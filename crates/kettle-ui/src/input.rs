@@ -144,7 +144,24 @@ pub fn encode(
     if let Key::Named(n) = key {
         match n {
             NamedKey::Enter => return Some(vec![b'\r']),
-            NamedKey::Backspace => return Some(if alt { vec![0x1b, 0x7f] } else { vec![0x7f] }),
+            NamedKey::Backspace => {
+                // The three flavors every modern terminal emits:
+                //   plain Backspace  → DEL (0x7F)  — xterm convention,
+                //     what readline's `backward-delete-char` reads.
+                //   Alt+Backspace    → ESC+DEL    — readline's standard
+                //     `backward-kill-word` (a.k.a. M-DEL).
+                //   Ctrl+Backspace   → BS  (0x08) — alacritty/xterm
+                //     convention; users coming from VS Code / browsers
+                //     expect this to be "delete word back," and bash can
+                //     be told so with `bind '"\C-h":backward-kill-word'`.
+                //     Without distinguishing it, Ctrl+Backspace was a
+                //     plain Backspace, breaking the muscle memory.
+                return Some(match (ctrl, alt) {
+                    (true, _) => vec![0x08],
+                    (false, true) => vec![0x1b, 0x7f],
+                    (false, false) => vec![0x7f],
+                });
+            }
             // Shift+Tab is the standard "back-tab" (`CSI Z`) used by
             // readline, fzf, and every TUI form for reverse field nav.
             NamedKey::Tab => {
@@ -305,6 +322,38 @@ mod tests {
             std::str::from_utf8(&p).unwrap().contains("evilrm -rf /"),
             "body after strip: {}",
             String::from_utf8_lossy(&p)
+        );
+    }
+
+    #[test]
+    fn backspace_three_flavors() {
+        use winit::keyboard::{Key, NamedKey};
+        let no = ModifiersState::empty();
+        let alt = ModifiersState::ALT;
+        let ctrl = ModifiersState::CONTROL;
+        let mode = TermMode::empty();
+        // Plain → DEL (xterm; readline `backward-delete-char`).
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Backspace), None, no, mode),
+            Some(vec![0x7f])
+        );
+        // Alt+Backspace → ESC+DEL (readline `backward-kill-word`, M-DEL).
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Backspace), None, alt, mode),
+            Some(vec![0x1b, 0x7f])
+        );
+        // Ctrl+Backspace → BS (alacritty/xterm; VS Code-style delete-word
+        // muscle memory works once the shell is told `\C-h` = kill-word).
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Backspace), None, ctrl, mode),
+            Some(vec![0x08])
+        );
+        // Ctrl+Alt+Backspace currently follows the ctrl path (BS) — the
+        // combo is rarely bound and going through ctrl matches alacritty.
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Backspace), None, ctrl_alt, mode),
+            Some(vec![0x08])
         );
     }
 

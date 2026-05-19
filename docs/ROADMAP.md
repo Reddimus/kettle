@@ -377,6 +377,10 @@
       ; ? ; 7 ; ?` (used by tmux / neovim 0.10 / base16-shell-hook
       to batch palette probes) now has an end-to-end test
       confirming one `ColorRequest` per pair. +1 test.
+- [x] **`Ctrl+Backspace` = BS (0x08) for delete-word muscle
+      memory.** Plain BS still = DEL (0x7F), Alt+BS still =
+      ESC+DEL — only the Ctrl flavor was collapsing to plain.
+      Alacritty/xterm/Ghostty parity. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

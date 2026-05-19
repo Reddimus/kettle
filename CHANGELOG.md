@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`Ctrl+Backspace` now sends BS (0x08) for delete-word muscle
+  memory.** xterm/alacritty/Ghostty all distinguish the chord:
+  plain Backspace → DEL (0x7F, readline `backward-delete-char`),
+  Alt+Backspace → ESC+DEL (readline `backward-kill-word` / M-DEL),
+  Ctrl+Backspace → BS (0x08). Kettle was mapping Ctrl+Backspace to
+  plain DEL — same as a bare Backspace — so users coming from VS
+  Code / browsers couldn't get delete-word with their muscle
+  memory even after telling bash `bind '"\C-h":backward-kill-word'`
+  (the shell never saw the BS that triggers it). +1 test covering
+  all three flavors + the Ctrl+Alt combo.
 - **OSC 4 multi-index query conformance is now pinned.** The
   cycle-44 fix shipped single-index replies (`OSC 4 ; 1 ; ?`); the
   vte parser already chunks the params so multi-index queries
