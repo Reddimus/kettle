@@ -57,8 +57,14 @@
 - [x] Per-style font family overrides (`font-family-bold/italic/
       bold-italic`) + ligature toggle (Advanced vs Basic shaping)
 
+- [x] VT conformance test suite: end-to-end through the real
+      vte+alacritty path — text/newline/CUP, erase line/display, SGR
+      truecolor+bold+reset, tab stops/CR, alt-screen + bracketed-paste
+      modes, DECSTBM scroll region (6 tests)
+
 ## Next (in priority order)
-- [ ] Broader `vttest` conformance sweep + fixes
+- [ ] Extend conformance: charsets/DEC line-drawing, origin mode,
+      insert/delete line/char, more DEC private modes
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

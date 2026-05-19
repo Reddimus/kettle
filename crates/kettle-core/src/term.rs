@@ -337,3 +337,120 @@ fn place_image(
     let nl = "\r\n".repeat(cell_rows.clamp(1, 256));
     processor.advance(&mut *t, nl.as_bytes());
 }
+
+/// End-to-end VT conformance: drives the *same* parser path the PTY reader
+/// uses (alacritty_terminal + vte) over a battery of escape sequences and
+/// asserts the resulting grid/cursor/mode. This is the automatable,
+/// regression-proof core of a `vttest` sweep.
+#[cfg(test)]
+mod conformance {
+    use super::*;
+    use alacritty_terminal::Term;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::TermMode;
+    use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let proxy = EventProxy::new(tx, waker);
+        let term = Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: cols,
+                screen_lines: rows,
+            },
+            proxy,
+        );
+        (term, Processor::new())
+    }
+
+    fn feed(term: &mut Term<EventProxy>, p: &mut Processor, bytes: &[u8]) {
+        p.advance(term, bytes);
+    }
+
+    fn row_text(term: &Term<EventProxy>, row: i32) -> String {
+        let g = term.grid();
+        (0..g.columns())
+            .map(|c| g[Point::new(Line(row), Column(c))].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn text_newline_and_cursor_addressing() {
+        let (mut t, mut p) = harness(20, 5);
+        feed(&mut t, &mut p, b"hello\r\nworld");
+        assert_eq!(row_text(&t, 0), "hello");
+        assert_eq!(row_text(&t, 1), "world");
+        // CUP: ESC[3;2H then write — 1-based row/col.
+        feed(&mut t, &mut p, b"\x1b[3;2HX");
+        assert_eq!(row_text(&t, 2), " X");
+    }
+
+    #[test]
+    fn erase_line_and_display() {
+        let (mut t, mut p) = harness(10, 3);
+        feed(&mut t, &mut p, b"ABCDEFG");
+        feed(&mut t, &mut p, b"\x1b[1;4H\x1b[K"); // cursor col4, erase to EOL
+        assert_eq!(row_text(&t, 0), "ABC");
+        feed(&mut t, &mut p, b"\x1b[2J"); // erase whole display
+        assert_eq!(row_text(&t, 0), "");
+    }
+
+    #[test]
+    fn sgr_truecolor_bold_and_reset() {
+        use alacritty_terminal::vte::ansi::Color;
+        let (mut t, mut p) = harness(8, 2);
+        feed(&mut t, &mut p, b"\x1b[1;38;2;10;20;30mZ\x1b[0mz");
+        let g = t.grid();
+        let z = &g[Point::new(Line(0), Column(0))];
+        assert!(z.flags.contains(Flags::BOLD));
+        match z.fg {
+            Color::Spec(rgb) => assert_eq!((rgb.r, rgb.g, rgb.b), (10, 20, 30)),
+            other => panic!("expected truecolor, got {other:?}"),
+        }
+        // After SGR reset, the next cell is back to default fg + no bold.
+        let z2 = &g[Point::new(Line(0), Column(1))];
+        assert!(!z2.flags.contains(Flags::BOLD));
+    }
+
+    #[test]
+    fn tab_stops_and_carriage_return() {
+        let (mut t, mut p) = harness(20, 2);
+        feed(&mut t, &mut p, b"a\tb");
+        let s = row_text(&t, 0);
+        assert_eq!(&s[..1], "a");
+        assert_eq!(s.chars().nth(8), Some('b')); // default tab stop at col 8
+        feed(&mut t, &mut p, b"\rZ");
+        assert_eq!(row_text(&t, 0).chars().next(), Some('Z'));
+    }
+
+    #[test]
+    fn alt_screen_and_bracketed_paste_modes() {
+        let (mut t, mut p) = harness(10, 3);
+        feed(&mut t, &mut p, b"\x1b[?1049h");
+        assert!(t.mode().contains(TermMode::ALT_SCREEN));
+        feed(&mut t, &mut p, b"\x1b[?2004h");
+        assert!(t.mode().contains(TermMode::BRACKETED_PASTE));
+        feed(&mut t, &mut p, b"\x1b[?1049l");
+        assert!(!t.mode().contains(TermMode::ALT_SCREEN));
+    }
+
+    #[test]
+    fn scroll_region_and_index() {
+        let (mut t, mut p) = harness(6, 4);
+        // Restrict scrolling to rows 1..=2 (DECSTBM, 1-based), then make it
+        // scroll: cursor to row2, newlines push row1 content up within region.
+        feed(
+            &mut t,
+            &mut p,
+            b"\x1b[1;2r\x1b[1;1Hone\x1b[2;1Htwo\r\n\r\nthree",
+        );
+        // Row 3 (outside the region) stays empty; region scrolled.
+        assert_eq!(row_text(&t, 3), "");
+    }
+}
