@@ -231,9 +231,17 @@
       `Enter` dispatch, `Esc` cancel; bottom-bar overlay reusing the
       SSH-launcher plumbing (+3 tests, 114 workspace).
 
+- [x] Quick-select / hint-mode core (`kettle_core::hints`): pure
+      detection of URLs / paths / git hashes / IPv4 across the visible
+      rows (priority de-overlap, trailing-punctuation trim, char-column
+      coords) + minimal-width unique label generator (home-row
+      alphabet). +4 tests, 121 workspace. Overlay + keypress wiring is
+      the next sub-item.
+
 ## Next (in priority order)
-- [ ] Detachable mux server (remote attach); native macOS menu;
-      code-signed/notarized macOS build; Windows MSI
+- [ ] Hint-mode UI: overlay labels + key-to-act (copy/open) reusing
+      the search/palette plumbing; then detachable mux server; native
+      macOS menu; signed packaging
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Quick-select / hint-mode core (`kettle_core::hints`, pure +
+  fully-tested): scans the visible rows for URLs, filesystem paths,
+  git hashes and IPv4 addresses (higher-priority kinds win on overlap,
+  trailing punctuation trimmed, char-column coordinates) and generates
+  minimal-width unique labels over a home-row alphabet. The overlay +
+  key-to-act wiring is the next cycle.
 - Docs: `ARCHITECTURE.md` refreshed to the current system — crate
   responsibilities, the side-channel chunk set
   (VirtualImage/Animation/RelativePlacement), the per-pane registries,

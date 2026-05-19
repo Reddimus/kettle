@@ -2,6 +2,7 @@
 //! engine glue, the UI event bridge, and buffer search.
 
 pub mod event;
+pub mod hints;
 pub mod images;
 pub mod links;
 pub mod search;
