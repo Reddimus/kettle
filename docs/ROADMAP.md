@@ -39,12 +39,19 @@
       8 MiB perf guard) + CI fmt-check, headless GPU smoke, CLI smoke on all
       three OSes — see docs/TESTING.md
 
+- [x] Offscreen GPU self-test (compiles WGSL + renders a pass with no
+      window) run in CI on Linux/macOS/Windows — real cross-platform GPU
+      validation
+- [x] OS packaging + release workflow: Linux tar+`.desktop`, macOS `.app`
+      bundle, Windows zip, built on real runners and attached to GitHub
+      releases on tag (see docs/INSTALL.md)
+
 ## Next (in priority order)
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
-- [ ] macOS app bundle + native menu; Windows installer
+- [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 
 ## Quality bar each cycle
 

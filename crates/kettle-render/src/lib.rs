@@ -759,3 +759,104 @@ fn measure_cell(
     }
     (w, metrics.line_height)
 }
+
+/// Headless GPU validation. Builds the real wgpu pipelines (compiling the
+/// WGSL on whatever backend the platform uses — Vulkan/Metal/DX12/GL) and
+/// runs one offscreen render pass with no window. CI runs this on Linux,
+/// macOS and Windows so the GPU stack is verified on every platform.
+///
+/// Returns `Ok(false)` when the host has no usable adapter at all (so CI on a
+/// GPU-less box is informative, not flaky); `Ok(true)` on success.
+pub fn offscreen_selftest() -> anyhow::Result<bool> {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::default();
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::None,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+        {
+            Ok(a) => a,
+            Err(_) => return Ok(false),
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-selftest"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| anyhow!("device: {e:?}"))?;
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        // Pipeline construction compiles our WGSL on the active backend —
+        // this is the part that historically breaks per-platform.
+        let mut quads = QuadPipeline::new(&device, format);
+        let mut imgs = imgpipe::ImagePipeline::new(&device, format);
+        quads.upload(
+            &device,
+            &queue,
+            [8.0, 8.0],
+            &[QuadInstance {
+                pos: [0.0, 0.0],
+                size: [4.0, 4.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+        );
+        imgs.upload(&device, &queue, [8.0, 8.0], &[]);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-selftest-target"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-selftest-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            quads.draw(&mut pass);
+            imgs.draw(&mut pass);
+        }
+        queue.submit(std::iter::once(enc.finish()));
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        Ok(true)
+    })
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    #[test]
+    fn gpu_pipelines_compile_and_render_offscreen() {
+        match super::offscreen_selftest() {
+            Ok(true) => {}
+            Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
+            Err(e) => panic!("offscreen GPU self-test failed: {e}"),
+        }
+    }
+}

@@ -11,5 +11,6 @@ glyphon = "0.11.0"
 kettle-config = { version = "0.1.0", path = "../kettle-config" }
 kettle-core = { version = "0.1.0", path = "../kettle-core" }
 log.workspace = true
+pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 wgpu = "29.0.3"
