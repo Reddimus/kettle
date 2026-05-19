@@ -105,7 +105,10 @@ impl Theme {
             return "TokyoNight Night";
         }
         let n = names.len();
-        match names.iter().position(|&x| x == current) {
+        // Case-insensitive + trimmed, mirroring `by_name`, so a config
+        // like `theme = tokyonight night` still cycles from here.
+        let want = current.trim().to_ascii_lowercase();
+        match names.iter().position(|&x| x.to_ascii_lowercase() == want) {
             // Unknown current → start at the first theme (don't skip it).
             None => names[0],
             Some(i) => {
@@ -148,5 +151,12 @@ mod tests {
         assert_eq!(Theme::cycle(nxt, false), first);
         // Unknown current → first theme.
         assert_eq!(Theme::cycle("no such theme zzz", true), first);
+        // Case-insensitive + trimmed, like `by_name` (a config that
+        // lower-cases the name still cycles from the right spot).
+        assert_eq!(
+            Theme::cycle(&format!("  {}  ", first.to_uppercase()), true),
+            second,
+            "differently-cased/padded current resolves correctly"
+        );
     }
 }

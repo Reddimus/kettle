@@ -7,6 +7,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- Theme cycling (`next_theme`/`prev_theme`) now matches the current
+  theme **case-insensitively and trimmed** (like `by_name`), so a
+  config such as `theme = tokyonight night` cycles from the right
+  place instead of jumping to the first theme.
 - Split keys now match Terminator exactly: `Ctrl+Shift+O` splits
   horizontally (top/bottom), `Ctrl+Shift+E` splits vertically
   (left/right); `split_horiz`/`split_vert` action names corrected.
