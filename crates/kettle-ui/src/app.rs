@@ -1,20 +1,21 @@
-//! winit application: window lifecycle, input routing, the multiplexer, the
-//! search overlay, clipboard, and live config reload.
+//! winit application: window lifecycle, input routing, the tiled multiplexer,
+//! the search overlay, clipboard, and live config reload.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
 use kettle_core::{Scroll, TermEvent};
-use kettle_render::{HighlightRect, Overlay, Renderer};
+use kettle_render::{HighlightRect, Overlay, PaneView, Renderer};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::input;
-use crate::mux::Mux;
+use crate::mux::{Dir, Mux, Rect};
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
@@ -31,6 +32,7 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     clipboard: Option<arboard::Clipboard>,
     fullscreen: bool,
+    cursor: PhysicalPosition<f64>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -40,7 +42,6 @@ impl App {
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
 
-        // Live config reload via a filesystem watcher.
         let mut watcher = None;
         if let Some(path) = Config::default_path()
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
@@ -65,6 +66,7 @@ impl App {
             proxy,
             clipboard: arboard::Clipboard::new().ok(),
             fullscreen: false,
+            cursor: PhysicalPosition::new(0.0, 0.0),
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -81,22 +83,57 @@ impl App {
     fn cell_px(&self) -> (u16, u16) {
         self.renderer
             .as_ref()
-            .map(|r| (r.cell_w as u16, r.cell_h as u16))
+            .map(|r| (r.cell_w.max(1.0) as u16, r.cell_h.max(1.0) as u16))
             .unwrap_or((8, 16))
     }
 
-    fn grid(&self) -> (usize, usize) {
-        self.renderer
-            .as_ref()
-            .map(|r| r.grid_size(self.cfg.padding_x, self.cfg.padding_y))
-            .unwrap_or((80, 24))
+    fn tab_bar_h(&self) -> f32 {
+        if self.mux.tabs.len() > 1 {
+            self.renderer
+                .as_ref()
+                .map(|r| r.cell_h + 8.0)
+                .unwrap_or(24.0)
+        } else {
+            0.0
+        }
     }
 
+    /// Content area below the tab bar, in physical pixels.
+    fn area(&self) -> Rect {
+        let (w, h) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let tb = self.tab_bar_h();
+        (0.0, tb, w as f32, (h as f32 - tb).max(1.0))
+    }
+
+    fn grid_of(&self, rect: Rect) -> (usize, usize) {
+        let (cw, ch) = self
+            .renderer
+            .as_ref()
+            .map(|r| (r.cell_w, r.cell_h))
+            .unwrap_or((8.0, 16.0));
+        let (_, _, w, h) = rect;
+        let cols = ((w - self.cfg.padding_x * 2.0) / cw).floor().max(1.0) as usize;
+        let rows = ((h - self.cfg.padding_y * 2.0) / ch).floor().max(1.0) as usize;
+        (cols, rows)
+    }
+
+    /// Resize every pane's PTY to match its tile in the layout.
     fn resize_all(&mut self) {
-        let (cols, rows) = self.grid();
         let (cw, ch) = self.cell_px();
-        for tab in &mut self.mux.tabs {
-            for p in &mut tab.panes {
+        let area = self.area();
+        let mut plan: Vec<(u64, usize, usize)> = Vec::new();
+        for ti in 0..self.mux.tabs.len() {
+            for (id, r) in self.mux.layout(ti, area) {
+                let (cols, rows) = self.grid_of(r);
+                plan.push((id, cols, rows));
+            }
+        }
+        for (id, cols, rows) in plan {
+            if let Some(p) = self.mux.panes.get_mut(&id) {
                 p.term.resize(cols, rows, cw, ch);
             }
         }
@@ -104,32 +141,33 @@ impl App {
 
     fn drain_events(&mut self) {
         let mut title: Option<String> = None;
-        for tab in &mut self.mux.tabs {
-            for pane in &mut tab.panes {
-                while let Ok(ev) = pane.rx.try_recv() {
-                    match ev {
-                        TermEvent::Title(t) => {
-                            pane.title = t.clone();
+        let focus = self.mux.active_focus();
+        for (id, pane) in self.mux.panes.iter_mut() {
+            while let Ok(ev) = pane.rx.try_recv() {
+                match ev {
+                    TermEvent::Title(t) => {
+                        pane.title = t.clone();
+                        if Some(*id) == focus {
                             title = Some(t);
                         }
-                        TermEvent::ResetTitle => pane.title = "kettle".into(),
-                        TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
-                        TermEvent::ClipboardStore(_, s) => {
-                            if let Some(cb) = &mut self.clipboard {
-                                let _ = cb.set_text(s);
-                            }
-                        }
-                        TermEvent::ClipboardLoad(_, fmt) => {
-                            let text = self
-                                .clipboard
-                                .as_mut()
-                                .and_then(|c| c.get_text().ok())
-                                .unwrap_or_default();
-                            pane.term.write(fmt(&text).as_bytes());
-                        }
-                        TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
-                        _ => {}
                     }
+                    TermEvent::ResetTitle => pane.title = "kettle".into(),
+                    TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
+                    TermEvent::ClipboardStore(_, s) => {
+                        if let Some(cb) = &mut self.clipboard {
+                            let _ = cb.set_text(s);
+                        }
+                    }
+                    TermEvent::ClipboardLoad(_, fmt) => {
+                        let text = self
+                            .clipboard
+                            .as_mut()
+                            .and_then(|c| c.get_text().ok())
+                            .unwrap_or_default();
+                        pane.term.write(fmt(&text).as_bytes());
+                    }
+                    TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
+                    _ => {}
                 }
             }
         }
@@ -146,11 +184,12 @@ impl App {
         }
         let query = self.mux.search.query.clone();
         let matches = if let Some(p) = self.mux.focused() {
-            if let Ok(t) = p.term.term.lock() {
-                kettle_core::search(&t, &query)
-            } else {
-                Vec::new()
-            }
+            p.term
+                .term
+                .lock()
+                .ok()
+                .map(|t| kettle_core::search(&t, &query))
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -197,29 +236,59 @@ impl App {
         }
         self.update_search();
         let overlay = self.overlay();
-        let (Some(renderer), Some(_w)) = (self.renderer.as_mut(), self.window.as_ref()) else {
+        let area = self.area();
+        let tab_bar_h = self.tab_bar_h();
+        let active = self.mux.active;
+        let titles = self.mux.tab_titles();
+        let layout = self.mux.layout(active, area);
+        let focus = self.mux.active_focus();
+
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        let a = self.mux.active;
-        if let Some(tab) = self.mux.tabs.get_mut(a)
-            && let Some(pane) = tab.panes.get_mut(tab.focus)
-            && let Ok(term) = pane.term.term.lock()
-            && let Err(e) = renderer.render(&term, &self.cfg, &overlay)
+
+        // Lock every visible pane, then hand references to the renderer.
+        let mut guards = Vec::with_capacity(layout.len());
+        for (id, r) in &layout {
+            if let Some(p) = self.mux.panes.get(id)
+                && let Ok(g) = p.term.term.lock()
+            {
+                guards.push((*r, g, Some(*id) == focus));
+            }
+        }
+        let panes: Vec<PaneView> = guards
+            .iter()
+            .map(|(r, g, f)| PaneView {
+                rect: *r,
+                term: g,
+                focused: *f,
+            })
+            .collect();
+        if let Err(e) =
+            renderer.render_frame(&panes, &titles, active, tab_bar_h, &self.cfg, &overlay)
         {
             log::warn!("render error: {e}");
         }
     }
 
     fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
-        let (cols, rows) = self.grid();
+        let area = self.area();
+        let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
         let waker = self.waker();
         match action {
-            Action::NewTab => {
+            Action::NewTab | Action::NewWindow => {
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
             }
-            Action::SplitRight | Action::SplitDown | Action::SplitAuto => {
-                let _ = self.mux.split(&self.cfg, cols, rows, cw, ch, waker);
+            Action::SplitRight => {
+                let _ = self
+                    .mux
+                    .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker);
+            }
+            Action::SplitDown | Action::SplitAuto => {
+                let _ = self
+                    .mux
+                    .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker);
             }
             Action::ClosePane => {
                 if self.mux.close_focused() {
@@ -227,23 +296,22 @@ impl App {
                 }
             }
             Action::CloseWindow | Action::CloseTab => {
-                let a = self.mux.active;
-                if a < self.mux.tabs.len() {
-                    self.mux.tabs.remove(a);
-                    if self.mux.active >= self.mux.tabs.len() && self.mux.active > 0 {
-                        self.mux.active -= 1;
-                    }
-                }
-                if self.mux.tabs.is_empty() {
+                if self.mux.close_tab() {
                     event_loop.exit();
                 }
             }
             Action::NextTab => self.mux.next_tab(),
             Action::PrevTab => self.mux.prev_tab(),
-            Action::FocusNext | Action::FocusRight | Action::FocusDown => {
-                self.mux.focus_next_pane()
-            }
-            Action::FocusPrev | Action::FocusLeft | Action::FocusUp => self.mux.focus_prev_pane(),
+            Action::FocusNext => self.mux.focus_cycle(area, true),
+            Action::FocusPrev => self.mux.focus_cycle(area, false),
+            Action::FocusLeft => self.mux.focus_dir(area, -1, 0),
+            Action::FocusRight => self.mux.focus_dir(area, 1, 0),
+            Action::FocusUp => self.mux.focus_dir(area, 0, -1),
+            Action::FocusDown => self.mux.focus_dir(area, 0, 1),
+            Action::ResizeLeft => self.mux.resize_focus(Dir::Horizontal, -0.03),
+            Action::ResizeRight => self.mux.resize_focus(Dir::Horizontal, 0.03),
+            Action::ResizeUp => self.mux.resize_focus(Dir::Vertical, -0.03),
+            Action::ResizeDown => self.mux.resize_focus(Dir::Vertical, 0.03),
             Action::Copy => {
                 if let Some(p) = self.mux.focused()
                     && let Ok(t) = p.term.term.lock()
@@ -265,20 +333,13 @@ impl App {
             }
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
                 if let Some(r) = self.renderer.as_mut() {
-                    let s = match action {
-                        Action::IncreaseFontSize => r.cell_h + 1.0,
-                        Action::DecreaseFontSize => (r.cell_h - 1.0).max(6.0),
-                        _ => self.cfg.font_size * 1.25,
+                    let new = match action {
+                        Action::IncreaseFontSize => r.cell_h / 1.25 + 1.0,
+                        Action::DecreaseFontSize => (r.cell_h / 1.25 - 1.0).max(6.0),
+                        _ => self.cfg.font_size,
                     };
-                    // cell_h tracks line height; derive font size back out.
-                    let new_size = match action {
-                        Action::ResetFontSize => self.cfg.font_size,
-                        Action::IncreaseFontSize => (s / 1.25) + 0.0,
-                        _ => s / 1.25,
-                    };
-                    r.set_font_size(new_size);
+                    r.set_font_size(new);
                 }
-                self.resize_all();
             }
             Action::StartSearch => {
                 self.mux.search.open = true;
@@ -311,22 +372,15 @@ impl App {
                 if let Some(p) = self.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
                 {
-                    let s = match action {
+                    t.scroll_display(match action {
                         Action::ScrollPageUp => Scroll::PageUp,
                         Action::ScrollPageDown => Scroll::PageDown,
                         Action::ScrollToTop => Scroll::Top,
                         _ => Scroll::Bottom,
-                    };
-                    t.scroll_display(s);
+                    });
                 }
             }
             Action::ReloadConfig => self.reload_config(),
-            Action::ResizeUp | Action::ResizeDown | Action::ResizeLeft | Action::ResizeRight => {}
-            Action::NewWindow => {
-                let _ = self
-                    .mux
-                    .new_tab(&self.cfg, cols, rows, cw, ch, self.waker());
-            }
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {
                 let i = n as usize;
@@ -335,6 +389,7 @@ impl App {
                 }
             }
         }
+        self.resize_all();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -354,17 +409,15 @@ impl App {
 
     fn search_key(&mut self, key: &Key, text: Option<&str>) {
         match key {
-            Key::Named(NamedKey::Escape) => {
-                self.mux.search.open = false;
-            }
+            Key::Named(NamedKey::Escape) => self.mux.search.open = false,
             Key::Named(NamedKey::Enter) => {
                 let s = &mut self.mux.search;
                 if !s.matches.is_empty() {
-                    if self.mods.shift_key() {
-                        s.index = (s.index + s.matches.len() - 1) % s.matches.len();
+                    s.index = if self.mods.shift_key() {
+                        (s.index + s.matches.len() - 1) % s.matches.len()
                     } else {
-                        s.index = (s.index + 1) % s.matches.len();
-                    }
+                        (s.index + 1) % s.matches.len()
+                    };
                 }
             }
             Key::Named(NamedKey::Backspace) => {
@@ -461,7 +514,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         self.window = Some(window);
 
-        let (cols, rows) = self.grid();
+        let area = self.area();
+        let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
         if let Err(e) = self
             .mux
@@ -505,6 +559,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::CursorMoved { position, .. } => self.cursor = position,
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let area = self.area();
+                self.mux
+                    .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
@@ -519,7 +586,6 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                // Keybindings first.
                 if let Some(k) = to_kkey(&event.logical_key) {
                     let trig = Trigger::new(to_mods(self.mods), k);
                     if let Some(act) = self.cfg.keybinds.get(&trig).cloned() {
@@ -528,7 +594,6 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // Otherwise feed the focused pane (and broadcast if enabled).
                 let mode = self
                     .mux
                     .focused()

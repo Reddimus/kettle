@@ -1,6 +1,10 @@
 //! GPU renderer: wgpu surface + glyphon (cosmic-text) glyph atlas for text,
-//! plus an instanced quad pipeline for cell backgrounds, cursor, selection and
-//! search highlights.
+//! plus an instanced quad pipeline for cell backgrounds, cursor, selection,
+//! search highlights, split dividers, focus borders and the tab bar.
+//!
+//! Multiple panes are tiled in a single frame: each pane gets its own
+//! cosmic-text buffer clipped to its rectangle; all backgrounds/UI go through
+//! one instanced quad pass and all text through one glyphon prepare/render.
 
 mod color;
 mod quad;
@@ -22,7 +26,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 pub use color::resolve;
 use quad::{QuadInstance, QuadPipeline};
 
-/// A search match expressed in viewport rows (already scrolled).
+/// A search match in a pane's viewport (grid coords, pre-scrolled).
 #[derive(Clone, Copy)]
 pub struct HighlightRect {
     pub col: usize,
@@ -31,14 +35,21 @@ pub struct HighlightRect {
     pub active: bool,
 }
 
-/// Optional UI overlays drawn on top of the grid.
+/// Search-bar overlay state.
 #[derive(Default)]
 pub struct Overlay {
-    /// `Some(query)` when the search bar is open.
     pub search_query: Option<String>,
     pub search_count: usize,
     pub search_index: usize,
     pub highlights: Vec<HighlightRect>,
+}
+
+/// One tiled pane to draw this frame.
+pub struct PaneView<'a> {
+    /// Pixel rect `(x, y, w, h)` within the surface.
+    pub rect: (f32, f32, f32, f32),
+    pub term: &'a Term<EventProxy>,
+    pub focused: bool,
 }
 
 pub struct Renderer {
@@ -52,13 +63,15 @@ pub struct Renderer {
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
-    text_buffer: TextBuffer,
-    overlay_buffer: TextBuffer,
+    pane_buffers: Vec<TextBuffer>,
+    tabbar_buffer: TextBuffer,
+    search_buffer: TextBuffer,
 
     quads: QuadPipeline,
 
     font_family: String,
     font_size: f32,
+    metrics: Metrics,
     pub cell_w: f32,
     pub cell_h: f32,
     pub scale: f32,
@@ -112,8 +125,6 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        // Font system seeded with the bundled Nerd Font faces (so AstroNvim
-        // icons render with zero setup) plus the user's system fonts.
         let mut font_system = FontSystem::new();
         for face in kettle_config::font::all() {
             font_system.db_mut().load_font_data(face.to_vec());
@@ -128,15 +139,11 @@ impl Renderer {
 
         let font_size = cfg.font_size;
         let metrics = Metrics::new(font_size, font_size * 1.25);
-        let mut text_buffer = TextBuffer::new(&mut font_system, metrics);
-        let overlay_buffer = TextBuffer::new(&mut font_system, metrics);
-
-        let (cell_w, cell_h) = measure_cell(
-            &mut font_system,
-            &mut text_buffer,
-            &cfg.font_family,
-            metrics,
-        );
+        let mut measure = TextBuffer::new(&mut font_system, metrics);
+        let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let search_buffer = TextBuffer::new(&mut font_system, metrics);
+        let (cell_w, cell_h) =
+            measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
 
         let quads = QuadPipeline::new(&device, format);
 
@@ -150,11 +157,13 @@ impl Renderer {
             atlas,
             viewport,
             text_renderer,
-            text_buffer,
-            overlay_buffer,
+            pane_buffers: Vec::new(),
+            tabbar_buffer,
+            search_buffer,
             quads,
             font_family: cfg.font_family.clone(),
             font_size,
+            metrics,
             cell_w,
             cell_h,
             scale,
@@ -167,243 +176,114 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = size.clamp(5.0, 72.0);
-        let metrics = Metrics::new(self.font_size, self.font_size * 1.25);
+        self.metrics = Metrics::new(self.font_size, self.font_size * 1.25);
         let family = self.font_family.clone();
-        let (cw, ch) = measure_cell(
-            &mut self.font_system,
-            &mut self.text_buffer,
-            &family,
-            metrics,
-        );
+        let m = self.metrics;
+        let mut measure = TextBuffer::new(&mut self.font_system, m);
+        let (cw, ch) = measure_cell(&mut self.font_system, &mut measure, &family, m);
         self.cell_w = cw;
         self.cell_h = ch;
     }
 
-    /// Grid size for the current surface, accounting for padding.
-    pub fn grid_size(&self, pad_x: f32, pad_y: f32) -> (usize, usize) {
-        let w = (self.config.width as f32 - pad_x * 2.0).max(0.0);
-        let h = (self.config.height as f32 - pad_y * 2.0).max(0.0);
-        let cols = (w / self.cell_w).floor() as usize;
-        let rows = (h / self.cell_h).floor() as usize;
-        (cols.max(1), rows.max(1))
-    }
-
-    pub fn render(
+    /// Render a full frame of tiled panes plus the tab bar and search overlay.
+    pub fn render_frame(
         &mut self,
-        term: &Term<EventProxy>,
+        panes: &[PaneView<'_>],
+        tabs: &[String],
+        active_tab: usize,
+        tab_bar_h: f32,
         cfg: &Config,
         overlay: &Overlay,
     ) -> Result<()> {
         let theme = &cfg.theme;
-        let content = term.renderable_content();
-        let term_colors = content.colors;
-        let cols = term.grid().columns();
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
         let cw = self.cell_w;
         let ch = self.cell_h;
-        let default_bg = theme.background;
-
-        // 1. Build text spans + background quads from the visible grid.
-        let mut quads: Vec<QuadInstance> = Vec::new();
-        let mut line_text: Vec<String> = Vec::new();
-        // Per span: (text, fg, bold, italic)
-        let mut spans: Vec<(String, Rgb, bool, bool)> = Vec::new();
-        let mut span_line_breaks: Vec<usize> = Vec::new(); // span index where a newline precedes
-
-        let mut cur_row = 0i32;
-        let mut cur: Option<(String, Rgb, bool, bool)> = None;
-        let mut last_col = 0usize;
-
-        for indexed in content.display_iter {
-            let point = indexed.point;
-            let cell = indexed.cell;
-            let row = point.line.0;
-            let col = point.column.0;
-
-            if row != cur_row {
-                if let Some(s) = cur.take() {
-                    spans.push(s);
-                }
-                for _ in cur_row..row {
-                    span_line_breaks.push(spans.len());
-                }
-                cur_row = row;
-                last_col = 0;
-            }
-            let _ = last_col;
-            last_col = col;
-
-            let flags = cell.flags;
-            let mut fg = color::resolve(cell.fg, theme, term_colors);
-            let mut bg = color::resolve(cell.bg, theme, term_colors);
-            if flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let bold = flags.contains(Flags::BOLD);
-            let italic = flags.contains(Flags::ITALIC);
-            let hidden = flags.contains(Flags::HIDDEN);
-
-            // Background quad (skip the default terminal background).
-            if bg != default_bg {
-                quads.push(rect(
-                    pad_x + col as f32 * cw,
-                    pad_y + row as f32 * ch,
-                    cw,
-                    ch,
-                    bg,
-                    1.0,
-                ));
-            }
-
-            let ch_draw = if hidden { ' ' } else { cell.c };
-            match &mut cur {
-                Some((text, cfg_, cb, ci)) if *cfg_ == fg && *cb == bold && *ci == italic => {
-                    text.push(ch_draw);
-                }
-                _ => {
-                    if let Some(s) = cur.take() {
-                        spans.push(s);
-                    }
-                    let mut s = String::new();
-                    s.push(ch_draw);
-                    cur = Some((s, fg, bold, italic));
-                }
-            }
-        }
-        if let Some(s) = cur.take() {
-            spans.push(s);
-        }
-        let _ = &mut line_text;
-
-        // Selection highlight.
-        if let Some(sel) = content.selection {
-            let s = sel.start;
-            let e = sel.end;
-            for r in s.line.0..=e.line.0 {
-                if r < 0 {
-                    continue;
-                }
-                let (c0, c1) = if s.line.0 == e.line.0 {
-                    (s.column.0, e.column.0)
-                } else if r == s.line.0 {
-                    (s.column.0, cols.saturating_sub(1))
-                } else if r == e.line.0 {
-                    (0, e.column.0)
-                } else {
-                    (0, cols.saturating_sub(1))
-                };
-                let w = (c1 + 1).saturating_sub(c0).max(1);
-                quads.push(rect(
-                    pad_x + c0 as f32 * cw,
-                    pad_y + r as f32 * ch,
-                    w as f32 * cw,
-                    ch,
-                    theme.selection_background,
-                    1.0,
-                ));
-            }
-        }
-
-        // Search highlights.
-        for h in &overlay.highlights {
-            quads.push(rect(
-                pad_x + h.col as f32 * cw,
-                pad_y + h.row as f32 * ch,
-                h.width as f32 * cw,
-                ch,
-                if h.active {
-                    cfg.search_background
-                } else {
-                    theme.selection_background
-                },
-                1.0,
-            ));
-        }
-
-        // Cursor.
-        let cur_pt = content.cursor.point;
-        if cur_pt.line.0 >= 0 {
-            let (cwidth, alpha) = match cfg.cursor_style {
-                CursorStyle::Bar => (cw * 0.15, 1.0),
-                CursorStyle::Underline => (cw, 1.0),
-                CursorStyle::Block => (cw, 0.55),
-            };
-            let y = if matches!(cfg.cursor_style, CursorStyle::Underline) {
-                pad_y + cur_pt.line.0 as f32 * ch + ch - 2.0
-            } else {
-                pad_y + cur_pt.line.0 as f32 * ch
-            };
-            let cheight = if matches!(cfg.cursor_style, CursorStyle::Underline) {
-                2.0
-            } else {
-                ch
-            };
-            quads.push(rect(
-                pad_x + cur_pt.column.0 as f32 * cw,
-                y,
-                cwidth,
-                cheight,
-                theme.cursor,
-                alpha,
-            ));
-        }
-
-        // 2. Lay out the text buffer.
-        let metrics = Metrics::new(self.font_size, self.font_size * 1.25);
-        self.text_buffer.set_metrics(&mut self.font_system, metrics);
-        self.text_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
+        let metrics = self.metrics;
         let family = self.font_family.clone();
-        let default_attrs = Attrs::new().family(Family::Name(&family));
+        let sw = self.config.width as f32;
+        let sh = self.config.height as f32;
 
-        // Reconstruct the rich text: spans separated by line breaks.
-        let mut rich: Vec<(String, Attrs)> = Vec::new();
-        let mut next_break = 0usize;
-        for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
-            while next_break < span_line_breaks.len() && span_line_breaks[next_break] == i {
-                rich.push(("\n".to_string(), default_attrs.clone()));
-                next_break += 1;
-            }
-            let mut a = Attrs::new().family(Family::Name(&family));
-            a = a.color(GColor::rgb(fg.r, fg.g, fg.b));
-            if *bold {
-                a = a.weight(Weight::BOLD);
-            }
-            if *italic {
-                a = a.style(Style::Italic);
-            }
-            rich.push((text.clone(), a));
+        // Ensure one text buffer per pane.
+        while self.pane_buffers.len() < panes.len() {
+            let b = TextBuffer::new(&mut self.font_system, metrics);
+            self.pane_buffers.push(b);
         }
-        self.text_buffer.set_rich_text(
-            &mut self.font_system,
-            rich.iter().map(|(s, a)| (s.as_str(), a.clone())),
-            &default_attrs,
-            Shaping::Advanced,
-            None,
-        );
-        self.text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
 
-        // Overlay (search bar) text.
-        let mut overlay_areas: Vec<TextArea> = Vec::new();
+        let mut quads: Vec<QuadInstance> = Vec::new();
+
+        // Tab bar.
+        if tab_bar_h > 0.0 {
+            quads.push(rect(0.0, 0.0, sw, tab_bar_h, theme.palette[8], 1.0));
+            let seg = if tabs.is_empty() {
+                sw
+            } else {
+                sw / tabs.len() as f32
+            };
+            for (i, _) in tabs.iter().enumerate() {
+                if i == active_tab {
+                    quads.push(rect(
+                        i as f32 * seg,
+                        0.0,
+                        seg,
+                        tab_bar_h,
+                        theme.background,
+                        1.0,
+                    ));
+                }
+            }
+        }
+
+        // Per-pane grid + dividers/border.
+        for (i, pv) in panes.iter().enumerate() {
+            let (rx, ry, rw, rh) = pv.rect;
+            // Pane separators / focus border.
+            let border = if pv.focused {
+                theme.palette[4]
+            } else {
+                theme.palette[8]
+            };
+            quads.push(rect(rx, ry, rw, 1.0, border, 1.0));
+            quads.push(rect(rx, ry + rh - 1.0, rw, 1.0, border, 1.0));
+            quads.push(rect(rx, ry, 1.0, rh, border, 1.0));
+            quads.push(rect(rx + rw - 1.0, ry, 1.0, rh, border, 1.0));
+
+            self.build_pane(i, pv, cfg, &family, &mut quads);
+
+            // Search highlights are drawn over the focused pane.
+            if pv.focused {
+                for hl in &overlay.highlights {
+                    quads.push(rect(
+                        rx + pad_x + hl.col as f32 * cw,
+                        ry + pad_y + hl.row as f32 * ch,
+                        hl.width as f32 * cw,
+                        ch,
+                        if hl.active {
+                            cfg.search_background
+                        } else {
+                            theme.selection_background
+                        },
+                        0.85,
+                    ));
+                }
+            }
+        }
+
+        // Search bar overlay.
+        let mut have_search = false;
         if let Some(q) = &overlay.search_query {
-            let bar_h = self.cell_h + 10.0;
-            quads.push(rect(
-                0.0,
-                self.config.height as f32 - bar_h,
-                self.config.width as f32,
-                bar_h,
-                theme.palette[8],
-                0.95,
-            ));
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
             let label = format!(
-                "  search: {}    [{}/{}]   (Enter next · Shift+Enter prev · Esc close)",
+                "  search: {}_    [{}/{}]   (Enter next · Shift+Enter prev · Esc close)",
                 q,
                 if overlay.search_count == 0 {
                     0
@@ -412,43 +292,49 @@ impl Renderer {
                 },
                 overlay.search_count
             );
-            self.overlay_buffer
+            self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
-            self.overlay_buffer.set_size(
-                &mut self.font_system,
-                Some(self.config.width as f32),
-                Some(bar_h),
-            );
-            self.overlay_buffer.set_text(
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
             );
-            self.overlay_buffer
+            self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-            overlay_areas.push(TextArea {
-                buffer: &self.overlay_buffer,
-                left: 0.0,
-                top: self.config.height as f32 - bar_h + 5.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
-                },
-                default_color: GColor::rgb(
-                    theme.foreground.r,
-                    theme.foreground.g,
-                    theme.foreground.b,
-                ),
-                custom_glyphs: &[],
-            });
         }
 
-        // 3. Prepare GPU resources.
+        // Tab-bar text.
+        let mut have_tabs = false;
+        if tab_bar_h > 0.0 && !tabs.is_empty() {
+            have_tabs = true;
+            let line: String = tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mark = if i == active_tab { "▌" } else { " " };
+                    format!("{mark} {}: {}   ", i + 1, truncate(t, 18))
+                })
+                .collect();
+            self.tabbar_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.tabbar_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(tab_bar_h));
+            self.tabbar_buffer.set_text(
+                &mut self.font_system,
+                &line,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.tabbar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -457,21 +343,57 @@ impl Renderer {
             },
         );
         let fg = theme.foreground;
-        let mut areas = vec![TextArea {
-            buffer: &self.text_buffer,
-            left: pad_x,
-            top: pad_y,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: self.config.width as i32,
-                bottom: self.config.height as i32,
-            },
-            default_color: GColor::rgb(fg.r, fg.g, fg.b),
-            custom_glyphs: &[],
-        }];
-        areas.extend(overlay_areas);
+        let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
+        for (i, pv) in panes.iter().enumerate() {
+            let (rx, ry, rw, rh) = pv.rect;
+            areas.push(TextArea {
+                buffer: &self.pane_buffers[i],
+                left: rx + pad_x,
+                top: ry + pad_y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rx as i32,
+                    top: ry as i32,
+                    right: (rx + rw) as i32,
+                    bottom: (ry + rh) as i32,
+                },
+                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                custom_glyphs: &[],
+            });
+        }
+        if have_tabs {
+            areas.push(TextArea {
+                buffer: &self.tabbar_buffer,
+                left: 6.0,
+                top: 4.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: tab_bar_h as i32,
+                },
+                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                custom_glyphs: &[],
+            });
+        }
+        if have_search {
+            let bar_h = ch + 10.0;
+            areas.push(TextArea {
+                buffer: &self.search_buffer,
+                left: 0.0,
+                top: sh - bar_h + 5.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                custom_glyphs: &[],
+            });
+        }
 
         self.text_renderer.prepare(
             &self.device,
@@ -482,15 +404,9 @@ impl Renderer {
             areas,
             &mut self.swash,
         )?;
+        self.quads
+            .upload(&self.device, &self.queue, [sw, sh], &quads);
 
-        self.quads.upload(
-            &self.device,
-            &self.queue,
-            [self.config.width as f32, self.config.height as f32],
-            &quads,
-        );
-
-        // 4. Encode the frame.
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -509,7 +425,7 @@ impl Renderer {
                 label: Some("kettle-encoder"),
             });
         {
-            let bg = default_bg;
+            let bg = theme.background;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -540,12 +456,180 @@ impl Renderer {
         self.atlas.trim();
         Ok(())
     }
+
+    /// Build one pane's text buffer + background/cursor/selection/search quads.
+    fn build_pane(
+        &mut self,
+        idx: usize,
+        pv: &PaneView<'_>,
+        cfg: &Config,
+        family: &str,
+        quads: &mut Vec<QuadInstance>,
+    ) {
+        let theme = &cfg.theme;
+        let (rx, ry, rw, rh) = pv.rect;
+        let ox = rx + cfg.padding_x;
+        let oy = ry + cfg.padding_y;
+        let cw = self.cell_w;
+        let ch = self.cell_h;
+        let term = pv.term;
+        let content = term.renderable_content();
+        let term_colors = content.colors;
+        let cols = term.grid().columns();
+        let default_bg = theme.background;
+
+        let mut spans: Vec<(String, Rgb, bool, bool)> = Vec::new();
+        let mut span_line_breaks: Vec<usize> = Vec::new();
+        let mut cur_row = 0i32;
+        let mut cur: Option<(String, Rgb, bool, bool)> = None;
+
+        for indexed in content.display_iter {
+            let point = indexed.point;
+            let cell = indexed.cell;
+            let row = point.line.0;
+            let col = point.column.0;
+            if row != cur_row {
+                if let Some(s) = cur.take() {
+                    spans.push(s);
+                }
+                for _ in cur_row..row {
+                    span_line_breaks.push(spans.len());
+                }
+                cur_row = row;
+            }
+
+            let flags = cell.flags;
+            let mut fg = color::resolve(cell.fg, theme, term_colors);
+            let mut bg = color::resolve(cell.bg, theme, term_colors);
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            let bold = flags.contains(Flags::BOLD);
+            let italic = flags.contains(Flags::ITALIC);
+            let hidden = flags.contains(Flags::HIDDEN);
+
+            if bg != default_bg {
+                quads.push(rect(
+                    ox + col as f32 * cw,
+                    oy + row as f32 * ch,
+                    cw,
+                    ch,
+                    bg,
+                    1.0,
+                ));
+            }
+            let dc = if hidden { ' ' } else { cell.c };
+            match &mut cur {
+                Some((t, f, cb, ci)) if *f == fg && *cb == bold && *ci == italic => t.push(dc),
+                _ => {
+                    if let Some(s) = cur.take() {
+                        spans.push(s);
+                    }
+                    cur = Some((dc.to_string(), fg, bold, italic));
+                }
+            }
+        }
+        if let Some(s) = cur.take() {
+            spans.push(s);
+        }
+
+        // Selection.
+        if let Some(sel) = content.selection {
+            let (s, e) = (sel.start, sel.end);
+            for r in s.line.0..=e.line.0 {
+                if r < 0 {
+                    continue;
+                }
+                let (c0, c1) = if s.line.0 == e.line.0 {
+                    (s.column.0, e.column.0)
+                } else if r == s.line.0 {
+                    (s.column.0, cols.saturating_sub(1))
+                } else if r == e.line.0 {
+                    (0, e.column.0)
+                } else {
+                    (0, cols.saturating_sub(1))
+                };
+                let w = (c1 + 1).saturating_sub(c0).max(1);
+                quads.push(rect(
+                    ox + c0 as f32 * cw,
+                    oy + r as f32 * ch,
+                    w as f32 * cw,
+                    ch,
+                    theme.selection_background,
+                    1.0,
+                ));
+            }
+        }
+
+        // Cursor (only meaningful for the focused pane but cheap to always draw).
+        let cp = content.cursor.point;
+        if cp.line.0 >= 0 && pv.focused {
+            let (cwidth, alpha, cheight, yoff) = match cfg.cursor_style {
+                CursorStyle::Bar => (cw * 0.15, 1.0, ch, 0.0),
+                CursorStyle::Underline => (cw, 1.0, 2.0, ch - 2.0),
+                CursorStyle::Block => (cw, 0.55, ch, 0.0),
+            };
+            quads.push(rect(
+                ox + cp.column.0 as f32 * cw,
+                oy + cp.line.0 as f32 * ch + yoff,
+                cwidth,
+                cheight,
+                theme.cursor,
+                alpha,
+            ));
+        }
+
+        // Lay out the text buffer.
+        let buf = &mut self.pane_buffers[idx];
+        buf.set_metrics(&mut self.font_system, self.metrics);
+        buf.set_size(
+            &mut self.font_system,
+            Some((rw - cfg.padding_x * 2.0).max(1.0)),
+            Some((rh - cfg.padding_y * 2.0).max(1.0)),
+        );
+        let default_attrs = Attrs::new().family(Family::Name(family));
+        let mut rich: Vec<(String, Attrs)> = Vec::new();
+        let mut nb = 0usize;
+        for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
+            while nb < span_line_breaks.len() && span_line_breaks[nb] == i {
+                rich.push(("\n".to_string(), default_attrs.clone()));
+                nb += 1;
+            }
+            let mut a = Attrs::new()
+                .family(Family::Name(family))
+                .color(GColor::rgb(fg.r, fg.g, fg.b));
+            if *bold {
+                a = a.weight(Weight::BOLD);
+            }
+            if *italic {
+                a = a.style(Style::Italic);
+            }
+            rich.push((text.clone(), a));
+        }
+        buf.set_rich_text(
+            &mut self.font_system,
+            rich.iter().map(|(s, a)| (s.as_str(), a.clone())),
+            &default_attrs,
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut self.font_system, false);
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
     QuadInstance {
         pos: [x, y],
-        size: [w, h],
+        size: [w.max(0.0), h.max(0.0)],
         color: [
             c.r as f32 / 255.0,
             c.g as f32 / 255.0,
@@ -564,7 +648,6 @@ fn srgb(c: u8) -> f64 {
     }
 }
 
-/// Measure a single monospace cell by shaping `M`.
 fn measure_cell(
     fs: &mut FontSystem,
     buf: &mut TextBuffer,

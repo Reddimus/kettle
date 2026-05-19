@@ -8,14 +8,15 @@
 - [x] Ghostty-syntax config + ~500 bundled themes (default TokyoNight Night)
 - [x] Bundled JetBrains Mono Nerd Font (embedded)
 - [x] Terminator-compatible keybindings + live config reload
-- [x] Tabs, panes, focus cycling, broadcast/group input
+- [x] Tabs + **binary split tree**, tiled multi-pane GPU rendering, split
+      dividers, focus border, tab bar
+- [x] Geometry-based focus nav (`Alt+Arrows`), mouse-click focus, ratio
+      resize (`Ctrl+Shift+Arrows`), broadcast/group input
 - [x] Regex search overlay (`Ctrl+Shift+F`)
 - [x] Clipboard (OSC 52 + copy/paste), keyboard input encoding, IME text
 
 ## Next (in priority order)
 
-- [ ] Tiled multi-pane GPU rendering (per-pane scissor viewport) — replace
-      full-window focused-pane draw
 - [ ] Selection by mouse drag; mouse reporting passthrough
 - [ ] Sixel + kitty graphics + iTerm2 OSC 1337 image protocols (`kettle-vt`)
 - [ ] Hyperlink (OSC 8) + URL autodetection, click to open
