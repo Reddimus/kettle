@@ -15,7 +15,7 @@ use kettle_vt::{Chunk, Extractor, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
-use crate::images::{Images, Placement, VirtualEntry, Virtuals};
+use crate::images::{AnimEntry, Animations, Images, Placement, VirtualEntry, Virtuals};
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
@@ -49,6 +49,8 @@ pub struct Terminal {
     pub images: Images,
     /// kitty `U=1` virtual images, keyed by image id (for placeholder draw).
     pub virtuals: Virtuals,
+    /// kitty animations, keyed by image id (frame substituted at draw time).
+    pub anims: Animations,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
     pub prompts: Arc<Mutex<Vec<i64>>>,
     /// Latest working directory reported via OSC 7.
@@ -125,6 +127,7 @@ impl Terminal {
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
         let virtuals: Virtuals = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let anims: Animations = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
@@ -133,6 +136,7 @@ impl Terminal {
             let term = term.clone();
             let images = images.clone();
             let virtuals = virtuals.clone();
+            let anims = anims.clone();
             let prompts = prompts.clone();
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
@@ -184,6 +188,15 @@ impl Terminal {
                                                     (false, None) => {}
                                                 }
                                             }
+                                            if let Ok(mut am) = anims.lock() {
+                                                match (all, id) {
+                                                    (true, _) => am.clear(),
+                                                    (false, Some(x)) => {
+                                                        am.remove(&x);
+                                                    }
+                                                    (false, None) => {}
+                                                }
+                                            }
                                         }
                                         Chunk::VirtualImage {
                                             id,
@@ -194,6 +207,41 @@ impl Terminal {
                                         } => {
                                             if let Ok(mut vm) = virtuals.lock() {
                                                 vm.insert(id, VirtualEntry { img, cols, rows, z });
+                                            }
+                                            (waker)();
+                                        }
+                                        Chunk::Animation {
+                                            id,
+                                            imgs,
+                                            gaps,
+                                            state,
+                                        } => {
+                                            if let Ok(mut am) = anims.lock() {
+                                                // An empty/single-image, not-
+                                                // running snapshot = cleared.
+                                                if imgs.len() <= 1 && !state.running {
+                                                    am.remove(&id);
+                                                } else {
+                                                    // Keep the clock unless the
+                                                    // run state flipped.
+                                                    let started = match am.get(&id) {
+                                                        Some(p)
+                                                            if p.state.running == state.running =>
+                                                        {
+                                                            p.started
+                                                        }
+                                                        _ => std::time::Instant::now(),
+                                                    };
+                                                    am.insert(
+                                                        id,
+                                                        AnimEntry {
+                                                            imgs,
+                                                            gaps,
+                                                            state,
+                                                            started,
+                                                        },
+                                                    );
+                                                }
                                             }
                                             (waker)();
                                         }
@@ -238,6 +286,7 @@ impl Terminal {
             rows,
             images,
             virtuals,
+            anims,
             prompts,
             cwd: cwd_cell,
             argv: argv.to_vec(),
@@ -256,9 +305,32 @@ impl Terminal {
     }
 
     /// Image placements for this terminal (cloned cheaply; `ImageData` is
-    /// `Arc`-backed).
+    /// `Arc`-backed). For placements whose kitty id has a registered
+    /// animation, the image is swapped for the frame the playback clock
+    /// selects right now, so animations play wherever the image sits.
     pub fn placements(&self) -> Vec<Placement> {
-        self.images.lock().map(|v| v.clone()).unwrap_or_default()
+        let mut v = self.images.lock().map(|v| v.clone()).unwrap_or_default();
+        if let Ok(am) = self.anims.lock()
+            && !am.is_empty()
+        {
+            for p in &mut v {
+                if let Some(id) = p.id
+                    && let Some(e) = am.get(&id)
+                {
+                    p.img = e.current().clone();
+                }
+            }
+        }
+        v
+    }
+
+    /// `true` if any registered kitty animation is currently running (so the
+    /// UI knows to schedule frame-paced redraws).
+    pub fn has_running_animation(&self) -> bool {
+        self.anims
+            .lock()
+            .map(|am| am.values().any(|e| e.state.running))
+            .unwrap_or(false)
     }
 
     /// Per-cell image tiles for the kitty Unicode placeholders (`U+10EEEE`)

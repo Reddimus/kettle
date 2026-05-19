@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty animation **now plays end-to-end**: `a=f` frames / `a=a`
+  control snapshot through `Chunk::Animation` into a per-terminal
+  `Animations` registry; at draw time a placement's image is swapped for
+  the frame the playback clock selects, and the event loop schedules
+  ~30 fps redraws while any animation is running. Root-frame gap via
+  `a=a,r=1,z=`; animations are reaped with the image or by `a=d,d=f`.
 - kitty animation playback-timing engine: pure, deterministic
   `current_frame(gaps, state, elapsed_ms)` mapping elapsed time to the
   frame to show — skips gapless frames, honors infinite/finite loop

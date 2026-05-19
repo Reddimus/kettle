@@ -148,6 +148,36 @@ mod tests {
     }
 
     #[test]
+    fn kitty_animation_snapshot_surfaces_sequence() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode([7u8, 7, 7, 255]);
+        let mut e = Extractor::new();
+        // Base image (root frame) for id 2.
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=2,a=T;{b64}\x1b\\").as_bytes());
+        // One animation frame with a 40ms gap.
+        e.feed(format!("\x1b_Ga=f,i=2,f=32,s=1,v=1,z=40;{b64}\x1b\\").as_bytes());
+        // Control: run looping, root gap 60ms via r=1.
+        let cs = e.feed(b"\x1b_Ga=a,i=2,s=3,r=1,z=60\x1b\\");
+        let snap = cs
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                Chunk::Animation {
+                    id,
+                    imgs,
+                    gaps,
+                    state,
+                } => Some((*id, imgs.len(), gaps.clone(), *state)),
+                _ => None,
+            })
+            .expect("an Animation snapshot");
+        assert_eq!(snap.0, 2);
+        assert_eq!(snap.1, 2, "root + 1 frame");
+        assert_eq!(snap.2, vec![60, 40], "root gap then frame gap");
+        assert!(snap.3.running && !snap.3.loading);
+    }
+
+    #[test]
     fn kitty_virtual_placement_surfaces_image_not_at_cursor() {
         use base64::Engine;
         // 2×1 RGBA image (8 bytes).

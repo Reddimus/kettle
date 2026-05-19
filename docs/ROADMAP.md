@@ -174,10 +174,17 @@
       (`kitty::current_frame`, +1 test, 95 workspace). Only the renderer
       clock + frame→placement substitution remain.
 
+- [x] kitty animation **plays end-to-end**: `a=f`/`a=a` snapshots flow
+      through `Chunk::Animation` → per-terminal `Animations` registry; a
+      placement's image is swapped for the playback-clock frame at draw
+      time, and the UI schedules ~30 fps redraws while any animation
+      runs. Root-gap via `a=a,r=1,z=`; cleared with the image / `d=f`
+      (`AnimEntry`, +1 extractor test, 96 workspace tests). Cited kitty
+      `graphics-protocol.rst:839`.
+
 ## Next (in priority order)
-- [ ] kitty animation: wire the clock + per-image frame registry so
-      `current_frame` selects the drawn image; then `a=c` compositing /
-      partial-rect frames + relative placements
+- [ ] kitty animation: `a=c` frame compositing + partial-rect (`x,y`)
+      frames; relative placements
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

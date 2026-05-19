@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+pub use kettle_vt::kitty::{AnimationState, current_frame};
 pub use kettle_vt::{ImageData, Placed};
 
 #[derive(Clone)]
@@ -34,6 +36,29 @@ pub struct VirtualEntry {
 
 /// Per-terminal registry of virtual images, keyed by kitty image id.
 pub type Virtuals = Arc<Mutex<HashMap<u32, VirtualEntry>>>;
+
+/// A kitty animation: the full display sequence (`imgs[0]` = base/root
+/// frame) with each frame's gap (ms), the control state, and the wall
+/// clock the playback timing is measured from.
+#[derive(Clone)]
+pub struct AnimEntry {
+    pub imgs: Vec<ImageData>,
+    pub gaps: Vec<i32>,
+    pub state: AnimationState,
+    /// When the current run started (reset when run state changes).
+    pub started: Instant,
+}
+
+impl AnimEntry {
+    /// The image to draw right now per the playback clock.
+    pub fn current(&self) -> &ImageData {
+        let i = current_frame(&self.gaps, &self.state, self.started.elapsed().as_millis());
+        &self.imgs[i.min(self.imgs.len().saturating_sub(1))]
+    }
+}
+
+/// Per-terminal registry of kitty animations, keyed by image id.
+pub type Animations = Arc<Mutex<HashMap<u32, AnimEntry>>>;
 
 /// Drop placements that have scrolled far above the retained history.
 pub fn prune(images: &Images, oldest_abs: i64) {

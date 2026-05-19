@@ -61,6 +61,9 @@ pub struct AnimationState {
     /// Loop count: `0` = infinite, `n` = play `n` times (kitty `v`,
     /// normalized: `v=1`→infinite→0 here, `v=n`→`n-1`).
     pub loops: u32,
+    /// Gap (ms) of the *root* frame (frame 1 = the base image); only
+    /// settable via `a=a,r=1,z=` since the root has no gap by default.
+    pub root_gap: i32,
 }
 
 impl Default for AnimationState {
@@ -70,6 +73,7 @@ impl Default for AnimationState {
             running: false,
             loading: false,
             loops: 0,
+            root_gap: 0,
         }
     }
 }
@@ -138,6 +142,12 @@ pub enum KittyOut {
     Virtual {
         id: u32,
     },
+    /// An animation frame was transmitted or the animation control state
+    /// changed for image `id`; nothing is drawn at the cursor — the caller
+    /// snapshots `frames`/`animation` and runs the playback clock.
+    Animate {
+        id: u32,
+    },
 }
 
 /// Reassembles chunked transmissions and remembers transmitted images so
@@ -191,7 +201,8 @@ impl KittyState {
                     self.frames.clear();
                     self.anim.clear();
                 }
-                return KittyOut::None;
+                // Surface an (now-empty) snapshot so the caller drops it.
+                return KittyOut::Animate { id };
             }
             return match target {
                 "i" | "I" => {
@@ -243,17 +254,22 @@ impl KittyState {
             {
                 st.loops = if v == 1 { 0 } else { v - 1 };
             }
-            // `r` + `z`: set the gap of an existing (1-based) frame.
+            // `r` + `z`: set the gap of an existing 1-based frame. `r=1` is
+            // the root frame (base image); `r>=2` is `frames[r-2]`.
             if z != 0
                 && let Some(r) = dim("r")
-                && let Some(fr) = self
+            {
+                if r <= 1 {
+                    self.anim.entry(id).or_default().root_gap = z;
+                } else if let Some(fr) = self
                     .frames
                     .get_mut(&id)
-                    .and_then(|f| f.get_mut((r as usize).saturating_sub(1)))
-            {
-                fr.gap_ms = z;
+                    .and_then(|f| f.get_mut(r as usize - 2))
+                {
+                    fr.gap_ms = z;
+                }
             }
-            return KittyOut::None;
+            return KittyOut::Animate { id };
         }
         if action == "c" {
             // Frame composition (`a=c`): not modelled yet (see ROADMAP).
@@ -286,7 +302,7 @@ impl KittyState {
                     .or_default()
                     .push(Frame { img, gap_ms: gap });
             }
-            return KittyOut::None;
+            return KittyOut::Animate { id: fid };
         }
         if action == "q" {
             return KittyOut::None; // capability query — nothing to render
@@ -498,10 +514,11 @@ mod tests {
             k.feed(&format!("a=T,i=3,f=32,s=1,v=1;{PX}")),
             KittyOut::Place(_)
         ));
-        // Two frames with gaps; neither draws at the cursor.
+        // Two frames with gaps; neither draws at the cursor (Animate, not
+        // Place/None).
         assert!(matches!(
             k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=40;{PX}")),
-            KittyOut::None
+            KittyOut::Animate { id: 3 }
         ));
         k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=-1;{PX}"));
         let fr = k.frames(3);
@@ -517,9 +534,11 @@ mod tests {
         assert!(a.running && !a.loading);
         assert_eq!(a.loops, 4);
 
-        // r+z sets the gap of an existing (1-based) frame.
-        k.feed("a=a,i=3,r=1,z=48");
-        assert_eq!(k.frames(3)[0].gap_ms, 48);
+        // r>=2 sets a frame's gap; r=1 sets the root frame's gap.
+        k.feed("a=a,i=3,r=2,z=48");
+        assert_eq!(k.frames(3)[0].gap_ms, 48, "r=2 → frames[0]");
+        k.feed("a=a,i=3,r=1,z=70");
+        assert_eq!(k.animation(3).unwrap().root_gap, 70, "r=1 → root frame gap");
 
         // Stop resets running + loop counter.
         k.feed("a=a,i=3,s=1");
@@ -541,6 +560,7 @@ mod tests {
             running: true,
             loading,
             loops,
+            ..AnimationState::default()
         };
         // Stopped → the selected current frame, clamped.
         let stop = AnimationState {
@@ -548,6 +568,7 @@ mod tests {
             running: false,
             loading: false,
             loops: 0,
+            ..AnimationState::default()
         };
         assert_eq!(current_frame(&[10, 10, 10, 10], &stop, 9_999), 2);
         assert_eq!(current_frame(&[], &stop, 0), 0);

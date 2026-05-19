@@ -1202,11 +1202,18 @@ impl ApplicationHandler<UserEvent> for App {
             .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
             .unwrap_or(false);
         let blink_active = self.cfg.cursor_blink && self.window_focused;
-        if bell_active || blink_active {
+        let anim_active = self
+            .mux
+            .panes
+            .values()
+            .any(|p| p.term.has_running_animation());
+        if bell_active || blink_active || anim_active {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
-            let wait = if bell_active { 33 } else { 120 };
+            // Bell decay and animation playback both want a ~30 fps tick;
+            // cursor blink alone can coast at a coarse 120 ms.
+            let wait = if bell_active || anim_active { 33 } else { 120 };
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(wait),
             ));

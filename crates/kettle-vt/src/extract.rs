@@ -40,6 +40,17 @@ pub enum Chunk {
         rows: u32,
         z: i32,
     },
+    /// kitty animation snapshot for image `id`: the full display sequence
+    /// (`imgs[0]` = base/root frame) with each frame's gap in ms and the
+    /// current animation control state. Emitted whenever a frame or the
+    /// control state changes; an empty/▒single-image non-running snapshot
+    /// means the animation was cleared.
+    Animation {
+        id: u32,
+        imgs: Vec<ImageData>,
+        gaps: Vec<i32>,
+        state: crate::kitty::AnimationState,
+    },
     /// A shell-integration mark at the current cursor line.
     Prompt(PromptKind),
     /// Working-directory report (OSC 7), absolute path.
@@ -202,6 +213,12 @@ impl Extractor {
                 rows: u32,
                 z: i32,
             },
+            Anim {
+                id: u32,
+                imgs: Vec<ImageData>,
+                gaps: Vec<i32>,
+                state: crate::kitty::AnimationState,
+            },
         }
 
         let result = match mode {
@@ -236,6 +253,27 @@ impl Extractor {
                                 _ => R::None,
                             }
                         }
+                        // Snapshot the full display sequence: base/root
+                        // image first, then each transmitted frame, with the
+                        // root gap from the control state.
+                        KittyOut::Animate { id } => match self.kitty.image(id) {
+                            Some(base) => {
+                                let st = self.kitty.animation(id).copied().unwrap_or_default();
+                                let mut imgs = vec![base.clone()];
+                                let mut gaps = vec![st.root_gap];
+                                for f in self.kitty.frames(id) {
+                                    imgs.push(f.img.clone());
+                                    gaps.push(f.gap_ms);
+                                }
+                                R::Anim {
+                                    id,
+                                    imgs,
+                                    gaps,
+                                    state: st,
+                                }
+                            }
+                            None => R::None,
+                        },
                         KittyOut::None => R::None,
                     }
                 } else {
@@ -270,6 +308,17 @@ impl Extractor {
                 cols,
                 rows,
                 z,
+            }),
+            R::Anim {
+                id,
+                imgs,
+                gaps,
+                state,
+            } => out.push(Chunk::Animation {
+                id,
+                imgs,
+                gaps,
+                state,
             }),
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
