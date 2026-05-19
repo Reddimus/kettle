@@ -460,6 +460,10 @@ impl App {
 
     fn drain_events(&mut self) {
         let mut bell = false;
+        // Cell size is renderer-owned and uniform across panes, so resolve it
+        // once per drain rather than per event (a sixel/kitty app polling CSI
+        // 14 t doesn't need a renderer lookup per CSI).
+        let (cell_w, cell_h) = self.cell_px();
         for pane in self.mux.panes.values_mut() {
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
@@ -489,6 +493,28 @@ impl App {
                             String::new()
                         };
                         pane.term.write(fmt(&text).as_bytes());
+                    }
+                    TermEvent::TextAreaSizeRequest(fmt) => {
+                        // CSI 14 t — text-area size in pixels. Sixel / kitty
+                        // graphics / iTerm2-OSC-1337 apps probe this to do
+                        // pixel-perfect image placements; the engine raises
+                        // the event but expects us to fill in the cell + grid
+                        // dimensions before the formatter produces the reply
+                        // (CSI 4 ; <height> ; <width> t).
+                        let (cols, rows) = pane
+                            .term
+                            .term
+                            .lock()
+                            .ok()
+                            .map(|t| {
+                                use kettle_core::Dimensions;
+                                (t.columns() as u16, t.screen_lines() as u16)
+                            })
+                            .unwrap_or((0, 0));
+                        let reply = kettle_render::reply_for_text_area_size(
+                            cols, rows, cell_w, cell_h, &*fmt,
+                        );
+                        pane.term.write(reply.as_bytes());
                     }
                     TermEvent::ColorRequest(idx, fmt) => {
                         // OSC 4 ; n ; ? / OSC 10 / 11 / 12 — resolve against

@@ -1118,6 +1118,36 @@ mod conformance {
     }
 
     #[test]
+    fn xtwinops_text_area_size_pixels_formats_csi4_reply() {
+        // CSI 14 t — text-area pixel size. The engine raises
+        // TextAreaSizeRequest(fmt) and expects the caller to plug in cell
+        // dimensions + grid size; the formatter then produces the standard
+        // `CSI 4 ; h ; w t` xtwinops reply (h = rows × cell_h, w = cols ×
+        // cell_w). Sixel/kitty/iTerm2 image apps depend on this to compute
+        // pixel-accurate placements.
+        let (mut t, mut p, rx) = harness_rx(40, 10);
+        feed(&mut t, &mut p, b"\x1b[14t");
+        let fmt = rx
+            .try_iter()
+            .find_map(|ev| match ev {
+                TermEvent::TextAreaSizeRequest(f) => Some(f),
+                _ => None,
+            })
+            .expect("CSI 14 t must raise a TextAreaSizeRequest");
+        // 9 px wide × 18 px tall cells on a 40×10 grid → 360 × 180 px.
+        let reply = fmt(alacritty_terminal::event::WindowSize {
+            num_lines: 10,
+            num_cols: 40,
+            cell_width: 9,
+            cell_height: 18,
+        });
+        assert_eq!(
+            reply, "\x1b[4;180;360t",
+            "CSI 14 t reply must be CSI 4 ; <height-px> ; <width-px> t"
+        );
+    }
+
+    #[test]
     fn osc_color_queries_carry_index_and_format_xparsecolor_reply() {
         // OSC 10 / 11 / 12 (default fg / bg / cursor) and OSC 4 ; n ; ? are
         // the four queries shells and TUIs use to detect light-vs-dark and
@@ -1407,9 +1437,6 @@ mod conformance {
         );
     }
 
-    // NOTE: XTWINOPS CSI 14 t (pixel size) routes through a windowing
-    // callback (Event::TextAreaSizeRequest) so it has no deterministic
-    // headless reply and is exercised by the live app, not asserted here.
     // SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
     // stops), DECSCA/DECSEL selective-erase and LNM LF→CRLF *output*
     // translation are not applied by alacritty_terminal, so no conformance

@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`CSI 14 t` (text-area pixel size) now replies.** Sixel / kitty
+  graphics / iTerm2 OSC 1337 apps probe this to compute
+  pixel-perfect image placements (a 200-px image needs to know how
+  many cells it covers); the engine raised
+  `TextAreaSizeRequest(formatter)` but the app's event loop dropped
+  it and the apps fell back to a 8×16 cell guess. New pure helper
+  `kettle_render::reply_for_text_area_size(cols, rows, cell_w,
+  cell_h, fmt)` feeds the engine formatter the live grid + cell
+  dimensions and yields the canonical xtwinops reply
+  `CSI 4 ; <height-px> ; <width-px> t`. +1 conformance test.
 - **OSC 4 / 10 / 11 / 12 color queries now reply** (xparsecolor
   `rgb:RRRR/GGGG/BBBB` form). vim/neovim and tmux use these to detect
   the actual default foreground / background / cursor and the live

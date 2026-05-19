@@ -292,6 +292,12 @@
       neovim/vim/tmux couldn't detect the active fg/bg/cursor/palette.
       Pure `kettle_render::reply_for_query` resolves against theme +
       OSC overrides; out-of-range → no reply. +2 tests.
+- [x] **`CSI 14 t` (text-area pixel size) replies.** The engine
+      raised `TextAreaSizeRequest(fmt)` but the app dropped it, so
+      sixel/kitty/iTerm2 image apps fell back to guessed cells. Pure
+      `kettle_render::reply_for_text_area_size` plugs in the live cell
+      + grid dimensions and the formatter renders the canonical
+      `CSI 4 ; h ; w t` xtwinops reply. +1 test.
 
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)

@@ -25,7 +25,7 @@ use kettle_config::{Config, CursorStyle, Rgb, ScrollbarMode};
 use kettle_core::EventProxy;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub use color::{reply_for_query, resolve, resolve_query};
+pub use color::{reply_for_query, reply_for_text_area_size, resolve, resolve_query};
 use quad::{QuadInstance, QuadPipeline};
 
 /// A search match in a pane's viewport (grid coords, pre-scrolled).

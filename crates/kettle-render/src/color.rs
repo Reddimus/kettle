@@ -100,6 +100,35 @@ pub fn reply_for_query(
     }))
 }
 
+/// Format the engine-supplied reply for `CSI 14 t` (text-area size in
+/// pixels).
+///
+/// `alacritty_terminal` raises `TermEvent::TextAreaSizeRequest(fmt)` with
+/// a formatter that needs a `WindowSize { num_lines, num_cols, cell_width,
+/// cell_height }` and produces the standard xtwinops reply `CSI 4 ; h ; w t`
+/// (height = rows × cell-height, width = cols × cell-width). Sixel, kitty
+/// graphics and iTerm2-OSC-1337-aware apps use this to compute
+/// pixel-perfect image placements; without it they fall back to guessed
+/// 8×16 cells.
+///
+/// Same layering rationale as `reply_for_query`: keep the engine
+/// `WindowSize` type contained here so kettle-ui can stay engine-internal-
+/// free and just call this helper with the four numbers it already knows.
+pub fn reply_for_text_area_size(
+    cols: u16,
+    rows: u16,
+    cell_w: u16,
+    cell_h: u16,
+    fmt: &(dyn Fn(alacritty_terminal::event::WindowSize) -> String + Send + Sync),
+) -> String {
+    fmt(alacritty_terminal::event::WindowSize {
+        num_lines: rows,
+        num_cols: cols,
+        cell_width: cell_w,
+        cell_height: cell_h,
+    })
+}
+
 /// Resolve a cell color. `term_colors` carries runtime OSC 4/10/11 overrides.
 pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
     match c {
