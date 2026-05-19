@@ -113,6 +113,9 @@ pub struct App {
     /// Active quick-select hint mode: detected targets + typed prefix.
     hint_state: Option<(Vec<HintTarget>, String)>,
     window_focused: bool,
+    /// True while the OS mouse cursor is hidden because the user is typing
+    /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
+    mouse_hidden: bool,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -175,6 +178,7 @@ impl App {
             palette_input: None,
             hint_state: None,
             window_focused: true,
+            mouse_hidden: false,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -200,6 +204,43 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w.max(1.0) as u16, r.cell_h.max(1.0) as u16))
             .unwrap_or((8, 16))
+    }
+
+    /// Hide the OS mouse cursor; idempotent. Called when the user starts
+    /// typing if `mouse-hide-while-typing` is on. The cursor reappears on
+    /// the next mouse move or window-enter event.
+    fn hide_mouse_cursor(&mut self) {
+        if self.mouse_hidden || !self.cfg.mouse_hide_while_typing {
+            return;
+        }
+        if let Some(w) = &self.window {
+            w.set_cursor_visible(false);
+            self.mouse_hidden = true;
+        }
+    }
+
+    /// Show the OS mouse cursor; idempotent. Called whenever the mouse
+    /// moves or re-enters the window.
+    fn show_mouse_cursor(&mut self) {
+        if !self.mouse_hidden {
+            return;
+        }
+        if let Some(w) = &self.window {
+            w.set_cursor_visible(true);
+            self.mouse_hidden = false;
+        }
+    }
+
+    /// Clear the focused pane's selection (called when the user types —
+    /// every modern terminal does this so a stale highlight doesn't
+    /// confuse the next copy/paste). No-op when nothing is selected.
+    fn clear_selection_on_input(&mut self) {
+        if let Some(p) = self.mux.focused()
+            && let Ok(mut t) = p.term.term.lock()
+            && t.selection.is_some()
+        {
+            t.selection = None;
+        }
     }
 
     fn tab_bar_h(&self) -> f32 {
@@ -1520,6 +1561,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                // Any real mouse movement undoes the hide-while-typing
+                // state. Sub-pixel movements that winit *might* coalesce
+                // are fine to ignore — the next "real" motion will fire.
+                self.show_mouse_cursor();
                 if let Some(btn) = self.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
                     if self.send_mouse(btn, true, true) {
@@ -1725,6 +1770,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // Keep the cursor solid while actively typing.
                 self.blink_on = true;
                 self.last_blink = std::time::Instant::now();
+                // Hide the OS mouse cursor (configurable; default on, like
+                // every modern terminal). Re-shown on the next CursorMoved.
+                self.hide_mouse_cursor();
                 let text = event.text.as_ref().map(|s| s.as_str());
 
                 if self.hint_state.is_some() {
@@ -1773,6 +1821,11 @@ impl ApplicationHandler<UserEvent> for App {
                     .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
                     .unwrap_or(kettle_core::TermMode::empty());
                 if let Some(bytes) = input::encode(&event.logical_key, text, self.mods, mode) {
+                    // Any keystroke that produces PTY bytes also dismisses
+                    // an active selection — alacritty/iTerm2/WezTerm all do
+                    // this so typing after a select doesn't leave a stale
+                    // highlight behind.
+                    self.clear_selection_on_input();
                     if self.mux.broadcast {
                         self.mux.broadcast_write(&bytes);
                     } else if let Some(p) = self.mux.focused() {

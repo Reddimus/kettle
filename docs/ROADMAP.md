@@ -319,6 +319,11 @@
       used to collapse to their unmodified sequence. New
       `xterm_modifier` helper + `CSI 1;<m>…` / `CSI <n>;<m>~` /
       `CSI 1;<m>P..S` for F1-4 / `CSI Z` for Shift+Tab. +2 tests.
+- [x] **`mouse-hide-while-typing` + selection clear on typing.**
+      OS mouse cursor hides on keystroke (re-shows on next motion),
+      and the focused pane's selection clears on any keystroke that
+      produces PTY bytes — Alacritty / kitty / WezTerm / iTerm2
+      parity. +1 config test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

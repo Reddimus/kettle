@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`mouse-hide-while-typing` + selection clears on typing.** Two
+  QoL gaps every modern terminal (Alacritty, kitty, WezTerm,
+  iTerm2, Ghostty) has but kettle didn't:
+  - The OS mouse cursor now hides on keyboard input (configurable,
+    default on; aliases `mouse-hide`) and reappears on the next
+    mouse move — so the pointer doesn't sit over the column you're
+    editing.
+  - The focused pane's selection is cleared on any keystroke that
+    produces PTY bytes — so typing after a select doesn't leave a
+    stale highlight behind to confuse the next copy/paste.
+  Wired via small `hide_mouse_cursor`/`show_mouse_cursor`/
+  `clear_selection_on_input` helpers on App. +1 config test.
 - **Modified named keys now encode per xterm modifyCursorKeys** —
   `Ctrl+Right` (skip-word in bash/zsh/readline), `Ctrl+Delete`
   (delete-word), `Shift+Tab` (`CSI Z` back-tab used by readline /

@@ -216,6 +216,11 @@ pub struct Config {
     /// xterm `scrollTtyOutput`). Default `false` so reading old output isn't
     /// interrupted by a chatty background process.
     pub scroll_on_output: bool,
+    /// Hide the OS mouse cursor while the user is typing; show it again on
+    /// the next mouse movement. Defaults to `true` (matches Alacritty /
+    /// kitty / WezTerm so the mouse pointer doesn't sit over the text
+    /// you're editing). Disable to keep the cursor visible at all times.
+    pub mouse_hide_while_typing: bool,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -260,6 +265,7 @@ impl Default for Config {
             copy_on_select: true,
             scroll_on_keystroke: true,
             scroll_on_output: false,
+            mouse_hide_while_typing: true,
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
@@ -496,6 +502,9 @@ impl Config {
                     cfg.scroll_on_keystroke = e.value != "false";
                 }
                 "scroll-on-output" => cfg.scroll_on_output = e.value != "false",
+                "mouse-hide-while-typing" | "mouse-hide" => {
+                    cfg.mouse_hide_while_typing = e.value != "false";
+                }
                 "font-feature" => {
                     for tok in e.value.split(',') {
                         if let Some(f) = FontFeature::parse(tok) {
@@ -868,6 +877,17 @@ mod config_tests {
         assert!(c.scroll_on_output);
         // Alacritty's `scroll-on-input` alias is honored too.
         assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
+    }
+
+    #[test]
+    fn mouse_hide_while_typing_default_and_parse() {
+        // Default is `true` — matches every modern terminal (Alacritty
+        // `mouse.hide_when_typing`, kitty `hide_mouse_when_typing`,
+        // WezTerm `hide_mouse_cursor_when_typing`).
+        assert!(Config::default().mouse_hide_while_typing);
+        assert!(!Config::parse_text("mouse-hide-while-typing = false").mouse_hide_while_typing);
+        // Short `mouse-hide` alias also works.
+        assert!(!Config::parse_text("mouse-hide = false").mouse_hide_while_typing);
     }
 
     #[test]
