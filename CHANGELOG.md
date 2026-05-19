@@ -7,6 +7,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- Scrollback **search now scrolls the viewport to the active match**:
+  matches in history (and `Tab`/`Shift+Tab` cycling onto them) bring
+  the line into view (~⅓ from the top), once per match/query change so
+  wheel-scrolling still works. Previously off-screen matches were found
+  but never shown. Pure tested `search::reveal_offset`.
 - Theme cycling (`next_theme`/`prev_theme`) now matches the current
   theme **case-insensitively and trimmed** (like `by_name`), so a
   config such as `theme = tokyonight night` cycles from the right

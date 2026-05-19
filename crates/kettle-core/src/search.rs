@@ -72,6 +72,25 @@ pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
     matches
 }
 
+/// The `display_offset` that brings a match on grid line `match_line`
+/// (negative = scrollback) into view, or keeps the current one if the
+/// match is already visible (no jitter while typing/cycling). When a
+/// scroll is needed the match is placed ~1/3 from the top for context.
+/// Pure — `hist` = scrollback lines, `screen_lines` = visible rows.
+pub fn reveal_offset(match_line: i32, cur_off: usize, hist: usize, screen_lines: usize) -> usize {
+    let h = hist as i64;
+    let off = cur_off as i64;
+    let sl = screen_lines.max(1) as i64;
+    // Absolute line (0 = oldest scrollback … h+rows = newest).
+    let target = h + match_line as i64;
+    let top = h - off; // absolute line at the viewport's top row
+    if target >= top && target < top + sl {
+        return cur_off; // already on screen
+    }
+    let want_top = (target - sl / 3).max(0);
+    (h - want_top).clamp(0, h) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_regex;
@@ -98,6 +117,23 @@ mod tests {
         let re = build_regex(r"\bfoo\b").unwrap();
         assert!(re.is_match("a foo b"));
         assert!(!re.is_match("foobar"));
+    }
+
+    #[test]
+    fn reveal_offset_keeps_visible_else_scrolls() {
+        use super::reveal_offset;
+        // hist=100, screen=40, at the bottom (off=0): viewport abs 100..139.
+        // A viewport match (line 10 → abs 110) is already visible → no move.
+        assert_eq!(reveal_offset(10, 0, 100, 40), 0);
+        // A scrollback match (line -50 → abs 50) isn't visible → scroll so
+        // it sits ~1/3 down: want_top = 50 - 13 = 37 → off = 100-37 = 63.
+        assert_eq!(reveal_offset(-50, 0, 100, 40), 63);
+        // Already-scrolled and the match is within that window → unchanged.
+        // off=63 → top abs = 100-63 = 37, window 37..76; abs 50 is inside.
+        assert_eq!(reveal_offset(-50, 63, 100, 40), 63);
+        // Clamped to [0, hist]; never panics on extremes.
+        assert!(reveal_offset(-9999, 0, 100, 40) <= 100);
+        assert_eq!(reveal_offset(9999, 0, 100, 40), 0);
     }
 
     #[test]

@@ -71,6 +71,9 @@ pub struct App {
     selecting: bool,
     /// Dragging the focused pane's scrollbar thumb.
     dragging_scrollbar: bool,
+    /// `(query, index)` last scrolled-to, so the viewport follows search
+    /// matches into scrollback without re-scrolling every frame.
+    search_revealed: Option<(String, usize)>,
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
@@ -134,6 +137,7 @@ impl App {
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
             dragging_scrollbar: false,
+            search_revealed: None,
             mouse_btn: None,
             links: Vec::new(),
             ssh_input: None,
@@ -499,10 +503,37 @@ impl App {
         } else {
             Vec::new()
         };
-        let s = &mut self.mux.search;
-        s.matches = matches;
-        if s.index >= s.matches.len() {
-            s.index = 0;
+        {
+            let s = &mut self.mux.search;
+            s.matches = matches;
+            if s.index >= s.matches.len() {
+                s.index = 0;
+            }
+        }
+        // Follow the active match into scrollback when it (or the query)
+        // changed — once, so the user can still wheel-scroll freely.
+        let active = {
+            let s = &self.mux.search;
+            s.matches
+                .get(s.index)
+                .copied()
+                .map(|m| ((s.query.clone(), s.index), m.line))
+        };
+        if let Some((key, line)) = active
+            && self.search_revealed.as_ref() != Some(&key)
+        {
+            if let Some(p) = self.mux.focused()
+                && let Ok(mut t) = p.term.term.lock()
+            {
+                use kettle_core::Dimensions;
+                let g = t.grid();
+                let (hist, off, rows) = (g.history_size(), g.display_offset(), g.screen_lines());
+                let want = kettle_core::search::reveal_offset(line, off, hist, rows);
+                if want != off {
+                    t.scroll_display(kettle_core::Scroll::Delta(want as i32 - off as i32));
+                }
+            }
+            self.search_revealed = Some(key);
         }
     }
 
@@ -853,6 +884,7 @@ impl App {
                 self.mux.search.query.clear();
                 self.mux.search.matches.clear();
                 self.mux.search.index = 0;
+                self.search_revealed = None; // re-reveal on this new search
             }
             Action::ToggleBroadcastAll => self.mux.broadcast = true,
             Action::ToggleBroadcastOff => self.mux.broadcast = false,
