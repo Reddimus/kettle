@@ -81,6 +81,8 @@ pub enum Action {
     ScrollPageDown,
     ScrollToTop,
     ScrollToBottom,
+    JumpPrevPrompt,
+    JumpNextPrompt,
     ReloadConfig,
     GotoTab(u8),
 }
@@ -126,6 +128,8 @@ impl Action {
             "scroll_page_down" => ScrollPageDown,
             "scroll_to_top" => ScrollToTop,
             "scroll_to_bottom" => ScrollToBottom,
+            "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
+            "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
             "reload_config" => ReloadConfig,
             _ => return None,
         })
@@ -235,6 +239,8 @@ pub fn defaults() -> Bindings {
     bind(sus, Char('g'), ToggleBroadcastOff);
     bind(Mods::empty(), F(11), ToggleFullscreen);
     bind(cs, Char('m'), ReloadConfig);
+    bind(c, Up, JumpPrevPrompt);
+    bind(c, Down, JumpNextPrompt);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
     bind(Mods::SHIFT, Home, ScrollToTop);

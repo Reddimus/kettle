@@ -42,6 +42,7 @@ to print it. The file is **watched and reloaded live**.
 `goto_split:{up,down,left,right}`, `increase_font_size`,
 `decrease_font_size`, `reset_font_size`, `start_search`, `broadcast_all`,
 `broadcast_off`, `toggle_fullscreen`, `reset`, `scroll_page_up`,
-`scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `reload_config`.
+`scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `prev_prompt`,
+`next_prompt`, `reload_config`.
 
 See [`kettle.example.config`](kettle.example.config).

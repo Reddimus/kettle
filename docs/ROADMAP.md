@@ -23,11 +23,14 @@
 
 - [x] Mouse reporting passthrough (X10 + SGR 1006): click/drag/wheel to
       vim/tmux/htop/fzf; local selection/scroll when tracking is off
+- [x] Shell integration (OSC 133 A/B/C/D) + jump-to-prompt
+      (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish snippets in
+      docs/SHELL-INTEGRATION.md
 
 ## Next (in priority order)
+- [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)
-- [ ] Shell integration (OSC 133) + prompt jumping
 - [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] SSH multiplexing / detachable mux server

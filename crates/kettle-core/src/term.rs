@@ -10,7 +10,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::Result;
-use kettle_vt::{Chunk, Extractor};
+use kettle_vt::{Chunk, Extractor, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
@@ -46,6 +46,8 @@ pub struct Terminal {
     pub cols: usize,
     pub rows: usize,
     pub images: Images,
+    /// Absolute lines (history-aware) where OSC 133 prompts started.
+    pub prompts: Arc<Mutex<Vec<i64>>>,
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
@@ -102,11 +104,13 @@ impl Terminal {
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
+        let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
 
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
+            let prompts = prompts.clone();
             let cell_px = cell_px.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
@@ -137,6 +141,23 @@ impl Terminal {
                                                 data,
                                             );
                                         }
+                                        Chunk::Prompt(PromptKind::PromptStart) => {
+                                            if let Ok(t) = term.lock() {
+                                                let rc = t.renderable_content();
+                                                let line = rc.cursor.point.line.0 as i64;
+                                                let abs = t.grid().history_size() as i64 + line;
+                                                if let Ok(mut m) = prompts.lock()
+                                                    && m.last() != Some(&abs)
+                                                {
+                                                    m.push(abs);
+                                                    if m.len() > 2048 {
+                                                        let d = m.len() - 2048;
+                                                        m.drain(0..d);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Chunk::Prompt(_) => {}
                                     }
                                 }
                                 (waker)();
@@ -155,8 +176,14 @@ impl Terminal {
             cols,
             rows,
             images,
+            prompts,
             cell_px,
         })
+    }
+
+    /// Absolute prompt-start lines recorded via OSC 133.
+    pub fn prompt_marks(&self) -> Vec<i64> {
+        self.prompts.lock().map(|m| m.clone()).unwrap_or_default()
     }
 
     /// Image placements for this terminal (cloned cheaply; `ImageData` is

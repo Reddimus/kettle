@@ -9,12 +9,27 @@ use crate::{iterm, sixel};
 
 const MAX_SEQ: usize = 64 * 1024 * 1024;
 
+/// OSC 133 shell-integration marks (FinalTerm / iTerm2 / kitty convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// `A` — start of a fresh prompt.
+    PromptStart,
+    /// `B` — end of prompt / start of user input.
+    CommandStart,
+    /// `C` — command began executing (output starts).
+    OutputStart,
+    /// `D` — command finished (optional exit code).
+    CommandEnd(Option<i32>),
+}
+
 #[derive(Debug)]
 pub enum Chunk {
     /// Bytes to forward to the terminal engine unchanged.
     Pass(Vec<u8>),
     /// A decoded image to place at the current cursor position.
     Image(ImageData),
+    /// A shell-integration mark at the current cursor line.
+    Prompt(PromptKind),
 }
 
 #[derive(PartialEq)]
@@ -137,6 +152,15 @@ impl Extractor {
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
         let seq = std::mem::take(&mut self.seq);
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
+
+        // OSC 133 shell-integration marks are consumed (not forwarded).
+        if mode == Mode::Osc && seq.starts_with(b"133;") {
+            if let Some(kind) = parse_prompt(&seq[4..]) {
+                out.push(Chunk::Prompt(kind));
+            }
+            return;
+        }
+
         let img = match mode {
             Mode::Dcs => {
                 // Sixel: params then 'q' then data.
@@ -184,5 +208,22 @@ impl Extractor {
                 out.push(Chunk::Pass(v));
             }
         }
+    }
+}
+
+fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
+    match rest.first()? {
+        b'A' => Some(PromptKind::PromptStart),
+        b'B' => Some(PromptKind::CommandStart),
+        b'C' => Some(PromptKind::OutputStart),
+        b'D' => {
+            let s = String::from_utf8_lossy(rest);
+            let code = s
+                .split(';')
+                .nth(1)
+                .and_then(|c| c.trim().parse::<i32>().ok());
+            Some(PromptKind::CommandEnd(code))
+        }
+        _ => None,
     }
 }

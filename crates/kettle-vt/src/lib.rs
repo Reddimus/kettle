@@ -10,7 +10,7 @@ pub mod iterm;
 pub mod kitty;
 pub mod sixel;
 
-pub use extract::{Chunk, Extractor};
+pub use extract::{Chunk, Extractor, PromptKind};
 pub use image::ImageData;
 
 #[cfg(test)]

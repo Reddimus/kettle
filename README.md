@@ -27,6 +27,10 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   with `Ctrl`/`Cmd`+click.
 - **Inline images** — Sixel, kitty graphics, and iTerm2 (OSC 1337) decoded
   and GPU-composited (`img2sixel`, `kitten icat`, `imgcat`).
+- **Shell integration** — OSC 133 prompt marks; jump between prompts with
+  `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
+- **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
+  works (X10 + SGR 1006).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

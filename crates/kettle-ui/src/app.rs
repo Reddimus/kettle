@@ -508,6 +508,30 @@ impl App {
                     });
                 }
             }
+            Action::JumpPrevPrompt | Action::JumpNextPrompt => {
+                let prev = matches!(action, Action::JumpPrevPrompt);
+                if let Some(p) = self.mux.focused() {
+                    let marks = p.term.prompt_marks();
+                    if let Ok(mut t) = p.term.term.lock() {
+                        use kettle_core::Dimensions;
+                        let hist = t.grid().history_size() as i64;
+                        let off = t.grid().display_offset() as i64;
+                        let top = hist - off;
+                        let target = if prev {
+                            marks.iter().filter(|&&m| m < top).max().copied()
+                        } else {
+                            marks.iter().filter(|&&m| m > top).min().copied()
+                        };
+                        if let Some(m) = target {
+                            let new_off = (hist - m).clamp(0, hist);
+                            let delta = (new_off - off) as i32;
+                            if delta != 0 {
+                                t.scroll_display(Scroll::Delta(delta));
+                            }
+                        }
+                    }
+                }
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {
