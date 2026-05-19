@@ -10,11 +10,12 @@
 //!   placement registered, but nothing is drawn at the cursor — it is shown
 //!   later via Unicode placeholder text (see [`crate::placeholder`])
 //!
-//! - `a=f` transmit animation frames; `a=a` animation control (current
-//!   frame / run-stop / loop count / per-frame gap); `a=d,d=f` frame delete
+//! - `a=f` transmit animation frames (full or partial-rect over a
+//!   previous-frame / `Y=` color / transparent canvas; `r=` edits a frame
+//!   in place); `a=a` control (current frame / run-stop / loop / gap);
+//!   `a=c` copy a rectangle between frames; `a=d,d=f` frame delete
 //!
-//! Spec: `kitty/docs/graphics-protocol.rst`. Frame compositing (`a=c`),
-//! partial-rect frames, playback timing and relative placements remain out
+//! Spec: `kitty/docs/graphics-protocol.rst`. Relative placements remain out
 //! of scope for now (see ROADMAP).
 
 use std::collections::HashMap;
@@ -39,10 +40,10 @@ pub struct VirtualPlacement {
     pub z: i32,
 }
 
-/// One animation frame of an image (`a=f`). `gap_ms`: `0` = unset,
-/// `> 0` = display this many ms, `< 0` = *gapless* (skipped on playback,
-/// kept only as base data). Partial-rect frames (`x,y` offsets) and
-/// frame-composition (`a=c`) are not modelled yet — see ROADMAP.
+/// One animation frame of an image (`a=f`). `img` is the *fully composed*
+/// frame (partial-rect transmissions are already blended onto their canvas).
+/// `gap_ms`: `0` = unset, `> 0` = display this many ms, `< 0` = *gapless*
+/// (skipped on playback, kept only as base data).
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub img: ImageData,
@@ -272,8 +273,32 @@ impl KittyState {
             return KittyOut::Animate { id };
         }
         if action == "c" {
-            // Frame composition (`a=c`): not modelled yet (see ROADMAP).
-            return KittyOut::None;
+            // Frame composition: copy a rectangle from source frame `r`
+            // onto destination frame `c` (both 1-based; 1 = root/base).
+            let src = dim("r").and_then(|n| self.frame_image(id, n));
+            let dn = dim("c").unwrap_or(0);
+            let Some(src) = src else {
+                return KittyOut::None;
+            };
+            let w = dim("w").unwrap_or(src.width);
+            let h = dim("h").unwrap_or(src.height);
+            let replace = kv.get("C").map(|v| v == "1").unwrap_or(false);
+            let (dx, dy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
+            let (sx, sy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
+            if let Some(patch) = src.crop(sx, sy, w, h) {
+                if dn <= 1 {
+                    if let Some(b) = self.store.get_mut(&id) {
+                        b.compose(&patch, dx, dy, replace);
+                    }
+                } else if let Some(fr) = self
+                    .frames
+                    .get_mut(&id)
+                    .and_then(|f| f.get_mut(dn as usize - 2))
+                {
+                    fr.img.compose(&patch, dx, dy, replace);
+                }
+            }
+            return KittyOut::Animate { id };
         }
         if action == "f" {
             // Transmit animation frame data (chunked like an image). The
@@ -292,15 +317,66 @@ impl KittyState {
                 return KittyOut::None;
             }
             let (fid, Acc { control, payload }) = self.frame_in_flight.take().unwrap();
-            if let Some(img) = decode(&control, &payload) {
-                let gap = parse_control(&control)
-                    .get("z")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0i32);
-                self.frames
-                    .entry(fid)
-                    .or_default()
-                    .push(Frame { img, gap_ms: gap });
+            if let Some(patch) = decode(&control, &payload) {
+                let fc = parse_control(&control);
+                let g = |k: &str| fc.get(k).and_then(|v| v.parse::<u32>().ok());
+                let gap = fc.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
+                let (x, y) = (g("x").unwrap_or(0), g("y").unwrap_or(0));
+                let replace = fc.get("X").map(|v| v == "1").unwrap_or(false);
+                let edit = g("r");
+                let bg_frame = g("c");
+                let bg_color = g("Y");
+                // Base-image dimensions size the canvas (fallback: patch).
+                let (bw, bh) = self
+                    .store
+                    .get(&fid)
+                    .map(|b| (b.width, b.height))
+                    .unwrap_or((patch.width, patch.height));
+                let partial = x != 0
+                    || y != 0
+                    || bg_frame.is_some()
+                    || bg_color.is_some()
+                    || edit.is_some()
+                    || patch.width != bw
+                    || patch.height != bh;
+                let frame_img = if !partial {
+                    patch
+                } else {
+                    let mut canvas = edit
+                        .and_then(|r| self.frame_image(fid, r))
+                        .or_else(|| bg_frame.and_then(|n| self.frame_image(fid, n)))
+                        .or_else(|| {
+                            bg_color.and_then(|c| {
+                                ImageData::solid(
+                                    bw,
+                                    bh,
+                                    [(c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8],
+                                )
+                            })
+                        })
+                        .or_else(|| ImageData::solid(bw, bh, [0, 0, 0, 0]))
+                        .unwrap_or_else(|| patch.clone());
+                    canvas.compose(&patch, x, y, replace);
+                    canvas
+                };
+                // `r` (>=2) edits an existing frame in place; else append.
+                if let Some(r) = edit
+                    && r >= 2
+                    && let Some(fr) = self
+                        .frames
+                        .get_mut(&fid)
+                        .and_then(|f| f.get_mut(r as usize - 2))
+                {
+                    fr.img = frame_img;
+                    if gap != 0 {
+                        fr.gap_ms = gap;
+                    }
+                } else {
+                    self.frames.entry(fid).or_default().push(Frame {
+                        img: frame_img,
+                        gap_ms: gap,
+                    });
+                }
             }
             return KittyOut::Animate { id: fid };
         }
@@ -396,6 +472,19 @@ impl KittyState {
     /// Animation control state for an image id, if the client set any.
     pub fn animation(&self, id: u32) -> Option<&AnimationState> {
         self.anim.get(&id)
+    }
+
+    /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
+    /// `n >= 2` is `frames[n-2]` (used as a composition background).
+    fn frame_image(&self, id: u32, n: u32) -> Option<ImageData> {
+        if n <= 1 {
+            self.store.get(&id).cloned()
+        } else {
+            self.frames
+                .get(&id)
+                .and_then(|f| f.get(n as usize - 2))
+                .map(|fr| fr.img.clone())
+        }
     }
 }
 
@@ -607,6 +696,48 @@ mod tests {
         assert_eq!(current_frame(&g2, &load, 50), 0);
         assert_eq!(current_frame(&g2, &load, 250), 1);
         assert_eq!(current_frame(&g2, &load, 900), 1, "loading waits at end");
+    }
+
+    #[test]
+    fn partial_rect_frame_and_compose() {
+        use base64::Engine;
+        let b = |v: &[u8]| base64::engine::general_purpose::STANDARD.encode(v);
+        let mut k = KittyState::default();
+        // Base image: 2×1, pixels black then white.
+        let base = b(&[0, 0, 0, 255, 255, 255, 255, 255]);
+        k.feed(&format!("a=T,i=1,f=32,s=2,v=1;{base}"));
+        // Partial frame: replace just pixel (1,0) with red over the base
+        // (c=1 = root background, x=1, X=1 replace), 1×1 patch.
+        let red = b(&[255, 0, 0, 255]);
+        k.feed(&format!("a=f,i=1,c=1,x=1,X=1,f=32,s=1,v=1,z=30;{red}"));
+        let fr = k.frames(1);
+        assert_eq!(fr.len(), 1);
+        assert_eq!(fr[0].gap_ms, 30);
+        // Frame = base with (1,0) → red; (0,0) still black.
+        assert_eq!(&fr[0].img.rgba[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&fr[0].img.rgba[4..8], &[255, 0, 0, 255]);
+        assert_eq!((fr[0].img.width, fr[0].img.height), (2, 1));
+
+        // a=c: copy frame-2's pixel (0,0) onto the root at (0,0), replace.
+        k.feed("a=c,i=1,r=2,c=1,w=1,h=1,C=1");
+        assert_eq!(
+            &k.image(1).unwrap().rgba[0..4],
+            &[0, 0, 0, 255],
+            "frame2(0,0) is black → root(0,0) stays black"
+        );
+        // Copy frame-2's red pixel (1,0) onto root (0,0).
+        k.feed("a=c,i=1,r=2,c=1,w=1,h=1,x=1,C=1");
+        assert_eq!(
+            &k.image(1).unwrap().rgba[0..4],
+            &[255, 0, 0, 255],
+            "root(0,0) now red from frame2(1,0)"
+        );
+
+        // Editing an existing frame in place (r=2) updates its gap too.
+        k.feed(&format!("a=f,i=1,r=2,x=0,X=1,f=32,s=1,v=1,z=99;{red}"));
+        assert_eq!(k.frames(1).len(), 1, "r=2 edits, does not append");
+        assert_eq!(k.frames(1)[0].gap_ms, 99);
+        assert_eq!(&k.frames(1)[0].img.rgba[0..4], &[255, 0, 0, 255]);
     }
 
     #[test]

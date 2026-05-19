@@ -182,9 +182,16 @@
       (`AnimEntry`, +1 extractor test, 96 workspace tests). Cited kitty
       `graphics-protocol.rst:839`.
 
+- [x] kitty animation frame compositing: partial-rect `a=f` frames
+      blended/replaced over a previous-frame (`c=`) / `Y=` color /
+      transparent canvas, `r=` edits a frame in place; `a=c` copies a
+      rectangle between frames (incl. onto the root). RGBA `compose`
+      (source-over) + `solid` primitives, +3 tests (99 workspace).
+      Cited kitty `graphics-protocol.rst` frame-composition.
+
 ## Next (in priority order)
-- [ ] kitty animation: `a=c` frame compositing + partial-rect (`x,y`)
-      frames; relative placements
+- [ ] kitty graphics: relative placements (`P=`/`Q=` parent, `H=`/`V=`
+      offsets)
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

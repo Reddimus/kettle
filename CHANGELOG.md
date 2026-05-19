@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty animation frame compositing: partial-rect `a=f` frames are
+  blended (or `X=1` replaced) over a chosen canvas — a previous frame
+  (`c=`), a `Y=` background color, or transparent — and `r=` edits an
+  existing frame in place; `a=c` copies a rectangle between frames
+  (including onto the root image). New RGBA `ImageData::compose`
+  (source-over) and `solid` primitives.
 - kitty animation **now plays end-to-end**: `a=f` frames / `a=a`
   control snapshot through `Chunk::Animation` into a per-terminal
   `Animations` registry; at draw time a placement's image is swapped for
