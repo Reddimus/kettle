@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Runtime theme choice **persists across restarts** (saved in
+      `session.json` as `theme`, `#[serde(default)]` so old files still
+      load; applied on restore unless config-reloaded). +session tests.
 - [x] **Runtime theme switching**: `next_theme`/`prev_theme` actions
       (+ "Next/Previous theme" palette entries) cycle the bundled themes
       live (no config edit/reload); pure `Theme::cycle` wrap-around,

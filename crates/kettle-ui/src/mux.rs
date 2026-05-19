@@ -254,6 +254,8 @@ impl Mux {
                 })
                 .collect(),
             active: self.active,
+            // Filled in by App::save_session (it owns the active theme).
+            theme: None,
         }
     }
 

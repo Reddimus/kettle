@@ -931,6 +931,7 @@ impl App {
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
                 self.cfg.theme_name = name.to_string();
                 self.cfg.theme = kettle_config::Theme::by_name(name);
+                self.save_session(); // persist so the choice sticks
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -952,7 +953,9 @@ impl App {
     }
 
     fn save_session(&self) {
-        self.mux.snapshot().save();
+        let mut s = self.mux.snapshot();
+        s.theme = Some(self.cfg.theme_name.clone());
+        s.save();
     }
 
     fn reload_config(&mut self) {
@@ -1271,6 +1274,15 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             match crate::session::Session::load() {
                 Some(s) if !s.is_empty() => {
+                    // A theme picked at runtime last session sticks until
+                    // the user changes it again or reloads the config.
+                    if let Some(name) = s.theme.as_deref()
+                        && name != self.cfg.theme_name
+                        && kettle_config::Theme::list().contains(&name)
+                    {
+                        self.cfg.theme_name = name.to_string();
+                        self.cfg.theme = kettle_config::Theme::by_name(name);
+                    }
                     let proxy = self.proxy.clone();
                     let mk = move || -> kettle_core::Waker {
                         let p = proxy.clone();

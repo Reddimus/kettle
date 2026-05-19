@@ -31,6 +31,10 @@ pub struct STab {
 pub struct Session {
     pub tabs: Vec<STab>,
     pub active: usize,
+    /// Theme chosen at runtime (`next_theme`/`prev_theme`); restored on
+    /// launch so a picked theme sticks. `default` so old files still load.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl Session {
@@ -84,10 +88,12 @@ mod tests {
                 },
             }],
             active: 0,
+            theme: Some("Dracula".into()),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tabs.len(), 1);
+        assert_eq!(back.theme.as_deref(), Some("Dracula"), "theme persists");
         match &back.tabs[0].root {
             SNode::Split { a, b, .. } => {
                 assert!(matches!(**a, SNode::Leaf { ref cwd, .. } if cwd.as_deref()==Some("/tmp")));
@@ -103,5 +109,7 @@ mod tests {
         let json = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}}],"active":0}"#;
         let s: Session = serde_json::from_str(json).unwrap();
         assert_eq!(s.tabs.len(), 1);
+        // `theme` is also #[serde(default)] → None on pre-theme files.
+        assert_eq!(s.theme, None);
     }
 }

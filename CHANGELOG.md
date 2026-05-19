@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- A theme picked at runtime now **persists across restarts** — it's
+  saved in `session.json` (`theme`, `#[serde(default)]` so older
+  sessions still load) and reapplied on launch, until you change it
+  again or reload the config.
 - **Live theme switching**: `next_theme` / `prev_theme` keybind actions
   and "Next theme" / "Previous theme" command-palette entries cycle the
   ~512 bundled themes at runtime — no config edit or reload. Pure
