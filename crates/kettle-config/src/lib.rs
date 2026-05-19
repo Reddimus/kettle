@@ -14,6 +14,10 @@ pub use color::Rgb;
 pub use keybinds::{Action, Bindings, Key, Mods, Trigger};
 pub use theme::Theme;
 
+/// Practical stand-in for "infinite" scrollback: ~10M lines (keeps memory
+/// bounded while never realistically clipping history).
+pub const INFINITE_SCROLLBACK: usize = 10_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -149,8 +153,13 @@ impl Config {
                     }
                 }
                 "scrollback-limit" | "scrollback" => {
-                    if let Ok(v) = e.value.parse() {
-                        cfg.scrollback = v;
+                    let v = e.value.trim().to_ascii_lowercase();
+                    // `0` / `infinite` / `unlimited` => effectively unbounded
+                    // history (capped high to keep memory bounded).
+                    if v == "infinite" || v == "unlimited" || v == "0" {
+                        cfg.scrollback = INFINITE_SCROLLBACK;
+                    } else if let Ok(n) = v.parse::<usize>() {
+                        cfg.scrollback = n;
                     }
                 }
                 "window-padding-x" => {

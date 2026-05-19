@@ -21,7 +21,7 @@ to print it. The file is **watched and reloaded live**.
 | `selection-background` / `selection-foreground` | color | from theme | |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | amber on dark | Search highlight |
-| `scrollback` | int | `10000` | Lines of history |
+| `scrollback` | int / `infinite` | `10000` | Lines of history; `0`, `infinite` or `unlimited` = effectively unbounded |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `background-opacity` | float | `1.0` | 0..1 |
 | `cursor-style` | `block`\|`underline`\|`bar` | `block` | |

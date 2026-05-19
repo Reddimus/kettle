@@ -212,6 +212,12 @@ pub fn defaults() -> Bindings {
     bind(cs, Down, ResizeDown);
     bind(cs, Left, ResizeLeft);
     bind(cs, Right, ResizeRight);
+    // Terminator-style Shift+Arrow split resize.
+    let sh = Mods::SHIFT;
+    bind(sh, Up, ResizeUp);
+    bind(sh, Down, ResizeDown);
+    bind(sh, Left, ResizeLeft);
+    bind(sh, Right, ResizeRight);
     bind(c, PageDown, NextTab);
     bind(c, PageUp, PrevTab);
     bind(cs, PageDown, MoveTabRight);
