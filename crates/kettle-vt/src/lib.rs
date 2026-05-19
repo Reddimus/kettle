@@ -8,6 +8,7 @@ pub mod extract;
 pub mod image;
 pub mod iterm;
 pub mod kitty;
+pub mod placeholder;
 pub mod sixel;
 
 pub use extract::{Chunk, Extractor, PromptKind};

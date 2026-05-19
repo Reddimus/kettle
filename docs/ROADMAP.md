@@ -131,9 +131,20 @@
       CSI 14 t pixel size routes through a windowing callback — exercised
       live, not asserted headless.
 
+- [x] kitty graphics Unicode placeholders — decode layer: the 297-entry
+      row/column diacritic table, per-cell diacritic parsing, 32-bit
+      image-id reconstruction (fg + msb diacritic), and the
+      omitted-diacritic left-inheritance algorithm
+      (`kettle-vt::placeholder`, 6 tests); plus `U=1` virtual placements
+      in the kitty decoder (`a=p,U=1` / `a=T,U=1` register a rows×cols
+      placement, store the image, draw nothing at the cursor; deleted
+      with the image — 3 tests). Cited to
+      `kitty/docs/graphics-protocol.rst:555`.
+
 ## Next (in priority order)
-- [ ] kitty graphics: Unicode placeholders, animation frames, relative
-      placements
+- [ ] kitty Unicode placeholders — renderer: scan `U+10EEEE` grid cells,
+      resolve via `placeholder::resolve_run`, composite the virtual image
+      tile-by-tile (then animation frames + relative placements)
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu

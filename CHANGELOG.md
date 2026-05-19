@@ -30,6 +30,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty Unicode placeholders (decode layer): `kettle-vt::placeholder` —
+  the 297-entry row/column diacritic table, per-cell diacritic parsing,
+  32-bit image-id reconstruction (foreground + msb diacritic), and the
+  omitted-diacritic left-inheritance algorithm; plus `U=1` **virtual
+  placements** in the kitty decoder (`a=p,U=1` / `a=T,U=1` store the
+  image and register a rows×cols placement without drawing at the
+  cursor). Renderer compositing of placeholder cells is the next cycle.
 - VT conformance: XTWINOPS `CSI 18 t` text-area size report
   (`CSI 8 ; rows ; cols t`), DSR `CSI 5 n` device-status (`→ CSI 0 n`),
   and an exact-match DA1 assertion (`CSI c`/`CSI 0 c` → `CSI ? 6 c`).

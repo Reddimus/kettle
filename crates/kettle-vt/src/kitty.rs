@@ -6,9 +6,12 @@
 //! - `a=p` put a previously transmitted image (by `i=` id) at the cursor
 //! - `a=d` delete images (all, or by `i=` id)
 //! - `z=`  z-index ordering between images
+//! - `U=1` *virtual placement*: the image is stored and a rows×cols virtual
+//!   placement registered, but nothing is drawn at the cursor — it is shown
+//!   later via Unicode placeholder text (see [`crate::placeholder`])
 //!
-//! Spec: `kitty/docs/graphics-protocol.rst`. Animation, Unicode placeholders
-//! and relative placements remain out of scope (see ROADMAP).
+//! Spec: `kitty/docs/graphics-protocol.rst`. Animation and relative
+//! placements remain out of scope (see ROADMAP).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -23,11 +26,28 @@ struct Acc {
     payload: String,
 }
 
+/// A `U=1` virtual placement: the image is fit into a `cols`×`rows`
+/// rectangle and displayed later via Unicode placeholder cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualPlacement {
+    pub cols: u32,
+    pub rows: u32,
+    pub z: i32,
+}
+
 /// What a kitty APC resolved to.
 pub enum KittyOut {
     None,
     Place(Placed),
-    Delete { all: bool, id: Option<u32> },
+    Delete {
+        all: bool,
+        id: Option<u32>,
+    },
+    /// A virtual placement was (re)registered for image `id`; nothing is
+    /// drawn now — the renderer composites it where placeholder cells appear.
+    Virtual {
+        id: u32,
+    },
 }
 
 /// Reassembles chunked transmissions and remembers transmitted images so
@@ -36,6 +56,7 @@ pub enum KittyOut {
 pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
+    virtual_placements: HashMap<u32, VirtualPlacement>,
 }
 
 impl KittyState {
@@ -47,6 +68,9 @@ impl KittyState {
         let action = kv.get("a").map(|s| s.as_str()).unwrap_or("t");
         let z = kv.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
 
+        let virt = kv.get("U").map(|v| v == "1").unwrap_or(false);
+        let dim = |k: &str| kv.get(k).and_then(|v| v.parse::<u32>().ok());
+
         // Control-only ops are never chunked.
         if action == "d" {
             self.in_flight.clear();
@@ -54,6 +78,7 @@ impl KittyState {
             return match target {
                 "i" | "I" => {
                     self.store.remove(&id);
+                    self.virtual_placements.remove(&id);
                     KittyOut::Delete {
                         all: false,
                         id: Some(id),
@@ -61,6 +86,7 @@ impl KittyState {
                 }
                 _ => {
                     self.store.clear();
+                    self.virtual_placements.clear();
                     KittyOut::Delete {
                         all: true,
                         id: None,
@@ -72,6 +98,19 @@ impl KittyState {
             return KittyOut::None; // capability query — nothing to render
         }
         if action == "p" {
+            // `a=p,U=1` registers a virtual placement (shown later via
+            // placeholder text); plain `a=p` puts the image at the cursor.
+            if virt {
+                self.virtual_placements.insert(
+                    id,
+                    VirtualPlacement {
+                        cols: dim("c").unwrap_or(0),
+                        rows: dim("r").unwrap_or(0),
+                        z,
+                    },
+                );
+                return KittyOut::Virtual { id };
+            }
             return match self.store.get(&id) {
                 Some(img) => KittyOut::Place(Placed {
                     img: img.clone(),
@@ -101,6 +140,20 @@ impl KittyState {
         if id != 0 {
             self.store.insert(id, img.clone());
         }
+        // `U=1` (possibly combined with `a=T`): store + register a virtual
+        // placement, but draw nothing at the cursor.
+        if first.get("U").map(|v| v == "1").unwrap_or(false) {
+            let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
+            self.virtual_placements.insert(
+                id,
+                VirtualPlacement {
+                    cols: first.get("c").and_then(|v| v.parse().ok()).unwrap_or(0),
+                    rows: first.get("r").and_then(|v| v.parse().ok()).unwrap_or(0),
+                    z: fz,
+                },
+            );
+            return KittyOut::Virtual { id };
+        }
         // `T` displays now; bare `t` only stores.
         if first.get("a").map(|s| s.as_str()).unwrap_or("t") == "T" {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
@@ -112,6 +165,16 @@ impl KittyState {
         } else {
             KittyOut::None
         }
+    }
+
+    /// A stored image by id (for compositing Unicode-placeholder cells).
+    pub fn image(&self, id: u32) -> Option<&ImageData> {
+        self.store.get(&id)
+    }
+
+    /// The registered virtual placement for an image id, if any.
+    pub fn virtual_placement(&self, id: u32) -> Option<&VirtualPlacement> {
+        self.virtual_placements.get(&id)
     }
 }
 
@@ -152,5 +215,73 @@ fn decode(control: &str, b64: &str) -> Option<ImageData> {
             ImageData::new(w, h, rgba)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One opaque RGBA pixel (f=32,s=1,v=1): bytes [1,2,3,4].
+    const PX: &str = "AQIDBA==";
+
+    #[test]
+    fn transmit_and_display_virtual_placement() {
+        let mut k = KittyState::default();
+        let out = k.feed(&format!("a=T,U=1,i=7,c=2,r=3,f=32,s=1,v=1;{PX}"));
+        assert!(
+            matches!(out, KittyOut::Virtual { id: 7 }),
+            "a=T,U=1 must register a virtual placement, not draw at cursor"
+        );
+        assert!(
+            k.image(7).is_some(),
+            "image still stored for later compositing"
+        );
+        assert_eq!(
+            k.virtual_placement(7).copied(),
+            Some(VirtualPlacement {
+                cols: 2,
+                rows: 3,
+                z: 0
+            })
+        );
+    }
+
+    #[test]
+    fn transmit_then_put_virtual() {
+        let mut k = KittyState::default();
+        // a=t stores only (no placement).
+        assert!(matches!(
+            k.feed(&format!("a=t,i=8,f=32,s=1,v=1;{PX}")),
+            KittyOut::None
+        ));
+        // a=p,U=1 registers the virtual placement by id.
+        let out = k.feed("a=p,U=1,i=8,c=4,r=1,z=5");
+        assert!(matches!(out, KittyOut::Virtual { id: 8 }));
+        assert_eq!(
+            k.virtual_placement(8).copied(),
+            Some(VirtualPlacement {
+                cols: 4,
+                rows: 1,
+                z: 5
+            })
+        );
+        // Plain a=p (no U) still draws at the cursor.
+        assert!(matches!(
+            k.feed("a=p,i=8"),
+            KittyOut::Place(p) if p.id == Some(8)
+        ));
+    }
+
+    #[test]
+    fn delete_clears_virtual_placement() {
+        let mut k = KittyState::default();
+        k.feed(&format!("a=T,U=1,i=9,c=1,r=1,f=32,s=1,v=1;{PX}"));
+        assert!(k.virtual_placement(9).is_some());
+        k.feed("a=d,d=i,i=9");
+        assert!(
+            k.virtual_placement(9).is_none(),
+            "delete-by-id drops the virtual placement too"
+        );
     }
 }

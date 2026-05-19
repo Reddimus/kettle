@@ -201,7 +201,9 @@ impl Extractor {
                     match self.kitty.feed(&body) {
                         KittyOut::Place(p) => R::Img(p),
                         KittyOut::Delete { all, id } => R::Del { all, id },
-                        KittyOut::None => R::None,
+                        // Virtual placements draw nothing at the cursor —
+                        // they surface later via Unicode placeholder text.
+                        KittyOut::Virtual { .. } | KittyOut::None => R::None,
                     }
                 } else {
                     R::None
