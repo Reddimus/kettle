@@ -1,0 +1,16 @@
+[package]
+name = "kettle-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow.workspace = true
+crossbeam-channel = "0.5.15"
+kettle-vt = { version = "0.1.0", path = "../kettle-vt" }
+log.workspace = true
+portable-pty = "0.9.0"
+regex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+unicode-width.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "kettle-vt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22.1"
+flate2 = "1.1.9"
+image = "0.25.10"
+log.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true

@@ -1,0 +1,27 @@
+kettle — third-party attributions
+
+This product depends on and/or adapts ideas from the following projects:
+
+* Alacritty (alacritty_terminal, vte) — Apache-2.0
+  https://github.com/alacritty/alacritty
+  kettle uses alacritty_terminal for its VT parser, grid and scrollback model.
+
+* WezTerm (portable-pty) — MIT
+  https://github.com/wez/wezterm
+  kettle uses portable-pty for cross-platform PTY / Windows ConPTY support, and
+  its image-protocol implementations were used as a reference.
+
+* cosmic-text / glyphon — MIT OR Apache-2.0
+  Text shaping, font fallback and GPU glyph atlas.
+
+* Contour — Apache-2.0
+  Reference for the Sixel parser state machine.
+
+Bundled assets:
+
+* JetBrains Mono Nerd Font — SIL Open Font License 1.1
+  See assets/fonts/OFL.txt
+
+* iTerm2-Color-Schemes (Ghostty theme set) — MIT
+  See assets/themes/LICENSE
+  https://github.com/mbadolato/iTerm2-Color-Schemes
