@@ -352,8 +352,10 @@ mod conformance {
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::vte::ansi::Processor;
 
-    fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+    type Rx = crossbeam_channel::Receiver<TermEvent>;
+
+    fn harness_rx(cols: usize, rows: usize) -> (Term<EventProxy>, Processor, Rx) {
+        let (tx, rx) = crossbeam_channel::unbounded();
         let waker: Waker = std::sync::Arc::new(|| {});
         let proxy = EventProxy::new(tx, waker);
         let term = Term::new(
@@ -364,7 +366,23 @@ mod conformance {
             },
             proxy,
         );
-        (term, Processor::new())
+        (term, Processor::new(), rx)
+    }
+
+    fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
+        let (t, p, _rx) = harness_rx(cols, rows);
+        (t, p)
+    }
+
+    /// Concatenate everything the terminal wrote back to the PTY.
+    fn drain_pty(rx: &Rx) -> String {
+        let mut out = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let TermEvent::PtyWrite(s) = ev {
+                out.push_str(&s);
+            }
+        }
+        out
     }
 
     fn feed(term: &mut Term<EventProxy>, p: &mut Processor, bytes: &[u8]) {
@@ -513,5 +531,44 @@ mod conformance {
         feed(&mut t, &mut p, b"\x1b[2;4r\x1b[?6h\x1b[1;1HO");
         assert_eq!(row_text(&t, 0), "", "row 0 is above the margin");
         assert_eq!(row_text(&t, 1), "O", "origin-mode home = top margin");
+    }
+
+    #[test]
+    fn dsr_cursor_position_report() {
+        let (mut t, mut p, rx) = harness_rx(40, 10);
+        // Move to row 3, col 5 (1-based), then DSR 6n.
+        feed(&mut t, &mut p, b"\x1b[3;5H\x1b[6n");
+        let reply = drain_pty(&rx);
+        assert_eq!(reply, "\x1b[3;5R", "CPR must echo the 1-based cursor");
+    }
+
+    #[test]
+    fn device_attributes_reply() {
+        let (mut t, mut p, rx) = harness_rx(10, 3);
+        feed(&mut t, &mut p, b"\x1b[c"); // Primary DA
+        let reply = drain_pty(&rx);
+        assert!(
+            reply.starts_with("\x1b[?"),
+            "DA1 reply should be a CSI ? … c, got {reply:?}"
+        );
+        assert!(reply.ends_with('c'));
+    }
+
+    #[test]
+    fn sgr_underline_dim_strike() {
+        let (mut t, mut p) = harness(8, 2);
+        // dim + single underline + strikeout, then a curly underline cell.
+        feed(&mut t, &mut p, b"\x1b[2;4;9mA\x1b[0m\x1b[4:3mB");
+        let g = t.grid();
+        let a = &g[Point::new(Line(0), Column(0))];
+        assert!(a.flags.contains(Flags::DIM));
+        assert!(a.flags.contains(Flags::UNDERLINE));
+        assert!(a.flags.contains(Flags::STRIKEOUT));
+        let b = &g[Point::new(Line(0), Column(1))];
+        assert!(
+            b.flags.contains(Flags::UNDERCURL),
+            "SGR 4:3 = curly underline"
+        );
+        assert!(!b.flags.contains(Flags::DIM), "SGR 0 reset cleared dim");
     }
 }

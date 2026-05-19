@@ -67,9 +67,14 @@
       line (IL/DL), DECSC/DECRC save-restore, DECAWM autowrap, DECOM
       origin mode within margins
 
+- [x] Conformance for device responses (14 tests total): DSR 6n cursor
+      position report, primary Device Attributes reply, SGR
+      dim/underline/strikeout + curly-underline (4:3) + reset — verified
+      through the real EventProxy PTY write-back path
+
 ## Next (in priority order)
-- [ ] Conformance: DSR/cursor-position report, DECRQSS, more SGR
-      (underline styles, dim, strike), mouse-mode round-trips
+- [ ] Conformance: mouse-mode (SGR 1006) click/drag round-trips,
+      focus-event reporting (?1004), bracketed-paste wrapping
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides
