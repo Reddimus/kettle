@@ -267,8 +267,9 @@ impl Terminal {
     /// inheritance rules over contiguous runs, and slice the referenced
     /// virtual image into one `Placement` per cell. Recomputed per frame —
     /// cheap: `ImageData` is `Arc`-backed and only the shown tiles are
-    /// cropped. Placement-id (underline color) is not yet decoded; any
-    /// virtual placement of the image is used (documented in ROADMAP).
+    /// cropped. The placement id is decoded from the cell's underline
+    /// color (used for run grouping / inheritance per the spec); a single
+    /// virtual placement is stored per image id, so it also selects it.
     pub fn placeholder_tiles(&self) -> Vec<Placement> {
         let Ok(virtuals) = self.virtuals.lock() else {
             return Vec::new();
@@ -299,7 +300,9 @@ impl Terminal {
                 runs.last_mut().unwrap().push((
                     RawCell {
                         fg: fg_id_bits(cell.fg),
-                        placement_id: 0,
+                        // Underline color carries the placement id (0/absent
+                        // ⇒ any placement); spec §"Unicode placeholders".
+                        placement_id: cell.underline_color().map(fg_id_bits).unwrap_or(0),
                         diacritics: CellDiacritics::parse(&marks),
                     },
                     top + p.line.0 as i64,

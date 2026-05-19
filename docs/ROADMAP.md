@@ -149,9 +149,12 @@
       tests; 89 workspace tests). Placement-id via underline color is the
       remaining sub-item.
 
+- [x] kitty placeholders: placement-id decoded from the cell underline
+      color (drives spec run-grouping / left-inheritance; +1 test, 90
+      workspace tests).
+
 ## Next (in priority order)
-- [ ] kitty placeholders: decode placement-id from underline color;
-      then animation frames + relative placements
+- [ ] kitty placeholders: animation frames + relative placements
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu

@@ -291,6 +291,34 @@ mod tests {
     }
 
     #[test]
+    fn differing_placement_id_breaks_inheritance() {
+        // Same fg/image but a different placement id (underline color) ⇒
+        // the neighbor is not "the same", so nothing is inherited.
+        let explicit = RawCell {
+            fg: 7,
+            placement_id: 1,
+            diacritics: CellDiacritics {
+                row: Some(3),
+                col: Some(9),
+                msb: None,
+            },
+        };
+        let other_place = RawCell {
+            fg: 7,
+            placement_id: 2,
+            diacritics: CellDiacritics::default(),
+        };
+        let res = resolve_run(&[explicit, other_place]);
+        assert_eq!((res[0].row, res[0].col), (3, 9));
+        assert_eq!(
+            (res[1].row, res[1].col),
+            (0, 0),
+            "different placement id ⇒ no inheritance from the left"
+        );
+        assert_eq!(res[1].placement_id, 2);
+    }
+
+    #[test]
     fn tile_rects_tile_the_image_without_gaps() {
         // 100×40 image over a 2×2 placement: tiles must abut exactly and
         // cover the whole image.

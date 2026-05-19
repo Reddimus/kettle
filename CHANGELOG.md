@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty placeholders: the **placement id** is now decoded from each
+  cell's underline color (256/truecolor/named), feeding the spec's
+  run-grouping and left-inheritance so cells of different placements no
+  longer inherit across each other.
 - kitty Unicode placeholders **now render**: each frame the visible grid
   is scanned for `U+10EEEE`, the image id is read from the cell
   foreground (256-color / truecolor / ANSI-named) plus the msb diacritic,
