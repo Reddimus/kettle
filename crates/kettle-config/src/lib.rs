@@ -188,6 +188,8 @@ pub struct Config {
     pub tab_bar_pos: TabBarPos,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
+    /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
+    pub scroll_multiplier: f32,
     pub scrollbar: ScrollbarMode,
     /// Explicit split-divider/border color (else theme palette).
     pub split_divider_color: Option<Rgb>,
@@ -229,6 +231,7 @@ impl Default for Config {
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             unfocused_split_opacity: 0.7,
+            scroll_multiplier: 1.0,
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
             cursor_blink_interval: 530,
@@ -425,6 +428,11 @@ impl Config {
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {
                         cfg.unfocused_split_opacity = v.clamp(0.1, 1.0);
+                    }
+                }
+                "scroll-multiplier" | "mouse-scroll-multiplier" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.scroll_multiplier = v.clamp(0.1, 50.0);
                     }
                 }
                 "scrollbar" => {
@@ -673,6 +681,30 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn scroll_multiplier_default_and_clamps() {
+        assert_eq!(Config::default().scroll_multiplier, 1.0);
+        // Both names accepted, value clamped to a sane range.
+        assert_eq!(
+            Config::parse_text("scroll-multiplier = 2.5").scroll_multiplier,
+            2.5
+        );
+        assert_eq!(
+            Config::parse_text("mouse-scroll-multiplier = 0.5").scroll_multiplier,
+            0.5
+        );
+        assert_eq!(
+            Config::parse_text("scroll-multiplier = 0").scroll_multiplier,
+            0.1,
+            "clamped to >= 0.1"
+        );
+        assert_eq!(
+            Config::parse_text("scroll-multiplier = 9999").scroll_multiplier,
+            50.0,
+            "clamped to <= 50"
+        );
     }
 
     #[test]

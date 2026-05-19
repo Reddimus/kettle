@@ -33,6 +33,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
+| `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane scrollback scrollbar (`auto` = only while scrolled) |
 | `split-divider-color` | color | theme | Pane border/divider color |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |

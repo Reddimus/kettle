@@ -24,6 +24,18 @@ pub enum UserEvent {
     ReloadConfig,
 }
 
+/// Translate a winit `MouseScrollDelta` into terminal lines, scaled by the
+/// configured `scroll-multiplier`. `LineDelta` ticks are ~3 lines × mult;
+/// `PixelDelta` is `y/20` × mult (~3 lines per typical notch). Pure.
+fn wheel_lines(delta: &winit::event::MouseScrollDelta, multiplier: f32) -> i32 {
+    let m = multiplier.max(0.0);
+    let raw = match delta {
+        winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() * 3.0,
+        winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
+    };
+    (raw * m).round() as i32
+}
+
 /// Cap an OSC 52 clipboard payload so a hostile program can't make the
 /// terminal allocate/set an unbounded clipboard. Truncates on a UTF-8
 /// char boundary at or below `max` bytes (xterm/kitty also bound this).
@@ -1561,10 +1573,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() as i32 * 3,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
-                };
+                let lines = wheel_lines(&delta, self.cfg.scroll_multiplier);
                 if lines == 0 {
                     return;
                 }
@@ -1713,6 +1722,26 @@ impl ApplicationHandler<UserEvent> for App {
 mod tests {
     use super::selection_kind;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn wheel_lines_scales_by_multiplier() {
+        use super::wheel_lines;
+        use winit::dpi::PhysicalPosition;
+        use winit::event::MouseScrollDelta;
+
+        // One LineDelta notch at default mult (1.0) = 3 lines; doubles at 2x.
+        let one = MouseScrollDelta::LineDelta(0.0, 1.0);
+        assert_eq!(wheel_lines(&one, 1.0), 3);
+        assert_eq!(wheel_lines(&one, 2.0), 6);
+        // Negative notch → negative lines (scroll the other way).
+        let down = MouseScrollDelta::LineDelta(0.0, -2.0);
+        assert_eq!(wheel_lines(&down, 1.0), -6);
+        // PixelDelta: ~3 lines per ~60 px notch (60/20=3) at default mult.
+        let pix = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 60.0));
+        assert_eq!(wheel_lines(&pix, 1.0), 3);
+        // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
+        assert_eq!(wheel_lines(&one, -5.0), 0);
+    }
 
     #[test]
     fn clamp_osc52_bounds_and_keeps_char_boundary() {

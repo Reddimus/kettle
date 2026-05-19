@@ -7,6 +7,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- Mouse-wheel scroll speed is now configurable: `scroll-multiplier`
+  (alias `mouse-scroll-multiplier`, default `1.0` ≈ 3 lines per notch,
+  clamped 0.1–50) scales both `LineDelta` and `PixelDelta` input;
+  Ghostty/kitty parity. Pure `wheel_lines` helper, +2 tests.
 - OSC 52 clipboard **writes are now size-capped** (1 MiB, truncated on
   a UTF-8 char boundary) so a hostile program can't push an unbounded
   payload into the system clipboard.
