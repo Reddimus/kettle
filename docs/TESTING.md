@@ -35,7 +35,7 @@ cargo test --workspace
   DSR 6n cursor-position report, primary Device Attributes,
   SGR dim/underline/strikeout + curly-underline (4:3) + reset,
   DECALN screen alignment, REP repeat-char, G1 charset via SO/SI,
-  RIS full reset, EL erase-left, ED erase-below, DA2 secondary
+  RIS full reset, EL erase-left, ED erase-below, ECH erase-in-place, ICH, CHA/HPA/VPA, DECSC-restores-SGR, DA2 secondary
   device attributes. The automatable, regression-proof core of a
   `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,

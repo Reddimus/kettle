@@ -641,6 +641,51 @@ mod conformance {
         );
     }
 
+    #[test]
+    fn ech_erases_in_place() {
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"ABCDE");
+        // Cursor col 2 (1-based), ECH 2 clears 2 cells, cursor unmoved.
+        feed(&mut t, &mut p, b"\x1b[1;2H\x1b[2X");
+        assert_eq!(row_text(&t, 0), "A  DE");
+    }
+
+    #[test]
+    fn ich_shifts_right_off_edge() {
+        let (mut t, mut p) = harness(5, 2);
+        feed(&mut t, &mut p, b"abcde");
+        // ICH 2 at home pushes cells right; the line is 5 wide so d,e fall off.
+        feed(&mut t, &mut p, b"\x1b[1;1H\x1b[2@");
+        assert_eq!(row_text(&t, 0), "  abc");
+    }
+
+    #[test]
+    fn absolute_cursor_moves_cha_hpa_vpa() {
+        let (mut t, mut p) = harness(6, 4);
+        // CHA: column-absolute to col 3 then write.
+        feed(&mut t, &mut p, b"abcde\x1b[3GZ");
+        assert_eq!(row_text(&t, 0), "abZde");
+        // HPA (ESC[`) col 2 on row 1, VPA (ESC[d) row 3.
+        feed(&mut t, &mut p, b"\x1b[1;1H\x1b[2`Q\x1b[3dW");
+        assert_eq!(row_text(&t, 0).chars().nth(1), Some('Q'), "HPA col 2");
+        // VPA changes the row only; column stays where it was (col 3 after Q).
+        assert_eq!(row_text(&t, 2).chars().nth(2), Some('W'), "VPA row 3");
+    }
+
+    #[test]
+    fn decsc_restores_sgr_attributes() {
+        let (mut t, mut p) = harness(6, 3);
+        // Bold on, DECSC (saves cursor + pen), reset SGR + move away,
+        // DECRC restores both, then write — must be bold at the saved cell.
+        feed(&mut t, &mut p, b"\x1b[1m\x1b7\x1b[0m\x1b[3;4HZ\x1b8A");
+        let a = &t.grid()[Point::new(Line(0), Column(0))];
+        assert_eq!(a.c, 'A');
+        assert!(
+            a.flags.contains(Flags::BOLD),
+            "DECRC must restore the saved SGR pen"
+        );
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) is not implemented by
     // alacritty_terminal, so no conformance test asserts it — see ROADMAP.
 }

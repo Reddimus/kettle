@@ -90,9 +90,13 @@
       tests). DECSTR/ED-1 differ upstream — used engine-supported
       equivalents instead of asserting unsupported behavior.
 
+- [x] Conformance: ECH erase-in-place, ICH shift-off-edge, CHA/HPA/VPA
+      absolute moves (VPA keeps column), DECSC/DECRC restores the SGR
+      pen (25 conformance tests)
+
 ## Next (in priority order)
-- [ ] Conformance: ICH/ECH edge cases, CHA/HPA/VPA absolute moves,
-      cursor save/restore interaction with SGR
+- [ ] Conformance: SU/SD scroll up/down, DECSCUSR cursor shape,
+      wide-char (CJK) width + wrap
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides
