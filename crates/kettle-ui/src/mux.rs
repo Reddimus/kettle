@@ -332,7 +332,8 @@ impl Mux {
         waker: Waker,
     ) -> Result<()> {
         let argv = shell_argv(cfg);
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
+        let cwd = self.focused_cwd();
+        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -380,7 +381,8 @@ impl Mux {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
         let argv = shell_argv(cfg);
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
+        let cwd = self.focused_cwd();
+        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
@@ -414,6 +416,15 @@ impl Mux {
 
     pub fn active_focus(&self) -> Option<u64> {
         self.tabs.get(self.active).map(|t| t.focus)
+    }
+
+    /// The focused pane's current directory (reported via OSC 7), used so a
+    /// new tab/split opens where you are — like WezTerm/iTerm/kitty. A
+    /// since-deleted directory falls back to the default (handled by
+    /// [`usable_cwd`]).
+    fn focused_cwd(&self) -> Option<String> {
+        let id = self.active_focus()?;
+        usable_cwd(self.panes.get(&id).and_then(|p| p.term.current_dir()))
     }
 
     pub fn focused(&mut self) -> Option<&mut Pane> {
@@ -617,6 +628,13 @@ fn shell_argv(cfg: &Config) -> Vec<String> {
     }
 }
 
+/// Keep a candidate cwd only if it still names an existing directory — a
+/// pane may have been `cd`'d into a since-removed path, in which case a new
+/// tab/split should fall back to the default rather than fail to spawn.
+fn usable_cwd(dir: Option<String>) -> Option<String> {
+    dir.filter(|d| std::path::Path::new(d).is_dir())
+}
+
 fn collect_ids(n: &Node, out: &mut Vec<u64>) {
     match n {
         Node::Leaf(id) => out.push(*id),
@@ -636,6 +654,20 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    #[test]
+    fn usable_cwd_keeps_only_existing_dirs() {
+        // An existing directory is kept (new tab/split opens here).
+        assert_eq!(usable_cwd(Some("/".to_string())), Some("/".to_string()));
+        let tmp = std::env::temp_dir();
+        assert_eq!(
+            usable_cwd(Some(tmp.to_string_lossy().into_owned())),
+            Some(tmp.to_string_lossy().into_owned())
+        );
+        // A since-deleted path or a file → fall back to the default.
+        assert_eq!(usable_cwd(Some("/no/such/kettle/xyz".to_string())), None);
+        assert_eq!(usable_cwd(None), None);
+    }
 
     #[test]
     fn split_layout_tiles_without_gaps_or_overlap() {

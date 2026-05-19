@@ -39,7 +39,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   injection-guarded), double-click word / triple-click line selection with
   auto-copy, focus-aware hollow cursor, configurable blink, visual bell.
 - **Session restore** — the tab/split tree and each pane's working directory
-  are saved and restored across launches.
+  are saved and restored across launches; new tabs/splits also inherit the
+  focused pane's current directory (OSC 7).
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
   `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
   persist across sessions.

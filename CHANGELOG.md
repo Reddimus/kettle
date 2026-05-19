@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- New tabs and splits now **inherit the focused pane's working
+  directory** (via OSC 7), like WezTerm/iTerm/kitty — open a split and
+  you're already in the same project. A since-deleted directory falls
+  back to the default (`usable_cwd` guard) instead of failing to spawn.
 - Quick-select **hint mode** is now usable (`Ctrl+Shift+H`): every
   visible URL / path / git-hash / IP gets a short label drawn over the
   focused pane (chip + glyph); type the label to open it (URLs via the

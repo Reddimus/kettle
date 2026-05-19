@@ -243,6 +243,10 @@
       (chip quads + glyphs), type a label to open URLs / copy others,
       `Esc` cancels; reuses the overlay + key-routing plumbing.
 
+- [x] New tabs/splits inherit the focused pane's OSC-7 cwd
+      (WezTerm/iTerm/kitty parity); stale dir → default fallback
+      (`usable_cwd`, +1 test).
+
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach); native macOS menu;
       code-signed/notarized macOS build; Windows MSI
