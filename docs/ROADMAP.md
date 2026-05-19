@@ -62,9 +62,14 @@
       truecolor+bold+reset, tab stops/CR, alt-screen + bracketed-paste
       modes, DECSTBM scroll region (6 tests)
 
+- [x] Extended VT conformance (11 tests total): DEC special-graphics
+      line-drawing charset, insert/delete char (ICH/DCH), insert/delete
+      line (IL/DL), DECSC/DECRC save-restore, DECAWM autowrap, DECOM
+      origin mode within margins
+
 ## Next (in priority order)
-- [ ] Extend conformance: charsets/DEC line-drawing, origin mode,
-      insert/delete line/char, more DEC private modes
+- [ ] Conformance: DSR/cursor-position report, DECRQSS, more SGR
+      (underline styles, dim, strike), mouse-mode round-trips
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

@@ -453,4 +453,65 @@ mod conformance {
         // Row 3 (outside the region) stays empty; region scrolled.
         assert_eq!(row_text(&t, 3), "");
     }
+
+    #[test]
+    fn dec_special_graphics_charset() {
+        let (mut t, mut p) = harness(6, 2);
+        // ESC ( 0 = DEC line-drawing into G0; q->─ x->│; ESC ( B back to ASCII.
+        feed(&mut t, &mut p, b"\x1b(0qx\x1b(By");
+        let s = row_text(&t, 0);
+        let cs: Vec<char> = s.chars().collect();
+        assert_eq!(cs[0], '\u{2500}', "q -> light horizontal");
+        assert_eq!(cs[1], '\u{2502}', "x -> light vertical");
+        assert_eq!(cs[2], 'y', "ASCII restored after ESC(B");
+    }
+
+    #[test]
+    fn insert_and_delete_char() {
+        let (mut t, mut p) = harness(8, 2);
+        feed(&mut t, &mut p, b"abcde");
+        // Cursor to col 2 ('b'), delete it (DCH).
+        feed(&mut t, &mut p, b"\x1b[1;2H\x1b[P");
+        assert_eq!(row_text(&t, 0), "acde");
+        // Insert a blank at col 1 (ICH), then type at it.
+        feed(&mut t, &mut p, b"\x1b[1;1H\x1b[@Z");
+        assert_eq!(row_text(&t, 0), "Zacde");
+    }
+
+    #[test]
+    fn insert_and_delete_line() {
+        let (mut t, mut p) = harness(6, 4);
+        feed(&mut t, &mut p, b"r0\r\nr1\r\nr2");
+        // Delete line 2 (DL): r2 moves up into row 1.
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b[M");
+        assert_eq!(row_text(&t, 0), "r0");
+        assert_eq!(row_text(&t, 1), "r2");
+        // Insert a line at row 1 (IL): pushes r2 back down.
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b[L");
+        assert_eq!(row_text(&t, 1), "");
+        assert_eq!(row_text(&t, 2), "r2");
+    }
+
+    #[test]
+    fn save_restore_cursor_and_autowrap() {
+        let (mut t, mut p) = harness(3, 3);
+        // DECSC at row1col1, move away, write, DECRC back, overwrite.
+        feed(&mut t, &mut p, b"\x1b7\x1b[3;3HX\x1b8A");
+        assert_eq!(row_text(&t, 0).chars().next(), Some('A'));
+        // Autowrap (DECAWM, on by default): 4 chars into 3 columns wraps.
+        let (mut t2, mut p2) = harness(3, 3);
+        feed(&mut t2, &mut p2, b"abcd");
+        assert_eq!(row_text(&t2, 0), "abc");
+        assert_eq!(row_text(&t2, 1), "d");
+    }
+
+    #[test]
+    fn origin_mode_addresses_within_margins() {
+        let (mut t, mut p) = harness(6, 5);
+        // Scroll region rows 2..=4, enable origin mode, then home (1;1) is
+        // the region top (absolute row index 1).
+        feed(&mut t, &mut p, b"\x1b[2;4r\x1b[?6h\x1b[1;1HO");
+        assert_eq!(row_text(&t, 0), "", "row 0 is above the margin");
+        assert_eq!(row_text(&t, 1), "O", "origin-mode home = top margin");
+    }
 }

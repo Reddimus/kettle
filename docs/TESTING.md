@@ -24,11 +24,13 @@ cargo test --workspace
   palette; Ghostty `key = value` overrides, repeats, `palette`, `infinite`
   scrollback and `ssh-host`; the bundled theme set has >400 entries incl.
   "TokyoNight Night"; Terminator default keybinds and trigger parsing.
-- **kettle-core VT conformance** (6 tests): drives the *real* vte +
+- **kettle-core VT conformance** (11 tests): drives the *real* vte +
   alacritty_terminal path used by the PTY reader and asserts grid/cursor
   state — text + `\r\n` + CUP addressing, erase-line/erase-display,
   SGR truecolor + bold + reset, tab stops + carriage return, alt-screen
-  & bracketed-paste private modes, DECSTBM scroll region. This is the
+  & bracketed-paste private modes, DECSTBM scroll region, DEC
+  special-graphics line-drawing charset, ICH/DCH, IL/DL,
+  DECSC/DECRC save-restore, DECAWM autowrap, DECOM origin mode. The
   automatable, regression-proof core of a `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;
