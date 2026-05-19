@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- VT conformance: XTWINOPS `CSI 18 t` text-area size report
+  (`CSI 8 ; rows ; cols t`), DSR `CSI 5 n` device-status (`→ CSI 0 n`),
+  and an exact-match DA1 assertion (`CSI c`/`CSI 0 c` → `CSI ? 6 c`).
+  44 conformance tests total.
 - VT conformance suite — 35 end-to-end tests through the real
   `vte`+`alacritty_terminal` path: CUP/erase/SGR/tabs, scroll region,
   charsets, ICH/DCH/IL/DL, DECSC/DECRC, autowrap, origin mode, DECALN,

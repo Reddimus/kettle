@@ -125,9 +125,13 @@
 - [x] Conformance: CHT/CBT tab navigation (41 conformance tests).
       DECSCA/DECSEL selective-erase unsupported upstream — documented.
 
+- [x] Conformance: XTWINOPS CSI 18 t text-area size (8;rows;cols t),
+      DSR CSI 5 n device-status (→ CSI 0 n), exact DA1 reply
+      `CSI ? 6 c` incl. the `CSI 0 c` alias (44 conformance tests).
+      CSI 14 t pixel size routes through a windowing callback — exercised
+      live, not asserted headless.
+
 ## Next (in priority order)
-- [ ] Conformance: XTWINOPS text-area report, DA primary params,
-      DSR device-status (5n)
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

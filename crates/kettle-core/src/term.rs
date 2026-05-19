@@ -912,7 +912,52 @@ mod conformance {
         );
     }
 
-    // NOTE: SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
+    #[test]
+    fn xtwinops_text_area_size_chars() {
+        // XTWINOPS CSI 18 t → report text area size in characters as
+        // CSI 8 ; rows ; cols t (DA-style, deterministic — no window needed).
+        let (mut t, mut p, rx) = harness_rx(40, 10);
+        feed(&mut t, &mut p, b"\x1b[18t");
+        assert_eq!(
+            drain_pty(&rx),
+            "\x1b[8;10;40t",
+            "CSI 18 t must report 8;<rows>;<cols>t"
+        );
+    }
+
+    #[test]
+    fn dsr_device_status_ok() {
+        // DSR CSI 5 n → "terminal OK" = CSI 0 n (no malfunction).
+        let (mut t, mut p, rx) = harness_rx(8, 3);
+        feed(&mut t, &mut p, b"\x1b[5n");
+        assert_eq!(
+            drain_pty(&rx),
+            "\x1b[0n",
+            "CSI 5 n must reply CSI 0 n (ready)"
+        );
+    }
+
+    #[test]
+    fn da1_primary_attributes_exact_params() {
+        // Primary DA (CSI c) must reply exactly CSI ? 6 c — VT2xx-class id
+        // with no extensions — so apps don't probe for features we lack.
+        let (mut t, mut p, rx) = harness_rx(10, 3);
+        feed(&mut t, &mut p, b"\x1b[c");
+        assert_eq!(
+            drain_pty(&rx),
+            "\x1b[?6c",
+            "DA1 reply must be exactly CSI ? 6 c"
+        );
+        // CSI 0 c is an explicit-parameter alias for the same query.
+        let (mut t2, mut p2, rx2) = harness_rx(10, 3);
+        feed(&mut t2, &mut p2, b"\x1b[0c");
+        assert_eq!(drain_pty(&rx2), "\x1b[?6c", "CSI 0 c == CSI c");
+    }
+
+    // NOTE: XTWINOPS CSI 14 t (pixel size) routes through a windowing
+    // callback (Event::TextAreaSizeRequest) so it has no deterministic
+    // headless reply and is exercised by the live app, not asserted here.
+    // SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
     // stops) and DECSCA/DECSEL selective-erase are not reliably handled by
     // alacritty_terminal, so no conformance test asserts them — see ROADMAP.
 }
