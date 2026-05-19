@@ -31,6 +31,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
 - **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
   works (X10 + SGR 1006).
+- **Session restore** — the tab/split tree and each pane's working directory
+  are saved and restored across launches.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

@@ -4,6 +4,7 @@
 mod app;
 mod input;
 mod mux;
+mod session;
 
 pub use app::App;
 

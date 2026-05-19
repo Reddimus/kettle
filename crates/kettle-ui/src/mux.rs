@@ -8,6 +8,8 @@ use crossbeam_channel::{Receiver, Sender};
 use kettle_config::Config;
 use kettle_core::{TermEvent, Terminal, Waker};
 
+use crate::session::{SNode, STab, Session};
+
 /// Pixel rectangle: `(x, y, w, h)`.
 pub type Rect = (f32, f32, f32, f32);
 
@@ -191,10 +193,12 @@ impl Mux {
         cw: u16,
         ch: u16,
         waker: Waker,
+        cwd: Option<&str>,
     ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
         let term = Terminal::new(
             cfg.shell.as_deref(),
+            cwd,
             cfg.scrollback,
             cols.max(1),
             rows.max(1),
@@ -217,6 +221,90 @@ impl Mux {
         Ok(id)
     }
 
+    fn snap(&self, n: &Node) -> SNode {
+        match n {
+            Node::Leaf(id) => SNode::Leaf {
+                cwd: self.panes.get(id).and_then(|p| p.term.current_dir()),
+            },
+            Node::Split { dir, ratio, a, b } => SNode::Split {
+                vertical: *dir == Dir::Vertical,
+                ratio: *ratio,
+                a: Box::new(self.snap(a)),
+                b: Box::new(self.snap(b)),
+            },
+        }
+    }
+
+    /// Capture the full tab/split tree + per-pane cwd.
+    pub fn snapshot(&self) -> Session {
+        Session {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| STab {
+                    root: self.snap(&t.root),
+                })
+                .collect(),
+            active: self.active,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_node(
+        &mut self,
+        n: &SNode,
+        cfg: &Config,
+        cw: u16,
+        ch: u16,
+        mk: &dyn Fn() -> Waker,
+    ) -> Result<Node> {
+        match n {
+            SNode::Leaf { cwd } => {
+                let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref())?;
+                Ok(Node::Leaf(id))
+            }
+            SNode::Split {
+                vertical,
+                ratio,
+                a,
+                b,
+            } => {
+                let a = self.build_node(a, cfg, cw, ch, mk)?;
+                let b = self.build_node(b, cfg, cw, ch, mk)?;
+                Ok(Node::Split {
+                    dir: if *vertical {
+                        Dir::Vertical
+                    } else {
+                        Dir::Horizontal
+                    },
+                    ratio: *ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                })
+            }
+        }
+    }
+
+    /// Rebuild tabs/splits from a saved session, spawning shells in their
+    /// recorded directories. Returns whether anything was restored.
+    pub fn restore(
+        &mut self,
+        s: &Session,
+        cfg: &Config,
+        cw: u16,
+        ch: u16,
+        mk: &dyn Fn() -> Waker,
+    ) -> bool {
+        for st in &s.tabs {
+            if let Ok(root) = self.build_node(&st.root, cfg, cw, ch, mk) {
+                let focus = root.first_leaf();
+                self.tabs.push(Tab { root, focus });
+            }
+        }
+        self.active = s.active.min(self.tabs.len().saturating_sub(1));
+        !self.tabs.is_empty()
+    }
+
     pub fn new_tab(
         &mut self,
         cfg: &Config,
@@ -226,7 +314,7 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker)?;
+        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -249,7 +337,7 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker)?;
+        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;

@@ -542,9 +542,14 @@ impl App {
             }
         }
         self.resize_all();
+        self.save_session();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    fn save_session(&self) {
+        self.mux.snapshot().save();
     }
 
     fn reload_config(&mut self) {
@@ -669,14 +674,31 @@ impl ApplicationHandler<UserEvent> for App {
         let area = self.area();
         let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
-        if let Err(e) = self
-            .mux
-            .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
+
+        // Restore a previous session if one was saved; else a fresh shell.
+        let restored = match crate::session::Session::load() {
+            Some(s) if !s.is_empty() => {
+                let proxy = self.proxy.clone();
+                let mk = move || -> kettle_core::Waker {
+                    let p = proxy.clone();
+                    std::sync::Arc::new(move || {
+                        let _ = p.send_event(UserEvent::Wakeup);
+                    })
+                };
+                self.mux.restore(&s, &self.cfg, cw, ch, &mk)
+            }
+            _ => false,
+        };
+        if !restored
+            && let Err(e) = self
+                .mux
+                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
         {
             log::error!("failed to spawn shell: {e}");
             event_loop.exit();
             return;
         }
+        self.resize_all();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -695,7 +717,10 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_session();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
@@ -855,6 +880,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.mux.reap() && self.window.is_some() {
+            self.save_session();
             event_loop.exit();
         }
     }

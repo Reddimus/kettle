@@ -48,6 +48,8 @@ pub struct Terminal {
     pub images: Images,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
     pub prompts: Arc<Mutex<Vec<i64>>>,
+    /// Latest working directory reported via OSC 7.
+    pub cwd: Arc<Mutex<Option<String>>>,
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
@@ -55,6 +57,7 @@ impl Terminal {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: Option<&str>,
+        cwd: Option<&str>,
         scrollback: usize,
         cols: usize,
         rows: usize,
@@ -78,8 +81,13 @@ impl Terminal {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "kettle");
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.cwd(home);
+        match cwd {
+            Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
+            _ => {
+                if let Some(home) = std::env::var_os("HOME") {
+                    cmd.cwd(home);
+                }
+            }
         }
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -105,12 +113,14 @@ impl Terminal {
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
         let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+        let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
 
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
             let prompts = prompts.clone();
+            let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
@@ -158,6 +168,11 @@ impl Terminal {
                                             }
                                         }
                                         Chunk::Prompt(_) => {}
+                                        Chunk::Cwd(path) => {
+                                            if let Ok(mut c) = cwd_cell.lock() {
+                                                *c = Some(path);
+                                            }
+                                        }
                                     }
                                 }
                                 (waker)();
@@ -177,8 +192,14 @@ impl Terminal {
             rows,
             images,
             prompts,
+            cwd: cwd_cell,
             cell_px,
         })
+    }
+
+    /// Last working directory reported via OSC 7, if any.
+    pub fn current_dir(&self) -> Option<String> {
+        self.cwd.lock().ok().and_then(|c| c.clone())
     }
 
     /// Absolute prompt-start lines recorded via OSC 133.

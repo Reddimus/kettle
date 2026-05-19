@@ -27,8 +27,11 @@
       (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish snippets in
       docs/SHELL-INTEGRATION.md
 
+- [x] Session save/restore: OSC 7 cwd capture, tab/split tree + per-pane
+      cwd serialized to session.json, restored on launch, autosaved on
+      structural changes + exit
+
 ## Next (in priority order)
-- [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)
 - [ ] Session save/restore (pane tree + cwd) and layouts

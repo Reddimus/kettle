@@ -30,6 +30,8 @@ pub enum Chunk {
     Image(ImageData),
     /// A shell-integration mark at the current cursor line.
     Prompt(PromptKind),
+    /// Working-directory report (OSC 7), absolute path.
+    Cwd(String),
 }
 
 #[derive(PartialEq)]
@@ -160,6 +162,13 @@ impl Extractor {
             }
             return;
         }
+        // OSC 7 cwd report (`7;file://host/abs/path`).
+        if mode == Mode::Osc && seq.starts_with(b"7;") {
+            if let Some(path) = parse_osc7(&String::from_utf8_lossy(&seq[2..])) {
+                out.push(Chunk::Cwd(path));
+            }
+            return;
+        }
 
         let img = match mode {
             Mode::Dcs => {
@@ -209,6 +218,35 @@ impl Extractor {
             }
         }
     }
+}
+
+fn parse_osc7(s: &str) -> Option<String> {
+    // `file://host/path` — keep the path; percent-decode the common cases.
+    let rest = s.strip_prefix("file://").unwrap_or(s);
+    let path = match rest.find('/') {
+        Some(i) => &rest[i..],
+        None => rest,
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(path.len());
+    let b = path.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(c) = u8::from_str_radix(&path[i + 1..i + 3], 16)
+        {
+            out.push(c as char);
+            i += 3;
+            continue;
+        }
+        out.push(b[i] as char);
+        i += 1;
+    }
+    Some(out)
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
