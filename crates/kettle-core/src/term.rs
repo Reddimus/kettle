@@ -79,6 +79,7 @@ impl Terminal {
         cell_h: u16,
         cursor_blink: bool,
         cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
     ) -> Result<Terminal> {
@@ -128,12 +129,21 @@ impl Terminal {
             blinking: cursor_blink,
             shape: cursor_shape,
         };
-        let tconf = TermConfig {
+        let mut tconf = TermConfig {
             scrolling_history: scrollback,
             kitty_keyboard: true,
             default_cursor_style,
             ..TermConfig::default()
         };
+        // Word delimiters drive double-click word selection (and the
+        // jump-to-prompt search). An empty config means "use the engine
+        // default" — `",│`|:\"' ()[]{}<>\t"` — so users that don't set
+        // anything still get sensible word boundaries.
+        if let Some(wd) = word_delimiters
+            && !wd.is_empty()
+        {
+            tconf.semantic_escape_chars = wd.to_string();
+        }
         let term = Term::new(
             tconf,
             &TermSize {

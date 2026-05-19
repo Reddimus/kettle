@@ -221,6 +221,12 @@ pub struct Config {
     /// kitty / WezTerm so the mouse pointer doesn't sit over the text
     /// you're editing). Disable to keep the cursor visible at all times.
     pub mouse_hide_while_typing: bool,
+    /// Characters that delimit a "word" for double-click word selection
+    /// (and the matching jump-to-prompt search). When empty, the engine
+    /// default is used (Alacritty `selection.semantic_escape_chars`:
+    /// `,│`|:\"' ()[]{}<>\t`). Set to e.g. ` "'` to make `/` part of a
+    /// word so URLs/paths are picked up whole.
+    pub word_delimiters: String,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -266,6 +272,7 @@ impl Default for Config {
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
+            word_delimiters: String::new(),
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
@@ -504,6 +511,9 @@ impl Config {
                 "scroll-on-output" => cfg.scroll_on_output = e.value != "false",
                 "mouse-hide-while-typing" | "mouse-hide" => {
                     cfg.mouse_hide_while_typing = e.value != "false";
+                }
+                "word-delimiters" | "selection-word-chars" | "semantic-escape-chars" => {
+                    cfg.word_delimiters = e.value.clone();
                 }
                 "font-feature" => {
                     for tok in e.value.split(',') {
@@ -877,6 +887,28 @@ mod config_tests {
         assert!(c.scroll_on_output);
         // Alacritty's `scroll-on-input` alias is honored too.
         assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
+    }
+
+    #[test]
+    fn word_delimiters_default_empty_and_aliases() {
+        // Default is empty so the engine uses its own default set —
+        // means "no override," not "everything is a word".
+        assert!(Config::default().word_delimiters.is_empty());
+        // Canonical + two aliases — same field in different terminals'
+        // configs. Value is taken verbatim after the `=` (with the usual
+        // surrounding-whitespace trim).
+        assert_eq!(
+            Config::parse_text("word-delimiters = /").word_delimiters,
+            "/"
+        );
+        assert_eq!(
+            Config::parse_text("selection-word-chars = ,;").word_delimiters,
+            ",;"
+        );
+        assert_eq!(
+            Config::parse_text("semantic-escape-chars = ()[]{}").word_delimiters,
+            "()[]{}"
+        );
     }
 
     #[test]

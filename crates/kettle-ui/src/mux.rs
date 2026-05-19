@@ -226,6 +226,7 @@ impl Mux {
             ch,
             cfg.cursor_blink,
             engine_cursor_shape(cfg.cursor_style),
+            Some(cfg.word_delimiters.as_str()),
             tx,
             waker,
         )?;

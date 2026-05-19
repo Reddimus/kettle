@@ -333,6 +333,10 @@
       right edge and enters drag mode. Bare Shift+Click on empty
       space falls through to a normal new-selection; bare
       right-click on empty space is a no-op.
+- [x] **`word-delimiters` config** (alacritty
+      `selection.semantic_escape_chars` parity, aliases
+      `selection-word-chars`, `semantic-escape-chars`). Customizes
+      double-click word boundaries; empty = engine default. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`word-delimiters` config** (Alacritty `selection.
+  semantic_escape_chars` parity, aliases `selection-word-chars` and
+  `semantic-escape-chars`). Customizes what counts as a word for
+  double-click selection (and the jump-to-prompt search that uses
+  the same boundary set). Defaults to empty meaning "use the engine
+  default" — `,│\`|:\"' ()[]{}<>\t`. Override to e.g. `()[]{}` to
+  drop `/` and `:` from the delimiter set so a double-click on a URL
+  or path picks it up whole. Plumbed through a new
+  `Terminal::new(word_delimiters: Option<&str>)` arg →
+  `TermConfig::semantic_escape_chars`. +1 config-parse test
+  covering the canonical key and both aliases.
 - **Shift+Click / right-click extend the selection** (xterm /
   Alacritty / iTerm2 / WezTerm convention). Previously every left
   click started a fresh selection at the click point, so the only
