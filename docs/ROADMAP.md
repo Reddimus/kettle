@@ -34,12 +34,16 @@
 - [x] SSH multiplexing: per-pane argv, `Ctrl+Shift+S` SSH launcher with
       configured `ssh-host` tab-complete, SSH tabs persisted in sessions
 
+- [x] Automated test harness (19 deterministic tests across vt/config/ui:
+      decoders, extractor, config, keybinds, split-tree, session round-trip,
+      8 MiB perf guard) + CI fmt-check, headless GPU smoke, CLI smoke on all
+      three OSes — see docs/TESTING.md
+
 ## Next (in priority order)
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)
-- [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] Ligature tuning + per-style font family overrides
-- [ ] SSH multiplexing / detachable mux server
+- [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] macOS app bundle + native menu; Windows installer
 
 ## Quality bar each cycle

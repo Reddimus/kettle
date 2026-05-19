@@ -61,3 +61,47 @@ impl Session {
         self.tabs.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_json_round_trips_ssh_panes() {
+        let s = Session {
+            tabs: vec![STab {
+                root: SNode::Split {
+                    vertical: false,
+                    ratio: 0.5,
+                    a: Box::new(SNode::Leaf {
+                        cwd: Some("/tmp".into()),
+                        cmd: vec![],
+                    }),
+                    b: Box::new(SNode::Leaf {
+                        cwd: None,
+                        cmd: vec!["ssh".into(), "-t".into(), "me@host".into()],
+                    }),
+                },
+            }],
+            active: 0,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tabs.len(), 1);
+        match &back.tabs[0].root {
+            SNode::Split { a, b, .. } => {
+                assert!(matches!(**a, SNode::Leaf { ref cwd, .. } if cwd.as_deref()==Some("/tmp")));
+                assert!(matches!(**b, SNode::Leaf { ref cmd, .. } if cmd.len()==3));
+            }
+            _ => panic!("expected split"),
+        }
+    }
+
+    #[test]
+    fn old_session_without_cmd_field_still_loads() {
+        // `cmd` has #[serde(default)] so pre-SSH sessions remain loadable.
+        let json = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}}],"active":0}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(s.tabs.len(), 1);
+    }
+}

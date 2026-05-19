@@ -20,14 +20,32 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
-            libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
+            libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev \
+            mesa-vulkan-drivers libvulkan1 xvfb
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Headless GPU smoke (Linux)
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          cargo build --release -p kettle
+          xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >/tmp/out.log 2>&1; rc=$?; \
+            grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
+            test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
+            echo "headless run OK (exit $rc)"'
+      - name: CLI smoke (all OSes)
+        run: |
+          cargo run -q -p kettle -- --config-path
+          cargo run -q -p kettle -- --list-themes > themes.txt
+          test "$(wc -l < themes.txt)" -gt 400
+        shell: bash

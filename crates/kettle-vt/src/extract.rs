@@ -48,6 +48,9 @@ pub struct Extractor {
     seq: Vec<u8>,
     esc_pending: bool,
     st_pending: bool,
+    /// The terminator that ended the current sequence was a BEL (`0x07`),
+    /// not `ESC \`; preserved so pass-through bytes echo exactly.
+    term_bel: bool,
     kitty: KittyState,
 }
 
@@ -65,6 +68,7 @@ impl Extractor {
             seq: Vec::new(),
             esc_pending: false,
             st_pending: false,
+            term_bel: false,
             kitty: KittyState::default(),
         }
     }
@@ -107,6 +111,7 @@ impl Extractor {
                     if self.st_pending {
                         self.st_pending = false;
                         if b == b'\\' {
+                            self.term_bel = false;
                             self.finish_seq(&mut out);
                             continue;
                         } else {
@@ -116,6 +121,7 @@ impl Extractor {
                     } else if b == 0x1b {
                         self.st_pending = true;
                     } else if (b == 0x07 && self.mode == Mode::Osc) || b == 0x9c {
+                        self.term_bel = b == 0x07;
                         self.finish_seq(&mut out);
                     } else {
                         self.seq.push(b);
@@ -212,8 +218,12 @@ impl Extractor {
                     Mode::Pass => b' ',
                 });
                 v.extend_from_slice(&seq);
-                v.push(0x1b);
-                v.push(b'\\');
+                if self.term_bel && mode == Mode::Osc {
+                    v.push(0x07);
+                } else {
+                    v.push(0x1b);
+                    v.push(b'\\');
+                }
                 out.push(Chunk::Pass(v));
             }
         }

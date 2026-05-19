@@ -88,6 +88,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design + diagrams
 - [docs/RESEARCH.md](docs/RESEARCH.md) — analysis of other terminals & citations
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
+- [docs/TESTING.md](docs/TESTING.md) — test suite + CI
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
 
 ## License

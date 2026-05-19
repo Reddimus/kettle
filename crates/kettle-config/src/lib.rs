@@ -210,3 +210,64 @@ impl Config {
         cfg
     }
 }
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_tokyonight_night() {
+        let c = Config::default();
+        assert_eq!(c.theme_name, "TokyoNight Night");
+        assert_eq!(c.theme.background, Rgb::new(0x1a, 0x1b, 0x26));
+        assert_eq!(c.theme.foreground, Rgb::new(0xc0, 0xca, 0xf5));
+        assert_eq!(c.theme.palette[4], Rgb::new(0x7a, 0xa2, 0xf7));
+        assert_eq!(c.font_family, font::FAMILY);
+    }
+
+    #[test]
+    fn ghostty_syntax_overrides_and_repeats() {
+        let c = Config::parse_text(
+            "# comment\nfont-size = 16\nbackground = #102030\n\
+             palette = 1=#abcdef\nscrollback = infinite\n\
+             ssh-host = box=me@example.com\nssh-host = gpu=root@10.0.0.2\n\
+             keybind = ctrl+shift+f=start_search\n",
+        );
+        assert_eq!(c.font_size, 16.0);
+        assert_eq!(c.theme.background, Rgb::new(0x10, 0x20, 0x30));
+        assert_eq!(c.theme.palette[1], Rgb::new(0xab, 0xcd, 0xef));
+        assert_eq!(c.scrollback, INFINITE_SCROLLBACK);
+        assert_eq!(c.ssh_hosts.len(), 2);
+        assert_eq!(c.ssh_hosts[0], ("box".into(), "me@example.com".into()));
+    }
+
+    #[test]
+    fn bundled_theme_set_is_large_and_named() {
+        let list = Theme::list();
+        assert!(list.len() > 400, "expected the full Ghostty set");
+        assert!(list.contains(&"TokyoNight Night"));
+    }
+
+    #[test]
+    fn terminator_default_keybinds() {
+        let b = keybinds::defaults();
+        let t = |m: Mods, k: Key| b.get(&Trigger::new(m, k)).cloned();
+        assert_eq!(
+            t(Mods::CTRL | Mods::SHIFT, Key::Char('o')),
+            Some(Action::SplitRight)
+        );
+        assert_eq!(
+            t(Mods::CTRL | Mods::SHIFT, Key::Char('f')),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(t(Mods::SHIFT, Key::Left), Some(Action::ResizeLeft));
+        assert_eq!(t(Mods::CTRL, Key::Up), Some(Action::JumpPrevPrompt));
+    }
+
+    #[test]
+    fn trigger_parsing() {
+        let tr = keybinds::parse_trigger("ctrl+shift+o").unwrap();
+        assert_eq!(tr, Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('o')));
+        assert!(keybinds::parse_trigger("alt+up").is_some());
+    }
+}

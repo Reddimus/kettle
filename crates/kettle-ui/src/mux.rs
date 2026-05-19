@@ -604,3 +604,48 @@ impl Default for Mux {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+
+    #[test]
+    fn split_layout_tiles_without_gaps_or_overlap() {
+        let mut n = Node::Leaf(1);
+        assert!(n.split_leaf(1, 2, Dir::Horizontal));
+        let mut rects = Vec::new();
+        n.layout((0.0, 0.0, 100.0, 40.0), &mut rects);
+        assert_eq!(rects.len(), 2);
+        let (_, a) = rects[0];
+        let (_, b) = rects[1];
+        assert_eq!(a.2 + b.2, 100.0); // widths sum to full
+        assert_eq!(a.0, 0.0);
+        assert_eq!(b.0, a.2); // b starts where a ends
+        assert_eq!(a.3, 40.0);
+    }
+
+    #[test]
+    fn remove_leaf_collapses_parent() {
+        let mut n = Node::Leaf(1);
+        n.split_leaf(1, 2, Dir::Vertical);
+        assert!(n.contains(2));
+        // Removing one child of a 2-leaf split collapses to the sibling,
+        // signalled as `Err(Some(sibling))` to the parent.
+        match n.remove_leaf(2) {
+            Err(Some(Node::Leaf(1))) => {}
+            _ => panic!("removing one child should collapse to the sibling"),
+        }
+    }
+
+    #[test]
+    fn nested_splits_keep_all_leaves() {
+        let mut n = Node::Leaf(1);
+        n.split_leaf(1, 2, Dir::Horizontal);
+        n.split_leaf(2, 3, Dir::Vertical);
+        let mut rects = Vec::new();
+        n.layout((0.0, 0.0, 200.0, 100.0), &mut rects);
+        let ids: Vec<u64> = rects.iter().map(|(i, _)| *i).collect();
+        assert!(ids.contains(&1) && ids.contains(&2) && ids.contains(&3));
+        assert_eq!(rects.len(), 3);
+    }
+}
