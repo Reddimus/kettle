@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty animation playback-timing engine: pure, deterministic
+  `current_frame(gaps, state, elapsed_ms)` mapping elapsed time to the
+  frame to show — skips gapless frames, honors infinite/finite loop
+  counts, `loading`-mode hold-at-end, and stopped→selected-frame. The
+  renderer clock + frame substitution is the only remaining sub-item.
 - kitty animation (decode/state layer): `a=f` animation-frame
   transmission (chunked via a single in-flight slot, gap from `z` with
   `z<0` = gapless base frames), `a=a` animation control (`c` current

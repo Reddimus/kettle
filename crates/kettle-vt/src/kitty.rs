@@ -74,6 +74,57 @@ impl Default for AnimationState {
     }
 }
 
+/// The 0-based frame index to display *now*.
+///
+/// `gaps[i]` is frame `i+1`'s gap in milliseconds: `> 0` dwell that long,
+/// `<= 0` *gapless* (kept as base data but never dwelt on, so skipped for
+/// display — kitty `graphics-protocol.rst:909`). `gaps[0]` is the root /
+/// base-image frame. Pure and deterministic so the renderer's clock is the
+/// only non-testable part.
+///
+/// - Stopped (`s=1`): the explicitly selected `current` frame, clamped.
+/// - Running: time is mapped over the displayable frames. `loops == 0`
+///   (kitty `v=1`) loops forever; a finite count stops on the last
+///   displayable frame after that many full passes. `loading` (`s=2`)
+///   never loops — it holds on the last frame waiting for more frames.
+/// - No displayable frame ⇒ hold on `current`.
+pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usize {
+    if gaps.is_empty() {
+        return 0;
+    }
+    let clamp_current = || (st.current.max(1) as usize - 1).min(gaps.len() - 1);
+    let shown: Vec<(usize, u128)> = gaps
+        .iter()
+        .enumerate()
+        .filter(|&(_, &g)| g > 0)
+        .map(|(i, &g)| (i, g as u128))
+        .collect();
+    if !st.running || shown.is_empty() {
+        return clamp_current();
+    }
+    let total: u128 = shown.iter().map(|&(_, g)| g).sum();
+    if total == 0 {
+        return clamp_current();
+    }
+    // Finite, non-loading loop count: freeze on the last shown frame once
+    // all passes have elapsed.
+    if !st.loading && st.loops > 0 && elapsed_ms >= total * st.loops as u128 {
+        return shown.last().unwrap().0;
+    }
+    // Loading mode never loops: hold the last shown frame at/after the end.
+    if st.loading && elapsed_ms >= total {
+        return shown.last().unwrap().0;
+    }
+    let mut t = elapsed_ms % total;
+    for &(idx, g) in &shown {
+        if t < g {
+            return idx;
+        }
+        t -= g;
+    }
+    shown.last().unwrap().0
+}
+
 /// What a kitty APC resolved to.
 pub enum KittyOut {
     None,
@@ -481,6 +532,60 @@ mod tests {
         assert!(k.frames(3).is_empty());
         assert!(k.animation(3).is_none());
         assert!(k.image(3).is_some(), "d=f keeps the base image");
+    }
+
+    #[test]
+    fn playback_timing_maps_elapsed_to_frame() {
+        let run = |loops, loading| AnimationState {
+            current: 1,
+            running: true,
+            loading,
+            loops,
+        };
+        // Stopped → the selected current frame, clamped.
+        let stop = AnimationState {
+            current: 3,
+            running: false,
+            loading: false,
+            loops: 0,
+        };
+        assert_eq!(current_frame(&[10, 10, 10, 10], &stop, 9_999), 2);
+        assert_eq!(current_frame(&[], &stop, 0), 0);
+        let stop_oob = AnimationState {
+            current: 99,
+            ..stop
+        };
+        assert_eq!(current_frame(&[10, 10], &stop_oob, 0), 1, "clamped");
+
+        // Infinite loop over [100,200,300] (total 600).
+        let g = [100, 200, 300];
+        let inf = run(0, false);
+        assert_eq!(current_frame(&g, &inf, 0), 0);
+        assert_eq!(current_frame(&g, &inf, 150), 1);
+        assert_eq!(current_frame(&g, &inf, 350), 2);
+        assert_eq!(current_frame(&g, &inf, 650), 0, "wraps (650 % 600 = 50)");
+
+        // Gapless frame (g<=0) is never displayed, only skipped over.
+        let gl = [100, -1, 200];
+        assert_eq!(current_frame(&gl, &inf, 50), 0);
+        assert_eq!(current_frame(&gl, &inf, 150), 2, "frame 2 is gapless");
+        assert_eq!(current_frame(&gl, &inf, 350), 0, "300ms shown cycle");
+        // All gapless ⇒ hold on current.
+        assert_eq!(current_frame(&[0, -1], &run(0, false), 1234), 0);
+
+        // Finite loop count: freeze on the last shown frame after N passes.
+        let g2 = [100, 200]; // total 300
+        let fin = run(2, false);
+        assert_eq!(current_frame(&g2, &fin, 0), 0);
+        assert_eq!(current_frame(&g2, &fin, 250), 1);
+        assert_eq!(current_frame(&g2, &fin, 600), 1, "2 passes done → freeze");
+        assert_eq!(current_frame(&g2, &fin, 500), 1, "500 % 300 = 200 → f2");
+
+        // Loading mode never loops: holds the last frame at/after the end.
+        let load = run(0, true);
+        assert_eq!(current_frame(&g2, &load, 50), 0);
+        assert_eq!(current_frame(&g2, &load, 250), 1);
+        assert_eq!(current_frame(&g2, &load, 900), 1, "loading waits at end");
     }
 
     #[test]

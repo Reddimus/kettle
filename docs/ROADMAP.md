@@ -168,9 +168,16 @@
       Frame compositing (`a=c`), partial-rect frames and playback
       timing/rendering are the remaining sub-items.
 
+- [x] kitty animation playback-timing engine: pure `current_frame(gaps,
+      state, elapsed_ms)` — gapless-frame skipping, infinite/finite loop
+      counts, `loading` hold-at-end, stopped→selected frame
+      (`kitty::current_frame`, +1 test, 95 workspace). Only the renderer
+      clock + frame→placement substitution remain.
+
 ## Next (in priority order)
-- [ ] kitty animation: playback loop + frame compositing (`a=c`,
-      partial-rect) + relative placements
+- [ ] kitty animation: wire the clock + per-image frame registry so
+      `current_frame` selects the drawn image; then `a=c` compositing /
+      partial-rect frames + relative placements
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 
