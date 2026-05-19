@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Modified named keys now encode per xterm modifyCursorKeys** —
+  `Ctrl+Right` (skip-word in bash/zsh/readline), `Ctrl+Delete`
+  (delete-word), `Shift+Tab` (`CSI Z` back-tab used by readline /
+  fzf / TUI forms), and modified arrows / F-keys / Insert / Delete /
+  PageUp / PageDown / Home / End all previously collapsed to their
+  unmodified sequence — vim users couldn't word-skip, fzf couldn't
+  reverse-tab through fields. New pure `xterm_modifier(mods) → u32`
+  emits the standard table (1 + shift + 2·alt + 4·ctrl + 8·super)
+  and the encoder switches:
+  - Arrows / Home / End → `CSI 1;<m>A..D|H|F` when modified
+    (unmodified still honors DECCKM, modified always CSI).
+  - Insert / Delete / PgUp / PgDn / F5..F12 → `CSI <n>;<m>~`.
+  - F1..F4 → `CSI 1;<m>P..S` when modified (SS3 only when bare).
+  - `Shift+Tab` → `CSI Z`.
+  +2 tests covering the modifier table + every encoded family.
 - **DECSCUSR cursor shape & DEC ?25 visibility now honor the
   running program.** Vim / neovim / fish flip cursor shape per-mode
   (`CSI 1 SP q` block in normal, `CSI 5 SP q` beam in insert,

@@ -69,6 +69,28 @@ pub fn mouse_encode(
     }
 }
 
+/// xterm "modifyOtherKeys" / "modifyCursorKeys" modifier code: `1` for no
+/// modifiers, otherwise `1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0) +
+/// (super?8:0)`. This is the value apps see in `CSI 1;<m>A`-style cursor
+/// reports, `CSI 5;<m>~` page-up, `CSI 1;<m>P` modified F1, etc. — the
+/// shared encoding xterm/Alacritty/WezTerm/kitty all emit.
+pub fn xterm_modifier(mods: ModifiersState) -> u32 {
+    let mut m = 1;
+    if mods.shift_key() {
+        m += 1;
+    }
+    if mods.alt_key() {
+        m += 2;
+    }
+    if mods.control_key() {
+        m += 4;
+    }
+    if mods.super_key() {
+        m += 8;
+    }
+    m
+}
+
 /// Encode a key press to the bytes that should be written to the PTY.
 /// Returns `None` if the key produces no output.
 pub fn encode(
@@ -79,21 +101,59 @@ pub fn encode(
 ) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
+    let shift = mods.shift_key();
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
+    let m = xterm_modifier(mods);
+    let modded = m > 1;
 
-    // Cursor / navigation keys.
+    // Cursor / navigation keys. Unmodified honors `app-cursor` mode (vim,
+    // less, readline all rely on this so arrow keys produce `\x1bOA` after
+    // they request DECCKM); modified always uses CSI with a modifier
+    // parameter (`CSI 1;<m>A`), which xterm/Alacritty/WezTerm all do —
+    // there is no `SS3`-style modified form.
     let csi = |c: char| {
+        if modded {
+            return Some(format!("\x1b[1;{m}{c}").into_bytes());
+        }
         let intro = if app_cursor { b"\x1bO" } else { b"\x1b[" };
         let mut v = intro.to_vec();
         v.push(c as u8);
         Some(v)
     };
 
+    // `~`-terminated function/nav keys: unmodified is `\x1b[<n>~`, modified
+    // is `\x1b[<n>;<m>~` (Insert, Delete, PageUp, PageDown, F5..F12).
+    let tilde = |n: u32| {
+        Some(if modded {
+            format!("\x1b[{n};{m}~").into_bytes()
+        } else {
+            format!("\x1b[{n}~").into_bytes()
+        })
+    };
+
+    // F1..F4: unmodified is the legacy `\x1bOP..S` (SS3); modified switches
+    // to `CSI 1;<m>P..S` per xterm. F5..F12 reuse the tilde form above.
+    let fkey_ss3 = |c: char| {
+        Some(if modded {
+            format!("\x1b[1;{m}{c}").into_bytes()
+        } else {
+            format!("\x1bO{c}").into_bytes()
+        })
+    };
+
     if let Key::Named(n) = key {
         match n {
             NamedKey::Enter => return Some(vec![b'\r']),
             NamedKey::Backspace => return Some(if alt { vec![0x1b, 0x7f] } else { vec![0x7f] }),
-            NamedKey::Tab => return Some(vec![b'\t']),
+            // Shift+Tab is the standard "back-tab" (`CSI Z`) used by
+            // readline, fzf, and every TUI form for reverse field nav.
+            NamedKey::Tab => {
+                return Some(if shift {
+                    b"\x1b[Z".to_vec()
+                } else {
+                    vec![b'\t']
+                });
+            }
             NamedKey::Escape => return Some(vec![0x1b]),
             NamedKey::Space => return Some(vec![b' ']),
             NamedKey::ArrowUp => return csi('A'),
@@ -102,22 +162,22 @@ pub fn encode(
             NamedKey::ArrowLeft => return csi('D'),
             NamedKey::Home => return csi('H'),
             NamedKey::End => return csi('F'),
-            NamedKey::Delete => return Some(b"\x1b[3~".to_vec()),
-            NamedKey::Insert => return Some(b"\x1b[2~".to_vec()),
-            NamedKey::PageUp => return Some(b"\x1b[5~".to_vec()),
-            NamedKey::PageDown => return Some(b"\x1b[6~".to_vec()),
-            NamedKey::F1 => return Some(b"\x1bOP".to_vec()),
-            NamedKey::F2 => return Some(b"\x1bOQ".to_vec()),
-            NamedKey::F3 => return Some(b"\x1bOR".to_vec()),
-            NamedKey::F4 => return Some(b"\x1bOS".to_vec()),
-            NamedKey::F5 => return Some(b"\x1b[15~".to_vec()),
-            NamedKey::F6 => return Some(b"\x1b[17~".to_vec()),
-            NamedKey::F7 => return Some(b"\x1b[18~".to_vec()),
-            NamedKey::F8 => return Some(b"\x1b[19~".to_vec()),
-            NamedKey::F9 => return Some(b"\x1b[20~".to_vec()),
-            NamedKey::F10 => return Some(b"\x1b[21~".to_vec()),
-            NamedKey::F11 => return Some(b"\x1b[23~".to_vec()),
-            NamedKey::F12 => return Some(b"\x1b[24~".to_vec()),
+            NamedKey::Delete => return tilde(3),
+            NamedKey::Insert => return tilde(2),
+            NamedKey::PageUp => return tilde(5),
+            NamedKey::PageDown => return tilde(6),
+            NamedKey::F1 => return fkey_ss3('P'),
+            NamedKey::F2 => return fkey_ss3('Q'),
+            NamedKey::F3 => return fkey_ss3('R'),
+            NamedKey::F4 => return fkey_ss3('S'),
+            NamedKey::F5 => return tilde(15),
+            NamedKey::F6 => return tilde(17),
+            NamedKey::F7 => return tilde(18),
+            NamedKey::F8 => return tilde(19),
+            NamedKey::F9 => return tilde(20),
+            NamedKey::F10 => return tilde(21),
+            NamedKey::F11 => return tilde(23),
+            NamedKey::F12 => return tilde(24),
             _ => {}
         }
     }
@@ -199,6 +259,108 @@ mod tests {
             p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
             1,
             "embedded bracketed-paste end marker must be stripped"
+        );
+    }
+
+    #[test]
+    fn xterm_modifier_table() {
+        // xterm "modifyCursorKeys" encoding: 1 = none, +1 shift, +2 alt,
+        // +4 ctrl, +8 super (cmd/win). The standard table every modern
+        // terminal honors — bash/readline/vim/less/fzf all read it.
+        assert_eq!(xterm_modifier(ModifiersState::empty()), 1);
+        assert_eq!(xterm_modifier(ModifiersState::SHIFT), 2);
+        assert_eq!(xterm_modifier(ModifiersState::ALT), 3);
+        assert_eq!(xterm_modifier(ModifiersState::CONTROL), 5);
+        assert_eq!(
+            xterm_modifier(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            6
+        );
+        assert_eq!(
+            xterm_modifier(ModifiersState::CONTROL | ModifiersState::ALT),
+            7
+        );
+        assert_eq!(xterm_modifier(ModifiersState::SUPER), 9);
+    }
+
+    #[test]
+    fn encode_modifies_named_keys_per_xterm() {
+        use winit::keyboard::{Key, NamedKey};
+        let no = ModifiersState::empty();
+        let ctrl = ModifiersState::CONTROL;
+        let shift = ModifiersState::SHIFT;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let mode = TermMode::empty();
+
+        // Unmodified arrows keep the legacy `CSI A..D`; modified switch to
+        // `CSI 1;<m><letter>`. `Ctrl+Right` is "skip word" in bash/zsh/vim.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowRight), None, no, mode),
+            Some(b"\x1b[C".to_vec())
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowRight), None, ctrl, mode),
+            Some(b"\x1b[1;5C".to_vec()),
+            "Ctrl+ArrowRight must be CSI 1;5C (xterm modifyCursorKeys)"
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowLeft), None, ctrl_shift, mode),
+            Some(b"\x1b[1;6D".to_vec()),
+            "Ctrl+Shift+ArrowLeft must be CSI 1;6D"
+        );
+
+        // App-cursor mode (DECCKM) only changes the *unmodified* form;
+        // modified still uses CSI so vim's arrows-in-insert work.
+        let app = TermMode::APP_CURSOR;
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowUp), None, no, app),
+            Some(b"\x1bOA".to_vec()),
+            "DECCKM: bare arrows use SS3"
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowUp), None, ctrl, app),
+            Some(b"\x1b[1;5A".to_vec()),
+            "DECCKM: modified arrows stay CSI"
+        );
+
+        // Tilde-form nav: Delete / Insert / PageUp / PageDown, modified
+        // inserts `;<m>` before `~`. `Ctrl+Delete` = delete-word.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Delete), None, no, mode),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Delete), None, ctrl, mode),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::PageUp), None, shift, mode),
+            Some(b"\x1b[5;2~".to_vec())
+        );
+
+        // F1..F4 switch SS3 → CSI when modified; F5..F12 stay tilde.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::F1), None, no, mode),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::F1), None, ctrl, mode),
+            Some(b"\x1b[1;5P".to_vec()),
+            "Ctrl+F1 must be CSI 1;5P (not SS3)"
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::F5), None, ctrl, mode),
+            Some(b"\x1b[15;5~".to_vec())
+        );
+
+        // Shift+Tab = `CSI Z` back-tab (readline reverse-field nav, fzf).
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Tab), None, no, mode),
+            Some(b"\t".to_vec())
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Tab), None, shift, mode),
+            Some(b"\x1b[Z".to_vec()),
+            "Shift+Tab must be back-tab CSI Z"
         );
     }
 

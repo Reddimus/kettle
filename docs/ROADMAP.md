@@ -313,6 +313,12 @@
       `RenderableContent.cursor.shape` (which the engine collapses
       `?25 l` into `Hidden`, single guard for both). Added
       `HollowBlock` rendering. +2 tests.
+- [x] **Modified named-key encoding** (xterm modifyCursorKeys
+      family). `Ctrl+Right` skip-word, `Ctrl+Delete` delete-word,
+      `Shift+Tab` back-tab, modified arrows / F-keys / nav keys all
+      used to collapse to their unmodified sequence. New
+      `xterm_modifier` helper + `CSI 1;<m>…` / `CSI <n>;<m>~` /
+      `CSI 1;<m>P..S` for F1-4 / `CSI Z` for Shift+Tab. +2 tests.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
