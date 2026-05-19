@@ -347,18 +347,20 @@ impl App {
         // Lock every visible pane, then hand references to the renderer.
         let mut guards = Vec::with_capacity(layout.len());
         for (id, r) in &layout {
-            if let Some(p) = self.mux.panes.get(id)
-                && let Ok(g) = p.term.term.lock()
-            {
-                guards.push((*r, g, Some(*id) == focus));
+            if let Some(p) = self.mux.panes.get(id) {
+                let imgs = p.term.placements();
+                if let Ok(g) = p.term.term.lock() {
+                    guards.push((*r, g, Some(*id) == focus, imgs));
+                }
             }
         }
         let panes: Vec<PaneView> = guards
             .iter()
-            .map(|(r, g, f)| PaneView {
+            .map(|(r, g, f, imgs)| PaneView {
                 rect: *r,
                 term: g,
                 focused: *f,
+                images: imgs.clone(),
             })
             .collect();
         if let Err(e) =

@@ -25,6 +25,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 - **Search overlay** — `Ctrl+Shift+F`, regex, highlight + cycle.
 - **Hyperlinks** — OSC 8 + URL autodetection, underlined with hover, open
   with `Ctrl`/`Cmd`+click.
+- **Inline images** — Sixel, kitty graphics, and iTerm2 (OSC 1337) decoded
+  and GPU-composited (`img2sixel`, `kitten icat`, `imgcat`).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

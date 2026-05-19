@@ -35,7 +35,11 @@ are within each upstream repo).
   machine modelled on Contour
   (`contour/src/vtbackend/SixelParser.cpp`); iTerm2 `OSC 1337 File=` and the
   three-way image-source split seen in Konsole
-  (`konsole/src/Vt102Emulation.h`). *(kettle-vt — in progress.)*
+  (`konsole/src/Vt102Emulation.h`). *Implemented in `kettle-vt`*: an
+  `Extractor` pulls Sixel/kitty/iTerm2 sequences out of the PTY stream before
+  the VT parser sees them, decodes to RGBA, and the renderer composites them
+  as scroll-anchored GPU textures. Advanced kitty ops (placement ids,
+  deletion, Unicode placeholders, animation) remain future work.
 - **Config syntax + theme model** — Ghostty's `key = value` grammar
   (`ghostty/src/config/Config.zig`); themes are the iTerm2-Color-Schemes
   `ghostty/` set that Ghostty itself consumes (it is not vendored in-tree —

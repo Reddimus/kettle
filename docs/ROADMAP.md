@@ -18,10 +18,14 @@
 - [x] Mouse drag text selection + wheel scrollback
 - [x] Hyperlinks: OSC 8 + URL autodetection, underline + Ctrl/Cmd-click to open
 
+- [x] Image protocols: Sixel + kitty graphics + iTerm2 OSC 1337, extracted
+      ahead of the VT parser, decoded to RGBA, GPU-composited, scroll-anchored
+
 ## Next (in priority order)
 
 - [ ] Mouse reporting passthrough (apps that request SGR mouse)
-- [ ] Sixel + kitty graphics + iTerm2 OSC 1337 image protocols (`kettle-vt`)
+- [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
+      placeholders, animation)
 - [ ] Shell integration (OSC 133) + prompt jumping
 - [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] Ligature tuning + per-style font family overrides

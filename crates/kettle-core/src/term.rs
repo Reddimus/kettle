@@ -10,9 +10,11 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::Result;
+use kettle_vt::{Chunk, Extractor};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
+use crate::images::{Images, Placement};
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
@@ -43,6 +45,8 @@ pub struct Terminal {
     reader_thread: Option<JoinHandle<()>>,
     pub cols: usize,
     pub rows: usize,
+    pub images: Images,
+    cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
 impl Terminal {
@@ -97,12 +101,18 @@ impl Terminal {
         );
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
+        let images: Images = Arc::new(Mutex::new(Vec::new()));
+        let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
+
         let reader_thread = {
             let term = term.clone();
+            let images = images.clone();
+            let cell_px = cell_px.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
+                    let mut extractor = Extractor::new();
                     let mut buf = [0u8; 65536];
                     loop {
                         match reader.read(&mut buf) {
@@ -111,8 +121,23 @@ impl Terminal {
                                 break;
                             }
                             Ok(n) => {
-                                if let Ok(mut t) = term.lock() {
-                                    processor.advance(&mut *t, &buf[..n]);
+                                for chunk in extractor.feed(&buf[..n]) {
+                                    match chunk {
+                                        Chunk::Pass(bytes) => {
+                                            if let Ok(mut t) = term.lock() {
+                                                processor.advance(&mut *t, &bytes);
+                                            }
+                                        }
+                                        Chunk::Image(data) => {
+                                            place_image(
+                                                &term,
+                                                &images,
+                                                &cell_px,
+                                                &mut processor,
+                                                data,
+                                            );
+                                        }
+                                    }
                                 }
                                 (waker)();
                             }
@@ -129,7 +154,15 @@ impl Terminal {
             reader_thread: Some(reader_thread),
             cols,
             rows,
+            images,
+            cell_px,
         })
+    }
+
+    /// Image placements for this terminal (cloned cheaply; `ImageData` is
+    /// `Arc`-backed).
+    pub fn placements(&self) -> Vec<Placement> {
+        self.images.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -151,6 +184,9 @@ impl Terminal {
             pixel_width: cell_w * cols as u16,
             pixel_height: cell_h * rows as u16,
         });
+        if let Ok(mut p) = self.cell_px.lock() {
+            *p = (cell_w.max(1), cell_h.max(1));
+        }
         if let Ok(mut t) = self.term.lock() {
             t.resize(TermSize {
                 columns: cols,
@@ -185,4 +221,47 @@ impl EventProxy {
         use alacritty_terminal::event::EventListener;
         self.send_event(TermEvent::Exit);
     }
+}
+
+/// Anchor a decoded image at the cursor, then push the cursor below it so
+/// subsequent shell output flows after the image (kitty/iTerm2/Sixel all
+/// place at the cursor and advance).
+fn place_image(
+    term: &SharedTerm,
+    images: &Images,
+    cell_px: &Arc<Mutex<(u16, u16)>>,
+    processor: &mut Processor,
+    data: kettle_vt::ImageData,
+) {
+    let (cw, chh) = cell_px.lock().map(|p| *p).unwrap_or((8, 16));
+    let cw = cw.max(1) as u32;
+    let chh = chh.max(1) as u32;
+    let cell_cols = data.width.div_ceil(cw) as usize;
+    let cell_rows = data.height.div_ceil(chh) as usize;
+
+    let Ok(mut t) = term.lock() else {
+        return;
+    };
+    let (abs_line, col) = {
+        let rc = t.renderable_content();
+        let cur = rc.cursor.point;
+        let hist = t.grid().history_size() as i64;
+        (hist + cur.line.0 as i64, cur.column.0)
+    };
+    if let Ok(mut v) = images.lock() {
+        v.push(Placement {
+            abs_line,
+            col,
+            cell_cols,
+            cell_rows,
+            img: data,
+        });
+        if v.len() > 512 {
+            let drop = v.len() - 512;
+            v.drain(0..drop);
+        }
+    }
+    // Reserve the rows the image occupies.
+    let nl = "\r\n".repeat(cell_rows.clamp(1, 256));
+    processor.advance(&mut *t, nl.as_bytes());
 }

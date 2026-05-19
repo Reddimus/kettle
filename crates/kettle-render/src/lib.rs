@@ -7,6 +7,7 @@
 //! one instanced quad pass and all text through one glyphon prepare/render.
 
 mod color;
+mod imgpipe;
 mod quad;
 
 use std::sync::Arc;
@@ -60,6 +61,8 @@ pub struct PaneView<'a> {
     pub rect: (f32, f32, f32, f32),
     pub term: &'a Term<EventProxy>,
     pub focused: bool,
+    /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
+    pub images: Vec<kettle_core::Placement>,
 }
 
 pub struct Renderer {
@@ -78,6 +81,7 @@ pub struct Renderer {
     search_buffer: TextBuffer,
 
     quads: QuadPipeline,
+    imgs: imgpipe::ImagePipeline,
 
     font_family: String,
     font_size: f32,
@@ -156,6 +160,7 @@ impl Renderer {
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
 
         let quads = QuadPipeline::new(&device, format);
+        let imgs = imgpipe::ImagePipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -171,6 +176,7 @@ impl Renderer {
             tabbar_buffer,
             search_buffer,
             quads,
+            imgs,
             font_family: cfg.font_family.clone(),
             font_size,
             metrics,
@@ -228,6 +234,8 @@ impl Renderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
+        let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
         // Tab bar.
         if tab_bar_h > 0.0 {
@@ -266,6 +274,27 @@ impl Renderer {
             quads.push(rect(rx + rw - 1.0, ry, 1.0, rh, border, 1.0));
 
             self.build_pane(i, pv, cfg, &family, &mut quads);
+
+            // Image placements, anchored history-aware so they scroll.
+            {
+                let g = pv.term.grid();
+                let top = g.history_size() as i64 - g.display_offset() as i64;
+                let nrows = g.screen_lines() as i64;
+                for p in &pv.images {
+                    let row = p.abs_line - top;
+                    if row + p.cell_rows as i64 <= 0 || row >= nrows {
+                        continue;
+                    }
+                    live.insert(std::sync::Arc::as_ptr(&p.img.rgba) as usize);
+                    img_items.push((
+                        rx + pad_x + p.col as f32 * cw,
+                        ry + pad_y + row as f32 * ch,
+                        p.cell_cols as f32 * cw,
+                        p.cell_rows as f32 * ch,
+                        p.img.clone(),
+                    ));
+                }
+            }
 
             // Hyperlink underlines (all panes show them; brighter on hover).
             for ln in &overlay.links {
@@ -436,6 +465,9 @@ impl Renderer {
         )?;
         self.quads
             .upload(&self.device, &self.queue, [sw, sh], &quads);
+        self.imgs
+            .upload(&self.device, &self.queue, [sw, sh], &img_items);
+        self.imgs.gc(&live);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -478,6 +510,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             self.quads.draw(&mut pass);
+            self.imgs.draw(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }

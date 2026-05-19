@@ -1,0 +1,310 @@
+//! Textured-quad pipeline for compositing decoded images (Sixel / kitty /
+//! iTerm2) onto the grid. Textures are cached by `ImageData` identity so a
+//! static image uploads once.
+
+use std::collections::HashMap;
+
+use bytemuck::{Pod, Zeroable};
+use kettle_core::ImageData;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Inst {
+    pos: [f32; 2],
+    size: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Screen {
+    size: [f32; 2],
+    _pad: [f32; 2],
+}
+
+const SHADER: &str = r#"
+struct Screen { size: vec2<f32>, pad: vec2<f32> };
+@group(0) @binding(0) var<uniform> screen: Screen;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var smp: sampler;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32,
+      @location(0) pos: vec2<f32>,
+      @location(1) size: vec2<f32>) -> VsOut {
+    var c = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0));
+    let corner = c[vi];
+    let px = pos + corner * size;
+    let ndc = vec2<f32>(px.x / screen.size.x * 2.0 - 1.0,
+                         1.0 - px.y / screen.size.y * 2.0);
+    var o: VsOut;
+    o.clip = vec4<f32>(ndc, 0.0, 1.0);
+    o.uv = corner;
+    return o;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, smp, in.uv);
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+"#;
+
+pub struct ImagePipeline {
+    pipeline: wgpu::RenderPipeline,
+    tex_bgl: wgpu::BindGroupLayout,
+    screen_buf: wgpu::Buffer,
+    screen_bg: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    instances: wgpu::Buffer,
+    cap: usize,
+    cache: HashMap<usize, wgpu::BindGroup>,
+    draws: Vec<(usize, u32)>, // (cache key, instance index)
+}
+
+impl ImagePipeline {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("kettle-img"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let screen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("img-screen-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("img-tex-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("img-layout"),
+            bind_group_layouts: &[Some(&screen_bgl), Some(&tex_bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("img-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Inst>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("img-screen"),
+            size: std::mem::size_of::<Screen>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let screen_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("img-screen-bg"),
+            layout: &screen_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buf.as_entire_binding(),
+            }],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("img-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let cap = 64;
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("img-instances"),
+            size: (cap * std::mem::size_of::<Inst>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            tex_bgl,
+            screen_buf,
+            screen_bg,
+            sampler,
+            instances,
+            cap,
+            cache: HashMap::new(),
+            draws: Vec::new(),
+        }
+    }
+
+    fn ensure_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &ImageData,
+    ) -> usize {
+        let key = std::sync::Arc::as_ptr(&img.rgba) as usize;
+        if self.cache.contains_key(&key) {
+            return key;
+        }
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-image"),
+            size: wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(img.width * 4),
+                rows_per_image: Some(img.height),
+            },
+            wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("img-tex-bg"),
+            layout: &self.tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.cache.insert(key, bg);
+        key
+    }
+
+    /// `items`: `(x, y, w, h, image)` in physical pixels.
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: [f32; 2],
+        items: &[(f32, f32, f32, f32, ImageData)],
+    ) {
+        queue.write_buffer(
+            &self.screen_buf,
+            0,
+            bytemuck::bytes_of(&Screen {
+                size: screen,
+                _pad: [0.0; 2],
+            }),
+        );
+        self.draws.clear();
+        if items.is_empty() {
+            return;
+        }
+        if items.len() > self.cap {
+            self.cap = items.len().next_power_of_two();
+            self.instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("img-instances"),
+                size: (self.cap * std::mem::size_of::<Inst>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let mut insts = Vec::with_capacity(items.len());
+        for (i, (x, y, w, h, img)) in items.iter().enumerate() {
+            let key = self.ensure_texture(device, queue, img);
+            insts.push(Inst {
+                pos: [*x, *y],
+                size: [*w, *h],
+            });
+            self.draws.push((key, i as u32));
+        }
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
+    }
+
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.draws.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.screen_bg, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        for (key, idx) in &self.draws {
+            if let Some(bg) = self.cache.get(key) {
+                pass.set_bind_group(1, bg, &[]);
+                pass.draw(0..4, *idx..*idx + 1);
+            }
+        }
+    }
+
+    /// Forget textures no longer referenced this frame.
+    pub fn gc(&mut self, live: &std::collections::HashSet<usize>) {
+        self.cache.retain(|k, _| live.contains(k));
+    }
+}
