@@ -37,6 +37,11 @@ pub struct App {
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
+    window_focused: bool,
+    blink_on: bool,
+    last_blink: std::time::Instant,
+    last_bell: Option<std::time::Instant>,
+    last_click: Option<(std::time::Instant, usize, usize, u8)>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -75,6 +80,11 @@ impl App {
             mouse_btn: None,
             links: Vec::new(),
             ssh_input: None,
+            window_focused: true,
+            blink_on: true,
+            last_blink: std::time::Instant::now(),
+            last_bell: None,
+            last_click: None,
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -150,19 +160,51 @@ impl App {
         kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col))
     }
 
-    fn begin_selection(&mut self, area: Rect) {
-        self.selecting = true;
+    fn begin_selection(&mut self, area: Rect, ty: kettle_core::SelectionType) {
+        // Word/line selections are a "click", not a drag.
+        self.selecting = ty == kettle_core::SelectionType::Simple;
         if let Some(rect) = self.focused_rect(area) {
             let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
             if let Some(pane) = self.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
-                t.selection = Some(kettle_core::Selection::new(
-                    kettle_core::SelectionType::Simple,
-                    p,
-                    kettle_core::Side::Left,
-                ));
+                t.selection = Some(kettle_core::Selection::new(ty, p, kettle_core::Side::Left));
             }
+        }
+    }
+
+    /// Click count for the press at `(row,col)` within ~400 ms of the last.
+    fn click_count(&mut self, row: usize, col: usize) -> u8 {
+        let now = std::time::Instant::now();
+        let n = match self.last_click {
+            Some((t, r, c, n))
+                if r == row
+                    && c == col
+                    && now.duration_since(t) < std::time::Duration::from_millis(400) =>
+            {
+                n % 3 + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, row, col, n));
+        n
+    }
+
+    /// Copy the focused pane's selection to the clipboard (call on release).
+    fn copy_selection(&mut self) {
+        let sel = self
+            .mux
+            .focused()
+            .and_then(|p| {
+                p.term
+                    .term
+                    .lock()
+                    .ok()
+                    .and_then(|t| t.selection_to_string())
+            })
+            .filter(|s| !s.is_empty());
+        if let (Some(s), Some(cb)) = (sel, self.clipboard.as_mut()) {
+            let _ = cb.set_text(s);
         }
     }
 
@@ -201,6 +243,7 @@ impl App {
 
     fn drain_events(&mut self) {
         let mut title: Option<String> = None;
+        let mut bell = false;
         let focus = self.mux.active_focus();
         for (id, pane) in self.mux.panes.iter_mut() {
             while let Ok(ev) = pane.rx.try_recv() {
@@ -226,10 +269,14 @@ impl App {
                             .unwrap_or_default();
                         pane.term.write(fmt(&text).as_bytes());
                     }
+                    TermEvent::Bell => bell = true,
                     TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
                     _ => {}
                 }
             }
+        }
+        if bell {
+            self.last_bell = Some(std::time::Instant::now());
         }
         if let Some(t) = title
             && let Some(w) = &self.window
@@ -330,12 +377,33 @@ impl App {
             None => (None, String::new()),
         };
 
+        let window_focused = self.window_focused;
+        let cursor_visible = if !self.cfg.cursor_blink
+            || !window_focused
+            || self.ssh_input.is_some()
+            || self.mux.search.open
+        {
+            true
+        } else {
+            self.blink_on
+        };
+        let bell = self
+            .last_bell
+            .map(|t| {
+                let e = t.elapsed().as_secs_f32();
+                if e >= 0.30 { 0.0 } else { 1.0 - e / 0.30 }
+            })
+            .unwrap_or(0.0);
+
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
                 links,
                 ssh_query,
                 ssh_hint,
+                window_focused,
+                cursor_visible,
+                bell,
                 ..Overlay::default()
             };
         }
@@ -363,6 +431,9 @@ impl App {
             links,
             ssh_query,
             ssh_hint,
+            window_focused,
+            cursor_visible,
+            bell,
         }
     }
 
@@ -376,6 +447,14 @@ impl App {
 
     fn redraw(&mut self) {
         self.drain_events();
+        // Advance the cursor blink phase (~530 ms, xterm-like).
+        if self.cfg.cursor_blink
+            && self.window_focused
+            && self.last_blink.elapsed() >= std::time::Duration::from_millis(530)
+        {
+            self.blink_on = !self.blink_on;
+            self.last_blink = std::time::Instant::now();
+        }
         if self.mux.reap() {
             return;
         }
@@ -475,8 +554,12 @@ impl App {
                     .as_mut()
                     .and_then(|c| c.get_text().ok())
                     .unwrap_or_default();
+                let bracketed = self
+                    .focused_mode()
+                    .contains(kettle_core::TermMode::BRACKETED_PASTE);
+                let bytes = input::paste_payload(&text, bracketed);
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(text.as_bytes());
+                    p.term.write(&bytes);
                 }
             }
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
@@ -864,7 +947,19 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if bcode == 0 {
-                    self.begin_selection(area);
+                    let kind = if let Some((r, c)) = self.cursor_cell() {
+                        match self.click_count(r, c) {
+                            2 => kettle_core::SelectionType::Semantic,
+                            3 => kettle_core::SelectionType::Lines,
+                            _ => kettle_core::SelectionType::Simple,
+                        }
+                    } else {
+                        kettle_core::SelectionType::Simple
+                    };
+                    self.begin_selection(area, kind);
+                    if kind != kettle_core::SelectionType::Simple {
+                        self.copy_selection();
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -888,6 +983,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if bcode == 0 {
+                    if self.selecting {
+                        self.copy_selection();
+                    }
                     self.selecting = false;
                 }
             }
@@ -916,10 +1014,21 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            WindowEvent::Focused(f) => {
+                self.window_focused = f;
+                self.blink_on = true;
+                self.last_blink = std::time::Instant::now();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                // Keep the cursor solid while actively typing.
+                self.blink_on = true;
+                self.last_blink = std::time::Instant::now();
                 let text = event.text.as_ref().map(|s| s.as_str());
 
                 if self.ssh_input.is_some() {
@@ -971,6 +1080,25 @@ impl ApplicationHandler<UserEvent> for App {
         if self.mux.reap() && self.window.is_some() {
             self.save_session();
             event_loop.exit();
+            return;
+        }
+        // Drive cursor blink + visual-bell decay without busy-looping: only
+        // schedule wake-ups while something is actually animating.
+        let bell_active = self
+            .last_bell
+            .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
+            .unwrap_or(false);
+        let blink_active = self.cfg.cursor_blink && self.window_focused;
+        if bell_active || blink_active {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            let wait = if bell_active { 33 } else { 120 };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(wait),
+            ));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }

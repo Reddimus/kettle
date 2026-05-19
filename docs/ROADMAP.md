@@ -46,6 +46,11 @@
       bundle, Windows zip, built on real runners and attached to GitHub
       releases on tag (see docs/INSTALL.md)
 
+- [x] UX polish: safe bracketed paste (newline-normalized,
+      injection-guarded), focus-aware hollow cursor, config cursor blink,
+      visual bell flash, double-click word / triple-click line selection
+      with auto-copy on release
+
 ## Next (in priority order)
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)

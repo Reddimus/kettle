@@ -161,3 +161,44 @@ pub fn encode(
     }
     None
 }
+
+/// Build the bytes for a clipboard paste. Newlines are normalized to CR (so a
+/// trailing newline can't auto-run a shell command unexpectedly), and when the
+/// app enabled bracketed paste the content is wrapped and any embedded end
+/// marker stripped (paste-injection guard).
+pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    let body = text.replace("\r\n", "\r").replace('\n', "\r");
+    if bracketed {
+        let safe = body.replace("\x1b[201~", "");
+        let mut v = Vec::with_capacity(safe.len() + 12);
+        v.extend_from_slice(b"\x1b[200~");
+        v.extend_from_slice(safe.as_bytes());
+        v.extend_from_slice(b"\x1b[201~");
+        v
+    } else {
+        body.into_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_normalizes_and_brackets() {
+        assert_eq!(paste_payload("a\r\nb\n", false), b"a\rb\r");
+        let p = paste_payload("x\n", true);
+        assert!(p.starts_with(b"\x1b[200~") && p.ends_with(b"\x1b[201~"));
+    }
+
+    #[test]
+    fn paste_strips_injected_end_marker() {
+        let p = paste_payload("evil\x1b[201~rm -rf /", true);
+        // Only the wrapper's own terminator may remain.
+        assert_eq!(
+            p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
+            1,
+            "embedded bracketed-paste end marker must be stripped"
+        );
+    }
+}

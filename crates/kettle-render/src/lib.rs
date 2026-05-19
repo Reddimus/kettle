@@ -56,6 +56,12 @@ pub struct Overlay {
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
+    /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
+    pub window_focused: bool,
+    /// Cursor is in its "on" blink phase.
+    pub cursor_visible: bool,
+    /// Visual-bell intensity, 0.0 (none) .. 1.0 (just rang).
+    pub bell: f32,
 }
 
 /// One tiled pane to draw this frame.
@@ -276,7 +282,15 @@ impl Renderer {
             quads.push(rect(rx, ry, 1.0, rh, border, 1.0));
             quads.push(rect(rx + rw - 1.0, ry, 1.0, rh, border, 1.0));
 
-            self.build_pane(i, pv, cfg, &family, &mut quads);
+            self.build_pane(
+                i,
+                pv,
+                cfg,
+                &family,
+                overlay.window_focused,
+                overlay.cursor_visible,
+                &mut quads,
+            );
 
             // Image placements, anchored history-aware so they scroll.
             {
@@ -336,6 +350,18 @@ impl Renderer {
                     ));
                 }
             }
+        }
+
+        // Visual bell: a brief full-surface flash (replaces an audible beep).
+        if overlay.bell > 0.0 {
+            quads.push(rect(
+                0.0,
+                0.0,
+                sw,
+                sh,
+                theme.foreground,
+                overlay.bell * 0.18,
+            ));
         }
 
         // Search bar overlay.
@@ -545,12 +571,15 @@ impl Renderer {
     }
 
     /// Build one pane's text buffer + background/cursor/selection/search quads.
+    #[allow(clippy::too_many_arguments)]
     fn build_pane(
         &mut self,
         idx: usize,
         pv: &PaneView<'_>,
         cfg: &Config,
         family: &str,
+        window_focused: bool,
+        cursor_visible: bool,
         quads: &mut Vec<QuadInstance>,
     ) {
         let theme = &cfg.theme;
@@ -648,22 +677,25 @@ impl Renderer {
             }
         }
 
-        // Cursor (only meaningful for the focused pane but cheap to always draw).
+        // Cursor: hollow when the window is unfocused, blink-aware otherwise.
         let cp = content.cursor.point;
         if cp.line.0 >= 0 && pv.focused {
-            let (cwidth, alpha, cheight, yoff) = match cfg.cursor_style {
-                CursorStyle::Bar => (cw * 0.15, 1.0, ch, 0.0),
-                CursorStyle::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                CursorStyle::Block => (cw, 0.55, ch, 0.0),
-            };
-            quads.push(rect(
-                ox + cp.column.0 as f32 * cw,
-                oy + cp.line.0 as f32 * ch + yoff,
-                cwidth,
-                cheight,
-                theme.cursor,
-                alpha,
-            ));
+            let bx = ox + cp.column.0 as f32 * cw;
+            let by = oy + cp.line.0 as f32 * ch;
+            if !window_focused {
+                // Hollow outline (1px) like xterm/most terminals.
+                quads.push(rect(bx, by, cw, 1.0, theme.cursor, 1.0));
+                quads.push(rect(bx, by + ch - 1.0, cw, 1.0, theme.cursor, 1.0));
+                quads.push(rect(bx, by, 1.0, ch, theme.cursor, 1.0));
+                quads.push(rect(bx + cw - 1.0, by, 1.0, ch, theme.cursor, 1.0));
+            } else if cursor_visible {
+                let (cwidth, alpha, cheight, yoff) = match cfg.cursor_style {
+                    CursorStyle::Bar => (cw * 0.15, 1.0, ch, 0.0),
+                    CursorStyle::Underline => (cw, 1.0, 2.0, ch - 2.0),
+                    CursorStyle::Block => (cw, 0.55, ch, 0.0),
+                };
+                quads.push(rect(bx, by + yoff, cwidth, cheight, theme.cursor, alpha));
+            }
         }
 
         // Lay out the text buffer.

@@ -31,6 +31,9 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
 - **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
   works (X10 + SGR 1006).
+- **Polished input** — safe bracketed paste (newline-normalized,
+  injection-guarded), double-click word / triple-click line selection with
+  auto-copy, focus-aware hollow cursor, configurable blink, visual bell.
 - **Session restore** — the tab/split tree and each pane's working directory
   are saved and restored across launches.
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
