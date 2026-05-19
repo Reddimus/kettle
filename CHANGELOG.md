@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   (left/right); `split_horiz`/`split_vert` action names corrected.
 
 ### Added
+- UX backlog: unfocused-pane **dimming** (`unfocused-split-opacity`,
+  default 0.7), **pane zoom/maximize** (`Ctrl+Shift+X`), per-pane
+  **scrollbar** (`scrollbar = never|auto|always`), configurable
+  **split-divider color**, configurable **cursor-blink interval**, and
+  a **copy-on-select** toggle. Dimming/scrollbar use a post-text quad
+  pass so they sit above glyphs.
 - Tab bar redesign: per-tab close **✕** (click to close), trailing
   **+** new-tab button, **middle-click** a tab to close it,
   always-shown by default, active-tab accent, title eliding. New

@@ -64,6 +64,15 @@ pub enum TabBarPos {
     Bottom,
 }
 
+/// When the per-pane scrollback scrollbar is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarMode {
+    Never,
+    /// Only while scrolled back into history.
+    Auto,
+    Always,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: String,
@@ -83,6 +92,15 @@ pub struct Config {
     pub bell: BellMode,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
+    /// Opacity of unfocused split panes (1.0 = no dim).
+    pub unfocused_split_opacity: f32,
+    pub scrollbar: ScrollbarMode,
+    /// Explicit split-divider/border color (else theme palette).
+    pub split_divider_color: Option<Rgb>,
+    /// Cursor blink half-period in milliseconds.
+    pub cursor_blink_interval: u64,
+    /// Auto-copy the selection to the clipboard on release.
+    pub copy_on_select: bool,
     pub font_ligatures: bool,
     pub search_foreground: Rgb,
     pub search_background: Rgb,
@@ -112,6 +130,11 @@ impl Default for Config {
             bell: BellMode::Both,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
+            unfocused_split_opacity: 0.7,
+            scrollbar: ScrollbarMode::Auto,
+            split_divider_color: None,
+            cursor_blink_interval: 530,
+            copy_on_select: true,
             font_ligatures: true,
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
             search_background: Rgb::new(0xe0, 0xaf, 0x68),
@@ -292,6 +315,29 @@ impl Config {
                         _ => TabBarPos::Top,
                     }
                 }
+                "unfocused-split-opacity" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.unfocused_split_opacity = v.clamp(0.1, 1.0);
+                    }
+                }
+                "scrollbar" => {
+                    cfg.scrollbar = match e.value.as_str() {
+                        "never" | "off" | "false" => ScrollbarMode::Never,
+                        "always" => ScrollbarMode::Always,
+                        _ => ScrollbarMode::Auto,
+                    }
+                }
+                "split-divider-color" => {
+                    if let Some(c) = Rgb::parse(&e.value) {
+                        cfg.split_divider_color = Some(c);
+                    }
+                }
+                "cursor-blink-interval" => {
+                    if let Ok(v) = e.value.parse::<u64>() {
+                        cfg.cursor_blink_interval = v.clamp(50, 5000);
+                    }
+                }
+                "copy-on-select" => cfg.copy_on_select = e.value != "false",
                 "font-feature" if (e.value.contains("-liga") || e.value.contains("liga off")) => {
                     cfg.font_ligatures = false;
                 }
@@ -422,6 +468,31 @@ mod config_tests {
         assert_eq!(
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
+        );
+    }
+
+    #[test]
+    fn ux_backlog_config() {
+        let d = Config::default();
+        assert_eq!(d.unfocused_split_opacity, 0.7);
+        assert_eq!(d.scrollbar, ScrollbarMode::Auto);
+        assert_eq!(d.cursor_blink_interval, 530);
+        assert!(d.copy_on_select);
+        assert!(d.split_divider_color.is_none());
+        let c = Config::parse_text(
+            "unfocused-split-opacity = 0.5\nscrollbar = always\n\
+             split-divider-color = #ff8800\ncursor-blink-interval = 800\n\
+             copy-on-select = false\n",
+        );
+        assert_eq!(c.unfocused_split_opacity, 0.5);
+        assert_eq!(c.scrollbar, ScrollbarMode::Always);
+        assert_eq!(c.split_divider_color, Some(Rgb::new(0xff, 0x88, 0x00)));
+        assert_eq!(c.cursor_blink_interval, 800);
+        assert!(!c.copy_on_select);
+        // Clamping.
+        assert_eq!(
+            Config::parse_text("unfocused-split-opacity = 5").unfocused_split_opacity,
+            1.0
         );
     }
 

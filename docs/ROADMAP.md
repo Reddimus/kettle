@@ -116,6 +116,11 @@
       reply, cursor-blink mode (?12) event (40 conformance tests)
 
 - [x] Clickable tab bar: left-click a tab segment to switch tabs
+- [x] UI/UX overhaul: Terminator-parity split keys; tab bar with
+      per-tab ✕ / + / middle-click-close / always-show / top|bottom;
+      unfocused-pane dimming; pane zoom (Ctrl+Shift+X); per-pane
+      scrollbar; configurable split-divider color; cursor-blink
+      interval; copy-on-select toggle (see docs/UX-COMPARISON.md)
 
 - [x] Conformance: CHT/CBT tab navigation (41 conformance tests).
       DECSCA/DECSEL selective-erase unsupported upstream — documented.

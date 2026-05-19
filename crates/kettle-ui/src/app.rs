@@ -510,10 +510,11 @@ impl App {
 
     fn redraw(&mut self) {
         self.drain_events();
-        // Advance the cursor blink phase (~530 ms, xterm-like).
+        // Advance the cursor blink phase (configurable half-period).
         if self.cfg.cursor_blink
             && self.window_focused
-            && self.last_blink.elapsed() >= std::time::Duration::from_millis(530)
+            && self.last_blink.elapsed()
+                >= std::time::Duration::from_millis(self.cfg.cursor_blink_interval)
         {
             self.blink_on = !self.blink_on;
             self.last_blink = std::time::Instant::now();
@@ -640,7 +641,10 @@ impl App {
             }
             Action::ToggleBroadcastAll => self.mux.broadcast = true,
             Action::ToggleBroadcastOff => self.mux.broadcast = false,
-            Action::ToggleZoom => {}
+            Action::ToggleZoom => {
+                self.mux.toggle_zoom();
+                self.resize_all();
+            }
             Action::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
                 if let Some(w) = &self.window {
@@ -1053,7 +1057,7 @@ impl ApplicationHandler<UserEvent> for App {
                         kettle_core::SelectionType::Simple
                     };
                     self.begin_selection(area, kind);
-                    if kind != kettle_core::SelectionType::Simple {
+                    if kind != kettle_core::SelectionType::Simple && self.cfg.copy_on_select {
                         self.copy_selection();
                     }
                 }
@@ -1079,7 +1083,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if bcode == 0 {
-                    if self.selecting {
+                    if self.selecting && self.cfg.copy_on_select {
                         self.copy_selection();
                     }
                     self.selecting = false;

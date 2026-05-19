@@ -31,6 +31,11 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
+| `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
+| `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane scrollback scrollbar (`auto` = only while scrolled) |
+| `split-divider-color` | color | theme | Pane border/divider color |
+| `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
+| `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
 | `font-feature` | string | — | `-liga` disables ligatures |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |

@@ -20,7 +20,7 @@ use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
-use kettle_config::{Config, CursorStyle, Rgb};
+use kettle_config::{Config, CursorStyle, Rgb, ScrollbarMode};
 use kettle_core::EventProxy;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -128,6 +128,8 @@ pub struct Renderer {
     search_buffer: TextBuffer,
 
     quads: QuadPipeline,
+    /// Second quad pass drawn *after* text (pane dimming, scrollbar).
+    overlay_quads: QuadPipeline,
     imgs: imgpipe::ImagePipeline,
 
     font_family: String,
@@ -207,6 +209,7 @@ impl Renderer {
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
 
         let quads = QuadPipeline::new(&device, format);
+        let overlay_quads = QuadPipeline::new(&device, format);
         let imgs = imgpipe::ImagePipeline::new(&device, format);
 
         Ok(Renderer {
@@ -224,6 +227,7 @@ impl Renderer {
             tabbar_buffer,
             search_buffer,
             quads,
+            overlay_quads,
             imgs,
             font_family: cfg.font_family.clone(),
             font_size,
@@ -280,6 +284,8 @@ impl Renderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
+        let mut over: Vec<QuadInstance> = Vec::new();
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -312,11 +318,11 @@ impl Renderer {
         // Per-pane grid + dividers/border.
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
-            // Pane separators / focus border.
+            // Pane separators / focus border (configurable divider color).
             let border = if pv.focused {
                 theme.palette[4]
             } else {
-                theme.palette[8]
+                cfg.split_divider_color.unwrap_or(theme.palette[8])
             };
             quads.push(rect(rx, ry, rw, 1.0, border, 1.0));
             quads.push(rect(rx, ry + rh - 1.0, rw, 1.0, border, 1.0));
@@ -391,6 +397,42 @@ impl Renderer {
                             theme.selection_background
                         },
                         0.85,
+                    ));
+                }
+            }
+
+            // Post-text overlay: dim unfocused panes; per-pane scrollbar.
+            if !pv.focused && panes.len() > 1 && cfg.unfocused_split_opacity < 1.0 {
+                over.push(rect(
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    theme.background,
+                    1.0 - cfg.unfocused_split_opacity,
+                ));
+            }
+            if cfg.scrollbar != ScrollbarMode::Never {
+                let g = pv.term.grid();
+                let rows = g.screen_lines();
+                let hist = g.history_size();
+                let off = g.display_offset();
+                let total = rows + hist;
+                let show = cfg.scrollbar == ScrollbarMode::Always
+                    || (cfg.scrollbar == ScrollbarMode::Auto && off > 0);
+                if show && total > rows {
+                    let track = rh;
+                    let th = (track * rows as f32 / total as f32).max(12.0);
+                    // off counts lines scrolled back from the bottom.
+                    let from_top = (hist - off) as f32 / total as f32;
+                    let ty = ry + from_top * track;
+                    over.push(rect(
+                        rx + rw - 4.0,
+                        ty.min(ry + rh - th),
+                        3.0,
+                        th,
+                        theme.palette[8],
+                        0.8,
                     ));
                 }
             }
@@ -598,6 +640,8 @@ impl Renderer {
         self.imgs
             .upload(&self.device, &self.queue, [sw, sh], &img_items);
         self.imgs.gc(&live);
+        self.overlay_quads
+            .upload(&self.device, &self.queue, [sw, sh], &over);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -643,6 +687,8 @@ impl Renderer {
             self.imgs.draw(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+            // Dimming + scrollbar sit on top of glyphs.
+            self.overlay_quads.draw(&mut pass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

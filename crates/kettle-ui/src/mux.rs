@@ -161,6 +161,8 @@ impl Node {
 pub struct Tab {
     pub root: Node,
     pub focus: u64,
+    /// When true, only the focused pane is shown at full size.
+    pub zoomed: bool,
 }
 
 pub struct Mux {
@@ -309,7 +311,11 @@ impl Mux {
         for st in &s.tabs {
             if let Ok(root) = self.build_node(&st.root, cfg, cw, ch, mk) {
                 let focus = root.first_leaf();
-                self.tabs.push(Tab { root, focus });
+                self.tabs.push(Tab {
+                    root,
+                    focus,
+                    zoomed: false,
+                });
             }
         }
         self.active = s.active.min(self.tabs.len().saturating_sub(1));
@@ -330,6 +336,7 @@ impl Mux {
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
+            zoomed: false,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -352,6 +359,7 @@ impl Mux {
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
+            zoomed: false,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -386,9 +394,22 @@ impl Mux {
     pub fn layout(&self, tab: usize, area: Rect) -> Vec<(u64, Rect)> {
         let mut v = Vec::new();
         if let Some(t) = self.tabs.get(tab) {
-            t.root.layout(area, &mut v);
+            if t.zoomed {
+                // Zoomed: only the focused pane, full area.
+                v.push((t.focus, area));
+            } else {
+                t.root.layout(area, &mut v);
+            }
         }
         v
+    }
+
+    /// Toggle zoom (maximize the focused pane) for the active tab.
+    pub fn toggle_zoom(&mut self) {
+        let a = self.active;
+        if let Some(t) = self.tabs.get_mut(a) {
+            t.zoomed = !t.zoomed;
+        }
     }
 
     pub fn active_focus(&self) -> Option<u64> {
@@ -664,6 +685,7 @@ mod node_tests {
             m.tabs.push(Tab {
                 root: Node::Leaf(id),
                 focus: id,
+                zoomed: false,
             });
         }
         m.active = 2; // third tab
@@ -678,5 +700,25 @@ mod node_tests {
         // Closing the final tab reports "empty".
         assert!(m.close_tab_at(0));
         assert!(m.tabs.is_empty());
+    }
+
+    #[test]
+    fn zoom_collapses_layout_to_focused_pane() {
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        m.tabs.push(Tab {
+            root,
+            focus: 2,
+            zoomed: false,
+        });
+        m.active = 0;
+        assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
+        m.toggle_zoom();
+        let z = m.layout(0, (0.0, 0.0, 100.0, 50.0));
+        assert_eq!(z.len(), 1);
+        assert_eq!(z[0], (2, (0.0, 0.0, 100.0, 50.0)));
+        m.toggle_zoom();
+        assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
     }
 }
