@@ -160,8 +160,17 @@
       overrides already shipped (`FontFeature`, 92 tests). Cited:
       Ghostty `font-feature`, kitty `font_features`.
 
+- [x] kitty animation (decode/state layer): `a=f` frame transmission
+      (chunked, single in-flight slot; gap from `z`, `z<0` = gapless),
+      `a=a` control (`c` current frame, `s` stop/run/loading, `v` loop
+      count, `r`+`z` per-frame gap), `a=d,d=f` frame deletion;
+      `KittyState::frames/animation` accessors (+2 tests, 94 workspace).
+      Frame compositing (`a=c`), partial-rect frames and playback
+      timing/rendering are the remaining sub-items.
+
 ## Next (in priority order)
-- [ ] kitty placeholders: animation frames + relative placements
+- [ ] kitty animation: playback loop + frame compositing (`a=c`,
+      partial-rect) + relative placements
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

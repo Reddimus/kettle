@@ -30,6 +30,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty animation (decode/state layer): `a=f` animation-frame
+  transmission (chunked via a single in-flight slot, gap from `z` with
+  `z<0` = gapless base frames), `a=a` animation control (`c` current
+  frame, `s` = stop/run/loading, `v` loop count, `r`+`z` per-frame gap),
+  and `a=d,d=f` frame deletion (keeps the base image).
+  `KittyState::frames()/animation()` expose the model for the upcoming
+  playback/compositing cycle. Cited: kitty
+  `docs/graphics-protocol.rst:839`.
 - Font-feature tuning: `font-feature` now parses real OpenType tags
   (`liga`, `calt`, `ss01`, `cv01`, `zero`, …) with `+tag` / `-tag` /
   `tag=N` / `tag on|off` dialects, repeatable and comma-separated, and

@@ -10,8 +10,12 @@
 //!   placement registered, but nothing is drawn at the cursor — it is shown
 //!   later via Unicode placeholder text (see [`crate::placeholder`])
 //!
-//! Spec: `kitty/docs/graphics-protocol.rst`. Animation and relative
-//! placements remain out of scope (see ROADMAP).
+//! - `a=f` transmit animation frames; `a=a` animation control (current
+//!   frame / run-stop / loop count / per-frame gap); `a=d,d=f` frame delete
+//!
+//! Spec: `kitty/docs/graphics-protocol.rst`. Frame compositing (`a=c`),
+//! partial-rect frames, playback timing and relative placements remain out
+//! of scope for now (see ROADMAP).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -33,6 +37,41 @@ pub struct VirtualPlacement {
     pub cols: u32,
     pub rows: u32,
     pub z: i32,
+}
+
+/// One animation frame of an image (`a=f`). `gap_ms`: `0` = unset,
+/// `> 0` = display this many ms, `< 0` = *gapless* (skipped on playback,
+/// kept only as base data). Partial-rect frames (`x,y` offsets) and
+/// frame-composition (`a=c`) are not modelled yet — see ROADMAP.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub img: ImageData,
+    pub gap_ms: i32,
+}
+
+/// Per-image animation control state (`a=a`), set by the client and read by
+/// the renderer's playback loop (a later cycle). `current` is 1-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationState {
+    pub current: u32,
+    /// `false` = stopped (`s=1`); `true` = running (`s=2|3`).
+    pub running: bool,
+    /// `s=2`: wait for more frames at the end instead of looping.
+    pub loading: bool,
+    /// Loop count: `0` = infinite, `n` = play `n` times (kitty `v`,
+    /// normalized: `v=1`→infinite→0 here, `v=n`→`n-1`).
+    pub loops: u32,
+}
+
+impl Default for AnimationState {
+    fn default() -> Self {
+        AnimationState {
+            current: 1,
+            running: false,
+            loading: false,
+            loops: 0,
+        }
+    }
 }
 
 /// What a kitty APC resolved to.
@@ -57,6 +96,14 @@ pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
     virtual_placements: HashMap<u32, VirtualPlacement>,
+    /// The single in-flight `a=f` frame transmission (`id`, accumulator).
+    /// Continuation chunks omit `i=`, so a slot — not an id map — is right;
+    /// the protocol only allows one transmission in flight at a time.
+    frame_in_flight: Option<(u32, Acc)>,
+    /// Animation frames appended after the root image, per image id.
+    frames: HashMap<u32, Vec<Frame>>,
+    /// Animation control state per image id (`a=a`).
+    anim: HashMap<u32, AnimationState>,
 }
 
 impl KittyState {
@@ -65,7 +112,15 @@ impl KittyState {
         let (control, payload) = body.split_once(';').unwrap_or((body, ""));
         let kv = parse_control(control);
         let id = kv.get("i").and_then(|v| v.parse().ok()).unwrap_or(0u32);
-        let action = kv.get("a").map(|s| s.as_str()).unwrap_or("t");
+        // Continuation chunks carry only `m` (no `a`); route them to the
+        // frame accumulator if a frame — and only a frame — is in flight.
+        let action = match kv.get("a") {
+            Some(a) => a.as_str(),
+            // Continuation chunks carry only `m`; route to the frame
+            // accumulator when a frame — and only a frame — is in flight.
+            None if self.frame_in_flight.is_some() && !self.in_flight.contains_key(&id) => "f",
+            None => "t",
+        };
         let z = kv.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
 
         let virt = kv.get("U").map(|v| v == "1").unwrap_or(false);
@@ -74,11 +129,25 @@ impl KittyState {
         // Control-only ops are never chunked.
         if action == "d" {
             self.in_flight.clear();
+            self.frame_in_flight = None;
             let target = kv.get("d").map(|s| s.as_str()).unwrap_or("a");
+            // `d=f|F`: delete only the animation frames/state, keep the image.
+            if target.eq_ignore_ascii_case("f") {
+                if id != 0 {
+                    self.frames.remove(&id);
+                    self.anim.remove(&id);
+                } else {
+                    self.frames.clear();
+                    self.anim.clear();
+                }
+                return KittyOut::None;
+            }
             return match target {
                 "i" | "I" => {
                     self.store.remove(&id);
                     self.virtual_placements.remove(&id);
+                    self.frames.remove(&id);
+                    self.anim.remove(&id);
                     KittyOut::Delete {
                         all: false,
                         id: Some(id),
@@ -87,12 +156,86 @@ impl KittyState {
                 _ => {
                     self.store.clear();
                     self.virtual_placements.clear();
+                    self.frames.clear();
+                    self.anim.clear();
                     KittyOut::Delete {
                         all: true,
                         id: None,
                     }
                 }
             };
+        }
+        if action == "a" {
+            // Animation control. Record state for the renderer playback loop.
+            let st = self.anim.entry(id).or_default();
+            if let Some(c) = dim("c") {
+                st.current = c.max(1);
+            }
+            match kv.get("s").and_then(|v| v.parse::<u32>().ok()) {
+                Some(1) => {
+                    st.running = false;
+                    st.loading = false;
+                    st.loops = 0; // stopping resets the loop counter
+                }
+                Some(2) => {
+                    st.running = true;
+                    st.loading = true;
+                }
+                Some(3) => {
+                    st.running = true;
+                    st.loading = false;
+                }
+                _ => {}
+            }
+            if let Some(v) = kv.get("v").and_then(|v| v.parse::<u32>().ok())
+                && v != 0
+            {
+                st.loops = if v == 1 { 0 } else { v - 1 };
+            }
+            // `r` + `z`: set the gap of an existing (1-based) frame.
+            if z != 0
+                && let Some(r) = dim("r")
+                && let Some(fr) = self
+                    .frames
+                    .get_mut(&id)
+                    .and_then(|f| f.get_mut((r as usize).saturating_sub(1)))
+            {
+                fr.gap_ms = z;
+            }
+            return KittyOut::None;
+        }
+        if action == "c" {
+            // Frame composition (`a=c`): not modelled yet (see ROADMAP).
+            return KittyOut::None;
+        }
+        if action == "f" {
+            // Transmit animation frame data (chunked like an image). The
+            // first chunk carries `i=`/control; continuations carry only
+            // `m`, so the id + control come from the in-flight slot.
+            let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
+            let slot = self
+                .frame_in_flight
+                .get_or_insert_with(|| (id, Acc::default()));
+            if slot.1.control.is_empty() {
+                slot.0 = id;
+                slot.1.control = control.to_string();
+            }
+            slot.1.payload.push_str(payload.trim());
+            if more {
+                return KittyOut::None;
+            }
+            let (fid, Acc { control, payload }) = self.frame_in_flight.take().unwrap();
+            if let Some(img) = decode(&control, &payload) {
+                let gap = parse_control(&control)
+                    .get("z")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0i32);
+                self.frames
+                    .entry(fid)
+                    .or_default()
+                    .push(Frame { img, gap_ms: gap });
+            }
+            return KittyOut::None;
         }
         if action == "q" {
             return KittyOut::None; // capability query — nothing to render
@@ -175,6 +318,17 @@ impl KittyState {
     /// The registered virtual placement for an image id, if any.
     pub fn virtual_placement(&self, id: u32) -> Option<&VirtualPlacement> {
         self.virtual_placements.get(&id)
+    }
+
+    /// Animation frames appended to an image (root frame is the base image
+    /// itself and is not included here), in transmit order.
+    pub fn frames(&self, id: u32) -> &[Frame] {
+        self.frames.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Animation control state for an image id, if the client set any.
+    pub fn animation(&self, id: u32) -> Option<&AnimationState> {
+        self.anim.get(&id)
     }
 }
 
@@ -283,5 +437,63 @@ mod tests {
             k.virtual_placement(9).is_none(),
             "delete-by-id drops the virtual placement too"
         );
+    }
+
+    #[test]
+    fn animation_frames_transmit_and_control() {
+        let mut k = KittyState::default();
+        // Root image (id 3) shown.
+        assert!(matches!(
+            k.feed(&format!("a=T,i=3,f=32,s=1,v=1;{PX}")),
+            KittyOut::Place(_)
+        ));
+        // Two frames with gaps; neither draws at the cursor.
+        assert!(matches!(
+            k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=40;{PX}")),
+            KittyOut::None
+        ));
+        k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=-1;{PX}"));
+        let fr = k.frames(3);
+        assert_eq!(fr.len(), 2);
+        assert_eq!(fr[0].gap_ms, 40);
+        assert_eq!(fr[1].gap_ms, -1, "z<0 ⇒ gapless");
+        assert!(k.frames(99).is_empty());
+
+        // Control: make frame 2 current, run looping 5 times (v=5 ⇒ 4).
+        k.feed("a=a,i=3,c=2,s=3,v=5");
+        let a = k.animation(3).copied().unwrap();
+        assert_eq!(a.current, 2);
+        assert!(a.running && !a.loading);
+        assert_eq!(a.loops, 4);
+
+        // r+z sets the gap of an existing (1-based) frame.
+        k.feed("a=a,i=3,r=1,z=48");
+        assert_eq!(k.frames(3)[0].gap_ms, 48);
+
+        // Stop resets running + loop counter.
+        k.feed("a=a,i=3,s=1");
+        let a = k.animation(3).copied().unwrap();
+        assert!(!a.running);
+        assert_eq!(a.loops, 0);
+
+        // d=f deletes frames/anim but keeps the image.
+        k.feed("a=d,d=f,i=3");
+        assert!(k.frames(3).is_empty());
+        assert!(k.animation(3).is_none());
+        assert!(k.image(3).is_some(), "d=f keeps the base image");
+    }
+
+    #[test]
+    fn chunked_frame_transmission() {
+        let mut k = KittyState::default();
+        k.feed(&format!("a=T,i=4,f=32,s=1,v=1;{PX}"));
+        // Frame split across chunks (m=1 continuation).
+        assert!(matches!(
+            k.feed("a=f,i=4,f=32,s=1,v=1,m=1;AQID"),
+            KittyOut::None
+        ));
+        assert!(k.frames(4).is_empty(), "incomplete frame not stored yet");
+        k.feed("m=0;BA==");
+        assert_eq!(k.frames(4).len(), 1, "frame completes on final chunk");
     }
 }
