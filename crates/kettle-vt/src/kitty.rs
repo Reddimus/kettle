@@ -14,9 +14,11 @@
 //!   previous-frame / `Y=` color / transparent canvas; `r=` edits a frame
 //!   in place); `a=a` control (current frame / run-stop / loop / gap);
 //!   `a=c` copy a rectangle between frames; `a=d,d=f` frame delete
+//! - `a=p,P=,Q=` *relative placement*: recorded with its `H/V` cell offset
+//!   and parent; the on-screen position is resolved from the parent at
+//!   render time (a later cycle). Parent deletion cascades to relatives.
 //!
-//! Spec: `kitty/docs/graphics-protocol.rst`. Relative placements remain out
-//! of scope for now (see ROADMAP).
+//! Spec: `kitty/docs/graphics-protocol.rst`.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -38,6 +40,20 @@ pub struct VirtualPlacement {
     pub cols: u32,
     pub rows: u32,
     pub z: i32,
+}
+
+/// A *relative placement* (`a=p,P=,Q=`): this placement is positioned
+/// `(h, v)` cells from the top-left of its parent placement (positive = right
+/// / down). Most useful with Unicode placeholders — the real image tracks a
+/// placeholder that moves with the text. Render-time position resolution is
+/// a later cycle; this records the relation. kitty
+/// `graphics-protocol.rst:682`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelativePlacement {
+    pub parent_img: u32,
+    pub parent_placement: u32,
+    pub h: i32,
+    pub v: i32,
 }
 
 /// One animation frame of an image (`a=f`). `img` is the *fully composed*
@@ -149,6 +165,12 @@ pub enum KittyOut {
     Animate {
         id: u32,
     },
+    /// A relative placement was registered for image `id`; nothing is drawn
+    /// at the cursor — its position is derived from the parent placement at
+    /// render time (a later cycle).
+    Relative {
+        id: u32,
+    },
 }
 
 /// Reassembles chunked transmissions and remembers transmitted images so
@@ -166,6 +188,8 @@ pub struct KittyState {
     frames: HashMap<u32, Vec<Frame>>,
     /// Animation control state per image id (`a=a`).
     anim: HashMap<u32, AnimationState>,
+    /// Relative placements, keyed by `(image id, placement id)`.
+    rel: HashMap<(u32, u32), RelativePlacement>,
 }
 
 impl KittyState {
@@ -211,6 +235,10 @@ impl KittyState {
                     self.virtual_placements.remove(&id);
                     self.frames.remove(&id);
                     self.anim.remove(&id);
+                    // A placement group dies with its parent: drop this
+                    // image's relatives and any placement parented to it.
+                    self.rel
+                        .retain(|&(img, _), r| img != id && r.parent_img != id);
                     KittyOut::Delete {
                         all: false,
                         id: Some(id),
@@ -221,6 +249,7 @@ impl KittyState {
                     self.virtual_placements.clear();
                     self.frames.clear();
                     self.anim.clear();
+                    self.rel.clear();
                     KittyOut::Delete {
                         all: true,
                         id: None,
@@ -397,6 +426,22 @@ impl KittyState {
                 );
                 return KittyOut::Virtual { id };
             }
+            // `P=` (parent image id) ⇒ a relative placement: recorded and
+            // positioned from the parent at render time, not at the cursor.
+            if let Some(parent_img) = dim("P") {
+                let geti = |k: &str| kv.get(k).and_then(|v| v.parse::<i32>().ok());
+                let placement = dim("p").unwrap_or(0);
+                self.rel.insert(
+                    (id, placement),
+                    RelativePlacement {
+                        parent_img,
+                        parent_placement: dim("Q").unwrap_or(0),
+                        h: geti("H").unwrap_or(0),
+                        v: geti("V").unwrap_or(0),
+                    },
+                );
+                return KittyOut::Relative { id };
+            }
             return match self.store.get(&id) {
                 Some(img) => KittyOut::Place(Placed {
                     img: img.clone(),
@@ -472,6 +517,11 @@ impl KittyState {
     /// Animation control state for an image id, if the client set any.
     pub fn animation(&self, id: u32) -> Option<&AnimationState> {
         self.anim.get(&id)
+    }
+
+    /// The relative-placement relation for `(image id, placement id)`.
+    pub fn relative_placement(&self, id: u32, placement: u32) -> Option<&RelativePlacement> {
+        self.rel.get(&(id, placement))
     }
 
     /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
@@ -696,6 +746,41 @@ mod tests {
         assert_eq!(current_frame(&g2, &load, 50), 0);
         assert_eq!(current_frame(&g2, &load, 250), 1);
         assert_eq!(current_frame(&g2, &load, 900), 1, "loading waits at end");
+    }
+
+    #[test]
+    fn relative_placement_recorded_and_lifetime() {
+        let mut k = KittyState::default();
+        // Parent image 1 (placement 1) and child image 2.
+        k.feed(&format!("a=T,i=1,f=32,s=1,v=1;{PX}"));
+        k.feed(&format!("a=t,i=2,f=32,s=1,v=1;{PX}"));
+        // Relative placement: image 2 / placement 7, parent = img 1 / p 1,
+        // offset 3 right, -2 up. Drawn nowhere now (Relative, not Place).
+        assert!(matches!(
+            k.feed("a=p,i=2,p=7,P=1,Q=1,H=3,V=-2"),
+            KittyOut::Relative { id: 2 }
+        ));
+        assert_eq!(
+            k.relative_placement(2, 7).copied(),
+            Some(RelativePlacement {
+                parent_img: 1,
+                parent_placement: 1,
+                h: 3,
+                v: -2,
+            })
+        );
+        // Deleting the parent image cascades: the relative is dropped.
+        k.feed("a=d,d=i,i=1");
+        assert!(
+            k.relative_placement(2, 7).is_none(),
+            "relative dies with its parent"
+        );
+
+        // A relative whose own image is deleted also goes away.
+        k.feed("a=p,i=2,p=8,P=9,Q=1");
+        assert!(k.relative_placement(2, 8).is_some());
+        k.feed("a=d,d=i,i=2");
+        assert!(k.relative_placement(2, 8).is_none());
     }
 
     #[test]

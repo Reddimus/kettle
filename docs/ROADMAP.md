@@ -189,9 +189,16 @@
       (source-over) + `solid` primitives, +3 tests (99 workspace).
       Cited kitty `graphics-protocol.rst` frame-composition.
 
+- [x] kitty relative placements (decode/state): `a=p,P=,Q=` recorded
+      with parent image/placement + `H/V` cell offset; parent-deletion
+      cascade (group lifetime); `RelativePlacement` + accessor (+1 test,
+      100 workspace tests). Render-time position resolution from the
+      parent is the remaining sub-item. Cited kitty
+      `graphics-protocol.rst:682`.
+
 ## Next (in priority order)
-- [ ] kitty graphics: relative placements (`P=`/`Q=` parent, `H=`/`V=`
-      offsets)
+- [ ] kitty relative placements — render: resolve position from the
+      parent placement (incl. virtual/placeholder parents) + offset
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

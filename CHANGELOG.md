@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty relative placements (decode/state): `a=p,P=,Q=` is recorded as
+  a `RelativePlacement` (parent image/placement + `H`/`V` cell offset)
+  instead of drawing at the cursor; a placement group dies with its
+  parent (parent-image deletion cascades to its relatives). Render-time
+  resolution of the on-screen position from the parent is the next
+  sub-item.
 - kitty animation frame compositing: partial-rect `a=f` frames are
   blended (or `X=1` replaced) over a chosen canvas — a previous frame
   (`c=`), a `Y=` background color, or transparent — and `r=` edits an

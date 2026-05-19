@@ -274,7 +274,11 @@ impl Extractor {
                             }
                             None => R::None,
                         },
-                        KittyOut::None => R::None,
+                        // Relative placements are recorded in KittyState;
+                        // their on-screen position is derived from the
+                        // parent at render time (a later cycle), so nothing
+                        // is emitted at the cursor now.
+                        KittyOut::Relative { .. } | KittyOut::None => R::None,
                     }
                 } else {
                     R::None
