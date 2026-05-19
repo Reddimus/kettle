@@ -94,6 +94,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design + diagrams
 - [docs/RESEARCH.md](docs/RESEARCH.md) — analysis of other terminals & citations
+- [docs/UX-COMPARISON.md](docs/UX-COMPARISON.md) — cited UI/UX matrix vs Ghostty/kitty/WezTerm/Terminator/Alacritty
 - [docs/INSTALL.md](docs/INSTALL.md) — install per-OS / from source
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI

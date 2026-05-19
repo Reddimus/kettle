@@ -925,6 +925,374 @@ fn measure_cell(
     (w, metrics.line_height)
 }
 
+fn gc(c: Rgb) -> GColor {
+    GColor::rgb(c.r, c.g, c.b)
+}
+
+/// Render a representative kettle frame **offscreen** (no window/surface) and
+/// write it to a PNG. Used by `kettle --screenshot <out.png>` to produce the
+/// showcase images embedded in `docs/UX-COMPARISON.md`.
+///
+/// This drives kettle's *real* GPU text + quad path (bundled Nerd Font,
+/// `glyphon` shaping, the `QuadPipeline`, the active theme) over a scripted
+/// demo: a two-pane vertical split under the redesigned tab bar (active tab,
+/// per-tab `✕`, trailing `+`), with a themed shell session on the left and a
+/// monitor-style readout on the right. Content is synthetic; the rendering
+/// pipeline is identical to the live one.
+pub fn capture_png(cfg: &Config, cols: u32, rows: u32, out: &std::path::Path) -> Result<()> {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::None,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|e| anyhow!("no GPU adapter: {e:?}"))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-screenshot"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| anyhow!("device: {e:?}"))?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        let mut font_system = FontSystem::new();
+        for face in kettle_config::font::all() {
+            font_system.db_mut().load_font_data(face.to_vec());
+        }
+        let swash_cache = Cache::new(&device);
+        let mut atlas = TextAtlas::new(&device, &queue, &swash_cache, format);
+        let viewport = Viewport::new(&device, &swash_cache);
+        let mut text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let mut swash = SwashCache::new();
+        let mut quads = QuadPipeline::new(&device, format);
+
+        let theme = &cfg.theme;
+        let fam = cfg.font_family.clone();
+        let metrics = Metrics::new(cfg.font_size, cfg.font_size * 1.25);
+        let mut measure = TextBuffer::new(&mut font_system, metrics);
+        let (cw, ch) = measure_cell(&mut font_system, &mut measure, &fam, metrics);
+
+        let pad = cfg.padding_x.max(8.0);
+        let tab_h = ch + 12.0;
+        let body_w = cols as f32 * cw;
+        let body_h = rows as f32 * ch;
+        let w = (pad * 2.0 + body_w).ceil() as u32;
+        let h = (tab_h + body_h + pad * 2.0).ceil() as u32;
+        let (wf, hf) = (w as f32, h as f32);
+        let split_x = (wf / 2.0).round();
+
+        let base = Attrs::new().family(Family::Name(&fam));
+        let mut q: Vec<QuadInstance> = Vec::new();
+
+        // --- Tab bar (redesigned: active accent + per-tab ✕ + trailing +).
+        q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
+        let segw = 240.0_f32.min((wf - 44.0) / 2.0);
+        // Active tab 0: themed background + left accent bar.
+        q.push(rect(0.0, 0.0, segw, tab_h, theme.background, 1.0));
+        q.push(rect(0.0, 0.0, 2.0, tab_h, theme.palette[4], 1.0));
+        // Per-segment separators.
+        q.push(rect(segw - 1.0, 0.0, 1.0, tab_h, theme.background, 0.5));
+        q.push(rect(
+            2.0 * segw - 1.0,
+            0.0,
+            1.0,
+            tab_h,
+            theme.background,
+            0.5,
+        ));
+        // Trailing new-tab (+) button.
+        q.push(rect(2.0 * segw, 0.0, 40.0, tab_h, theme.palette[8], 1.0));
+
+        // --- Two-pane vertical split with focus border on the left pane.
+        q.push(rect(
+            split_x - 1.0,
+            tab_h,
+            2.0,
+            hf - tab_h,
+            theme.palette[8],
+            1.0,
+        ));
+        let foc = theme.palette[4];
+        let ly = tab_h;
+        let lh = hf - tab_h;
+        q.push(rect(0.0, ly, split_x, 1.0, foc, 1.0));
+        q.push(rect(0.0, ly + lh - 1.0, split_x, 1.0, foc, 1.0));
+        q.push(rect(0.0, ly, 1.0, lh, foc, 1.0));
+        q.push(rect(split_x - 1.0, ly, 1.0, lh, foc, 1.0));
+
+        // Block cursor on the left pane's active prompt line.
+        let cur_row = 6.0;
+        q.push(rect(
+            pad + 22.0 * cw,
+            ly + pad + cur_row * ch,
+            cw,
+            ch,
+            theme.cursor,
+            1.0,
+        ));
+
+        // --- Text buffers (rich, themed spans) -------------------------------
+        let p = theme.palette;
+        let dim = Attrs::new().family(Family::Name(&fam)).color(gc(p[8]));
+        let grn = Attrs::new().family(Family::Name(&fam)).color(gc(p[2]));
+        let blu = Attrs::new().family(Family::Name(&fam)).color(gc(p[4]));
+        let yel = Attrs::new().family(Family::Name(&fam)).color(gc(p[3]));
+        let mag = Attrs::new().family(Family::Name(&fam)).color(gc(p[5]));
+        let fg = Attrs::new()
+            .family(Family::Name(&fam))
+            .color(gc(theme.foreground));
+
+        let mut tab_buf = TextBuffer::new(&mut font_system, metrics);
+        tab_buf.set_size(&mut font_system, Some(wf), Some(tab_h));
+        tab_buf.set_rich_text(
+            &mut font_system,
+            [
+                (" 1: zsh  ✕   ", fg.clone()),
+                ("2: ssh prod  ✕", dim.clone()),
+                ("     +", grn.clone()),
+            ],
+            &base,
+            Shaping::Advanced,
+            None,
+        );
+        tab_buf.shape_until_scroll(&mut font_system, false);
+
+        let mut left = TextBuffer::new(&mut font_system, metrics);
+        left.set_size(&mut font_system, Some(split_x - pad), Some(lh));
+        left.set_rich_text(
+            &mut font_system,
+            [
+                ("kevim@kettle", grn.clone()),
+                (":", fg.clone()),
+                ("~/Repos/kettle", blu.clone()),
+                ("$ cargo test --workspace\n", fg.clone()),
+                ("   Compiling ", dim.clone()),
+                ("kettle v0.1.0\n", dim.clone()),
+                ("    Finished ", grn.clone()),
+                ("`test` profile [optimized]\n", fg.clone()),
+                ("     Running ", grn.clone()),
+                ("unittests\n", fg.clone()),
+                ("test result: ", fg.clone()),
+                ("ok", grn.clone()),
+                (". 74 passed; 0 failed\n\n", fg.clone()),
+                ("kevim@kettle", grn.clone()),
+                (":", fg.clone()),
+                ("~/Repos/kettle", blu.clone()),
+                ("$ ", fg.clone()),
+            ],
+            &base,
+            Shaping::Advanced,
+            None,
+        );
+        left.shape_until_scroll(&mut font_system, false);
+
+        let mut right = TextBuffer::new(&mut font_system, metrics);
+        right.set_size(&mut font_system, Some(wf - split_x - pad), Some(lh));
+        right.set_rich_text(
+            &mut font_system,
+            [
+                ("  kettle — cross-platform terminal\n\n", mag.clone()),
+                ("CPU ", fg.clone()),
+                ("|||||||||||", grn.clone()),
+                ("|||||", yel.clone()),
+                ("        37%\n", fg.clone()),
+                ("MEM ", fg.clone()),
+                ("||||||||", blu.clone()),
+                ("            5.1G/32G\n", fg.clone()),
+                ("NET ", fg.clone()),
+                ("↓ 1.2 MB/s  ↑ 88 KB/s\n\n", dim.clone()),
+                ("  GPU: ", fg.clone()),
+                ("wgpu", grn.clone()),
+                (" · font: ", fg.clone()),
+                ("JetBrainsMono NF", blu.clone()),
+                ("\n  theme: ", fg.clone()),
+                (cfg.theme_name.as_str(), yel.clone()),
+                ("\n  splits · tabs · ligatures ✓\n", dim.clone()),
+                ("  sixel · kitty · OSC 8 ✓", dim.clone()),
+            ],
+            &base,
+            Shaping::Advanced,
+            None,
+        );
+        right.shape_until_scroll(&mut font_system, false);
+
+        let areas = vec![
+            TextArea {
+                buffer: &tab_buf,
+                left: 8.0,
+                top: 6.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: w as i32,
+                    bottom: tab_h as i32,
+                },
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &left,
+                left: pad,
+                top: ly + pad,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: ly as i32,
+                    right: split_x as i32,
+                    bottom: h as i32,
+                },
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &right,
+                left: split_x + pad,
+                top: ly + pad,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: split_x as i32,
+                    top: ly as i32,
+                    right: w as i32,
+                    bottom: h as i32,
+                },
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            },
+        ];
+
+        let mut vp = viewport;
+        vp.update(
+            &queue,
+            Resolution {
+                width: w,
+                height: h,
+            },
+        );
+        quads.upload(&device, &queue, [wf, hf], &q);
+        text_renderer.prepare(
+            &device,
+            &queue,
+            &mut font_system,
+            &mut atlas,
+            &vp,
+            areas,
+            &mut swash,
+        )?;
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-screenshot-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bpp = 4u32;
+        let unpadded = w * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-screenshot-readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let bg = theme.background;
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-screenshot-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: srgb(bg.r),
+                            g: srgb(bg.g),
+                            b: srgb(bg.b),
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            quads.draw(&mut pass);
+            text_renderer.render(&atlas, &vp, &mut pass)?;
+        }
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(enc.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv()
+            .map_err(|_| anyhow!("map channel closed"))?
+            .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
+
+        let data = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded * h) as usize);
+        for row in 0..h {
+            let start = (row * padded) as usize;
+            pixels.extend_from_slice(&data[start..start + unpadded as usize]);
+        }
+        drop(data);
+        readback.unmap();
+
+        let img = image::RgbaImage::from_raw(w, h, pixels)
+            .ok_or_else(|| anyhow!("image buffer size mismatch"))?;
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        img.save(out)
+            .map_err(|e| anyhow!("write {}: {e}", out.display()))?;
+        Ok(())
+    })
+}
+
 /// Headless GPU validation. Builds the real wgpu pipelines (compiling the
 /// WGSL on whatever backend the platform uses — Vulkan/Metal/DX12/GL) and
 /// runs one offscreen render pass with no window. CI runs this on Linux,

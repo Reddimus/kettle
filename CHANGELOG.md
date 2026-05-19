@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   (left/right); `split_horiz`/`split_vert` action names corrected.
 
 ### Added
+- `kettle --screenshot <out.png> [--cols --rows]`: renders a representative
+  frame **offscreen** (no window) through the real `wgpu`/`glyphon`/quad
+  path and writes a PNG. Used to generate the showcase images in
+  **docs/UX-COMPARISON.md** — a cited UI/UX comparison matrix (kettle vs
+  Ghostty/kitty/WezTerm/Terminator/Alacritty) with a tab-bar hit-region
+  mermaid and the prioritized backlog status.
 - UX backlog: unfocused-pane **dimming** (`unfocused-split-opacity`,
   default 0.7), **pane zoom/maximize** (`Ctrl+Shift+X`), per-pane
   **scrollbar** (`scrollbar = never|auto|always`), configurable

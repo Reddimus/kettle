@@ -20,6 +20,18 @@ struct Cli {
     /// Validate the config (resolved settings + unknown-key warnings).
     #[arg(long)]
     check_config: bool,
+
+    /// Render a representative frame offscreen to a PNG and exit (no window).
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<std::path::PathBuf>,
+
+    /// Columns for `--screenshot` (default 96).
+    #[arg(long, default_value_t = 96)]
+    cols: u32,
+
+    /// Rows for `--screenshot` (default 28).
+    #[arg(long, default_value_t = 28)]
+    rows: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,6 +79,18 @@ fn main() -> anyhow::Result<()> {
             }
             std::process::exit(1);
         }
+    }
+
+    if let Some(out) = &cli.screenshot {
+        let cfg = match kettle_config::Config::default_path() {
+            Some(p) if p.exists() => {
+                kettle_config::Config::parse_collect(&std::fs::read_to_string(p)?).0
+            }
+            _ => kettle_config::Config::default(),
+        };
+        kettle_render::capture_png(&cfg, cli.cols.max(20), cli.rows.max(8), out)?;
+        println!("wrote {}", out.display());
+        return Ok(());
     }
 
     kettle_ui::run()
