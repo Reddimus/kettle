@@ -247,6 +247,10 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] **Runtime theme switching**: `next_theme`/`prev_theme` actions
+      (+ "Next/Previous theme" palette entries) cycle the bundled themes
+      live (no config edit/reload); pure `Theme::cycle` wrap-around,
+      unknown→first (+1 test).
 - [x] Scrollbar is now **click-to-jump and drag**: left-click the
       right-edge bar to scroll there, then drag to scrub (x ignored
       once grabbed, like every scrollbar). Pure `kettle_core::scrollbar`

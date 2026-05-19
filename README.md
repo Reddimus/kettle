@@ -49,6 +49,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   git-hash / IP on screen; type a label to open it (URLs) or copy it.
 - **Command palette** — `Ctrl+Shift+K` opens a fuzzy command palette;
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
+- **Live theme switching** — cycle the ~512 bundled themes at runtime
+  (palette: "Next/Previous theme", or `next_theme`/`prev_theme` binds).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

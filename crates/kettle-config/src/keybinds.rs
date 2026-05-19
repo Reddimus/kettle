@@ -87,6 +87,8 @@ pub enum Action {
     ReloadConfig,
     CommandPalette,
     HintMode,
+    NextTheme,
+    PrevTheme,
     GotoTab(u8),
 }
 
@@ -139,6 +141,8 @@ impl Action {
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
+            "next_theme" => NextTheme,
+            "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,
             _ => return None,
         })

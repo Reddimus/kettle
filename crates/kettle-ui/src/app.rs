@@ -926,6 +926,15 @@ impl App {
                     self.hint_state = Some((targets, String::new()));
                 }
             }
+            Action::NextTheme | Action::PrevTheme => {
+                let fwd = matches!(action, Action::NextTheme);
+                let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
+                self.cfg.theme_name = name.to_string();
+                self.cfg.theme = kettle_config::Theme::by_name(name);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {

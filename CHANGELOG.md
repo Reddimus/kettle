@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- **Live theme switching**: `next_theme` / `prev_theme` keybind actions
+  and "Next theme" / "Previous theme" command-palette entries cycle the
+  ~512 bundled themes at runtime — no config edit or reload. Pure
+  `Theme::cycle` (wrap-around; unknown current → first theme).
 - The scrollback **scrollbar is now interactive**: left-click the
   focused pane's right-edge bar to jump the viewport there, then
   **drag** to scrub through history (x is ignored once grabbed, like a

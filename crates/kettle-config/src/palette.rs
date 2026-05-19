@@ -39,6 +39,8 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll to bottom", ScrollToBottom),
         ("Jump to previous prompt", JumpPrevPrompt),
         ("Jump to next prompt", JumpNextPrompt),
+        ("Next theme", NextTheme),
+        ("Previous theme", PrevTheme),
         ("Reset terminal", Reset),
         ("Reload config", ReloadConfig),
     ]

@@ -54,6 +54,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 `decrease_font_size`, `reset_font_size`, `start_search`, `broadcast_all`,
 `broadcast_off`, `toggle_fullscreen`, `reset`, `scroll_page_up`,
 `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `prev_prompt`,
-`next_prompt`, `new_ssh`, `command_palette`, `hint_mode`, `reload_config`.
+`next_prompt`, `new_ssh`, `command_palette`, `hint_mode`, `next_theme`,
+`prev_theme`, `reload_config`.
 
 See [`kettle.example.config`](kettle.example.config).

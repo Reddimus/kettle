@@ -95,10 +95,58 @@ impl Theme {
     pub fn list() -> Vec<&'static str> {
         BUNDLED_THEMES.iter().map(|(n, _)| *n).collect()
     }
+
+    /// The next (`forward`) or previous bundled theme name after `current`,
+    /// wrapping around. If `current` isn't a bundled theme, returns the
+    /// first one. Pure — used by runtime theme cycling.
+    pub fn cycle(current: &str, forward: bool) -> &'static str {
+        let names: Vec<&'static str> = BUNDLED_THEMES.iter().map(|(n, _)| *n).collect();
+        if names.is_empty() {
+            return "TokyoNight Night";
+        }
+        let n = names.len();
+        match names.iter().position(|&x| x == current) {
+            // Unknown current → start at the first theme (don't skip it).
+            None => names[0],
+            Some(i) => {
+                let next = if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                };
+                names[next]
+            }
+        }
+    }
 }
 
 fn set(slot: &mut Rgb, v: &str) {
     if let Some(rgb) = Rgb::parse(v) {
         *slot = rgb;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Theme;
+
+    #[test]
+    fn cycle_wraps_and_is_reversible() {
+        let names = Theme::list();
+        assert!(names.len() >= 2, "need ≥2 bundled themes to cycle");
+        let first = names[0];
+        let second = names[1];
+        let last = *names.last().unwrap();
+
+        // Forward from the first → second; backward from first → last.
+        assert_eq!(Theme::cycle(first, true), second);
+        assert_eq!(Theme::cycle(first, false), last);
+        // Forward from the last wraps to the first.
+        assert_eq!(Theme::cycle(last, true), first);
+        // forward then backward is the identity.
+        let nxt = Theme::cycle(first, true);
+        assert_eq!(Theme::cycle(nxt, false), first);
+        // Unknown current → first theme.
+        assert_eq!(Theme::cycle("no such theme zzz", true), first);
     }
 }
