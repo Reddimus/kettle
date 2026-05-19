@@ -247,6 +247,11 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Standard CLI launch args: `-e/--exec CMD…` (run a command instead
+      of the shell, consumes the rest incl. hyphenated flags) and
+      `-d/--working-directory DIR`; override a saved session for the
+      first tab. `kettle_ui::run_with(Options)` (+1 parse test).
+
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach); native macOS menu;
       code-signed/notarized macOS build; Windows MSI

@@ -57,11 +57,17 @@ pub struct App {
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
     last_click: Option<(std::time::Instant, usize, usize, u8)>,
+    /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
+    startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl App {
     pub fn run() -> Result<()> {
+        Self::run_with(crate::Options::default())
+    }
+
+    pub fn run_with(startup: crate::Options) -> Result<()> {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
@@ -102,6 +108,7 @@ impl App {
             last_blink: std::time::Instant::now(),
             last_bell: None,
             last_click: None,
+            startup,
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -1121,19 +1128,45 @@ impl ApplicationHandler<UserEvent> for App {
         let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
 
-        // Restore a previous session if one was saved; else a fresh shell.
-        let restored = match crate::session::Session::load() {
-            Some(s) if !s.is_empty() => {
-                let proxy = self.proxy.clone();
-                let mk = move || -> kettle_core::Waker {
-                    let p = proxy.clone();
-                    std::sync::Arc::new(move || {
-                        let _ = p.send_event(UserEvent::Wakeup);
-                    })
-                };
-                self.mux.restore(&s, &self.cfg, cw, ch, &mk)
+        // CLI `-e cmd` / `-d dir` (consumed once) take precedence over a
+        // saved session: explicit intent shouldn't be overridden by restore.
+        let startup = std::mem::take(&mut self.startup);
+        let has_override = startup.command.is_some() || startup.cwd.is_some();
+        let restored = if has_override {
+            let argv = startup.command.unwrap_or_default();
+            let cwd = startup
+                .cwd
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            if let Err(e) = self.mux.new_tab_with(
+                &self.cfg,
+                cols,
+                rows,
+                cw,
+                ch,
+                self.waker(),
+                &argv,
+                cwd.as_deref(),
+            ) {
+                log::error!("failed to spawn `-e` command: {e}");
+                event_loop.exit();
+                return;
             }
-            _ => false,
+            true
+        } else {
+            match crate::session::Session::load() {
+                Some(s) if !s.is_empty() => {
+                    let proxy = self.proxy.clone();
+                    let mk = move || -> kettle_core::Waker {
+                        let p = proxy.clone();
+                        std::sync::Arc::new(move || {
+                            let _ = p.send_event(UserEvent::Wakeup);
+                        })
+                    };
+                    self.mux.restore(&s, &self.cfg, cw, ch, &mk)
+                }
+                _ => false,
+            }
         };
         if !restored
             && let Err(e) = self

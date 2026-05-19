@@ -32,6 +32,16 @@ struct Cli {
     /// Rows for `--screenshot` (default 28).
     #[arg(long, default_value_t = 28)]
     rows: u32,
+
+    /// Working directory for the first tab (`-d DIR`).
+    #[arg(long = "working-directory", short = 'd', value_name = "DIR")]
+    working_directory: Option<std::path::PathBuf>,
+
+    /// Run this command in the first tab instead of the shell, e.g.
+    /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
+    /// arguments (hyphenated flags for the program are passed through).
+    #[arg(short = 'e', long = "exec", num_args = 1.., allow_hyphen_values = true, value_name = "CMD")]
+    exec: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -93,5 +103,29 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    kettle_ui::run()
+    kettle_ui::run_with(kettle_ui::Options {
+        command: (!cli.exec.is_empty()).then_some(cli.exec),
+        cwd: cli.working_directory,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn cli_exec_and_working_directory_parse() {
+        let c = Cli::try_parse_from(["kettle", "-d", "/tmp", "-e", "ssh", "-t", "box"])
+            .expect("valid args");
+        assert_eq!(
+            c.working_directory.as_deref(),
+            Some(std::path::Path::new("/tmp"))
+        );
+        // `-e` consumes the rest, including hyphenated flags for the program.
+        assert_eq!(c.exec, vec!["ssh", "-t", "box"]);
+        // No -e → empty (falls back to the shell).
+        let d = Cli::try_parse_from(["kettle"]).unwrap();
+        assert!(d.exec.is_empty() && d.working_directory.is_none());
+    }
 }

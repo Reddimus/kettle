@@ -333,7 +333,24 @@ impl Mux {
     ) -> Result<()> {
         let argv = shell_argv(cfg);
         let cwd = self.focused_cwd();
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
+    }
+
+    /// Open a new tab running an explicit `argv` in `cwd` (CLI `-e`/`-d`);
+    /// an empty `argv` means the configured shell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_tab_with(
+        &mut self,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd, argv)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,

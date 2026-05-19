@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Standard launch CLI: `-e/--exec CMD …` runs a command in the first
+  tab instead of the shell (consumes the rest of the args, hyphenated
+  program flags included — e.g. `kettle -e ssh -t host`) and
+  `-d/--working-directory DIR` sets its directory; either overrides a
+  saved session for that first tab. (`kettle_ui::run_with(Options)`.)
 - New tabs and splits now **inherit the focused pane's working
   directory** (via OSC 7), like WezTerm/iTerm/kitty — open a split and
   you're already in the same project. A since-deleted directory falls
