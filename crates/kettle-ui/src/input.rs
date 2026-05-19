@@ -186,14 +186,28 @@ pub fn encode(
     if let Key::Character(s) = key {
         let c = s.chars().next()?;
         if ctrl && !alt {
-            // Control codes for letters and a few punctuation keys.
+            // Full xterm control-code table for Ctrl+<punctuation> — the
+            // letters are the obvious A→0x01..Z→0x1A range, the rest is
+            // the seven-bit C0 row terminals have produced since VT100:
+            //   Ctrl+@ / Ctrl+Space = NUL (0x00)
+            //   Ctrl+[              = ESC (0x1B)
+            //   Ctrl+\              = FS  (0x1C, SIGQUIT in cooked tty)
+            //   Ctrl+]              = GS  (0x1D, telnet/screen escape)
+            //   Ctrl+^              = RS  (0x1E, vim alt-buffer, tmux)
+            //   Ctrl+_ / Ctrl+/     = US  (0x1F, tmux/nano "undo")
+            // Adding `@`, `^`, `_`, `/` to the existing table; they were
+            // previously falling through and inserting the literal char
+            // — which is at best harmless, at worst breaks editor
+            // shortcuts in tmux/vim/nano.
             let b = c.to_ascii_lowercase();
             let code = match b {
                 'a'..='z' => Some((b as u8) - b'a' + 1),
-                '[' => Some(27),
-                '\\' => Some(28),
-                ']' => Some(29),
-                ' ' => Some(0),
+                '@' | ' ' => Some(0x00),
+                '[' => Some(0x1B),
+                '\\' => Some(0x1C),
+                ']' => Some(0x1D),
+                '^' => Some(0x1E),
+                '_' | '/' => Some(0x1F),
                 _ => None,
             };
             if let Some(code) = code {
@@ -292,6 +306,32 @@ mod tests {
             "body after strip: {}",
             String::from_utf8_lossy(&p)
         );
+    }
+
+    #[test]
+    fn ctrl_punctuation_emits_the_full_c0_row() {
+        use winit::keyboard::{Key, SmolStr};
+        let ctrl = ModifiersState::CONTROL;
+        let mode = TermMode::empty();
+        // Helper: encode a single-character key with Ctrl held.
+        let enc = |c: &str| encode(&Key::Character(SmolStr::new(c)), None, ctrl, mode);
+        // Letters: A → 0x01, M → 0x0D (carriage return), Z → 0x1A.
+        assert_eq!(enc("a"), Some(vec![0x01]));
+        assert_eq!(enc("m"), Some(vec![0x0D]));
+        assert_eq!(enc("z"), Some(vec![0x1A]));
+        // Punctuation row — each one was either already mapped (`[`, `\\`,
+        // `]`, ` `) or newly added (`@`, `^`, `_`, `/`).
+        assert_eq!(enc("@"), Some(vec![0x00]), "Ctrl+@ = NUL");
+        assert_eq!(enc("["), Some(vec![0x1B]), "Ctrl+[ = ESC");
+        assert_eq!(enc("\\"), Some(vec![0x1C]), "Ctrl+\\ = FS / SIGQUIT");
+        assert_eq!(enc("]"), Some(vec![0x1D]), "Ctrl+] = GS");
+        assert_eq!(
+            enc("^"),
+            Some(vec![0x1E]),
+            "Ctrl+^ = RS (vim alt-buf, tmux)"
+        );
+        assert_eq!(enc("_"), Some(vec![0x1F]), "Ctrl+_ = US");
+        assert_eq!(enc("/"), Some(vec![0x1F]), "Ctrl+/ = US (tmux/nano undo)");
     }
 
     #[test]

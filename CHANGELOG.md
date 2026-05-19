@@ -7,6 +7,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Full xterm Ctrl+<punctuation> C0 row.** Letter mappings
+  (Ctrl+A → 0x01, …, Ctrl+Z → 0x1A) were already in place, plus
+  `[` `\\` `]` ` `. Missing: `@` (NUL — same as Ctrl+Space), `^`
+  (RS 0x1E — vim's alt-buffer toggle and tmux's `Ctrl-^` prefix),
+  `_` (US 0x1F), and `/` (US 0x1F — tmux/nano undo). Each was
+  previously falling through to "insert the literal character,"
+  which silently broke those editor shortcuts. +1 test exercising
+  the whole table.
 - **`TERM_PROGRAM_VERSION` env var set on every spawned shell.**
   Companion to the existing `TERM_PROGRAM=kettle`; iTerm2 / kitty /
   WezTerm / Ghostty all set this pair. Neovim's

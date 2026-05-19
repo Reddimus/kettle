@@ -370,6 +370,9 @@
       fish themers, and shell diagnostics see "kettle v0.1.0"
       instead of an unknown program. Sourced from
       `env!("CARGO_PKG_VERSION")`.
+- [x] **Full xterm Ctrl+<punctuation> C0 row.** Added the missing
+      mappings: `@` (NUL), `^` (RS 0x1E, vim alt-buf / tmux),
+      `_` (US 0x1F), `/` (US 0x1F, tmux/nano undo). +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
