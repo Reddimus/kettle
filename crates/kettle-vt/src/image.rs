@@ -2,6 +2,25 @@
 
 use std::sync::Arc;
 
+/// A decoded image plus placement metadata (kitty image id + z-index;
+/// Sixel/iTerm2 use `id = None`, `z = 0`).
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub img: ImageData,
+    pub id: Option<u32>,
+    pub z: i32,
+}
+
+impl Placed {
+    pub fn plain(img: ImageData) -> Placed {
+        Placed {
+            img,
+            id: None,
+            z: 0,
+        }
+    }
+}
+
 /// An RGBA8 image ready to upload as a GPU texture.
 #[derive(Clone)]
 pub struct ImageData {

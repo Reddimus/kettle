@@ -151,14 +151,25 @@ impl Terminal {
                                                 processor.advance(&mut *t, &bytes);
                                             }
                                         }
-                                        Chunk::Image(data) => {
+                                        Chunk::Image(placed) => {
                                             place_image(
                                                 &term,
                                                 &images,
                                                 &cell_px,
                                                 &mut processor,
-                                                data,
+                                                placed,
                                             );
+                                        }
+                                        Chunk::DeleteImages { all, id } => {
+                                            if let Ok(mut v) = images.lock() {
+                                                if all {
+                                                    v.clear();
+                                                } else {
+                                                    v.retain(|p| {
+                                                        id.is_none_or(|x| p.id != Some(x))
+                                                    });
+                                                }
+                                            }
                                         }
                                         Chunk::Prompt(PromptKind::PromptStart) => {
                                             if let Ok(t) = term.lock() {
@@ -289,8 +300,9 @@ fn place_image(
     images: &Images,
     cell_px: &Arc<Mutex<(u16, u16)>>,
     processor: &mut Processor,
-    data: kettle_vt::ImageData,
+    placed: kettle_vt::Placed,
 ) {
+    let kettle_vt::Placed { img: data, id, z } = placed;
     let (cw, chh) = cell_px.lock().map(|p| *p).unwrap_or((8, 16));
     let cw = cw.max(1) as u32;
     let chh = chh.max(1) as u32;
@@ -313,6 +325,8 @@ fn place_image(
             cell_cols,
             cell_rows,
             img: data,
+            id,
+            z,
         });
         if v.len() > 512 {
             let drop = v.len() - 512;

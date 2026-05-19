@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-pub use kettle_vt::ImageData;
+pub use kettle_vt::{ImageData, Placed};
 
 #[derive(Clone)]
 pub struct Placement {
@@ -13,6 +13,10 @@ pub struct Placement {
     pub cell_cols: usize,
     pub cell_rows: usize,
     pub img: ImageData,
+    /// kitty image id (for deletion); `None` for Sixel/iTerm2.
+    pub id: Option<u32>,
+    /// z-index; images are drawn in ascending z order.
+    pub z: i32,
 }
 
 pub type Images = Arc<Mutex<Vec<Placement>>>;

@@ -3,8 +3,8 @@
 //! image support. Everything else passes through byte-for-byte so the terminal
 //! engine still sees correct cursor/scroll behavior.
 
-use crate::image::ImageData;
-use crate::kitty::KittyState;
+use crate::image::Placed;
+use crate::kitty::{KittyOut, KittyState};
 use crate::{iterm, sixel};
 
 const MAX_SEQ: usize = 64 * 1024 * 1024;
@@ -27,7 +27,9 @@ pub enum Chunk {
     /// Bytes to forward to the terminal engine unchanged.
     Pass(Vec<u8>),
     /// A decoded image to place at the current cursor position.
-    Image(ImageData),
+    Image(Placed),
+    /// kitty `a=d`: delete images (all, or by image id).
+    DeleteImages { all: bool, id: Option<u32> },
     /// A shell-integration mark at the current cursor line.
     Prompt(PromptKind),
     /// Working-directory report (OSC 7), absolute path.
@@ -176,37 +178,52 @@ impl Extractor {
             return;
         }
 
-        let img = match mode {
+        enum R {
+            None,
+            Img(Placed),
+            Del { all: bool, id: Option<u32> },
+        }
+
+        let result = match mode {
             Mode::Dcs => {
                 // Sixel: params then 'q' then data.
                 if let Some(qpos) = seq.iter().position(|&c| c == b'q') {
                     sixel::decode(&seq[qpos + 1..])
+                        .map(|i| R::Img(Placed::plain(i)))
+                        .unwrap_or(R::None)
                 } else {
-                    None
+                    R::None
                 }
             }
             Mode::Apc => {
                 if seq.first() == Some(&b'G') {
                     let body = String::from_utf8_lossy(&seq[1..]).into_owned();
-                    self.kitty.feed(&body)
+                    match self.kitty.feed(&body) {
+                        KittyOut::Place(p) => R::Img(p),
+                        KittyOut::Delete { all, id } => R::Del { all, id },
+                        KittyOut::None => R::None,
+                    }
                 } else {
-                    None
+                    R::None
                 }
             }
             Mode::Osc => {
                 let body = String::from_utf8_lossy(&seq).into_owned();
                 if body.starts_with("1337;File=") {
                     iterm::decode(&body)
+                        .map(|i| R::Img(Placed::plain(i)))
+                        .unwrap_or(R::None)
                 } else {
-                    None
+                    R::None
                 }
             }
-            Mode::Pass => None,
+            Mode::Pass => R::None,
         };
 
-        match img {
-            Some(data) => out.push(Chunk::Image(data)),
-            None => {
+        match result {
+            R::Img(data) => out.push(Chunk::Image(data)),
+            R::Del { all, id } => out.push(Chunk::DeleteImages { all, id }),
+            R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
                 // included, so the VT engine handles it.
                 let mut v = Vec::with_capacity(seq.len() + 4);

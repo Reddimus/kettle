@@ -11,7 +11,7 @@ pub mod kitty;
 pub mod sixel;
 
 pub use extract::{Chunk, Extractor, PromptKind};
-pub use image::ImageData;
+pub use image::{ImageData, Placed};
 
 #[cfg(test)]
 mod tests {
@@ -88,7 +88,7 @@ mod tests {
         let mut e = Extractor::new();
         let chunks = e.feed(b"\x1bP0;0;0q#0;2;100;100;100~\x1b\\");
         let img = chunks.iter().find_map(|c| match c {
-            Chunk::Image(d) => Some(d.clone()),
+            Chunk::Image(d) => Some(d.img.clone()),
             _ => None,
         });
         let img = img.expect("sixel image");
@@ -106,12 +106,44 @@ mod tests {
         let mut chunks = e.feed(format!("\x1b_Gf=32,s=1,v=1,a=T,m=1;{h1}\x1b\\").as_bytes());
         chunks.extend(e.feed(format!("\x1b_Gm=0;{h2}\x1b\\").as_bytes()));
         let img = chunks.iter().find_map(|c| match c {
-            Chunk::Image(d) => Some(d.clone()),
+            Chunk::Image(d) => Some(d.img.clone()),
             _ => None,
         });
         let img = img.expect("kitty image");
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(&img.rgba[..], &[9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn kitty_transmit_then_place_by_id_and_delete() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 255]);
+        let mut e = Extractor::new();
+        // a=t: transmit only (id 7) — no image shown yet.
+        let c1 = e.feed(format!("\x1b_Gf=32,s=1,v=1,i=7,a=t;{b64}\x1b\\").as_bytes());
+        assert!(!c1.iter().any(|c| matches!(c, Chunk::Image(_))));
+        // a=p: place stored image 7 with a z-index.
+        let c2 = e.feed(b"\x1b_Ga=p,i=7,z=5\x1b\\");
+        let placed = c2.iter().find_map(|c| match c {
+            Chunk::Image(p) => Some(p.clone()),
+            _ => None,
+        });
+        let p = placed.expect("placed by id");
+        assert_eq!(p.id, Some(7));
+        assert_eq!(p.z, 5);
+        assert_eq!(&p.img.rgba[..], &[1, 2, 3, 255]);
+        // a=d,d=i: delete image 7.
+        let c3 = e.feed(b"\x1b_Ga=d,d=i,i=7\x1b\\");
+        assert!(c3.iter().any(|c| matches!(
+            c,
+            Chunk::DeleteImages {
+                all: false,
+                id: Some(7)
+            }
+        )));
+        // After deletion it can no longer be placed.
+        let c4 = e.feed(b"\x1b_Ga=p,i=7\x1b\\");
+        assert!(!c4.iter().any(|c| matches!(c, Chunk::Image(_))));
     }
 
     #[test]

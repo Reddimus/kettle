@@ -38,8 +38,10 @@ are within each upstream repo).
   (`konsole/src/Vt102Emulation.h`). *Implemented in `kettle-vt`*: an
   `Extractor` pulls Sixel/kitty/iTerm2 sequences out of the PTY stream before
   the VT parser sees them, decodes to RGBA, and the renderer composites them
-  as scroll-anchored GPU textures. Advanced kitty ops (placement ids,
-  deletion, Unicode placeholders, animation) remain future work.
+  as scroll-anchored GPU textures. kitty advanced ops implemented:
+  `a=t` transmit-only (stored for later), `a=p` place-by-id, `a=d`
+  delete (all / by id), `z=` z-index ordering. Unicode placeholders,
+  animation and relative placements remain future work.
 - **Config syntax + theme model** — Ghostty's `key = value` grammar
   (`ghostty/src/config/Config.zig`); themes are the iTerm2-Color-Schemes
   `ghostty/` set that Ghostty itself consumes (it is not vendored in-tree —

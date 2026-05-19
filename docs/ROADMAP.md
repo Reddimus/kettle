@@ -51,9 +51,12 @@
       visual bell flash, double-click word / triple-click line selection
       with auto-copy on release
 
+- [x] kitty graphics advanced ops: `a=t` transmit-only store, `a=p`
+      place-by-id, `a=d` delete (all / by id), `z=` z-index ordering
+
 ## Next (in priority order)
-- [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
-      placeholders, animation)
+- [ ] kitty graphics: Unicode placeholders, animation frames, relative
+      placements
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu

@@ -297,7 +297,10 @@ impl Renderer {
                 let g = pv.term.grid();
                 let top = g.history_size() as i64 - g.display_offset() as i64;
                 let nrows = g.screen_lines() as i64;
-                for p in &pv.images {
+                // Draw in ascending z so higher z-index images land on top.
+                let mut ordered: Vec<&kettle_core::Placement> = pv.images.iter().collect();
+                ordered.sort_by_key(|p| p.z);
+                for p in ordered {
                     let row = p.abs_line - top;
                     if row + p.cell_rows as i64 <= 0 || row >= nrows {
                         continue;
