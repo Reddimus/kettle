@@ -1190,6 +1190,32 @@ mod conformance {
     }
 
     #[test]
+    fn osc4_multi_index_query_emits_one_request_per_index() {
+        // vte's OSC 4 handler chunks the params in pairs (`;idx;val`), so
+        // a single `OSC 4 ; 1 ; ? ; 7 ; ?` should ask for *two* colors in
+        // one go. tmux, neovim 0.10+ and base16-shell-hook all batch
+        // palette probes this way — without per-pair dispatch they'd see
+        // only the first reply and assume the rest of the palette equals
+        // the engine default, breaking the dark/light detection they rely
+        // on.
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        feed(&mut t, &mut p, b"\x1b]4;1;?;7;?\x07");
+        let mut indices: Vec<usize> = rx
+            .try_iter()
+            .filter_map(|ev| match ev {
+                TermEvent::ColorRequest(idx, _) => Some(idx),
+                _ => None,
+            })
+            .collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            vec![1, 7],
+            "multi-index OSC 4 must fire one ColorRequest per `;idx;?` pair"
+        );
+    }
+
+    #[test]
     fn osc_10_11_12_set_populate_default_color_slots() {
         // OSC 10/11/12 SET should populate the engine's `Colors[256..=258]`
         // slots (default fg, default bg, cursor) so the renderer's

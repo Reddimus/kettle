@@ -373,6 +373,10 @@
 - [x] **Full xterm Ctrl+<punctuation> C0 row.** Added the missing
       mappings: `@` (NUL), `^` (RS 0x1E, vim alt-buf / tmux),
       `_` (US 0x1F), `/` (US 0x1F, tmux/nano undo). +1 test.
+- [x] **OSC 4 multi-index query conformance pinned.** `OSC 4 ; 1
+      ; ? ; 7 ; ?` (used by tmux / neovim 0.10 / base16-shell-hook
+      to batch palette probes) now has an end-to-end test
+      confirming one `ColorRequest` per pair. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 4 multi-index query conformance is now pinned.** The
+  cycle-44 fix shipped single-index replies (`OSC 4 ; 1 ; ?`); the
+  vte parser already chunks the params so multi-index queries
+  (`OSC 4 ; 1 ; ? ; 7 ; ?` — sent by tmux, neovim 0.10+, base16-
+  shell-hook to probe an entire palette in one go) emit one
+  `ColorRequest` per pair. Added an end-to-end test that asserts
+  both indices come through; without per-pair dispatch the batched
+  probers would see only the first reply and assume the rest of
+  the palette equals the engine default, breaking dark/light
+  detection they all rely on.
 - **Full xterm Ctrl+<punctuation> C0 row.** Letter mappings
   (Ctrl+A → 0x01, …, Ctrl+Z → 0x1A) were already in place, plus
   `[` `\\` `]` ` `. Missing: `@` (NUL — same as Ctrl+Space), `^`
