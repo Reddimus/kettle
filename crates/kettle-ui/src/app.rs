@@ -769,12 +769,11 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Tab) => {
+                // Fuzzy-complete to the best-matching configured host name.
                 let typed = self.ssh_input.clone().unwrap_or_default();
-                if let Some((n, _)) = self
-                    .cfg
-                    .ssh_hosts
-                    .iter()
-                    .find(|(n, _)| n.starts_with(&typed) && !typed.is_empty())
+                if !typed.is_empty()
+                    && let Some((n, _)) =
+                        kettle_config::fuzzy::best(&typed, &self.cfg.ssh_hosts, |h| h.0.as_str())
                 {
                     self.ssh_input = Some(n.clone());
                 }
@@ -787,6 +786,16 @@ impl App {
                     .iter()
                     .find(|(n, _)| *n == typed)
                     .map(|(_, t)| t.clone())
+                    // No exact name → best fuzzy host match for the query.
+                    .or_else(|| {
+                        if typed.trim().is_empty() {
+                            return None;
+                        }
+                        kettle_config::fuzzy::best(typed.trim(), &self.cfg.ssh_hosts, |h| {
+                            h.0.as_str()
+                        })
+                        .map(|(_, t)| t.clone())
+                    })
                     .or_else(|| {
                         if !typed.trim().is_empty() {
                             Some(typed.trim().to_string())

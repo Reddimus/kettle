@@ -216,9 +216,16 @@
       flags (`?1000/1002/1003/1006`) set+clear — 5 end-to-end tests
       (108 workspace). LNM LF→CRLF output untranslated upstream (noted).
 
+- [x] Dependency-free **fuzzy matcher** (`kettle_config::fuzzy`):
+      subsequence scoring with prefix / word-boundary / camelCase /
+      contiguity bonuses + length penalty; `score`/`best` (+3 tests,
+      111 workspace). SSH launcher `Tab`-complete and `Enter` now
+      fuzzy-match host names instead of prefix-only. Reusable by a
+      future command palette.
+
 ## Next (in priority order)
-- [ ] Detachable mux server (remote attach); native macOS menu;
-      code-signed/notarized macOS build; Windows MSI
+- [ ] Command palette (fuzzy action launcher) reusing the matcher;
+      detachable mux server; native macOS menu; signed packaging
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

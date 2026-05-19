@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Fuzzy matcher (`kettle_config::fuzzy`, dependency-free): subsequence
+  scoring with prefix / word-boundary / camelCase / contiguity bonuses
+  and a length penalty (`score`, `best`). The `Ctrl+Shift+S` SSH
+  launcher now fuzzy-matches host names on `Tab`-complete and `Enter`
+  (was prefix-only); the matcher is reusable by a future command
+  palette.
 - VT conformance sweep: IRM insert mode (`CSI 4h` shifts text right),
   DECTCEM cursor visibility (`CSI ?25 h/l`), LNM mode bit
   (`CSI 20 h/l`), DECCKM + DECKPAM/DECKPNM application cursor/keypad
