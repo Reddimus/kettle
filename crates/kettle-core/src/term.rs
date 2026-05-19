@@ -1118,6 +1118,48 @@ mod conformance {
     }
 
     #[test]
+    fn osc_color_queries_carry_index_and_format_xparsecolor_reply() {
+        // OSC 10 / 11 / 12 (default fg / bg / cursor) and OSC 4 ; n ; ? are
+        // the four queries shells and TUIs use to detect light-vs-dark and
+        // theme colors. Each must (a) emit a `ColorRequest` carrying the
+        // correct index — 256 / 257 / 258 / palette-idx — and (b) hand back
+        // an engine-supplied formatter that renders the canonical xparsecolor
+        // reply `\e]<prefix>;rgb:RRRR/GGGG/BBBB\` so apps that probe for the
+        // exact wire format (mc / neovim / gnome-terminal probes) accept it.
+        let cases: &[(&[u8], usize, &str)] = &[
+            (b"\x1b]10;?\x07", 256, "\x1b]10;rgb:"), // OSC 10 — fg
+            (b"\x1b]11;?\x07", 257, "\x1b]11;rgb:"), // OSC 11 — bg
+            (b"\x1b]12;?\x07", 258, "\x1b]12;rgb:"), // OSC 12 — cursor
+            (b"\x1b]4;7;?\x07", 7, "\x1b]4;7;rgb:"), // OSC 4 ; 7 — palette
+        ];
+        for (input, want_idx, want_prefix) in cases {
+            let (mut t, mut p, rx) = harness_rx(8, 2);
+            feed(&mut t, &mut p, input);
+            let (idx, fmt) = rx
+                .try_iter()
+                .find_map(|ev| match ev {
+                    TermEvent::ColorRequest(i, f) => Some((i, f)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no ColorRequest for {input:?}"));
+            assert_eq!(idx, *want_idx, "wrong index for {input:?}");
+
+            // Format with a known value and verify the wire shape. The
+            // 8-bit channels are doubled to 16-bit per xparsecolor.
+            let reply = fmt(alacritty_terminal::vte::ansi::Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            });
+            let want_payload = format!("{want_prefix}1212/3434/5656");
+            assert!(
+                reply.starts_with(&want_payload),
+                "{input:?} reply must start with {want_payload:?}, got {reply:?}"
+            );
+        }
+    }
+
+    #[test]
     fn decrqm_reports_mode_state() {
         let (mut t, mut p, rx) = harness_rx(8, 2);
         // Enable bracketed paste, then DECRQM-query it (CSI ? 2004 $ p).

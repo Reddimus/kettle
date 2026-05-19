@@ -490,6 +490,21 @@ impl App {
                         };
                         pane.term.write(fmt(&text).as_bytes());
                     }
+                    TermEvent::ColorRequest(idx, fmt) => {
+                        // OSC 4 ; n ; ? / OSC 10 / 11 / 12 — resolve against
+                        // the active theme + any runtime overrides, then let
+                        // the engine-supplied formatter render the canonical
+                        // xparsecolor reply and write it back to the PTY. No
+                        // reply for out-of-range indices keeps the protocol
+                        // well-formed (apps that probe just see a timeout,
+                        // exactly as on terminals that don't support OSC).
+                        let reply = pane.term.term.lock().ok().and_then(|t| {
+                            kettle_render::reply_for_query(idx, &self.cfg.theme, t.colors(), &*fmt)
+                        });
+                        if let Some(s) = reply {
+                            pane.term.write(s.as_bytes());
+                        }
+                    }
                     TermEvent::Bell => bell = true,
                     TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
                     _ => {}

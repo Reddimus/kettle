@@ -49,6 +49,57 @@ fn named(n: NamedColor, theme: &Theme) -> Rgb {
     }
 }
 
+/// Resolve an OSC color **query** (OSC 4 `;i;?`, OSC 10/11/12 `;?`) index to
+/// an `Rgb`. `alacritty_terminal` numbers these the same way `Colors` is
+/// indexed: `0..=15` is the ANSI palette, `16..=255` is the xterm 256-color
+/// cube + grayscale ramp, **256 = default foreground**, **257 = default
+/// background**, **258 = cursor**. Anything else returns `None`.
+///
+/// Runtime overrides set via OSC 4 / 10 / 11 / 12 (stored in `term_colors`)
+/// take precedence over the theme. Pure — no I/O, fully unit-tested — so the
+/// app event loop just plugs the result into the engine-supplied formatter
+/// and writes the bytes back to the PTY.
+pub fn resolve_query(idx: usize, theme: &Theme, term_colors: &TermColors) -> Option<Rgb> {
+    // Reject out-of-range up front — `Colors` is fixed-size and OSC queries
+    // beyond the documented slots aren't meaningful for any app.
+    let fallback = match idx {
+        0..=15 => theme.palette[idx],
+        16..=255 => indexed_256(idx as u8),
+        256 => theme.foreground,
+        257 => theme.background,
+        258 => theme.cursor,
+        _ => return None,
+    };
+    // Runtime override (set via OSC 4 / 10 / 11 / 12) wins over the theme.
+    Some(
+        term_colors[idx]
+            .map(|rgb| Rgb::new(rgb.r, rgb.g, rgb.b))
+            .unwrap_or(fallback),
+    )
+}
+
+/// Resolve a color query and format the engine-supplied OSC reply.
+///
+/// The event loop receives `TermEvent::ColorRequest(idx, fmt)` where `fmt`
+/// already knows the right OSC prefix (`10`, `11`, `12`, or `4;<idx>`) and
+/// terminator (`ST`/`BEL`). This helper hides the `alacritty_terminal` `Rgb`
+/// type from the UI crate: callers pass the formatter through and we hand
+/// back the ready-to-write reply bytes, or `None` when the index is out of
+/// range (the protocol allows no reply in that case).
+pub fn reply_for_query(
+    idx: usize,
+    theme: &Theme,
+    term_colors: &TermColors,
+    fmt: &(dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync),
+) -> Option<String> {
+    let rgb = resolve_query(idx, theme, term_colors)?;
+    Some(fmt(alacritty_terminal::vte::ansi::Rgb {
+        r: rgb.r,
+        g: rgb.g,
+        b: rgb.b,
+    }))
+}
+
 /// Resolve a cell color. `term_colors` carries runtime OSC 4/10/11 overrides.
 pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
     match c {
@@ -185,6 +236,40 @@ mod tests {
         );
         // Direction: dark bg ⇒ lifted toward white (out is brighter).
         assert!(relative_luminance(out) > relative_luminance(fg));
+    }
+
+    #[test]
+    fn resolve_query_covers_palette_named_cube_and_overrides() {
+        use alacritty_terminal::term::color::Colors as TermColors;
+        use alacritty_terminal::vte::ansi::Rgb as AnsiRgb;
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+
+        // 0..=15 routes to the theme palette.
+        assert_eq!(resolve_query(2, &theme, &colors), Some(theme.palette[2]));
+        // 16..=255 uses the xterm 256-color cube. Index 196 is pure red.
+        assert_eq!(
+            resolve_query(196, &theme, &colors),
+            Some(Rgb::new(255, 0, 0))
+        );
+        // 256 / 257 / 258 are default fg / bg / cursor.
+        assert_eq!(resolve_query(256, &theme, &colors), Some(theme.foreground));
+        assert_eq!(resolve_query(257, &theme, &colors), Some(theme.background));
+        assert_eq!(resolve_query(258, &theme, &colors), Some(theme.cursor));
+        // Out of range queries don't index past the fixed-size palette.
+        assert_eq!(resolve_query(259, &theme, &colors), None);
+        assert_eq!(resolve_query(99_999, &theme, &colors), None);
+
+        // Runtime override (as set by OSC 4 / 10 / 11 / 12) wins over the theme.
+        colors[257] = Some(AnsiRgb {
+            r: 0xab,
+            g: 0xcd,
+            b: 0xef,
+        });
+        assert_eq!(
+            resolve_query(257, &theme, &colors),
+            Some(Rgb::new(0xab, 0xcd, 0xef))
+        );
     }
 
     #[test]

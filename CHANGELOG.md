@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 4 / 10 / 11 / 12 color queries now reply** (xparsecolor
+  `rgb:RRRR/GGGG/BBBB` form). vim/neovim and tmux use these to detect
+  the actual default foreground / background / cursor and the live
+  palette so they pick a colorscheme that matches the terminal. The
+  engine emitted `ColorRequest` events but the running app silently
+  dropped them — now they're resolved against the active theme plus
+  any runtime OSC overrides via a pure `kettle_render::reply_for_query`
+  (palette 0..=15 → theme, 16..=255 → xterm cube, 256/257/258 →
+  fg/bg/cursor; out-of-range → no reply). +2 tests (pure helper +
+  end-to-end formatter shape for all four OSC prefixes).
 - **`tab-format`** (alias `tab-title-format`): user-templatable per-tab
   label (default `{n}: {title}`) via the shared `template::fill`;
   unknown placeholders pass through verbatim; the trailing `✕` is

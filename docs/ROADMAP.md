@@ -286,6 +286,12 @@
       of the shell, consumes the rest incl. hyphenated flags) and
       `-d/--working-directory DIR`; override a saved session for the
       first tab. `kettle_ui::run_with(Options)` (+1 parse test).
+- [x] **OSC 4 / 10 / 11 / 12 color queries reply** with the canonical
+      xparsecolor `rgb:RRRR/GGGG/BBBB` form. The engine raised
+      `ColorRequest` events but the app silently dropped them, so
+      neovim/vim/tmux couldn't detect the active fg/bg/cursor/palette.
+      Pure `kettle_render::reply_for_query` resolves against theme +
+      OSC overrides; out-of-range → no reply. +2 tests.
 
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)
