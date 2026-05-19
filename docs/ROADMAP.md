@@ -85,8 +85,14 @@
       SO/SI charset invocation (17 conformance tests). SS2/SS3
       single-shift is unsupported upstream (alacritty_terminal) — noted.
 
+- [x] Conformance: RIS full reset clears origin/region, EL erase-left,
+      ED erase-below, DA2 secondary device attributes (21 conformance
+      tests). DECSTR/ED-1 differ upstream — used engine-supported
+      equivalents instead of asserting unsupported behavior.
+
 ## Next (in priority order)
-- [ ] Conformance: DECSTR soft reset, ED/EL variants, DA2/XTVERSION
+- [ ] Conformance: ICH/ECH edge cases, CHA/HPA/VPA absolute moves,
+      cursor save/restore interaction with SGR
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

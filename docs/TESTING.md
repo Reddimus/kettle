@@ -34,8 +34,10 @@ cargo test --workspace
   device responses captured via the real EventProxy PTY write-back —
   DSR 6n cursor-position report, primary Device Attributes,
   SGR dim/underline/strikeout + curly-underline (4:3) + reset,
-  DECALN screen alignment, REP repeat-char, G1 charset via SO/SI. The
-  automatable, regression-proof core of a `vttest` sweep.
+  DECALN screen alignment, REP repeat-char, G1 charset via SO/SI,
+  RIS full reset, EL erase-left, ED erase-below, DA2 secondary
+  device attributes. The automatable, regression-proof core of a
+  `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;
   session JSON round-trips (incl. SSH panes) and pre-SSH sessions still load.

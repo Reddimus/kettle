@@ -600,6 +600,47 @@ mod conformance {
         assert_eq!(cs[2], 'y', "SI returned to ASCII G0");
     }
 
+    #[test]
+    fn ris_full_reset_clears_origin_mode() {
+        let (mut t, mut p) = harness(6, 4);
+        // Origin mode on + scroll region, then RIS (ESC c) — a full reset —
+        // so 1;1 is absolute home again.
+        feed(&mut t, &mut p, b"\x1b[2;4r\x1b[?6hzz\x1bc\x1b[1;1HX");
+        assert_eq!(row_text(&t, 0), "X", "RIS cleared origin mode + region");
+    }
+
+    #[test]
+    fn el_erase_to_left() {
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"ABCDE");
+        // Cursor to col 3 (1-based), EL 1 = erase start..=cursor.
+        feed(&mut t, &mut p, b"\x1b[1;3H\x1b[1K");
+        // cols 0..=2 cleared; "DE" remains at cols 3,4.
+        assert_eq!(row_text(&t, 0), "   DE");
+    }
+
+    #[test]
+    fn ed_erase_below() {
+        let (mut t, mut p) = harness(4, 3);
+        feed(&mut t, &mut p, b"r0\r\nr1\r\nr2");
+        // Cursor to row 2 col 1 (1-based), ED 0 = erase cursor..=end.
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b[0J");
+        assert_eq!(row_text(&t, 0), "r0", "row above the cursor kept");
+        assert_eq!(row_text(&t, 1), "", "cursor row erased");
+        assert_eq!(row_text(&t, 2), "", "rows below erased");
+    }
+
+    #[test]
+    fn da2_secondary_device_attributes() {
+        let (mut t, mut p, rx) = harness_rx(10, 3);
+        feed(&mut t, &mut p, b"\x1b[>c"); // Secondary DA
+        let reply = drain_pty(&rx);
+        assert!(
+            reply.starts_with("\x1b[>") && reply.ends_with('c'),
+            "DA2 reply should be CSI > … c, got {reply:?}"
+        );
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) is not implemented by
     // alacritty_terminal, so no conformance test asserts it — see ROADMAP.
 }
