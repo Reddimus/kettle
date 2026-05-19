@@ -361,6 +361,10 @@
       paste containing the *open* marker could trap the shell in
       paste mode past the wrapper's real close. +1 test paired
       symmetrically with the existing close-marker test.
+- [x] **`kettle --check-config` echoes every per-cycle gate.**
+      Resolved cursor / bell / OSC 52 / scroll / mouse / tabs /
+      title / word-delimiters / ssh values now appear so a user
+      can verify their tweaks took effect without grepping source.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

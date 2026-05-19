@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now echoes every per-cycle config gate.** The
+  command was added back at cycle 5-ish and still only reported
+  five fields (config path, theme, font, scrollback, keybind
+  count). Since then we've added ~15 user-facing toggles — bell,
+  OSC 52 policy, minimum-contrast, scroll-on-keystroke, scroll-on-
+  output, scroll-multiplier, mouse-hide-while-typing, copy-on-
+  select, tab-bar mode/position/format, window-title-format,
+  word-delimiters, ssh-host count, cursor style/blink/interval —
+  and none of them surfaced. A user setting `mouse-hide = false`
+  had no way to verify it was actually applied without reading the
+  source. `--check-config` now groups them by theme (cursor / bell+
+  osc52+contrast / scroll / mouse / tabs / title / words / ssh) so
+  the output stays scannable; `word-delimiters` and `ssh` lines
+  only render when non-empty.
 - **Bracketed paste also strips the *opening* marker `\x1b[200~`.**
   The injection-guard added earlier (and tested in
   `paste_strips_injected_end_marker`) only filtered the closing

@@ -101,6 +101,37 @@ fn main() -> anyhow::Result<()> {
         println!("font:    {} {}pt", cfg.font_family, cfg.font_size);
         println!("scrollback: {}", cfg.scrollback);
         println!("keybinds: {} bound", cfg.keybinds.len());
+        // Echo back the resolved values of the per-cycle config gates so
+        // users can verify with `kettle --check-config` that their tweaks
+        // are taking effect (rather than greping the source). Grouped by
+        // theme of related settings; only one line per group for brevity.
+        println!(
+            "cursor:  {:?} (blink={}, interval={}ms)",
+            cfg.cursor_style, cfg.cursor_blink, cfg.cursor_blink_interval
+        );
+        println!(
+            "bell:    {:?}  osc52: {:?}  min-contrast: {}",
+            cfg.bell, cfg.osc52, cfg.minimum_contrast
+        );
+        println!(
+            "scroll:  on-keystroke={} on-output={} multiplier={}",
+            cfg.scroll_on_keystroke, cfg.scroll_on_output, cfg.scroll_multiplier
+        );
+        println!(
+            "mouse:   hide-while-typing={} copy-on-select={}",
+            cfg.mouse_hide_while_typing, cfg.copy_on_select
+        );
+        println!(
+            "tabs:    bar={:?} pos={:?} format={:?}",
+            cfg.tab_bar, cfg.tab_bar_pos, cfg.tab_format
+        );
+        println!("title:   format={:?}", cfg.window_title_format);
+        if !cfg.word_delimiters.is_empty() {
+            println!("words:   {:?}", cfg.word_delimiters);
+        }
+        if !cfg.ssh_hosts.is_empty() {
+            println!("ssh:     {} host(s) configured", cfg.ssh_hosts.len());
+        }
         if unknown.is_empty() {
             println!("status:  OK — no unrecognized keys");
             return Ok(());
