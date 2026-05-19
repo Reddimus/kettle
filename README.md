@@ -40,8 +40,10 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 - **Session restore** — the tab/split tree and each pane's working directory
   are saved and restored across launches.
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
-  `ssh-host` names with tab-complete, or any `user@host`); SSH tabs persist
-  across sessions.
+  `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
+  persist across sessions.
+- **Command palette** — `Ctrl+Shift+K` opens a fuzzy command palette;
+  type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

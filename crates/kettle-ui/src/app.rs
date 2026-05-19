@@ -38,6 +38,8 @@ pub struct App {
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
+    /// `Some((query, selected))` while the command palette is open.
+    palette_input: Option<(String, usize)>,
     window_focused: bool,
     blink_on: bool,
     last_blink: std::time::Instant,
@@ -81,6 +83,7 @@ impl App {
             mouse_btn: None,
             links: Vec::new(),
             ssh_input: None,
+            palette_input: None,
             window_focused: true,
             blink_on: true,
             last_blink: std::time::Instant::now(),
@@ -440,10 +443,41 @@ impl App {
             None => (None, String::new()),
         };
 
+        let (palette_query, palette_hint) = match &self.palette_input {
+            Some((q, sel)) => {
+                let cmds = kettle_config::palette::commands();
+                let ranked = kettle_config::palette::rank(q, &cmds);
+                let hint = if ranked.is_empty() {
+                    "(no matching command)".to_string()
+                } else {
+                    let sel = (*sel).min(ranked.len() - 1);
+                    let start = if sel < 8 { 0 } else { sel - 7 };
+                    ranked
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(8)
+                        .map(|(i, &ci)| {
+                            let l = cmds[ci].0;
+                            if i == sel {
+                                format!("«{l}»")
+                            } else {
+                                l.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ·  ")
+                };
+                (Some(q.clone()), hint)
+            }
+            None => (None, String::new()),
+        };
+
         let window_focused = self.window_focused;
         let cursor_visible = if !self.cfg.cursor_blink
             || !window_focused
             || self.ssh_input.is_some()
+            || self.palette_input.is_some()
             || self.mux.search.open
         {
             true
@@ -464,6 +498,8 @@ impl App {
                 links,
                 ssh_query,
                 ssh_hint,
+                palette_query,
+                palette_hint,
                 window_focused,
                 cursor_visible,
                 bell,
@@ -494,6 +530,8 @@ impl App {
             links,
             ssh_query,
             ssh_hint,
+            palette_query,
+            palette_hint,
             window_focused,
             cursor_visible,
             bell,
@@ -704,6 +742,9 @@ impl App {
             Action::OpenSsh => {
                 self.ssh_input = Some(String::new());
             }
+            Action::CommandPalette => {
+                self.palette_input = Some((String::new(), 0));
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {
@@ -755,6 +796,51 @@ impl App {
             _ => {
                 if let Some(t) = text {
                     self.mux.search.query.push_str(t);
+                }
+            }
+        }
+    }
+
+    /// Command-palette key handling: fuzzy-filter as you type, `Tab`/`↑↓`
+    /// to move the selection, `Enter` to run it, `Esc` to cancel.
+    fn palette_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+        let cmds = kettle_config::palette::commands();
+        let Some((q, sel)) = self.palette_input.as_mut() else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => self.palette_input = None,
+            Key::Named(NamedKey::Backspace) => {
+                q.pop();
+                *sel = 0;
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                let n = kettle_config::palette::rank(q, &cmds).len();
+                if n > 0 {
+                    *sel = (*sel + 1) % n;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let n = kettle_config::palette::rank(q, &cmds).len();
+                if n > 0 {
+                    *sel = (*sel + n - 1) % n;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let ranked = kettle_config::palette::rank(q, &cmds);
+                let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
+                self.palette_input = None;
+                if let Some(a) = action {
+                    self.handle_action(a, event_loop);
+                }
+            }
+            _ => {
+                if let Some(t) = text
+                    && !t.is_empty()
+                    && !t.chars().any(|c| c.is_control())
+                {
+                    q.push_str(t);
+                    *sel = 0;
                 }
             }
         }
@@ -1153,6 +1239,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.blink_on = true;
                 self.last_blink = std::time::Instant::now();
                 let text = event.text.as_ref().map(|s| s.as_str());
+
+                if self.palette_input.is_some() {
+                    self.palette_key(&event.logical_key, text, event_loop);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
 
                 if self.ssh_input.is_some() {
                     self.ssh_key(&event.logical_key, text);

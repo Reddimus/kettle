@@ -6,6 +6,7 @@ pub mod color;
 pub mod font;
 pub mod fuzzy;
 pub mod keybinds;
+pub mod palette;
 pub mod parse;
 pub mod theme;
 

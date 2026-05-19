@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Command palette (`Ctrl+Shift+K`): a fuzzy action launcher over a
+  29-command registry (`kettle_config::palette`) — type to filter,
+  `Tab`/`↑↓` to select, `Enter` to run, `Esc` to cancel. Bottom-bar
+  overlay reusing the SSH-launcher plumbing; new `command_palette`
+  keybind action.
 - Fuzzy matcher (`kettle_config::fuzzy`, dependency-free): subsequence
   scoring with prefix / word-boundary / camelCase / contiguity bonuses
   and a length penalty (`score`, `best`). The `Ctrl+Shift+S` SSH

@@ -223,9 +223,15 @@
       fuzzy-match host names instead of prefix-only. Reusable by a
       future command palette.
 
+- [x] **Command palette** (`Ctrl+Shift+K`): a fuzzy action launcher
+      over a 29-entry command registry (`kettle_config::palette`,
+      reusing the fuzzy matcher) — type to filter, `Tab`/`↑↓` select,
+      `Enter` dispatch, `Esc` cancel; bottom-bar overlay reusing the
+      SSH-launcher plumbing (+3 tests, 114 workspace).
+
 ## Next (in priority order)
-- [ ] Command palette (fuzzy action launcher) reusing the matcher;
-      detachable mux server; native macOS menu; signed packaging
+- [ ] Detachable mux server (remote attach); native macOS menu;
+      code-signed/notarized macOS build; Windows MSI
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

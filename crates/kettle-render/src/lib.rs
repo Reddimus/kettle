@@ -57,6 +57,10 @@ pub struct Overlay {
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
+    /// `Some(typed)` while the command palette is open.
+    pub palette_query: Option<String>,
+    /// The ranked command labels (selected one marked) for the palette.
+    pub palette_hint: String,
     /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
     pub window_focused: bool,
     /// Cursor is in its "on" blink phase.
@@ -466,6 +470,27 @@ impl Renderer {
                     overlay.search_index + 1
                 },
                 overlay.search_count
+            );
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some(q) = &overlay.palette_query {
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
+            let label = format!(
+                "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
+                overlay.palette_hint
             );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
