@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`TERM_PROGRAM_VERSION` env var set on every spawned shell.**
+  Companion to the existing `TERM_PROGRAM=kettle`; iTerm2 / kitty /
+  WezTerm / Ghostty all set this pair. Neovim's
+  `:checkhealth provider`, fish's prompt themers, and various
+  shell/script diagnostics key off the pair when probing for known
+  modern terminals — without the version, kettle showed up as "an
+  unknown program calling itself kettle" rather than "kettle
+  v0.1.0." Populated from `env!("CARGO_PKG_VERSION")` so a bumped
+  `Cargo.toml` flows through with no separate string to maintain.
 - **`--check-config` now echoes every per-cycle config gate.** The
   command was added back at cycle 5-ish and still only reported
   five fields (config path, theme, font, scrollback, keybind

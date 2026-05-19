@@ -365,6 +365,11 @@
       Resolved cursor / bell / OSC 52 / scroll / mouse / tabs /
       title / word-delimiters / ssh values now appear so a user
       can verify their tweaks took effect without grepping source.
+- [x] **`TERM_PROGRAM_VERSION` env on spawned shells.** Pairs with
+      the existing `TERM_PROGRAM=kettle` so neovim `:checkhealth`,
+      fish themers, and shell diagnostics see "kettle v0.1.0"
+      instead of an unknown program. Sourced from
+      `env!("CARGO_PKG_VERSION")`.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

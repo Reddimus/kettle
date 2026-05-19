@@ -104,6 +104,15 @@ impl Terminal {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "kettle");
+        // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
+        // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
+        // `:checkhealth provider`, fish's prompt themers, and various
+        // diagnostic tools key off the pair when probing whether they're
+        // running under a known modern terminal. Kettle's own crate
+        // version is the obvious answer — populated from Cargo at build
+        // time so a bumped `kettle/Cargo.toml` flows through with no
+        // separate version string to keep in sync.
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         match cwd {
             Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
             _ => {
