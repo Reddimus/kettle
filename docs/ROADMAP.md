@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Alt-drag **rectangular (block) selection** (`SelectionType::Block`,
+      iTerm2/Alacritty/WezTerm parity) via a pure `selection_kind`
+      mapping (+1 test); copy-on-select fires on release for drags.
 - [x] Standard CLI launch args: `-e/--exec CMD…` (run a command instead
       of the shell, consumes the rest incl. hyphenated flags) and
       `-d/--working-directory DIR`; override a saved session for the

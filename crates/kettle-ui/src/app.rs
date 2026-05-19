@@ -24,6 +24,19 @@ pub enum UserEvent {
     ReloadConfig,
 }
 
+/// Map a click count + the Alt modifier to a selection type: double =
+/// word, triple = line, single = a normal drag, and Alt+single =
+/// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
+fn selection_kind(clicks: u8, alt: bool) -> kettle_core::SelectionType {
+    use kettle_core::SelectionType::*;
+    match clicks {
+        2 => Semantic,
+        3 => Lines,
+        _ if alt => Block,
+        _ => Simple,
+    }
+}
+
 /// One on-screen quick-select target: where its label sits and what it is.
 #[derive(Clone)]
 struct HintTarget {
@@ -239,8 +252,11 @@ impl App {
     }
 
     fn begin_selection(&mut self, area: Rect, ty: kettle_core::SelectionType) {
-        // Word/line selections are a "click", not a drag.
-        self.selecting = ty == kettle_core::SelectionType::Simple;
+        // Simple + Block are drags; word/line select immediately on click.
+        self.selecting = matches!(
+            ty,
+            kettle_core::SelectionType::Simple | kettle_core::SelectionType::Block
+        );
         if let Some(rect) = self.focused_rect(area) {
             let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
             if let Some(pane) = self.mux.focused()
@@ -1298,17 +1314,21 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if bcode == 0 {
-                    let kind = if let Some((r, c)) = self.cursor_cell() {
-                        match self.click_count(r, c) {
-                            2 => kettle_core::SelectionType::Semantic,
-                            3 => kettle_core::SelectionType::Lines,
-                            _ => kettle_core::SelectionType::Simple,
-                        }
-                    } else {
-                        kettle_core::SelectionType::Simple
-                    };
+                    let clicks = self
+                        .cursor_cell()
+                        .map(|(r, c)| self.click_count(r, c))
+                        .unwrap_or(1);
+                    let kind = selection_kind(clicks, self.mods.alt_key());
                     self.begin_selection(area, kind);
-                    if kind != kettle_core::SelectionType::Simple && self.cfg.copy_on_select {
+                    // Word/line selections resolve on press; copy them now.
+                    // Simple/Block are drags — copied on button release.
+                    if self.cfg.copy_on_select
+                        && matches!(
+                            kind,
+                            kettle_core::SelectionType::Semantic
+                                | kettle_core::SelectionType::Lines
+                        )
+                    {
                         self.copy_selection();
                     }
                 }
@@ -1486,5 +1506,25 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_kind;
+    use kettle_core::SelectionType;
+
+    #[test]
+    fn selection_kind_maps_clicks_and_alt() {
+        // Double/triple click → word/line regardless of Alt.
+        assert!(matches!(selection_kind(2, false), SelectionType::Semantic));
+        assert!(matches!(selection_kind(2, true), SelectionType::Semantic));
+        assert!(matches!(selection_kind(3, false), SelectionType::Lines));
+        // Single click: plain drag, or Alt → rectangular block.
+        assert!(matches!(selection_kind(1, false), SelectionType::Simple));
+        assert!(matches!(selection_kind(1, true), SelectionType::Block));
+        // A 0 click-count (no cell) still behaves like a single click.
+        assert!(matches!(selection_kind(0, false), SelectionType::Simple));
+        assert!(matches!(selection_kind(0, true), SelectionType::Block));
     }
 }

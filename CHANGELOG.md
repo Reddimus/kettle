@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- **Rectangular (block) selection**: hold `Alt` and drag to select a
+  column block (iTerm2/Alacritty/WezTerm parity), via a pure
+  `selection_kind(clicks, alt)` mapping; word/line still copy on press,
+  Simple/Block copy on release.
 - Standard launch CLI: `-e/--exec CMD …` runs a command in the first
   tab instead of the shell (consumes the rest of the args, hyphenated
   program flags included — e.g. `kettle -e ssh -t host`) and
