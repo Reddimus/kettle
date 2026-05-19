@@ -94,9 +94,13 @@
       absolute moves (VPA keeps column), DECSC/DECRC restores the SGR
       pen (25 conformance tests)
 
+- [x] Conformance: SU/SD scroll up/down, DECSCUSR cursor shape
+      (underline/beam/block), wide CJK = 2 cells + WIDE_CHAR_SPACER,
+      wide-char wraps when it can't fit (29 conformance tests)
+
 ## Next (in priority order)
-- [ ] Conformance: SU/SD scroll up/down, DECSCUSR cursor shape,
-      wide-char (CJK) width + wrap
+- [ ] Conformance: combining marks / zero-width, OSC 4 palette query,
+      DECRQM mode query, tab clear (TBC) variants
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

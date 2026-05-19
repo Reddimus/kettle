@@ -686,6 +686,62 @@ mod conformance {
         );
     }
 
+    #[test]
+    fn su_sd_scroll_up_and_down() {
+        let (mut t, mut p) = harness(4, 3);
+        feed(&mut t, &mut p, b"r0\r\nr1\r\nr2");
+        feed(&mut t, &mut p, b"\x1b[1S"); // SU 1: content moves up
+        assert_eq!(row_text(&t, 0), "r1");
+        assert_eq!(row_text(&t, 1), "r2");
+        assert_eq!(row_text(&t, 2), "");
+
+        let (mut t2, mut p2) = harness(4, 3);
+        feed(&mut t2, &mut p2, b"a\r\nb\r\nc");
+        feed(&mut t2, &mut p2, b"\x1b[1T"); // SD 1: content moves down
+        assert_eq!(row_text(&t2, 0), "");
+        assert_eq!(row_text(&t2, 1), "a");
+        assert_eq!(row_text(&t2, 2), "b");
+    }
+
+    #[test]
+    fn decscusr_sets_cursor_shape() {
+        use alacritty_terminal::vte::ansi::CursorShape;
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"\x1b[3 q"); // DECSCUSR 3 = (blinking) underline
+        assert_eq!(t.renderable_content().cursor.shape, CursorShape::Underline);
+        feed(&mut t, &mut p, b"\x1b[5 q"); // 5 = (blinking) bar/beam
+        assert_eq!(t.renderable_content().cursor.shape, CursorShape::Beam);
+        feed(&mut t, &mut p, b"\x1b[1 q"); // 1 = (blinking) block
+        assert_eq!(t.renderable_content().cursor.shape, CursorShape::Block);
+    }
+
+    #[test]
+    fn wide_cjk_char_occupies_two_cells() {
+        let (mut t, mut p) = harness(8, 2);
+        feed(&mut t, &mut p, "世A".as_bytes());
+        let g = t.grid();
+        let c0 = &g[Point::new(Line(0), Column(0))];
+        assert_eq!(c0.c, '世');
+        assert!(c0.flags.contains(Flags::WIDE_CHAR), "CJK = wide");
+        assert!(
+            g[Point::new(Line(0), Column(1))]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER),
+            "second cell is the wide spacer"
+        );
+        assert_eq!(g[Point::new(Line(0), Column(2))].c, 'A');
+    }
+
+    #[test]
+    fn wide_char_wraps_when_it_does_not_fit() {
+        let (mut t, mut p) = harness(3, 3);
+        // 2 narrow + 1 wide: the wide char can't fit in the last column,
+        // so it wraps to the next row.
+        feed(&mut t, &mut p, "ab世".as_bytes());
+        assert_eq!(row_text(&t, 0), "ab");
+        assert_eq!(t.grid()[Point::new(Line(1), Column(0))].c, '世');
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) is not implemented by
     // alacritty_terminal, so no conformance test asserts it — see ROADMAP.
 }

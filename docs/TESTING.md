@@ -36,8 +36,9 @@ cargo test --workspace
   SGR dim/underline/strikeout + curly-underline (4:3) + reset,
   DECALN screen alignment, REP repeat-char, G1 charset via SO/SI,
   RIS full reset, EL erase-left, ED erase-below, ECH erase-in-place, ICH, CHA/HPA/VPA, DECSC-restores-SGR, DA2 secondary
-  device attributes. The automatable, regression-proof core of a
-  `vttest` sweep.
+  device attributes, SU/SD scroll, DECSCUSR cursor shape, wide CJK
+  (2 cells + spacer) and wide-char wrap. The automatable,
+  regression-proof core of a `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;
   session JSON round-trips (incl. SSH panes) and pre-SSH sessions still load.
