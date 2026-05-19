@@ -53,6 +53,20 @@ fn clamp_osc52(s: &str, max: usize) -> &str {
 /// 1 MiB — generous for real copies, bounded against abuse.
 const OSC52_MAX: usize = 1 << 20;
 
+/// Pure geometry: is the mouse y-coordinate inside the tab bar's vertical
+/// band? `bar_h` is the bar height in pixels, `surface_h` is total window
+/// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
+/// on-wheel-over-tab-bar decision is fully unit-tested.
+fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
+    if bar_h <= 0.0 {
+        return false;
+    }
+    match pos {
+        TabBarPos::Top => y >= 0.0 && y < bar_h,
+        TabBarPos::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
+    }
+}
+
 /// Render the OS window title from the user's `window-title-format`
 /// template with the active pane's title / cwd / 1-based tab index. Falls
 /// back to plain `"kettle"` when the pane has no meaningful title (so the
@@ -229,6 +243,24 @@ impl App {
             w.set_cursor_visible(true);
             self.mouse_hidden = false;
         }
+    }
+
+    /// True when the mouse cursor is inside the tab bar's vertical band.
+    /// Used to route wheel events away from scrollback so spinning the
+    /// wheel over the tab bar cycles tabs (kitty / iTerm2 / Ghostty
+    /// parity). When the tab bar is hidden (`tab-bar = off` or
+    /// `auto` with one tab) this returns `false`.
+    fn cursor_in_tab_bar(&self) -> bool {
+        let h = self.tab_bar_h();
+        if h <= 0.0 {
+            return false;
+        }
+        let (_, sh) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
     }
 
     /// Clear the focused pane's selection (called when the user types —
@@ -1726,6 +1758,22 @@ impl ApplicationHandler<UserEvent> for App {
                 if lines == 0 {
                     return;
                 }
+                // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
+                // Ghostty parity). Each "click" of the wheel moves one
+                // tab regardless of `scroll-multiplier` so the gesture
+                // stays predictable — multiple lines from a fast scroll
+                // collapse to a single tab change, like the real apps.
+                if self.cursor_in_tab_bar() && self.mux.tabs.len() > 1 {
+                    if lines > 0 {
+                        self.mux.prev_tab();
+                    } else {
+                        self.mux.next_tab();
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 let (track, _) = input::mouse_tracking(self.focused_mode());
                 if track != input::MouseTracking::Off {
                     let btn = if lines > 0 { 64 } else { 65 };
@@ -1906,6 +1954,40 @@ mod tests {
         assert_eq!(wheel_lines(&pix, 1.0), 3);
         // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
         assert_eq!(wheel_lines(&one, -5.0), 0);
+    }
+
+    #[test]
+    fn cursor_in_tab_bar_band_geometry() {
+        use super::{TabBarPos, cursor_in_tab_bar_band};
+        // 600 px window, 24 px tab bar. Top: [0, 24).
+        assert!(cursor_in_tab_bar_band(0.0, 24.0, 600.0, TabBarPos::Top));
+        assert!(cursor_in_tab_bar_band(23.0, 24.0, 600.0, TabBarPos::Top));
+        assert!(!cursor_in_tab_bar_band(24.0, 24.0, 600.0, TabBarPos::Top));
+        assert!(!cursor_in_tab_bar_band(300.0, 24.0, 600.0, TabBarPos::Top));
+        // Bottom: [576, 600].
+        assert!(cursor_in_tab_bar_band(
+            576.0,
+            24.0,
+            600.0,
+            TabBarPos::Bottom
+        ));
+        assert!(cursor_in_tab_bar_band(
+            600.0,
+            24.0,
+            600.0,
+            TabBarPos::Bottom
+        ));
+        assert!(!cursor_in_tab_bar_band(
+            575.0,
+            24.0,
+            600.0,
+            TabBarPos::Bottom
+        ));
+        assert!(!cursor_in_tab_bar_band(0.0, 24.0, 600.0, TabBarPos::Bottom));
+        // Hidden tab bar (`tab-bar = off` or single-tab `auto`) → always
+        // out of band so the wheel falls through to scrollback.
+        assert!(!cursor_in_tab_bar_band(0.0, 0.0, 600.0, TabBarPos::Top));
+        assert!(!cursor_in_tab_bar_band(0.0, 0.0, 600.0, TabBarPos::Bottom));
     }
 
     #[test]

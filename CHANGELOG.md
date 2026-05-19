@@ -7,6 +7,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Wheel over tab bar cycles tabs** (kitty / iTerm2 / Ghostty
+  parity). Spinning the mouse wheel while the pointer is over the
+  tab bar now switches tabs (wheel-up = previous, wheel-down =
+  next) instead of scrolling the focused pane's scrollback — the
+  same gesture every modern terminal binds. Honors
+  `tab-bar-position = bottom` and the hidden-bar case (`tab-bar =
+  off` or `auto` with one tab). Pure `cursor_in_tab_bar_band`
+  geometry helper, +1 unit test covering top/bottom/hidden bands.
 - **`mouse-hide-while-typing` + selection clears on typing.** Two
   QoL gaps every modern terminal (Alacritty, kitty, WezTerm,
   iTerm2, Ghostty) has but kettle didn't:

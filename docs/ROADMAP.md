@@ -324,6 +324,9 @@
       and the focused pane's selection clears on any keystroke that
       produces PTY bytes — Alacritty / kitty / WezTerm / iTerm2
       parity. +1 config test.
+- [x] **Mouse wheel over tab bar cycles tabs** (kitty / iTerm2 /
+      Ghostty parity). Pure `cursor_in_tab_bar_band` geometry
+      helper handles top/bottom positions + hidden bar. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
