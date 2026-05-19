@@ -207,6 +207,7 @@ impl Mux {
             rows.max(1),
             cw,
             ch,
+            cfg.cursor_blink,
             tx,
             waker,
         )?;

@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **DEC mode 12 (cursor blink) now honors the running program.**
+  `CSI ?12 h` / `?12 l` is the standard way for vim, neovim, and
+  shell prompts to ask the terminal for a solid (steady) or blinking
+  cursor inside their UI. The engine raised
+  `TermEvent::CursorBlinkingChange` and tracked the state on
+  `cursor_style().blinking`, but the app's blink decision was hard-
+  wired to the static `cursor-style-blink` config — every program
+  request was silently ignored. Wired via a small
+  `Terminal::cursor_blinking()` accessor (engine kept hidden), with
+  the redraw + cursor-visibility path now intersecting config and
+  live pane state. The event handler resets the blink phase so
+  off→solid is immediate (no half-period delay). Default initial
+  blink is seeded from `cursor-style-blink` at pane creation. +1
+  conformance test.
 - **`CSI 14 t` (text-area pixel size) now replies.** Sixel / kitty
   graphics / iTerm2 OSC 1337 apps probe this to compute
   pixel-perfect image placements (a 200-px image needs to know how

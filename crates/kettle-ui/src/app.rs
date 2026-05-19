@@ -531,6 +531,16 @@ impl App {
                             pane.term.write(s.as_bytes());
                         }
                     }
+                    TermEvent::CursorBlinkingChange => {
+                        // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
+                        // redraw will pick up the new state from
+                        // `Terminal::cursor_blinking()`, but reset the blink
+                        // phase so going *blink-on* starts visible and
+                        // *blink-off* makes the cursor solid right away,
+                        // not on whatever half-period we'd otherwise land in.
+                        self.blink_on = true;
+                        self.last_blink = std::time::Instant::now();
+                    }
                     TermEvent::Bell => bell = true,
                     TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
                     _ => {}
@@ -770,7 +780,22 @@ impl App {
         };
 
         let window_focused = self.window_focused;
-        let cursor_visible = if !self.cfg.cursor_blink
+        // Cursor blink is the *intersection* of the user config and the
+        // running app's wishes — programs flip it via DEC private mode 12
+        // (`CSI ?12 h/l`), which the engine tracks per-pane on its
+        // `cursor_style().blinking`. Read the active pane's live state so
+        // editors like vim that disable blink for their own cursor are
+        // honored even when the global config wants blink. (Goes through
+        // `active_focus` + `panes.get` so the `overlay()` builder stays a
+        // pure `&self` reader.)
+        let pane_blink = self
+            .mux
+            .active_focus()
+            .and_then(|id| self.mux.panes.get(&id))
+            .map(|p| p.term.cursor_blinking())
+            .unwrap_or(true);
+        let blink_enabled = self.cfg.cursor_blink && pane_blink;
+        let cursor_visible = if !blink_enabled
             || !window_focused
             || self.ssh_input.is_some()
             || self.palette_input.is_some()
@@ -849,8 +874,18 @@ impl App {
         self.drain_events();
         // Reflect the active pane (incl. after tab/focus switches).
         self.sync_window_title();
-        // Advance the cursor blink phase (configurable half-period).
+        // Advance the cursor blink phase (configurable half-period). Skip
+        // the increment when the active pane has DEC mode 12 cleared so the
+        // cursor sits solid — without this, vim-style "solid block while
+        // editing" requests are ignored even though the engine honored them.
+        let pane_blink_redraw = self
+            .mux
+            .active_focus()
+            .and_then(|id| self.mux.panes.get(&id))
+            .map(|p| p.term.cursor_blinking())
+            .unwrap_or(true);
         if self.cfg.cursor_blink
+            && pane_blink_redraw
             && self.window_focused
             && self.last_blink.elapsed()
                 >= std::time::Duration::from_millis(self.cfg.cursor_blink_interval)

@@ -298,6 +298,13 @@
       `kettle_render::reply_for_text_area_size` plugs in the live cell
       + grid dimensions and the formatter renders the canonical
       `CSI 4 ; h ; w t` xtwinops reply. +1 test.
+- [x] **DEC mode 12 (cursor blink) honors the running program.**
+      `CSI ?12 h/l` from vim/neovim/shell prompts was previously
+      ignored — the app's blink decision was bound to the static
+      config. Now intersects with the engine's live
+      `cursor_style().blinking` per pane via a `cursor_blinking()`
+      accessor; `CursorBlinkingChange` resets the blink phase so
+      blink-off shows a solid cursor instantly. +1 test.
 
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)

@@ -68,6 +68,7 @@ pub struct Terminal {
 
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         argv: &[String],
         cwd: Option<&str>,
@@ -76,6 +77,7 @@ impl Terminal {
         rows: usize,
         cell_w: u16,
         cell_h: u16,
+        cursor_blink: bool,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
     ) -> Result<Terminal> {
@@ -115,9 +117,18 @@ impl Terminal {
         let mut reader = pair.master.try_clone_reader()?;
 
         let proxy = EventProxy::new(event_tx, waker.clone());
+        // Seed the engine's *default* cursor blink from the user config; the
+        // engine seeds `cursor_style` lazily from this, and programs can flip
+        // it at runtime via DEC mode 12 (`CSI ?12 h/l`), which we honor live
+        // through `cursor_blinking()` below.
+        let default_cursor_style = alacritty_terminal::vte::ansi::CursorStyle {
+            blinking: cursor_blink,
+            ..Default::default()
+        };
         let tconf = TermConfig {
             scrolling_history: scrollback,
             kitty_keyboard: true,
+            default_cursor_style,
             ..TermConfig::default()
         };
         let term = Term::new(
@@ -342,6 +353,18 @@ impl Terminal {
     /// Last working directory reported via OSC 7, if any.
     pub fn current_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Live cursor-blink state. Defaults to whatever the config seeded at
+    /// pane creation; programs flip it at runtime via DEC private mode 12
+    /// (`CSI ?12 h` blink / `?12 l` solid) — the engine raises
+    /// `TermEvent::CursorBlinkingChange` and we re-read this on next redraw
+    /// so the cursor obeys the running app, not just the config.
+    pub fn cursor_blinking(&self) -> bool {
+        self.term
+            .lock()
+            .map(|t| t.cursor_style().blinking)
+            .unwrap_or(false)
     }
 
     /// Absolute prompt-start lines recorded via OSC 133.
@@ -1305,6 +1328,28 @@ mod conformance {
             .try_iter()
             .any(|ev| matches!(ev, TermEvent::CursorBlinkingChange));
         assert!(got, "?12h should signal a cursor-blink change");
+    }
+
+    #[test]
+    fn dec_mode_12_toggles_engine_cursor_blink_state() {
+        // The companion to the event test above: confirm the engine actually
+        // tracks the blink state on `cursor_style().blinking` so the UI can
+        // read it live (we honor the *running* program's wish for solid vs.
+        // blinking cursor, not just the static config). This is what
+        // `Terminal::cursor_blinking()` returns — exercised through the real
+        // vte parser so the mode-flip path is real.
+        let (mut t, mut p) = harness(8, 2);
+        let initial = t.cursor_style().blinking;
+        feed(&mut t, &mut p, b"\x1b[?12h"); // request blink
+        assert!(
+            t.cursor_style().blinking,
+            "DEC mode 12 set must turn cursor blink on (was {initial})"
+        );
+        feed(&mut t, &mut p, b"\x1b[?12l"); // request solid
+        assert!(
+            !t.cursor_style().blinking,
+            "DEC mode 12 reset must turn cursor blink off"
+        );
     }
 
     #[test]
