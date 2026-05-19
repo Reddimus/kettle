@@ -786,6 +786,50 @@ mod conformance {
         );
     }
 
+    #[test]
+    fn osc52_copy_emits_clipboard_store() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        // base64("hi") = "aGk=" ; OSC 52 ; c ; <b64> ST
+        feed(&mut t, &mut p, b"\x1b]52;c;aGk=\x07");
+        let stored = rx.try_iter().find_map(|ev| match ev {
+            TermEvent::ClipboardStore(_, s) => Some(s),
+            _ => None,
+        });
+        assert_eq!(stored.as_deref(), Some("hi"), "OSC 52 c sets clipboard");
+    }
+
+    #[test]
+    fn osc8_hyperlink_carries_on_cells() {
+        let (mut t, mut p) = harness(8, 2);
+        feed(
+            &mut t,
+            &mut p,
+            b"\x1b]8;;https://x.example\x07Z\x1b]8;;\x07W",
+        );
+        let g = t.grid();
+        let z = &g[Point::new(Line(0), Column(0))];
+        assert_eq!(z.c, 'Z');
+        assert_eq!(
+            z.hyperlink().map(|h| h.uri().to_string()).as_deref(),
+            Some("https://x.example"),
+            "OSC 8 URI attaches to the cell"
+        );
+        // After the closing OSC 8 ; ; the link is cleared.
+        assert!(g[Point::new(Line(0), Column(1))].hyperlink().is_none());
+    }
+
+    #[test]
+    fn alt_screen_preserves_primary_content() {
+        let (mut t, mut p) = harness(8, 3);
+        feed(&mut t, &mut p, b"main");
+        feed(&mut t, &mut p, b"\x1b[?1049h"); // enter alt screen
+        assert_eq!(row_text(&t, 0), "", "alt screen starts blank");
+        feed(&mut t, &mut p, b"\x1b[2J\x1b[1;1Halt");
+        assert_eq!(row_text(&t, 0), "alt");
+        feed(&mut t, &mut p, b"\x1b[?1049l"); // back to primary
+        assert_eq!(row_text(&t, 0), "main", "primary content restored");
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) and HTS (ESC H, custom
     // tab stops) are not reliably handled by alacritty_terminal, so no
     // conformance test asserts them — see ROADMAP.

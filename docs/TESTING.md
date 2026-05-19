@@ -38,8 +38,9 @@ cargo test --workspace
   RIS full reset, EL erase-left, ED erase-below, ECH erase-in-place, ICH, CHA/HPA/VPA, DECSC-restores-SGR, DA2 secondary
   device attributes, SU/SD scroll, DECSCUSR cursor shape, wide CJK
   (2 cells + spacer) and wide-char wrap, combining-mark zero-width,
-  OSC 4 palette query, DECRQM mode report. The automatable,
-  regression-proof core of a `vttest` sweep.
+  OSC 4 palette query, DECRQM mode report, OSC 52 clipboard copy,
+  OSC 8 hyperlink cell-carry, DECSET 1049 primary-screen preservation.
+  The automatable, regression-proof core of a `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;
   session JSON round-trips (incl. SSH panes) and pre-SSH sessions still load.

@@ -102,9 +102,13 @@
       palette query -> ColorRequest, DECRQM reports mode state
       (32 conformance tests). HTS custom tab stops unreliable upstream.
 
+- [x] Conformance: OSC 52 clipboard copy, OSC 8 hyperlink carried on
+      cells (and cleared), DECSET 1049 preserves primary-screen content
+      (35 conformance tests)
+
 ## Next (in priority order)
-- [ ] Conformance: OSC 52 clipboard, OSC 8 hyperlink cell carry,
-      DECSET 1049 alt-screen save/restore content
+- [ ] Conformance: DECSET 2026 synchronized output, mouse 1006 button
+      encoding round-trip, REP after wide char
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides
