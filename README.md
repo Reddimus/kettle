@@ -37,8 +37,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   (taskbar/dock urgency); `bell = off|visual|attention|both`.
 - **Polished input** — safe bracketed paste (newline-normalized,
   injection-guarded), double-click word / triple-click line selection +
-  **Alt-drag rectangular (block) selection**, auto-copy, focus-aware hollow
-  cursor, configurable blink, visual bell.
+  **Alt-drag rectangular (block) selection**, auto-copy, middle-click
+  paste, focus-aware hollow cursor, configurable blink, visual bell.
 - **Session restore** — the tab/split tree and each pane's working directory
   are saved and restored across launches; new tabs/splits also inherit the
   focused pane's current directory (OSC 7).

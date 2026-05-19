@@ -299,6 +299,26 @@ impl App {
     }
 
     /// Copy the focused pane's selection to the clipboard (call on release).
+    /// Paste the clipboard into the focused pane, bracketed-paste-safe.
+    /// Shared by `Action::Paste` and middle-click.
+    fn paste_clipboard(&mut self) {
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|c| c.get_text().ok())
+            .unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = self
+            .focused_mode()
+            .contains(kettle_core::TermMode::BRACKETED_PASTE);
+        let bytes = input::paste_payload(&text, bracketed);
+        if let Some(p) = self.mux.focused() {
+            p.term.write(&bytes);
+        }
+    }
+
     fn copy_selection(&mut self) {
         let sel = self
             .mux
@@ -763,20 +783,7 @@ impl App {
                     let _ = cb.set_text(sel);
                 }
             }
-            Action::Paste => {
-                let text = self
-                    .clipboard
-                    .as_mut()
-                    .and_then(|c| c.get_text().ok())
-                    .unwrap_or_default();
-                let bracketed = self
-                    .focused_mode()
-                    .contains(kettle_core::TermMode::BRACKETED_PASTE);
-                let bytes = input::paste_payload(&text, bracketed);
-                if let Some(p) = self.mux.focused() {
-                    p.term.write(&bytes);
-                }
-            }
+            Action::Paste => self.paste_clipboard(),
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
                 if let Some(r) = self.renderer.as_mut() {
                     let new = match action {
@@ -1336,6 +1343,15 @@ impl ApplicationHandler<UserEvent> for App {
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
                 if self.send_mouse(bcode, true, false) {
                     self.mouse_btn = Some(bcode);
+                    return;
+                }
+                // Middle-click in the content area pastes the clipboard
+                // (standard X11 terminal behavior; PRIMARY ≈ clipboard).
+                if bcode == 1 {
+                    self.paste_clipboard();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                     return;
                 }
                 if bcode == 0 {

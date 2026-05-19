@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Middle-click in the content area **pastes the clipboard**
+      (bracketed-paste-safe, standard X11 behavior); `Action::Paste`
+      and middle-click share `paste_clipboard()`.
 - [x] OS window title tracks the **active** pane (tab/focus switches,
       not only OSC events); deduped; pure `window_title` (+1 test).
 - [x] Alt-drag **rectangular (block) selection** (`SelectionType::Block`,

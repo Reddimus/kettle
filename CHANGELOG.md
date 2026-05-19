@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- **Middle-click pastes** the clipboard into the focused pane (standard
+  X11 terminal behavior; bracketed-paste-safe via the shared
+  `paste_clipboard`), when mouse-reporting isn't consuming the click
+  and the cursor isn't over the tab bar (where middle-click still
+  closes a tab).
 - The OS **window title now follows the active pane** — switching tabs
   or focusing another split retitles the window (not just on OSC title
   events), with empty/placeholder titles falling back to `kettle`. The
