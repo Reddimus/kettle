@@ -33,6 +33,11 @@ struct Cli {
     #[arg(long, default_value_t = 28)]
     rows: u32,
 
+    /// Use this config file instead of the default path
+    /// (`--config FILE`); also honored by `--check-config`/`--screenshot`.
+    #[arg(long = "config", value_name = "FILE")]
+    config: Option<std::path::PathBuf>,
+
     /// Working directory for the first tab (`-d DIR`).
     #[arg(long = "working-directory", short = 'd', value_name = "DIR")]
     working_directory: Option<std::path::PathBuf>,
@@ -55,14 +60,21 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.config_path {
-        match kettle_config::Config::default_path() {
+        match cli
+            .config
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        {
             Some(p) => println!("{}", p.display()),
             None => println!("(no config path resolvable)"),
         }
         return Ok(());
     }
     if cli.check_config {
-        let path = kettle_config::Config::default_path();
+        let path = cli
+            .config
+            .clone()
+            .or_else(kettle_config::Config::default_path);
         let (cfg, unknown) = match &path {
             Some(p) if p.exists() => {
                 let text = std::fs::read_to_string(p)?;
@@ -92,7 +104,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(out) = &cli.screenshot {
-        let cfg = match kettle_config::Config::default_path() {
+        let cfg = match cli
+            .config
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        {
             Some(p) if p.exists() => {
                 kettle_config::Config::parse_collect(&std::fs::read_to_string(p)?).0
             }
@@ -106,6 +122,7 @@ fn main() -> anyhow::Result<()> {
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
+        config: cli.config,
     })
 }
 
@@ -116,16 +133,30 @@ mod tests {
 
     #[test]
     fn cli_exec_and_working_directory_parse() {
-        let c = Cli::try_parse_from(["kettle", "-d", "/tmp", "-e", "ssh", "-t", "box"])
-            .expect("valid args");
+        let c = Cli::try_parse_from([
+            "kettle",
+            "--config",
+            "/etc/k.conf",
+            "-d",
+            "/tmp",
+            "-e",
+            "ssh",
+            "-t",
+            "box",
+        ])
+        .expect("valid args");
         assert_eq!(
             c.working_directory.as_deref(),
             Some(std::path::Path::new("/tmp"))
         );
+        assert_eq!(
+            c.config.as_deref(),
+            Some(std::path::Path::new("/etc/k.conf"))
+        );
         // `-e` consumes the rest, including hyphenated flags for the program.
         assert_eq!(c.exec, vec!["ssh", "-t", "box"]);
-        // No -e → empty (falls back to the shell).
+        // Defaults: no overrides.
         let d = Cli::try_parse_from(["kettle"]).unwrap();
-        assert!(d.exec.is_empty() && d.working_directory.is_none());
+        assert!(d.exec.is_empty() && d.working_directory.is_none() && d.config.is_none());
     }
 }

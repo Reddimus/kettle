@@ -15,6 +15,8 @@ pub struct Options {
     pub command: Option<Vec<String>>,
     /// Working directory for the first tab (`kettle -d DIR`).
     pub cwd: Option<std::path::PathBuf>,
+    /// Explicit config file (`kettle --config FILE`); `None` = default path.
+    pub config: Option<std::path::PathBuf>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

@@ -66,6 +66,7 @@ cargo run --release
 kettle --list-themes      # list all bundled themes
 kettle --config-path      # show where the config file is read from
 kettle --check-config     # validate config: resolved settings + unknown keys
+kettle --config FILE      # use a specific config file (live-reloaded)
 kettle -d /path/to/dir    # open the first tab in this directory
 kettle -e htop            # run a command instead of the shell
 kettle -e ssh -t host     # (-e consumes the rest of the args)

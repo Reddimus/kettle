@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- `--config FILE` selects an explicit config file instead of the
+  default path; it is honored by the running terminal (including the
+  live-reload watcher, which now watches that file's directory) and by
+  `--config-path`, `--check-config`, and `--screenshot`.
 - **Middle-click pastes** the clipboard into the focused pane (standard
   X11 terminal behavior; bracketed-paste-safe via the shared
   `paste_clipboard`), when mouse-reporting isn't consuming the click

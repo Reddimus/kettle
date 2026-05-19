@@ -83,6 +83,8 @@ pub struct App {
     last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     last_title: String,
+    /// Explicit `--config` file (persists for live reload).
+    config_path: Option<std::path::PathBuf>,
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
@@ -98,8 +100,9 @@ impl App {
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
 
+        // Watch the chosen config file's directory for live reload.
         let mut watcher = None;
-        if let Some(path) = Config::default_path()
+        if let Some(path) = startup.config.clone().or_else(Config::default_path)
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
@@ -114,7 +117,11 @@ impl App {
         }
 
         let mut app = App {
-            cfg: Config::load(),
+            cfg: startup
+                .config
+                .as_deref()
+                .map(Config::load_from)
+                .unwrap_or_else(Config::load),
             window: None,
             renderer: None,
             mux: Mux::new(),
@@ -135,6 +142,7 @@ impl App {
             last_bell: None,
             last_click: None,
             last_title: String::new(),
+            config_path: startup.config.clone(),
             startup,
             _watcher: watcher,
         };
@@ -893,7 +901,11 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        let new = Config::load();
+        let new = self
+            .config_path
+            .as_deref()
+            .map(Config::load_from)
+            .unwrap_or_else(Config::load);
         if let Some(r) = self.renderer.as_mut() {
             r.set_font_size(new.font_size);
         }
