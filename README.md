@@ -23,7 +23,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
   setup.
-- **Search overlay** — `Ctrl+Shift+F`, regex, highlight + cycle.
+- **Search overlay** — `Ctrl+Shift+F`, real regex with **smart-case**
+  (case-insensitive until you type an uppercase), highlight + cycle.
 - **Hyperlinks** — OSC 8 + URL autodetection, underlined with hover, open
   with `Ctrl`/`Cmd`+click.
 - **Inline images** — Sixel, kitty graphics, and iTerm2 (OSC 1337) decoded

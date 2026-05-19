@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Search is now a **real regex with smart-case**: the `Ctrl+Shift+F`
+  pattern is compiled as a regex (alternation, anchors, `\b`, …),
+  case-insensitive unless it contains an uppercase character
+  (ripgrep/vim smart-case), and an invalid pattern falls back to a
+  literal search instead of returning nothing (`search::build_regex`).
 - Command palette (`Ctrl+Shift+K`): a fuzzy action launcher over a
   29-command registry (`kettle_config::palette`) — type to filter,
   `Tab`/`↑↓` to select, `Enter` to run, `Esc` to cancel. Bottom-bar

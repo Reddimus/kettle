@@ -12,7 +12,9 @@
       dividers, focus border, tab bar
 - [x] Geometry-based focus nav (`Alt+Arrows`), mouse-click focus, ratio
       resize (`Ctrl+Shift+Arrows`), broadcast/group input
-- [x] Regex search overlay (`Ctrl+Shift+F`)
+- [x] Regex search overlay (`Ctrl+Shift+F`) — true regex + smart-case
+      (insensitive until an uppercase char), literal fallback for an
+      invalid pattern (`search::build_regex`, +3 tests)
 - [x] Clipboard (OSC 52 + copy/paste), keyboard input encoding, IME text
 
 - [x] Mouse drag text selection + wheel scrollback
