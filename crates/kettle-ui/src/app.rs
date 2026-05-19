@@ -33,6 +33,7 @@ pub struct App {
     clipboard: Option<arboard::Clipboard>,
     fullscreen: bool,
     cursor: PhysicalPosition<f64>,
+    selecting: bool,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -67,6 +68,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             fullscreen: false,
             cursor: PhysicalPosition::new(0.0, 0.0),
+            selecting: false,
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -119,6 +121,58 @@ impl App {
         let cols = ((w - self.cfg.padding_x * 2.0) / cw).floor().max(1.0) as usize;
         let rows = ((h - self.cfg.padding_y * 2.0) / ch).floor().max(1.0) as usize;
         (cols, rows)
+    }
+
+    fn focused_rect(&self, area: Rect) -> Option<Rect> {
+        let f = self.mux.active_focus()?;
+        self.mux
+            .layout(self.mux.active, area)
+            .into_iter()
+            .find(|(id, _)| *id == f)
+            .map(|(_, r)| r)
+    }
+
+    fn px_to_point(&self, rect: Rect, px: f32, py: f32) -> kettle_core::Point {
+        let (cw, ch) = self
+            .renderer
+            .as_ref()
+            .map(|r| (r.cell_w, r.cell_h))
+            .unwrap_or((8.0, 16.0));
+        let (rx, ry, _, _) = rect;
+        let col = ((px - rx - self.cfg.padding_x) / cw).floor().max(0.0) as usize;
+        let line = ((py - ry - self.cfg.padding_y) / ch).floor().max(0.0) as i32;
+        kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col))
+    }
+
+    fn begin_selection(&mut self, area: Rect) {
+        self.selecting = true;
+        if let Some(rect) = self.focused_rect(area) {
+            let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+            if let Some(pane) = self.mux.focused()
+                && let Ok(mut t) = pane.term.term.lock()
+            {
+                t.selection = Some(kettle_core::Selection::new(
+                    kettle_core::SelectionType::Simple,
+                    p,
+                    kettle_core::Side::Left,
+                ));
+            }
+        }
+    }
+
+    fn update_selection(&mut self, area: Rect) {
+        if !self.selecting {
+            return;
+        }
+        if let Some(rect) = self.focused_rect(area) {
+            let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+            if let Some(pane) = self.mux.focused()
+                && let Ok(mut t) = pane.term.term.lock()
+                && let Some(sel) = t.selection.as_mut()
+            {
+                sel.update(p, kettle_core::Side::Right);
+            }
+        }
     }
 
     /// Resize every pane's PTY to match its tile in the layout.
@@ -559,7 +613,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::CursorMoved { position, .. } => self.cursor = position,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = position;
+                if self.selecting {
+                    let area = self.area();
+                    self.update_selection(area);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -568,8 +631,30 @@ impl ApplicationHandler<UserEvent> for App {
                 let area = self.area();
                 self.mux
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
+                self.begin_selection(area);
                 if let Some(w) = &self.window {
                     w.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.selecting = false,
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() as i32 * 3,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
+                };
+                if lines != 0 {
+                    if let Some(pane) = self.mux.focused()
+                        && let Ok(mut t) = pane.term.term.lock()
+                    {
+                        t.scroll_display(Scroll::Delta(lines));
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {

@@ -6,7 +6,8 @@ pub mod search;
 pub mod term;
 
 pub use alacritty_terminal::grid::{Dimensions, Scroll};
-pub use alacritty_terminal::index::{Column, Line, Point};
+pub use alacritty_terminal::index::{Column, Line, Point, Side};
+pub use alacritty_terminal::selection::{Selection, SelectionType};
 pub use alacritty_terminal::term::{TermMode, cell::Flags};
 pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 
