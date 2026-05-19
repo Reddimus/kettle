@@ -148,6 +148,45 @@ mod tests {
     }
 
     #[test]
+    fn kitty_virtual_placement_surfaces_image_not_at_cursor() {
+        use base64::Engine;
+        // 2×1 RGBA image (8 bytes).
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode([10u8, 20, 30, 255, 40, 50, 60, 255]);
+        let mut e = Extractor::new();
+        // a=T,U=1: transmit + virtual placement → VirtualImage, no Image.
+        let c = e.feed(format!("\x1b_Ga=T,U=1,i=5,c=2,r=1,f=32,s=2,v=1;{b64}\x1b\\").as_bytes());
+        assert!(
+            !c.iter().any(|c| matches!(c, Chunk::Image(_))),
+            "U=1 must not place at the cursor"
+        );
+        let v = c
+            .iter()
+            .find_map(|c| match c {
+                Chunk::VirtualImage {
+                    id,
+                    img,
+                    cols,
+                    rows,
+                    z,
+                } => Some((*id, img.clone(), *cols, *rows, *z)),
+                _ => None,
+            })
+            .expect("a VirtualImage chunk");
+        assert_eq!((v.0, v.2, v.3, v.4), (5, 2, 1, 0));
+        assert_eq!((v.1.width, v.1.height), (2, 1));
+        // Deleting the id reaps the virtual image too.
+        let d = e.feed(b"\x1b_Ga=d,d=i,i=5\x1b\\");
+        assert!(d.iter().any(|c| matches!(
+            c,
+            Chunk::DeleteImages {
+                all: false,
+                id: Some(5)
+            }
+        )));
+    }
+
+    #[test]
     fn sequence_split_across_feeds() {
         let png = base64_png();
         let seq = format!("\x1b]1337;File=inline=1:{png}\x07");

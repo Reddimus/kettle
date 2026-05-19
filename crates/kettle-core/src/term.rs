@@ -8,13 +8,14 @@ use std::thread::JoinHandle;
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
 use anyhow::Result;
+use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
 use kettle_vt::{Chunk, Extractor, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
-use crate::images::{Images, Placement};
+use crate::images::{Images, Placement, VirtualEntry, Virtuals};
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
@@ -46,6 +47,8 @@ pub struct Terminal {
     pub cols: usize,
     pub rows: usize,
     pub images: Images,
+    /// kitty `U=1` virtual images, keyed by image id (for placeholder draw).
+    pub virtuals: Virtuals,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
     pub prompts: Arc<Mutex<Vec<i64>>>,
     /// Latest working directory reported via OSC 7.
@@ -121,6 +124,7 @@ impl Terminal {
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
+        let virtuals: Virtuals = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
@@ -128,6 +132,7 @@ impl Terminal {
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
+            let virtuals = virtuals.clone();
             let prompts = prompts.clone();
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
@@ -170,6 +175,27 @@ impl Terminal {
                                                     });
                                                 }
                                             }
+                                            if let Ok(mut vm) = virtuals.lock() {
+                                                match (all, id) {
+                                                    (true, _) => vm.clear(),
+                                                    (false, Some(x)) => {
+                                                        vm.remove(&x);
+                                                    }
+                                                    (false, None) => {}
+                                                }
+                                            }
+                                        }
+                                        Chunk::VirtualImage {
+                                            id,
+                                            img,
+                                            cols,
+                                            rows,
+                                            z,
+                                        } => {
+                                            if let Ok(mut vm) = virtuals.lock() {
+                                                vm.insert(id, VirtualEntry { img, cols, rows, z });
+                                            }
+                                            (waker)();
                                         }
                                         Chunk::Prompt(PromptKind::PromptStart) => {
                                             if let Ok(t) = term.lock() {
@@ -211,6 +237,7 @@ impl Terminal {
             cols,
             rows,
             images,
+            virtuals,
             prompts,
             cwd: cwd_cell,
             argv: argv.to_vec(),
@@ -232,6 +259,91 @@ impl Terminal {
     /// `Arc`-backed).
     pub fn placements(&self) -> Vec<Placement> {
         self.images.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// Per-cell image tiles for the kitty Unicode placeholders (`U+10EEEE`)
+    /// currently visible: decode each cell's `(image-id, row, column)` from
+    /// its foreground color + combining diacritics, apply the left-
+    /// inheritance rules over contiguous runs, and slice the referenced
+    /// virtual image into one `Placement` per cell. Recomputed per frame —
+    /// cheap: `ImageData` is `Arc`-backed and only the shown tiles are
+    /// cropped. Placement-id (underline color) is not yet decoded; any
+    /// virtual placement of the image is used (documented in ROADMAP).
+    pub fn placeholder_tiles(&self) -> Vec<Placement> {
+        let Ok(virtuals) = self.virtuals.lock() else {
+            return Vec::new();
+        };
+        if virtuals.is_empty() {
+            return Vec::new();
+        }
+        let Ok(t) = self.term.lock() else {
+            return Vec::new();
+        };
+        let top = t.grid().history_size() as i64 - t.grid().display_offset() as i64;
+        let content = t.renderable_content();
+
+        // Maximal same-row contiguous runs of placeholder cells.
+        let mut runs: Vec<Vec<(RawCell, i64, usize)>> = Vec::new();
+        let mut last: Option<(i32, i32)> = None;
+        for ind in content.display_iter {
+            let (cell, p) = (ind.cell, ind.point);
+            if cell.c == placeholder::PLACEHOLDER {
+                let contiguous = matches!(
+                    last,
+                    Some((r, c)) if r == p.line.0 && c + 1 == p.column.0 as i32
+                );
+                if !contiguous || runs.is_empty() {
+                    runs.push(Vec::new());
+                }
+                let marks: Vec<char> = cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default();
+                runs.last_mut().unwrap().push((
+                    RawCell {
+                        fg: fg_id_bits(cell.fg),
+                        placement_id: 0,
+                        diacritics: CellDiacritics::parse(&marks),
+                    },
+                    top + p.line.0 as i64,
+                    p.column.0,
+                ));
+                last = Some((p.line.0, p.column.0 as i32));
+            } else {
+                last = None;
+            }
+        }
+
+        let mut out = Vec::new();
+        for run in &runs {
+            let cells: Vec<RawCell> = run.iter().map(|(rc, _, _)| *rc).collect();
+            for (res, &(_, abs, col)) in
+                placeholder::resolve_run(&cells).into_iter().zip(run.iter())
+            {
+                let Some(v) = virtuals.get(&res.image_id) else {
+                    continue;
+                };
+                let pcols = v.cols.max(1).min(u16::MAX as u32) as u16;
+                let prows = v.rows.max(1).min(u16::MAX as u32) as u16;
+                if let Some((x, y, w, h)) = placeholder::tile_src_rect(
+                    v.img.width,
+                    v.img.height,
+                    pcols,
+                    prows,
+                    res.row,
+                    res.col,
+                ) && let Some(crop) = v.img.crop(x, y, w, h)
+                {
+                    out.push(Placement {
+                        abs_line: abs,
+                        col,
+                        cell_cols: 1,
+                        cell_rows: 1,
+                        img: crop,
+                        id: Some(res.image_id),
+                        z: v.z,
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -289,6 +401,38 @@ impl EventProxy {
     fn send_event_exit(&self) {
         use alacritty_terminal::event::EventListener;
         self.send_event(TermEvent::Exit);
+    }
+}
+
+/// The kitty image-id bits a placeholder cell's foreground color carries:
+/// a 256-palette index is the low byte, a truecolor spec is the low 24
+/// bits, and the 16 ANSI named colors map to indices 0..=15
+/// (`graphics-protocol.rst:589`). Non-id named slots (default fg/bg/cursor)
+/// have no id → 0.
+fn fg_id_bits(c: AnsiColor) -> u32 {
+    use NamedColor::*;
+    match c {
+        AnsiColor::Indexed(i) => i as u32,
+        AnsiColor::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32,
+        AnsiColor::Named(n) => match n {
+            Black => 0,
+            Red => 1,
+            Green => 2,
+            Yellow => 3,
+            Blue => 4,
+            Magenta => 5,
+            Cyan => 6,
+            White => 7,
+            BrightBlack | DimBlack => 8,
+            BrightRed | DimRed => 9,
+            BrightGreen | DimGreen => 10,
+            BrightYellow | DimYellow => 11,
+            BrightBlue | DimBlue => 12,
+            BrightMagenta | DimMagenta => 13,
+            BrightCyan | DimCyan => 14,
+            BrightWhite | DimWhite => 15,
+            _ => 0,
+        },
     }
 }
 

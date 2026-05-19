@@ -3,7 +3,7 @@
 //! image support. Everything else passes through byte-for-byte so the terminal
 //! engine still sees correct cursor/scroll behavior.
 
-use crate::image::Placed;
+use crate::image::{ImageData, Placed};
 use crate::kitty::{KittyOut, KittyState};
 use crate::{iterm, sixel};
 
@@ -30,6 +30,16 @@ pub enum Chunk {
     Image(Placed),
     /// kitty `a=d`: delete images (all, or by image id).
     DeleteImages { all: bool, id: Option<u32> },
+    /// kitty `U=1` virtual placement: store the image + its `cols`×`rows`
+    /// box by id; it is drawn later wherever `U+10EEEE` placeholder cells
+    /// reference this id (not at the cursor).
+    VirtualImage {
+        id: u32,
+        img: ImageData,
+        cols: u32,
+        rows: u32,
+        z: i32,
+    },
     /// A shell-integration mark at the current cursor line.
     Prompt(PromptKind),
     /// Working-directory report (OSC 7), absolute path.
@@ -181,7 +191,17 @@ impl Extractor {
         enum R {
             None,
             Img(Placed),
-            Del { all: bool, id: Option<u32> },
+            Del {
+                all: bool,
+                id: Option<u32>,
+            },
+            Virtual {
+                id: u32,
+                img: ImageData,
+                cols: u32,
+                rows: u32,
+                z: i32,
+            },
         }
 
         let result = match mode {
@@ -201,9 +221,22 @@ impl Extractor {
                     match self.kitty.feed(&body) {
                         KittyOut::Place(p) => R::Img(p),
                         KittyOut::Delete { all, id } => R::Del { all, id },
-                        // Virtual placements draw nothing at the cursor —
-                        // they surface later via Unicode placeholder text.
-                        KittyOut::Virtual { .. } | KittyOut::None => R::None,
+                        // Virtual placements draw nothing at the cursor; the
+                        // stored image + box are surfaced so the renderer can
+                        // composite them where placeholder cells appear.
+                        KittyOut::Virtual { id } => {
+                            match (self.kitty.image(id), self.kitty.virtual_placement(id)) {
+                                (Some(img), Some(vp)) => R::Virtual {
+                                    id,
+                                    img: img.clone(),
+                                    cols: vp.cols,
+                                    rows: vp.rows,
+                                    z: vp.z,
+                                },
+                                _ => R::None,
+                            }
+                        }
+                        KittyOut::None => R::None,
                     }
                 } else {
                     R::None
@@ -225,6 +258,19 @@ impl Extractor {
         match result {
             R::Img(data) => out.push(Chunk::Image(data)),
             R::Del { all, id } => out.push(Chunk::DeleteImages { all, id }),
+            R::Virtual {
+                id,
+                img,
+                cols,
+                rows,
+                z,
+            } => out.push(Chunk::VirtualImage {
+                id,
+                img,
+                cols,
+                rows,
+                z,
+            }),
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
                 // included, so the VT engine handles it.

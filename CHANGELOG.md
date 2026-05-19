@@ -30,6 +30,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty Unicode placeholders **now render**: each frame the visible grid
+  is scanned for `U+10EEEE`, the image id is read from the cell
+  foreground (256-color / truecolor / ANSI-named) plus the msb diacritic,
+  contiguous runs apply the left-inheritance rules, and the referenced
+  `U=1` virtual image is sliced per cell (`ImageData::crop` +
+  `placeholder::tile_src_rect`, exact-tiling) and drawn through the
+  existing GPU image pipeline. Virtual images are reaped on
+  delete-by-id/all. (`Terminal::placeholder_tiles`.)
 - kitty Unicode placeholders (decode layer): `kettle-vt::placeholder` —
   the 297-entry row/column diacritic table, per-cell diacritic parsing,
   32-bit image-id reconstruction (foreground + msb diacritic), and the

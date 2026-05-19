@@ -141,10 +141,17 @@
       with the image — 3 tests). Cited to
       `kitty/docs/graphics-protocol.rst:555`.
 
+- [x] kitty Unicode placeholders — renderer path: per-frame grid scan for
+      `U+10EEEE`, fg→image-id (256/truecolor/named) + diacritic decode,
+      left-inheritance over contiguous runs, virtual image sliced per cell
+      (`ImageData::crop`, `placeholder::tile_src_rect`) and drawn through
+      the existing image pipeline (`Terminal::placeholder_tiles`, +3
+      tests; 89 workspace tests). Placement-id via underline color is the
+      remaining sub-item.
+
 ## Next (in priority order)
-- [ ] kitty Unicode placeholders — renderer: scan `U+10EEEE` grid cells,
-      resolve via `placeholder::resolve_run`, composite the virtual image
-      tile-by-tile (then animation frames + relative placements)
+- [ ] kitty placeholders: decode placement-id from underline color;
+      then animation frames + relative placements
 - [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu

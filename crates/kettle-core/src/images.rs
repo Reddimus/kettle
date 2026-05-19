@@ -1,6 +1,7 @@
 //! Registry of decoded images placed in a terminal, anchored to an absolute
 //! grid line (history-aware) so they scroll with the text.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub use kettle_vt::{ImageData, Placed};
@@ -20,6 +21,19 @@ pub struct Placement {
 }
 
 pub type Images = Arc<Mutex<Vec<Placement>>>;
+
+/// A kitty `U=1` virtual image: stored by id, fit into `cols`×`rows` cells,
+/// and drawn wherever Unicode-placeholder cells reference its id.
+#[derive(Clone)]
+pub struct VirtualEntry {
+    pub img: ImageData,
+    pub cols: u32,
+    pub rows: u32,
+    pub z: i32,
+}
+
+/// Per-terminal registry of virtual images, keyed by kitty image id.
+pub type Virtuals = Arc<Mutex<HashMap<u32, VirtualEntry>>>;
 
 /// Drop placements that have scrolled far above the retained history.
 pub fn prune(images: &Images, oldest_abs: i64) {

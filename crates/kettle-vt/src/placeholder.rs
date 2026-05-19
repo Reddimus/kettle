@@ -160,6 +160,38 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
     out
 }
 
+/// The source sub-rectangle of an `img_w × img_h` image that the
+/// placeholder cell at `(row, col)` of a `pcols × prows` virtual placement
+/// displays. The image is stretch-fit across the placement grid (the
+/// producer is expected to size `pcols × prows` to the image's aspect ratio,
+/// per the spec). Returns `None` if the cell lies outside the placement or
+/// the rectangle is empty. Pure — fully unit tested.
+pub fn tile_src_rect(
+    img_w: u32,
+    img_h: u32,
+    pcols: u16,
+    prows: u16,
+    row: u16,
+    col: u16,
+) -> Option<(u32, u32, u32, u32)> {
+    if pcols == 0 || prows == 0 || col >= pcols || row >= prows || img_w == 0 || img_h == 0 {
+        return None;
+    }
+    let (pc, pr) = (pcols as u32, prows as u32);
+    let (c, r) = (col as u32, row as u32);
+    // Use exact pixel boundaries so adjacent tiles abut with no gap/overlap.
+    let x0 = c * img_w / pc;
+    let x1 = (c + 1) * img_w / pc;
+    let y0 = r * img_h / pr;
+    let y1 = (r + 1) * img_h / pr;
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w == 0 || h == 0 {
+        None
+    } else {
+        Some((x0, y0, w, h))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +288,32 @@ mod tests {
         };
         let res2 = resolve_run(&[explicit, other]);
         assert_eq!((res2[1].row, res2[1].col), (0, 0));
+    }
+
+    #[test]
+    fn tile_rects_tile_the_image_without_gaps() {
+        // 100×40 image over a 2×2 placement: tiles must abut exactly and
+        // cover the whole image.
+        let r00 = tile_src_rect(100, 40, 2, 2, 0, 0).unwrap();
+        let r01 = tile_src_rect(100, 40, 2, 2, 0, 1).unwrap();
+        let r10 = tile_src_rect(100, 40, 2, 2, 1, 0).unwrap();
+        assert_eq!(r00, (0, 0, 50, 20));
+        assert_eq!(r01, (50, 0, 50, 20));
+        assert_eq!(r10, (0, 20, 50, 20));
+        // Right edge of col0 meets left edge of col1; covers full width.
+        assert_eq!(r00.0 + r00.2, r01.0);
+        assert_eq!(r01.0 + r01.2, 100);
+        // Non-divisible sizes still tile exactly (no lost/duplicated pixels).
+        let a = tile_src_rect(7, 1, 3, 1, 0, 0).unwrap();
+        let b = tile_src_rect(7, 1, 3, 1, 0, 1).unwrap();
+        let c = tile_src_rect(7, 1, 3, 1, 0, 2).unwrap();
+        assert_eq!(a.0 + a.2, b.0);
+        assert_eq!(b.0 + b.2, c.0);
+        assert_eq!(c.0 + c.2, 7);
+        // Out-of-placement / degenerate inputs → None.
+        assert!(tile_src_rect(100, 40, 2, 2, 2, 0).is_none());
+        assert!(tile_src_rect(100, 40, 0, 2, 0, 0).is_none());
+        assert!(tile_src_rect(0, 40, 2, 2, 0, 0).is_none());
     }
 
     #[test]

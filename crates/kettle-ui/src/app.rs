@@ -539,7 +539,8 @@ impl App {
         let mut guards = Vec::with_capacity(layout.len());
         for (id, r) in &layout {
             if let Some(p) = self.mux.panes.get(id) {
-                let imgs = p.term.placements();
+                let mut imgs = p.term.placements();
+                imgs.extend(p.term.placeholder_tiles());
                 if let Ok(g) = p.term.term.lock() {
                     guards.push((*r, g, Some(*id) == focus, imgs));
                 }
