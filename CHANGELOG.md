@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`move_tab_left` / `move_tab_right` actions now actually move
+  the tab.** They were bound to `Ctrl+Shift+PageUp` / `PageDown` in
+  the default keymap (Terminator parity), parsed correctly, and
+  threaded all the way to `Action::MoveTabLeft|MoveTabRight` in the
+  app — and then dispatched into an empty arm. Every press was a
+  silent no-op. Wired by a new `Mux::move_active_tab(delta: i32) ->
+  bool` that swaps the active tab with its neighbor and clamps at
+  the edges (no wrap, matching iTerm2 / Ghostty / WezTerm; wrap
+  would have the tab bar lurch across on every press). +1 test
+  covering swap, clamp, no-op, and the < 2 tabs case.
 - **Selection auto-scrolls when you drag past the pane edge.**
   Previously the highlight stopped at the visible boundary — you
   had to release, scroll, then shift-click to extend. Every modern

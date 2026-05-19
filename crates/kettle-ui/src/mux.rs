@@ -542,6 +542,26 @@ impl Mux {
         }
     }
 
+    /// Swap the active tab with its neighbor `delta` positions away.
+    /// `delta > 0` moves the tab right, `delta < 0` moves it left. Clamps
+    /// at the edges (no wrap, matching iTerm2 / Ghostty / WezTerm — wrap
+    /// would have the tab bar lurch across the bar on every press).
+    /// Returns `true` if the tab actually moved.
+    pub fn move_active_tab(&mut self, delta: i32) -> bool {
+        let n = self.tabs.len();
+        if n < 2 || delta == 0 {
+            return false;
+        }
+        let from = self.active as i32;
+        let to = (from + delta).clamp(0, n as i32 - 1) as usize;
+        if to == self.active {
+            return false;
+        }
+        self.tabs.swap(self.active, to);
+        self.active = to;
+        true
+    }
+
     /// Focus whichever pane contains the pixel `(px, py)`.
     pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) {
         let a = self.active;
@@ -761,6 +781,47 @@ mod node_tests {
         let ids: Vec<u64> = rects.iter().map(|(i, _)| *i).collect();
         assert!(ids.contains(&1) && ids.contains(&2) && ids.contains(&3));
         assert_eq!(rects.len(), 3);
+    }
+
+    #[test]
+    fn move_active_tab_swaps_and_clamps() {
+        // Build a 4-tab mux without spawning real terminals; use the leaf
+        // ids as a fingerprint so we can verify the active tab actually
+        // moved (not just that the index changed).
+        let mut m = Mux::new();
+        for id in 1..=4u64 {
+            m.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                zoomed: false,
+            });
+        }
+        // Move tab at index 1 (id=2) one place right → swap with id=3.
+        m.active = 1;
+        assert!(m.move_active_tab(1));
+        assert_eq!(m.active, 2);
+        assert!(matches!(m.tabs[1].root, Node::Leaf(3)));
+        assert!(matches!(m.tabs[2].root, Node::Leaf(2)));
+        // Move the same tab three steps right — clamps to the last index.
+        assert!(m.move_active_tab(3));
+        assert_eq!(m.active, 3);
+        assert!(matches!(m.tabs[3].root, Node::Leaf(2)));
+        // No-op moves return false: zero delta, already at the right edge.
+        assert!(!m.move_active_tab(0));
+        assert!(!m.move_active_tab(5));
+        assert_eq!(m.active, 3);
+        // Move left clamps at 0.
+        assert!(m.move_active_tab(-100));
+        assert_eq!(m.active, 0);
+        assert!(matches!(m.tabs[0].root, Node::Leaf(2)));
+        // With < 2 tabs the move is a no-op (clamp still leaves us put).
+        let mut single = Mux::new();
+        single.tabs.push(Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            zoomed: false,
+        });
+        assert!(!single.move_active_tab(1));
     }
 
     #[test]

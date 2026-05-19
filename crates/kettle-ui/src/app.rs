@@ -1262,7 +1262,12 @@ impl App {
                 }
             }
             Action::ReloadConfig => self.reload_config(),
-            Action::MoveTabLeft | Action::MoveTabRight => {}
+            Action::MoveTabLeft => {
+                self.mux.move_active_tab(-1);
+            }
+            Action::MoveTabRight => {
+                self.mux.move_active_tab(1);
+            }
             Action::GotoTab(n) => {
                 let i = n as usize;
                 if i < self.mux.tabs.len() {
