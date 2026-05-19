@@ -109,9 +109,12 @@
 - [x] Config validation: unknown keys collected (typo guard), warned at
       startup, and surfaced by `kettle --check-config` (exit 1 on issues)
 
+- [x] Conformance: DECSET 2026 synchronized output applies content
+      atomically + DECRQM reports mode 2026 (37 conformance tests)
+
 ## Next (in priority order)
-- [ ] Conformance: DECSET 2026 synchronized output, mouse 1006 button
-      encoding round-trip, REP after wide char
+- [ ] Conformance: NEL/IND/RI line ops, DECID, cursor blink mode (?12),
+      reverse-video screen (?5)
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

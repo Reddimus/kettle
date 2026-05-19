@@ -830,6 +830,26 @@ mod conformance {
         assert_eq!(row_text(&t, 0), "main", "primary content restored");
     }
 
+    #[test]
+    fn synchronized_output_applies_content() {
+        let (mut t, mut p) = harness(8, 2);
+        // DECSET 2026 brackets an atomic update; the content must be present
+        // and correct once the synchronized update ends.
+        feed(&mut t, &mut p, b"\x1b[?2026hhello\x1b[?2026l");
+        assert_eq!(row_text(&t, 0), "hello");
+    }
+
+    #[test]
+    fn decrqm_reports_synchronized_output_mode() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        feed(&mut t, &mut p, b"\x1b[?2026$p"); // DECRQM query of mode 2026
+        let reply = drain_pty(&rx);
+        assert!(
+            reply.contains("2026;") && reply.ends_with("$y"),
+            "DECRPM should report mode 2026, got {reply:?}"
+        );
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) and HTS (ESC H, custom
     // tab stops) are not reliably handled by alacritty_terminal, so no
     // conformance test asserts them — see ROADMAP.
