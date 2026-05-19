@@ -131,7 +131,17 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Config {
         match std::fs::read_to_string(path) {
-            Ok(text) => Self::parse_text(&text),
+            Ok(text) => {
+                let (cfg, unknown) = Self::parse_collect(&text);
+                if !unknown.is_empty() {
+                    log::warn!(
+                        "{}: unrecognized config keys: {}",
+                        path.display(),
+                        unknown.join(", ")
+                    );
+                }
+                cfg
+            }
             Err(e) => {
                 log::warn!("could not read config {}: {e}", path.display());
                 Config::default()
@@ -140,8 +150,15 @@ impl Config {
     }
 
     pub fn parse_text(text: &str) -> Config {
+        Self::parse_collect(text).0
+    }
+
+    /// Parse, also returning any unrecognized config keys (typo guard,
+    /// surfaced by `kettle --check-config` and a startup `log::warn`).
+    pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
         for e in parse::parse(text) {
             match e.key.as_str() {
                 "font-family" => cfg.font_family = e.value.clone(),
@@ -251,7 +268,7 @@ impl Config {
                     }
                 }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
-                _ => {}
+                other => unknown.push(other.to_string()),
             }
         }
         for (i, c) in explicit_palette {
@@ -259,7 +276,9 @@ impl Config {
                 cfg.theme.palette[i] = c;
             }
         }
-        cfg
+        unknown.sort();
+        unknown.dedup();
+        (cfg, unknown)
     }
 }
 
@@ -346,5 +365,16 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_not_fatal() {
+        let (cfg, unknown) = Config::parse_collect(
+            "font-size = 14\nfont-szie = 99\ntheme = TokyoNight Night\nbogus = x\n",
+        );
+        // Valid keys still applied.
+        assert_eq!(cfg.font_size, 14.0);
+        // Typo'd / unknown keys collected, sorted + deduped.
+        assert_eq!(unknown, vec!["bogus".to_string(), "font-szie".to_string()]);
     }
 }

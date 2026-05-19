@@ -7,7 +7,8 @@ so hex colors work), and some keys may repeat.
 
 Config path: `$XDG_CONFIG_HOME/kettle/config` (Linux), the `~/.config`
 fallback, or `%APPDATA%\kettle\config` on Windows. Run `kettle --config-path`
-to print it. The file is **watched and reloaded live**.
+to print it, or `kettle --check-config` to validate it (resolved settings +
+any unrecognized keys). The file is **watched and reloaded live**.
 
 ## Keys
 

@@ -57,6 +57,7 @@ cargo run --release
 ```sh
 kettle --list-themes      # list all bundled themes
 kettle --config-path      # show where the config file is read from
+kettle --check-config     # validate config: resolved settings + unknown keys
 ```
 
 ## Default keybindings (Terminator-compatible)

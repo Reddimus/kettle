@@ -106,6 +106,9 @@
       cells (and cleared), DECSET 1049 preserves primary-screen content
       (35 conformance tests)
 
+- [x] Config validation: unknown keys collected (typo guard), warned at
+      startup, and surfaced by `kettle --check-config` (exit 1 on issues)
+
 ## Next (in priority order)
 - [ ] Conformance: DECSET 2026 synchronized output, mouse 1006 button
       encoding round-trip, REP after wide char
