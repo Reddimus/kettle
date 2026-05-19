@@ -513,6 +513,31 @@ impl App {
         }
     }
 
+    /// Extend the existing selection to the cursor point (Shift+Click).
+    /// Returns `true` when a selection was present *and* extended — the
+    /// caller falls back to a fresh `begin_selection` when no selection
+    /// existed (so Shift+Click on empty space starts a normal selection).
+    /// Matches xterm / Alacritty / iTerm2: Shift+Click anchors the
+    /// existing selection's start and pulls the end to the click.
+    fn extend_selection_to_cursor(&mut self, area: Rect) -> bool {
+        let rect = match self.focused_rect(area) {
+            Some(r) => r,
+            None => return false,
+        };
+        let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+        if let Some(pane) = self.mux.focused()
+            && let Ok(mut t) = pane.term.term.lock()
+            && let Some(sel) = t.selection.as_mut()
+        {
+            sel.update(p, kettle_core::Side::Right);
+            // Enter drag mode so a follow-up mouse-move keeps extending —
+            // matches every Mac/Linux text-control: shift-click, then drag.
+            self.selecting = true;
+            return true;
+        }
+        false
+    }
+
     /// Resize every pane's PTY to match its tile in the layout.
     fn resize_all(&mut self) {
         let (cw, ch) = self.cell_px();
@@ -1705,7 +1730,37 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Right-click extends an existing selection to the click
+                // (xterm convention). Mouse-tracking already short-circuited
+                // above when active, so this only fires for "chrome" use;
+                // and we only extend an *existing* selection so a bare
+                // right-click on empty space is still a no-op (avoiding a
+                // surprising selection that the user didn't ask for).
+                if bcode == 2 && self.extend_selection_to_cursor(area) {
+                    if self.cfg.copy_on_select {
+                        self.copy_selection();
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if bcode == 0 {
+                    // Shift+left-click extends an existing selection to the
+                    // click point (xterm / Alacritty / iTerm2 / WezTerm
+                    // parity). Alt still takes precedence for block-select
+                    // so Shift+Alt remains block. If there's no selection
+                    // to extend, fall through to the normal new-selection
+                    // path so Shift+Click on empty space "just works."
+                    if self.mods.shift_key()
+                        && !self.mods.alt_key()
+                        && self.extend_selection_to_cursor(area)
+                    {
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     let clicks = self
                         .cursor_cell()
                         .map(|(r, c)| self.click_count(r, c))

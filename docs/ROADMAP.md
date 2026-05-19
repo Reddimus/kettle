@@ -327,6 +327,12 @@
 - [x] **Mouse wheel over tab bar cycles tabs** (kitty / iTerm2 /
       Ghostty parity). Pure `cursor_in_tab_bar_band` geometry
       helper handles top/bottom positions + hidden bar. +1 test.
+- [x] **Shift+Click / right-click extend the selection**
+      (xterm / iTerm2 / Alacritty / WezTerm convention). Shared
+      `extend_selection_to_cursor` updates the existing selection's
+      right edge and enters drag mode. Bare Shift+Click on empty
+      space falls through to a normal new-selection; bare
+      right-click on empty space is a no-op.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

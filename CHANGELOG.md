@@ -7,6 +7,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Shift+Click / right-click extend the selection** (xterm /
+  Alacritty / iTerm2 / WezTerm convention). Previously every left
+  click started a fresh selection at the click point, so the only
+  way to grow a selection across a long scrollback was to start
+  the drag over and hold all the way through. Now:
+  - **Shift+left-click** anchors the current selection's start and
+    pulls the end to the click — and you can keep dragging from
+    there. Shift+Alt-Click still does block-select (Alt takes
+    precedence). Shift+Click on empty space falls through to a
+    normal new-selection.
+  - **Right-click** extends an existing selection to the click;
+    bare right-click on empty space is still a no-op so a stray
+    right-click doesn't conjure a selection.
+  Shared via a new `extend_selection_to_cursor` helper that updates
+  the engine selection's right edge and enters drag mode for live
+  follow-up. Copy-on-select fires on right-click extend too.
 - **Wheel over tab bar cycles tabs** (kitty / iTerm2 / Ghostty
   parity). Spinning the mouse wheel while the pointer is over the
   tab bar now switches tabs (wheel-up = previous, wheel-down =
