@@ -238,10 +238,14 @@
       alphabet). +4 tests, 121 workspace. Overlay + keypress wiring is
       the next sub-item.
 
+- [x] Quick-select **hint mode** wired end-to-end (`Ctrl+Shift+H`):
+      labels detected URL/path/hash/IP targets over the focused pane
+      (chip quads + glyphs), type a label to open URLs / copy others,
+      `Esc` cancels; reuses the overlay + key-routing plumbing.
+
 ## Next (in priority order)
-- [ ] Hint-mode UI: overlay labels + key-to-act (copy/open) reusing
-      the search/palette plumbing; then detachable mux server; native
-      macOS menu; signed packaging
+- [ ] Detachable mux server (remote attach); native macOS menu;
+      code-signed/notarized macOS build; Windows MSI
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

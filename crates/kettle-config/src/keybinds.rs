@@ -86,6 +86,7 @@ pub enum Action {
     OpenSsh,
     ReloadConfig,
     CommandPalette,
+    HintMode,
     GotoTab(u8),
 }
 
@@ -137,6 +138,7 @@ impl Action {
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
+            "hint_mode" | "hints" | "quick_select" => HintMode,
             "reload_config" => ReloadConfig,
             _ => return None,
         })
@@ -252,6 +254,7 @@ pub fn defaults() -> Bindings {
     bind(c, Down, JumpNextPrompt);
     bind(cs, Char('s'), OpenSsh);
     bind(cs, Char('k'), CommandPalette);
+    bind(cs, Char('h'), HintMode);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
     bind(Mods::SHIFT, Home, ScrollToTop);

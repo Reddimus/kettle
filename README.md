@@ -43,6 +43,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
   `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
   persist across sessions.
+- **Quick-select hints** — `Ctrl+Shift+H` labels every URL / path /
+  git-hash / IP on screen; type a label to open it (URLs) or copy it.
 - **Command palette** — `Ctrl+Shift+K` opens a fuzzy command palette;
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and

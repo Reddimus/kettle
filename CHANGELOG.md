@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Quick-select **hint mode** is now usable (`Ctrl+Shift+H`): every
+  visible URL / path / git-hash / IP gets a short label drawn over the
+  focused pane (chip + glyph); type the label to open it (URLs via the
+  OS handler) or copy it to the clipboard, `Backspace` to correct,
+  `Esc` to cancel. New `hint_mode` keybind action.
 - Quick-select / hint-mode core (`kettle_core::hints`, pure +
   fully-tested): scans the visible rows for URLs, filesystem paths,
   git hashes and IPv4 addresses (higher-priority kinds win on overlap,

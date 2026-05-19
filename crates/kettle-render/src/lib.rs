@@ -46,6 +46,16 @@ pub struct LinkRect {
     pub hover: bool,
 }
 
+/// One quick-select hint label drawn over the focused pane at a grid cell.
+#[derive(Clone)]
+pub struct HintLabel {
+    pub row: usize,
+    pub col: usize,
+    pub label: String,
+    /// Dimmed because the typed prefix no longer matches it.
+    pub dim: bool,
+}
+
 /// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
@@ -54,6 +64,8 @@ pub struct Overlay {
     pub search_index: usize,
     pub highlights: Vec<HighlightRect>,
     pub links: Vec<LinkRect>,
+    /// Quick-select hint labels (drawn over the focused pane).
+    pub hint_labels: Vec<HintLabel>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
@@ -129,6 +141,7 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     pane_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
+    hint_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
     search_buffer: TextBuffer,
 
@@ -229,6 +242,7 @@ impl Renderer {
             text_renderer,
             pane_buffers: Vec::new(),
             tab_buffers: Vec::new(),
+            hint_buffers: Vec::new(),
             tabbar_buffer,
             search_buffer,
             quads,
@@ -404,6 +418,22 @@ impl Renderer {
                         0.85,
                     ));
                 }
+                // Quick-select hint label chips.
+                for hint in &overlay.hint_labels {
+                    let n = hint.label.chars().count().max(1) as f32;
+                    quads.push(rect(
+                        rx + pad_x + hint.col as f32 * cw,
+                        ry + pad_y + hint.row as f32 * ch,
+                        n * cw,
+                        ch,
+                        if hint.dim {
+                            theme.palette[8]
+                        } else {
+                            cfg.search_background
+                        },
+                        if hint.dim { 0.6 } else { 0.96 },
+                    ));
+                }
             }
 
             // Post-text overlay: dim unfocused panes; per-pane scrollbar.
@@ -571,6 +601,29 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        // Quick-select hint label glyphs (one buffer per label).
+        if !overlay.hint_labels.is_empty() {
+            while self.hint_buffers.len() < overlay.hint_labels.len() {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.hint_buffers.push(b);
+            }
+            for (i, hint) in overlay.hint_labels.iter().enumerate() {
+                let n = hint.label.chars().count().max(1) as f32;
+                let buf = &mut self.hint_buffers[i];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(n * cw + 2.0), Some(ch));
+                buf.set_text(
+                    &mut self.font_system,
+                    &hint.label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Basic,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+        }
+        let focus_origin = panes.iter().find(|p| p.focused).map(|p| p.rect);
+
         // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
             &self.queue,
@@ -650,6 +703,26 @@ impl Renderer {
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
             });
+        }
+        // Hint labels over the focused pane (chips drawn above as quads).
+        if let Some((frx, fry, frw, frh)) = focus_origin {
+            let lab = cfg.search_foreground;
+            for (i, hint) in overlay.hint_labels.iter().enumerate() {
+                areas.push(TextArea {
+                    buffer: &self.hint_buffers[i],
+                    left: frx + pad_x + hint.col as f32 * cw,
+                    top: fry + pad_y + hint.row as f32 * ch,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: frx as i32,
+                        top: fry as i32,
+                        right: (frx + frw) as i32,
+                        bottom: (fry + frh) as i32,
+                    },
+                    default_color: GColor::rgb(lab.r, lab.g, lab.b),
+                    custom_glyphs: &[],
+                });
+            }
         }
 
         self.text_renderer.prepare(

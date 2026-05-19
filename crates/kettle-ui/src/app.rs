@@ -7,7 +7,7 @@ use anyhow::Result;
 use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
 use kettle_config::{TabBarMode, TabBarPos};
 use kettle_core::{Scroll, TermEvent};
-use kettle_render::{HighlightRect, Overlay, PaneView, Renderer, TabBar, TabSeg};
+use kettle_render::{HighlightRect, HintLabel, Overlay, PaneView, Renderer, TabBar, TabSeg};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -22,6 +22,16 @@ use crate::mux::{Dir, Mux, Rect};
 pub enum UserEvent {
     Wakeup,
     ReloadConfig,
+}
+
+/// One on-screen quick-select target: where its label sits and what it is.
+#[derive(Clone)]
+struct HintTarget {
+    row: usize,
+    col: usize,
+    label: String,
+    kind: kettle_core::hints::Kind,
+    text: String,
 }
 
 pub struct App {
@@ -40,6 +50,8 @@ pub struct App {
     ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
     palette_input: Option<(String, usize)>,
+    /// Active quick-select hint mode: detected targets + typed prefix.
+    hint_state: Option<(Vec<HintTarget>, String)>,
     window_focused: bool,
     blink_on: bool,
     last_blink: std::time::Instant,
@@ -84,6 +96,7 @@ impl App {
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
+            hint_state: None,
             window_focused: true,
             blink_on: true,
             last_blink: std::time::Instant::now(),
@@ -380,6 +393,43 @@ impl App {
         Some((p.line.0.max(0) as usize, p.column.0))
     }
 
+    /// Scan the focused pane's visible grid for quick-select targets and
+    /// assign each a short label.
+    fn collect_hints(&mut self) -> Vec<HintTarget> {
+        use kettle_core::hints;
+        use kettle_core::{Column, Dimensions, Line, Point};
+        let Some(p) = self.mux.focused() else {
+            return Vec::new();
+        };
+        let Ok(t) = p.term.term.lock() else {
+            return Vec::new();
+        };
+        let g = t.grid();
+        let (rows, cols) = (g.screen_lines(), g.columns());
+        let lines: Vec<String> = (0..rows)
+            .map(|r| {
+                let s: String = (0..cols)
+                    .map(|c| g[Point::new(Line(r as i32), Column(c))].c)
+                    .collect();
+                s.trim_end().to_string()
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let spans = hints::detect(&refs);
+        let labels = hints::labels(spans.len(), hints::ALPHABET);
+        spans
+            .into_iter()
+            .zip(labels)
+            .map(|(s, label)| HintTarget {
+                row: s.row,
+                col: s.start,
+                label,
+                kind: s.kind,
+                text: s.text,
+            })
+            .collect()
+    }
+
     fn link_at_cursor(&self) -> Option<&kettle_core::Link> {
         let (row, col) = self.cursor_cell()?;
         self.links
@@ -473,11 +523,25 @@ impl App {
             None => (None, String::new()),
         };
 
+        let hint_labels: Vec<HintLabel> = match &self.hint_state {
+            Some((targets, typed)) => targets
+                .iter()
+                .map(|t| HintLabel {
+                    row: t.row,
+                    col: t.col,
+                    label: t.label.clone(),
+                    dim: !typed.is_empty() && !t.label.starts_with(typed.as_str()),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         let window_focused = self.window_focused;
         let cursor_visible = if !self.cfg.cursor_blink
             || !window_focused
             || self.ssh_input.is_some()
             || self.palette_input.is_some()
+            || self.hint_state.is_some()
             || self.mux.search.open
         {
             true
@@ -500,6 +564,7 @@ impl App {
                 ssh_hint,
                 palette_query,
                 palette_hint,
+                hint_labels,
                 window_focused,
                 cursor_visible,
                 bell,
@@ -532,6 +597,7 @@ impl App {
             ssh_hint,
             palette_query,
             palette_hint,
+            hint_labels,
             window_focused,
             cursor_visible,
             bell,
@@ -745,6 +811,12 @@ impl App {
             Action::CommandPalette => {
                 self.palette_input = Some((String::new(), 0));
             }
+            Action::HintMode => {
+                let targets = self.collect_hints();
+                if !targets.is_empty() {
+                    self.hint_state = Some((targets, String::new()));
+                }
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {
@@ -803,6 +875,55 @@ impl App {
 
     /// Command-palette key handling: fuzzy-filter as you type, `Tab`/`↑↓`
     /// to move the selection, `Enter` to run it, `Esc` to cancel.
+    /// Quick-select hint key handling: type the label of a target to act on
+    /// it (open URLs, copy paths/hashes/IPs); `Esc` cancels.
+    fn hint_key(&mut self, key: &Key, text: Option<&str>) {
+        match key {
+            Key::Named(NamedKey::Escape) => self.hint_state = None,
+            Key::Named(NamedKey::Backspace) => {
+                if let Some((_, typed)) = self.hint_state.as_mut() {
+                    typed.pop();
+                }
+            }
+            _ => {
+                let Some(ch) = text
+                    .and_then(|t| t.chars().next())
+                    .filter(|c| c.is_ascii_alphabetic())
+                    .map(|c| c.to_ascii_lowercase())
+                else {
+                    return;
+                };
+                // Extend the typed prefix only if it still matches a label.
+                let chosen = {
+                    let Some((targets, typed)) = self.hint_state.as_mut() else {
+                        return;
+                    };
+                    let cand = format!("{typed}{ch}");
+                    if targets.iter().any(|t| t.label.starts_with(&cand)) {
+                        *typed = cand;
+                    }
+                    let exact: Vec<&HintTarget> =
+                        targets.iter().filter(|t| t.label == *typed).collect();
+                    (exact.len() == 1).then(|| exact[0].clone())
+                };
+                if let Some(h) = chosen {
+                    self.hint_state = None;
+                    self.act_hint(&h);
+                }
+            }
+        }
+    }
+
+    fn act_hint(&mut self, h: &HintTarget) {
+        if h.kind == kettle_core::hints::Kind::Url {
+            if let Err(e) = open::that_detached(&h.text) {
+                log::warn!("failed to open {}: {e}", h.text);
+            }
+        } else if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(h.text.clone());
+        }
+    }
+
     fn palette_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
         let cmds = kettle_config::palette::commands();
         let Some((q, sel)) = self.palette_input.as_mut() else {
@@ -1239,6 +1360,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.blink_on = true;
                 self.last_blink = std::time::Instant::now();
                 let text = event.text.as_ref().map(|s| s.as_str());
+
+                if self.hint_state.is_some() {
+                    self.hint_key(&event.logical_key, text);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
 
                 if self.palette_input.is_some() {
                     self.palette_key(&event.logical_key, text, event_loop);
