@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] `kettle --list-keybinds` prints the default keymap
+      (`Trigger::label` + `describe_defaults`, sorted; +2 tests) —
+      discoverable without reading source.
 - [x] Runtime theme choice **persists across restarts** (saved in
       `session.json` as `theme`, `#[serde(default)]` so old files still
       load; applied on restore unless config-reloaded). +session tests.

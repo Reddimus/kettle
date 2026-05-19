@@ -13,6 +13,10 @@ struct Cli {
     #[arg(long)]
     list_themes: bool,
 
+    /// Print the default keymap (trigger → action) and exit.
+    #[arg(long)]
+    list_keybinds: bool,
+
     /// Print the resolved config path and exit.
     #[arg(long)]
     config_path: bool,
@@ -56,6 +60,12 @@ fn main() -> anyhow::Result<()> {
     if cli.list_themes {
         for name in kettle_config::Theme::list() {
             println!("{name}");
+        }
+        return Ok(());
+    }
+    if cli.list_keybinds {
+        for line in kettle_config::keybinds::describe_defaults() {
+            println!("{line}");
         }
         return Ok(());
     }

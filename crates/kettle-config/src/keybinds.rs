@@ -39,6 +39,53 @@ impl Trigger {
     pub fn new(mods: Mods, key: Key) -> Self {
         Self { mods, key }
     }
+
+    /// Human-readable label, e.g. `Ctrl+Shift+E`, `Alt+Left`, `F5`.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.mods.contains(Mods::CTRL) {
+            parts.push("Ctrl".into());
+        }
+        if self.mods.contains(Mods::ALT) {
+            parts.push("Alt".into());
+        }
+        if self.mods.contains(Mods::SHIFT) {
+            parts.push("Shift".into());
+        }
+        if self.mods.contains(Mods::SUPER) {
+            parts.push("Super".into());
+        }
+        parts.push(match self.key {
+            Key::Char(c) => c.to_ascii_uppercase().to_string(),
+            Key::Up => "Up".into(),
+            Key::Down => "Down".into(),
+            Key::Left => "Left".into(),
+            Key::Right => "Right".into(),
+            Key::PageUp => "PageUp".into(),
+            Key::PageDown => "PageDown".into(),
+            Key::Home => "Home".into(),
+            Key::End => "End".into(),
+            Key::Enter => "Enter".into(),
+            Key::Tab => "Tab".into(),
+            Key::F(n) => format!("F{n}"),
+        });
+        parts.join("+")
+    }
+}
+
+/// Human-readable lines for the default keymap, sorted by trigger label —
+/// powers `kettle --list-keybinds` so the binding set is discoverable
+/// without reading the source.
+pub fn describe_defaults() -> Vec<String> {
+    let mut lines: Vec<(String, String)> = defaults()
+        .iter()
+        .map(|(t, a)| (t.label(), format!("{a:?}")))
+        .collect();
+    lines.sort();
+    lines
+        .into_iter()
+        .map(|(t, a)| format!("{t:<16}  {a}"))
+        .collect()
 }
 
 /// Every action kettle can bind. Names match Ghostty actions where they exist.
@@ -276,5 +323,35 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     };
     if let (Some(t), Some(a)) = (parse_trigger(trig), Action::from_name(act.trim())) {
         map.insert(t, a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_label_formats() {
+        let t = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('e'));
+        assert_eq!(t.label(), "Ctrl+Shift+E");
+        assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
+        assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn describe_defaults_is_sorted_and_complete() {
+        let lines = describe_defaults();
+        assert_eq!(lines.len(), defaults().len(), "one line per binding");
+        // Sorted by the (label, action) key.
+        let mut sorted = lines.clone();
+        sorted.sort();
+        assert_eq!(lines, sorted);
+        // A known Terminator binding is present and labelled.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Ctrl+Shift+E") && l.contains("SplitRight")),
+            "expected the Ctrl+Shift+E split binding, got {lines:?}"
+        );
     }
 }

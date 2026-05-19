@@ -66,6 +66,7 @@ cargo run --release
 
 ```sh
 kettle --list-themes      # list all bundled themes
+kettle --list-keybinds    # print the default keymap (trigger → action)
 kettle --config-path      # show where the config file is read from
 kettle --check-config     # validate config: resolved settings + unknown keys
 kettle --config FILE      # use a specific config file (live-reloaded)
