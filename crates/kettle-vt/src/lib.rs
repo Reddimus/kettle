@@ -148,6 +148,46 @@ mod tests {
     }
 
     #[test]
+    fn kitty_relative_placement_surfaces_child_and_parent() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode([3u8, 3, 3, 255]);
+        let mut e = Extractor::new();
+        // Parent image 1 and child image 2 stored (a=t = no cursor draw).
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=1,a=t;{b64}\x1b\\").as_bytes());
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=2,a=t;{b64}\x1b\\").as_bytes());
+        let cs = e.feed(b"\x1b_Ga=p,i=2,p=7,P=1,Q=1,H=2,V=-1\x1b\\");
+        assert!(
+            !cs.iter().any(|c| matches!(c, Chunk::Image(_))),
+            "relative placement must not draw at the cursor"
+        );
+        let rp = cs
+            .iter()
+            .find_map(|c| match c {
+                Chunk::RelativePlacement {
+                    id,
+                    placement,
+                    parent_img,
+                    parent_placement,
+                    h,
+                    v,
+                    img,
+                } => Some((
+                    *id,
+                    *placement,
+                    *parent_img,
+                    *parent_placement,
+                    *h,
+                    *v,
+                    img.clone(),
+                )),
+                _ => None,
+            })
+            .expect("a RelativePlacement chunk");
+        assert_eq!((rp.0, rp.1, rp.2, rp.3, rp.4, rp.5), (2, 7, 1, 1, 2, -1));
+        assert_eq!((rp.6.width, rp.6.height), (1, 1));
+    }
+
+    #[test]
     fn kitty_animation_snapshot_surfaces_sequence() {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode([7u8, 7, 7, 255]);

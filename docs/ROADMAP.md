@@ -196,9 +196,16 @@
       parent is the remaining sub-item. Cited kitty
       `graphics-protocol.rst:682`.
 
+- [x] kitty relative placements **render** for placeholder parents: the
+      child image is drawn `(h,v)` cells from its parent virtual image's
+      placeholder origin (min abs/col of its cells), via a `Relatives`
+      registry + pure `relative_origin` clamp; parent off-screen ⇒ not
+      shown; group lifetime cascades (+2 tests, 102 workspace). Non-
+      placeholder / chained parents remain a sub-item.
+
 ## Next (in priority order)
-- [ ] kitty relative placements — render: resolve position from the
-      parent placement (incl. virtual/placeholder parents) + offset
+- [ ] kitty relative placements: non-placeholder parents + relative
+      chains (depth ≤ 8); broader `vttest` sweep
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

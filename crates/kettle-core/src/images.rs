@@ -37,6 +37,31 @@ pub struct VirtualEntry {
 /// Per-terminal registry of virtual images, keyed by kitty image id.
 pub type Virtuals = Arc<Mutex<HashMap<u32, VirtualEntry>>>;
 
+/// A kitty relative placement: the child image plus its parent reference
+/// and `(h, v)` cell offset. Render-time position = the parent's origin
+/// offset by `(h, v)` cells.
+#[derive(Clone)]
+pub struct RelEntry {
+    pub img: ImageData,
+    pub parent_img: u32,
+    pub parent_placement: u32,
+    pub h: i32,
+    pub v: i32,
+}
+
+/// Per-terminal registry of relative placements, keyed by
+/// `(child image id, child placement id)`.
+pub type Relatives = Arc<Mutex<HashMap<(u32, u32), RelEntry>>>;
+
+/// The on-screen origin of a relative placement: its parent placement's
+/// top-left cell `(min_abs, min_col)` offset by `(h, v)` cells (positive =
+/// right / down), clamped to the grid origin. Pure — fully unit tested.
+pub fn relative_origin(min_abs: i64, min_col: usize, h: i32, v: i32) -> (i64, usize) {
+    let abs = (min_abs + v as i64).max(0);
+    let col = (min_col as i64 + h as i64).max(0) as usize;
+    (abs, col)
+}
+
 /// A kitty animation: the full display sequence (`imgs[0]` = base/root
 /// frame) with each frame's gap (ms), the control state, and the wall
 /// clock the playback timing is measured from.
@@ -68,5 +93,20 @@ pub fn prune(images: &Images, oldest_abs: i64) {
             let drop = v.len() - 512;
             v.drain(0..drop);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_origin;
+
+    #[test]
+    fn relative_origin_offsets_and_clamps() {
+        // Parent top-left at (abs 10, col 4); +3 right, -2 up.
+        assert_eq!(relative_origin(10, 4, 3, -2), (8, 7));
+        // No offset → parent origin.
+        assert_eq!(relative_origin(10, 4, 0, 0), (10, 4));
+        // Negative past the origin clamps to 0 (no wrap/underflow).
+        assert_eq!(relative_origin(1, 1, -9, -9), (0, 0));
     }
 }

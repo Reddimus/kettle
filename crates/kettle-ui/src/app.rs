@@ -541,6 +541,7 @@ impl App {
             if let Some(p) = self.mux.panes.get(id) {
                 let mut imgs = p.term.placements();
                 imgs.extend(p.term.placeholder_tiles());
+                imgs.extend(p.term.relative_tiles());
                 if let Ok(g) = p.term.term.lock() {
                     guards.push((*r, g, Some(*id) == focus, imgs));
                 }

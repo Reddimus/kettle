@@ -165,11 +165,12 @@ pub enum KittyOut {
     Animate {
         id: u32,
     },
-    /// A relative placement was registered for image `id`; nothing is drawn
-    /// at the cursor — its position is derived from the parent placement at
-    /// render time (a later cycle).
+    /// A relative placement was registered for `(id, placement)`; nothing is
+    /// drawn at the cursor — its position is derived from the parent
+    /// placement at render time.
     Relative {
         id: u32,
+        placement: u32,
     },
 }
 
@@ -440,7 +441,7 @@ impl KittyState {
                         v: geti("V").unwrap_or(0),
                     },
                 );
-                return KittyOut::Relative { id };
+                return KittyOut::Relative { id, placement };
             }
             return match self.store.get(&id) {
                 Some(img) => KittyOut::Place(Placed {
@@ -758,7 +759,10 @@ mod tests {
         // offset 3 right, -2 up. Drawn nowhere now (Relative, not Place).
         assert!(matches!(
             k.feed("a=p,i=2,p=7,P=1,Q=1,H=3,V=-2"),
-            KittyOut::Relative { id: 2 }
+            KittyOut::Relative {
+                id: 2,
+                placement: 7
+            }
         ));
         assert_eq!(
             k.relative_placement(2, 7).copied(),

@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty relative placements **now render** when the parent is a visible
+  Unicode-placeholder (virtual) image: the child image is drawn `(h,v)`
+  cells from the parent's placeholder origin (the min abs-line/column of
+  its cells), through a per-terminal `Relatives` registry and the pure
+  `relative_origin` clamp. Parents that aren't on screen this frame are
+  skipped; the placement group still dies with its parent.
 - kitty relative placements (decode/state): `a=p,P=,Q=` is recorded as
   a `RelativePlacement` (parent image/placement + `H`/`V` cell offset)
   instead of drawing at the cursor; a placement group dies with its

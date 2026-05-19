@@ -15,7 +15,10 @@ use kettle_vt::{Chunk, Extractor, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
-use crate::images::{AnimEntry, Animations, Images, Placement, VirtualEntry, Virtuals};
+use crate::images::{
+    AnimEntry, Animations, Images, Placement, RelEntry, Relatives, VirtualEntry, Virtuals,
+    relative_origin,
+};
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
@@ -51,6 +54,8 @@ pub struct Terminal {
     pub virtuals: Virtuals,
     /// kitty animations, keyed by image id (frame substituted at draw time).
     pub anims: Animations,
+    /// kitty relative placements, keyed by `(child img, child placement)`.
+    pub relatives: Relatives,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
     pub prompts: Arc<Mutex<Vec<i64>>>,
     /// Latest working directory reported via OSC 7.
@@ -128,6 +133,7 @@ impl Terminal {
         let images: Images = Arc::new(Mutex::new(Vec::new()));
         let virtuals: Virtuals = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let anims: Animations = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let relatives: Relatives = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
@@ -137,6 +143,7 @@ impl Terminal {
             let images = images.clone();
             let virtuals = virtuals.clone();
             let anims = anims.clone();
+            let relatives = relatives.clone();
             let prompts = prompts.clone();
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
@@ -197,6 +204,43 @@ impl Terminal {
                                                     (false, None) => {}
                                                 }
                                             }
+                                            if let Ok(mut rm) = relatives.lock() {
+                                                match (all, id) {
+                                                    (true, _) => rm.clear(),
+                                                    // Group dies with parent:
+                                                    // drop the child and any
+                                                    // child parented to it.
+                                                    (false, Some(x)) => {
+                                                        rm.retain(|&(cimg, _), e| {
+                                                            cimg != x && e.parent_img != x
+                                                        })
+                                                    }
+                                                    (false, None) => {}
+                                                }
+                                            }
+                                        }
+                                        Chunk::RelativePlacement {
+                                            id,
+                                            placement,
+                                            img,
+                                            parent_img,
+                                            parent_placement,
+                                            h,
+                                            v,
+                                        } => {
+                                            if let Ok(mut rm) = relatives.lock() {
+                                                rm.insert(
+                                                    (id, placement),
+                                                    RelEntry {
+                                                        img,
+                                                        parent_img,
+                                                        parent_placement,
+                                                        h,
+                                                        v,
+                                                    },
+                                                );
+                                            }
+                                            (waker)();
                                         }
                                         Chunk::VirtualImage {
                                             id,
@@ -287,6 +331,7 @@ impl Terminal {
             images,
             virtuals,
             anims,
+            relatives,
             prompts,
             cwd: cwd_cell,
             argv: argv.to_vec(),
@@ -342,13 +387,10 @@ impl Terminal {
     /// cropped. The placement id is decoded from the cell's underline
     /// color (used for run grouping / inheritance per the spec); a single
     /// virtual placement is stored per image id, so it also selects it.
-    pub fn placeholder_tiles(&self) -> Vec<Placement> {
-        let Ok(virtuals) = self.virtuals.lock() else {
-            return Vec::new();
-        };
-        if virtuals.is_empty() {
-            return Vec::new();
-        }
+    /// Scan the visible grid for `U+10EEEE` placeholder cells and resolve
+    /// each one (image id + in-image row/col after diacritic inheritance) to
+    /// its absolute line and column. Shared by placeholder + relative tiles.
+    fn placeholder_cells(&self) -> Vec<(i64, usize, placeholder::ResolvedCell)> {
         let Ok(t) = self.term.lock() else {
             return Vec::new();
         };
@@ -392,31 +434,90 @@ impl Terminal {
             for (res, &(_, abs, col)) in
                 placeholder::resolve_run(&cells).into_iter().zip(run.iter())
             {
-                let Some(v) = virtuals.get(&res.image_id) else {
-                    continue;
-                };
-                let pcols = v.cols.max(1).min(u16::MAX as u32) as u16;
-                let prows = v.rows.max(1).min(u16::MAX as u32) as u16;
-                if let Some((x, y, w, h)) = placeholder::tile_src_rect(
-                    v.img.width,
-                    v.img.height,
-                    pcols,
-                    prows,
-                    res.row,
-                    res.col,
-                ) && let Some(crop) = v.img.crop(x, y, w, h)
-                {
-                    out.push(Placement {
-                        abs_line: abs,
-                        col,
-                        cell_cols: 1,
-                        cell_rows: 1,
-                        img: crop,
-                        id: Some(res.image_id),
-                        z: v.z,
-                    });
-                }
+                out.push((abs, col, res));
             }
+        }
+        out
+    }
+
+    pub fn placeholder_tiles(&self) -> Vec<Placement> {
+        let Ok(virtuals) = self.virtuals.lock() else {
+            return Vec::new();
+        };
+        if virtuals.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (abs, col, res) in self.placeholder_cells() {
+            let Some(v) = virtuals.get(&res.image_id) else {
+                continue;
+            };
+            let pcols = v.cols.max(1).min(u16::MAX as u32) as u16;
+            let prows = v.rows.max(1).min(u16::MAX as u32) as u16;
+            if let Some((x, y, w, h)) = placeholder::tile_src_rect(
+                v.img.width,
+                v.img.height,
+                pcols,
+                prows,
+                res.row,
+                res.col,
+            ) && let Some(crop) = v.img.crop(x, y, w, h)
+            {
+                out.push(Placement {
+                    abs_line: abs,
+                    col,
+                    cell_cols: 1,
+                    cell_rows: 1,
+                    img: crop,
+                    id: Some(res.image_id),
+                    z: v.z,
+                });
+            }
+        }
+        out
+    }
+
+    /// Placements for kitty relative placements whose parent is a visible
+    /// Unicode-placeholder (virtual) image: the parent's origin is the
+    /// top-left of its placeholder cells, and the child image is drawn
+    /// `(h, v)` cells from there. Parents that aren't on screen this frame
+    /// are skipped (the relative is simply not shown). Non-placeholder /
+    /// chained parents are a later sub-item (see ROADMAP).
+    pub fn relative_tiles(&self) -> Vec<Placement> {
+        let Ok(relatives) = self.relatives.lock() else {
+            return Vec::new();
+        };
+        if relatives.is_empty() {
+            return Vec::new();
+        }
+        // Per parent image id: the minimum (abs_line, col) of its cells.
+        let mut origin: std::collections::HashMap<u32, (i64, usize)> =
+            std::collections::HashMap::new();
+        for (abs, col, res) in self.placeholder_cells() {
+            let e = origin.entry(res.image_id).or_insert((abs, col));
+            e.0 = e.0.min(abs);
+            e.1 = e.1.min(col);
+        }
+        if origin.is_empty() {
+            return Vec::new();
+        }
+        let (cw, chh) = self.cell_px.lock().map(|p| *p).unwrap_or((8, 16));
+        let (cw, chh) = (cw.max(1) as u32, chh.max(1) as u32);
+        let mut out = Vec::new();
+        for (&(cimg, _), e) in relatives.iter() {
+            let Some(&(pa, pc)) = origin.get(&e.parent_img) else {
+                continue;
+            };
+            let (abs, col) = relative_origin(pa, pc, e.h, e.v);
+            out.push(Placement {
+                abs_line: abs,
+                col,
+                cell_cols: e.img.width.div_ceil(cw) as usize,
+                cell_rows: e.img.height.div_ceil(chh) as usize,
+                img: e.img.clone(),
+                id: Some(cimg),
+                z: 0,
+            });
         }
         out
     }

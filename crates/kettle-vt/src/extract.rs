@@ -40,6 +40,18 @@ pub enum Chunk {
         rows: u32,
         z: i32,
     },
+    /// kitty relative placement: child image `id`/`placement` is positioned
+    /// `(h, v)` cells from its parent placement's origin (resolved against
+    /// the parent's on-screen position at draw time).
+    RelativePlacement {
+        id: u32,
+        placement: u32,
+        img: ImageData,
+        parent_img: u32,
+        parent_placement: u32,
+        h: i32,
+        v: i32,
+    },
     /// kitty animation snapshot for image `id`: the full display sequence
     /// (`imgs[0]` = base/root frame) with each frame's gap in ms and the
     /// current animation control state. Emitted whenever a frame or the
@@ -219,6 +231,15 @@ impl Extractor {
                 gaps: Vec<i32>,
                 state: crate::kitty::AnimationState,
             },
+            Rel {
+                id: u32,
+                placement: u32,
+                img: ImageData,
+                parent_img: u32,
+                parent_placement: u32,
+                h: i32,
+                v: i32,
+            },
         }
 
         let result = match mode {
@@ -274,11 +295,27 @@ impl Extractor {
                             }
                             None => R::None,
                         },
-                        // Relative placements are recorded in KittyState;
-                        // their on-screen position is derived from the
-                        // parent at render time (a later cycle), so nothing
-                        // is emitted at the cursor now.
-                        KittyOut::Relative { .. } | KittyOut::None => R::None,
+                        // Relative placement: surface the child image + its
+                        // parent reference; the renderer resolves the
+                        // on-screen position from the parent placement.
+                        KittyOut::Relative { id, placement } => {
+                            match (
+                                self.kitty.image(id),
+                                self.kitty.relative_placement(id, placement),
+                            ) {
+                                (Some(img), Some(rp)) => R::Rel {
+                                    id,
+                                    placement,
+                                    img: img.clone(),
+                                    parent_img: rp.parent_img,
+                                    parent_placement: rp.parent_placement,
+                                    h: rp.h,
+                                    v: rp.v,
+                                },
+                                _ => R::None,
+                            }
+                        }
+                        KittyOut::None => R::None,
                     }
                 } else {
                     R::None
@@ -323,6 +360,23 @@ impl Extractor {
                 imgs,
                 gaps,
                 state,
+            }),
+            R::Rel {
+                id,
+                placement,
+                img,
+                parent_img,
+                parent_placement,
+                h,
+                v,
+            } => out.push(Chunk::RelativePlacement {
+                id,
+                placement,
+                img,
+                parent_img,
+                parent_placement,
+                h,
+                v,
             }),
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
