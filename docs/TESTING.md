@@ -41,8 +41,9 @@ cargo test --workspace
   OSC 4 palette query, DECRQM mode report, OSC 52 clipboard copy,
   OSC 8 hyperlink cell-carry, DECSET 1049 primary-screen preservation,
   DECSET 2026 synchronized output + its DECRQM report, NEL/IND/RI line
-  ops, DECID reply, cursor-blink mode (?12) event. The automatable,
-  regression-proof core of a `vttest` sweep.
+  ops, DECID reply, cursor-blink mode (?12) event, CHT/CBT tab
+  navigation. The automatable, regression-proof core of a `vttest`
+  sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;
   session JSON round-trips (incl. SSH panes) and pre-SSH sessions still load.

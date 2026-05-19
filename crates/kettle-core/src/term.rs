@@ -892,7 +892,27 @@ mod conformance {
         assert!(got, "?12h should signal a cursor-blink change");
     }
 
-    // NOTE: SS2/SS3 single-shift (ESC N / ESC O) and HTS (ESC H, custom
-    // tab stops) are not reliably handled by alacritty_terminal, so no
-    // conformance test asserts them — see ROADMAP.
+    #[test]
+    fn cht_cbt_tab_navigation() {
+        // CHT (CSI I): forward N tab stops (default stops every 8).
+        let (mut t, mut p) = harness(40, 2);
+        feed(&mut t, &mut p, b"\x1b[3I*");
+        assert_eq!(
+            row_text(&t, 0).chars().nth(24),
+            Some('*'),
+            "CHT 3 → column 24"
+        );
+        // CBT (CSI Z): backward N tab stops.
+        let (mut t2, mut p2) = harness(40, 2);
+        feed(&mut t2, &mut p2, b"\x1b[1;21H\x1b[1ZB");
+        assert_eq!(
+            row_text(&t2, 0).chars().nth(16),
+            Some('B'),
+            "CBT 1 from col 20 → column 16"
+        );
+    }
+
+    // NOTE: SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
+    // stops) and DECSCA/DECSEL selective-erase are not reliably handled by
+    // alacritty_terminal, so no conformance test asserts them — see ROADMAP.
 }

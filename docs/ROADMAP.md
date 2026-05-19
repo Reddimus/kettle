@@ -117,9 +117,12 @@
 
 - [x] Clickable tab bar: left-click a tab segment to switch tabs
 
+- [x] Conformance: CHT/CBT tab navigation (41 conformance tests).
+      DECSCA/DECSEL selective-erase unsupported upstream — documented.
+
 ## Next (in priority order)
-- [ ] Conformance: DECSED/DECSEL selective erase, XTWINOPS report,
-      tab navigation (CHT/CBT)
+- [ ] Conformance: XTWINOPS text-area report, DA primary params,
+      DSR device-status (5n)
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides
