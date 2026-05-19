@@ -67,6 +67,34 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     }
 }
 
+/// Auto-scroll rate when the user drags a selection past the focused pane's
+/// content area. Positive value = scroll *up* into history (cursor above
+/// the top edge); negative = scroll *down* toward the present (cursor below
+/// the bottom edge); zero when inside the pane (no autoscroll needed).
+///
+/// Speed scales with how far past the edge the cursor sits — a small
+/// overshoot crawls (1 line/frame), a big one (40+ px) chases at 3 lines
+/// per frame. Pure so the cadence is unit-tested without spinning up a
+/// renderer or PTY.
+fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
+    let dist = if y < rect_top {
+        rect_top - y
+    } else if y > rect_bottom {
+        rect_bottom - y // negative
+    } else {
+        return 0;
+    };
+    // Magnitude → 1..=3 lines/frame ladder.
+    let mag = if dist.abs() >= 40.0 {
+        3
+    } else if dist.abs() >= 10.0 {
+        2
+    } else {
+        1
+    };
+    if dist > 0.0 { mag } else { -mag }
+}
+
 /// Render the OS window title from the user's `window-title-format`
 /// template with the active pane's title / cwd / 1-based tab index. Falls
 /// back to plain `"kettle"` when the pane has no meaningful title (so the
@@ -1019,6 +1047,31 @@ impl App {
             }
             pane.last_history = Some(now);
         }
+        // Auto-scroll while dragging a selection past the focused pane's
+        // top/bottom edge — every modern terminal does this so the user
+        // doesn't have to release / scroll-back / shift-click to extend.
+        // Pure `selection_autoscroll_lines` chooses the per-frame rate;
+        // scrolling the viewport here naturally re-fires `update_selection`
+        // below to anchor the selection's end to the new visible line.
+        if self.selecting {
+            let area = self.area();
+            if let Some(rect) = self.focused_rect(area) {
+                let lines =
+                    selection_autoscroll_lines(self.cursor.y as f32, rect.1, rect.1 + rect.3);
+                if lines != 0
+                    && let Some(p) = self.mux.focused()
+                    && let Ok(mut t) = p.term.term.lock()
+                {
+                    t.scroll_display(Scroll::Delta(lines));
+                }
+                if lines != 0 {
+                    // Re-anchor the selection's end at the (now-moved)
+                    // cursor row so the highlight grows in step with the
+                    // scroll, not stuck on the original click-time row.
+                    self.update_selection(area);
+                }
+            }
+        }
         self.update_search();
         self.update_links();
         let overlay = self.overlay();
@@ -1970,13 +2023,27 @@ impl ApplicationHandler<UserEvent> for App {
             .panes
             .values()
             .any(|p| p.term.has_running_animation());
-        if bell_active || blink_active || anim_active {
+        // Selection-autoscroll runs at the same ~30 fps as bell / image
+        // animation — without an active wake-up the loop sits idle waiting
+        // for a fresh CursorMoved, so the drag-past-edge case would freeze
+        // until the user wiggled the mouse.
+        let autoscroll_active = self.selecting && {
+            let area = self.area();
+            self.focused_rect(area)
+                .map(|r| selection_autoscroll_lines(self.cursor.y as f32, r.1, r.1 + r.3) != 0)
+                .unwrap_or(false)
+        };
+        if bell_active || blink_active || anim_active || autoscroll_active {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
-            // Bell decay and animation playback both want a ~30 fps tick;
-            // cursor blink alone can coast at a coarse 120 ms.
-            let wait = if bell_active || anim_active { 33 } else { 120 };
+            // Bell decay, animation playback and selection autoscroll all
+            // want a ~30 fps tick; cursor blink alone can coast at 120 ms.
+            let wait = if bell_active || anim_active || autoscroll_active {
+                33
+            } else {
+                120
+            };
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(wait),
             ));
@@ -2009,6 +2076,25 @@ mod tests {
         assert_eq!(wheel_lines(&pix, 1.0), 3);
         // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
         assert_eq!(wheel_lines(&one, -5.0), 0);
+    }
+
+    #[test]
+    fn selection_autoscroll_rate_scales_with_overshoot() {
+        use super::selection_autoscroll_lines;
+        // Inside the pane → no scroll.
+        assert_eq!(selection_autoscroll_lines(150.0, 100.0, 200.0), 0);
+        assert_eq!(selection_autoscroll_lines(100.0, 100.0, 200.0), 0);
+        assert_eq!(selection_autoscroll_lines(200.0, 100.0, 200.0), 0);
+        // Just past the top → 1 line/frame up into history (positive).
+        assert_eq!(selection_autoscroll_lines(95.0, 100.0, 200.0), 1);
+        // Moderate overshoot (10..40 px) → 2 lines/frame.
+        assert_eq!(selection_autoscroll_lines(80.0, 100.0, 200.0), 2);
+        // Big overshoot (≥40 px) → 3 lines/frame.
+        assert_eq!(selection_autoscroll_lines(50.0, 100.0, 200.0), 3);
+        // Past the bottom → negative (toward the present).
+        assert_eq!(selection_autoscroll_lines(205.0, 100.0, 200.0), -1);
+        assert_eq!(selection_autoscroll_lines(220.0, 100.0, 200.0), -2);
+        assert_eq!(selection_autoscroll_lines(280.0, 100.0, 200.0), -3);
     }
 
     #[test]

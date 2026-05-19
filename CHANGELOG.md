@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Selection auto-scrolls when you drag past the pane edge.**
+  Previously the highlight stopped at the visible boundary — you
+  had to release, scroll, then shift-click to extend. Every modern
+  terminal (Alacritty / iTerm2 / WezTerm / kitty / Ghostty) keeps
+  the scroll going while the mouse holds past the edge so a
+  long-distance "select these 500 lines" gesture is a single
+  click-and-drag. Per-frame rate scales with overshoot (1 line/
+  frame at the edge, 2 at 10 px past, 3 at 40+ px) via a pure
+  `selection_autoscroll_lines(y, top, bottom)` helper. The event
+  loop wake-up cadence (`about_to_wait`) now keeps a 30 fps tick
+  alive while drag-autoscroll is active, so the user doesn't have
+  to wiggle the mouse to keep it moving. +1 test covering all six
+  zones (inside, just-past, moderate, big × top/bottom).
 - **`word-delimiters` config** (Alacritty `selection.
   semantic_escape_chars` parity, aliases `selection-word-chars` and
   `semantic-escape-chars`). Customizes what counts as a word for

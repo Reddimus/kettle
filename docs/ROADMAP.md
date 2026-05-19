@@ -337,6 +337,10 @@
       `selection.semantic_escape_chars` parity, aliases
       `selection-word-chars`, `semantic-escape-chars`). Customizes
       double-click word boundaries; empty = engine default. +1 test.
+- [x] **Selection auto-scrolls past pane edge during drag.** Pure
+      `selection_autoscroll_lines(y, top, bottom)` rate ladder
+      (1/2/3 lines per frame by overshoot); `about_to_wait` keeps a
+      30 fps tick alive while the drag is active. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
