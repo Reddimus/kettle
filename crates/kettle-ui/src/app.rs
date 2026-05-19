@@ -261,6 +261,41 @@ impl App {
             .map(|(_, r)| r)
     }
 
+    /// If `(px, py)` is on the focused pane's scrollbar (right edge, ~8 px)
+    /// and the bar is visible, jump the viewport to the clicked position.
+    /// Returns `true` if it handled the click (so it won't start a
+    /// selection).
+    fn scrollbar_jump(&mut self, area: Rect, px: f32, py: f32) -> bool {
+        if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
+            return false;
+        }
+        let Some((rx, ry, rw, rh)) = self.focused_rect(area) else {
+            return false;
+        };
+        if px < rx + rw - 8.0 || px > rx + rw || py < ry || py > ry + rh {
+            return false;
+        }
+        let Some(p) = self.mux.focused() else {
+            return false;
+        };
+        let Ok(mut t) = p.term.term.lock() else {
+            return false;
+        };
+        use kettle_core::Dimensions;
+        let g = t.grid();
+        let (rows, hist, off) = (g.screen_lines(), g.history_size(), g.display_offset());
+        let visible = self.cfg.scrollbar == kettle_config::ScrollbarMode::Always || off > 0;
+        if !visible || rows + hist <= rows {
+            return false;
+        }
+        let target = kettle_core::scrollbar::target_offset(py - ry, rh, rows, hist);
+        let delta = target as i32 - off as i32;
+        if delta != 0 {
+            t.scroll_display(kettle_core::Scroll::Delta(delta));
+        }
+        true
+    }
+
     fn px_to_point(&self, rect: Rect, px: f32, py: f32) -> kettle_core::Point {
         let (cw, ch) = self
             .renderer
@@ -1361,6 +1396,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // (standard X11 terminal behavior; PRIMARY ≈ clipboard).
                 if bcode == 1 {
                     self.paste_clipboard();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Click the scrollbar to jump the viewport (left button).
+                if bcode == 0 && self.scrollbar_jump(area, px, py) {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }

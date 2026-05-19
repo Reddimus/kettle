@@ -449,26 +449,11 @@ impl Renderer {
             }
             if cfg.scrollbar != ScrollbarMode::Never {
                 let g = pv.term.grid();
-                let rows = g.screen_lines();
-                let hist = g.history_size();
-                let off = g.display_offset();
-                let total = rows + hist;
+                let (rows, hist, off) = (g.screen_lines(), g.history_size(), g.display_offset());
                 let show = cfg.scrollbar == ScrollbarMode::Always
                     || (cfg.scrollbar == ScrollbarMode::Auto && off > 0);
-                if show && total > rows {
-                    let track = rh;
-                    let th = (track * rows as f32 / total as f32).max(12.0);
-                    // off counts lines scrolled back from the bottom.
-                    let from_top = (hist - off) as f32 / total as f32;
-                    let ty = ry + from_top * track;
-                    over.push(rect(
-                        rx + rw - 4.0,
-                        ty.min(ry + rh - th),
-                        3.0,
-                        th,
-                        theme.palette[8],
-                        0.8,
-                    ));
+                if show && let Some((ty, th)) = kettle_core::scrollbar::thumb(rows, hist, off, rh) {
+                    over.push(rect(rx + rw - 4.0, ry + ty, 3.0, th, theme.palette[8], 0.8));
                 }
             }
         }

@@ -247,6 +247,10 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Scrollbar is now **click-to-jump** (left-click the right-edge bar
+      to scroll the viewport there); pure `kettle_core::scrollbar`
+      (`thumb` + `target_offset`) shared by the renderer and UI,
+      replacing the inline untested math (+3 tests).
 - [x] `--config FILE` override: used by the run, live-reload watcher,
       `--config-path`, `--check-config` and `--screenshot` (+CLI test).
 - [x] Middle-click in the content area **pastes the clipboard**

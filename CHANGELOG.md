@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- The scrollback **scrollbar is now interactive**: left-click anywhere
+  on the focused pane's right-edge bar to jump the viewport to that
+  position. Geometry moved to a pure, tested `kettle_core::scrollbar`
+  module (`thumb` for drawing, `target_offset` for the click mapping),
+  shared by the renderer and the UI (was duplicated, untested math).
 - `--config FILE` selects an explicit config file instead of the
   default path; it is honored by the running terminal (including the
   live-reload watcher, which now watches that file's directory) and by

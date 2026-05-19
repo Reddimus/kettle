@@ -5,6 +5,7 @@ pub mod event;
 pub mod hints;
 pub mod images;
 pub mod links;
+pub mod scrollbar;
 pub mod search;
 pub mod term;
 
