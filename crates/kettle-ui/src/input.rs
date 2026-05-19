@@ -201,4 +201,69 @@ mod tests {
             "embedded bracketed-paste end marker must be stripped"
         );
     }
+
+    #[test]
+    fn mouse_tracking_detection() {
+        use kettle_core::TermMode;
+        assert!(matches!(
+            mouse_tracking(TermMode::empty()),
+            (MouseTracking::Off, false)
+        ));
+        assert!(matches!(
+            mouse_tracking(TermMode::MOUSE_REPORT_CLICK),
+            (MouseTracking::Click, false)
+        ));
+        assert!(matches!(
+            mouse_tracking(TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE),
+            (MouseTracking::Click, true)
+        ));
+        assert!(matches!(
+            mouse_tracking(TermMode::MOUSE_DRAG),
+            (MouseTracking::Drag, false)
+        ));
+        assert!(matches!(
+            mouse_tracking(TermMode::MOUSE_MOTION),
+            (MouseTracking::Motion, false)
+        ));
+    }
+
+    #[test]
+    fn mouse_encode_sgr_and_legacy() {
+        let none = ModifiersState::empty();
+        // SGR: left press at grid (0,0) -> 1-based coords, 'M' = press.
+        assert_eq!(
+            mouse_encode(true, 0, true, false, 0, 0, none),
+            b"\x1b[<0;1;1M"
+        );
+        // Release uses 'm'.
+        assert_eq!(
+            mouse_encode(true, 0, false, false, 2, 3, none),
+            b"\x1b[<0;3;4m"
+        );
+        // Wheel-up (btn 64) is always a press.
+        assert_eq!(
+            mouse_encode(true, 64, true, false, 0, 0, none),
+            b"\x1b[<64;1;1M"
+        );
+        // Legacy X10: ESC [ M then (32+btn)(32+col+1)(32+row+1).
+        assert_eq!(
+            mouse_encode(false, 0, true, false, 0, 0, none),
+            vec![0x1b, b'[', b'M', 32, 33, 33]
+        );
+    }
+
+    #[test]
+    fn mouse_encode_modifiers_and_motion() {
+        // Ctrl adds 16, motion adds 32 to the SGR button code.
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            mouse_encode(true, 0, true, true, 0, 0, ctrl),
+            b"\x1b[<48;1;1M" // 0 + 32 (motion) + 16 (ctrl)
+        );
+        let shift = ModifiersState::SHIFT;
+        assert_eq!(
+            mouse_encode(true, 0, true, false, 0, 0, shift),
+            b"\x1b[<4;1;1M" // 0 + 4 (shift)
+        );
+    }
 }

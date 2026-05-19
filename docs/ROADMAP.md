@@ -72,9 +72,14 @@
       dim/underline/strikeout + curly-underline (4:3) + reset — verified
       through the real EventProxy PTY write-back path
 
+- [x] Focus-event reporting (DEC ?1004): CSI I / CSI O sent to the
+      focused pane on window focus change when the app enables it
+- [x] Mouse-encoding unit tests: SGR(1006) + legacy X10, press/release,
+      shift/ctrl/motion modifier bits, wheel; tracking-mode detection
+
 ## Next (in priority order)
-- [ ] Conformance: mouse-mode (SGR 1006) click/drag round-trips,
-      focus-event reporting (?1004), bracketed-paste wrapping
+- [ ] Audible-bell option + per-profile config; bell-on-focus suppression
+- [ ] Conformance: charset G1/G2/G3 invocation, REP (repeat), DECALN
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

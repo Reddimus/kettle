@@ -1018,6 +1018,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.window_focused = f;
                 self.blink_on = true;
                 self.last_blink = std::time::Instant::now();
+                // Focus-event reporting (DEC private mode ?1004): apps that
+                // enabled it expect CSI I on focus-in, CSI O on focus-out.
+                if self
+                    .focused_mode()
+                    .contains(kettle_core::TermMode::FOCUS_IN_OUT)
+                    && let Some(p) = self.mux.focused()
+                {
+                    p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
