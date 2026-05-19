@@ -112,9 +112,12 @@
 - [x] Conformance: DECSET 2026 synchronized output applies content
       atomically + DECRQM reports mode 2026 (37 conformance tests)
 
+- [x] Conformance: NEL/IND/RI line ops (column-preserving), DECID
+      reply, cursor-blink mode (?12) event (40 conformance tests)
+
 ## Next (in priority order)
-- [ ] Conformance: NEL/IND/RI line ops, DECID, cursor blink mode (?12),
-      reverse-video screen (?5)
+- [ ] Conformance: DECSED/DECSEL selective erase, XTWINOPS report,
+      tab navigation (CHT/CBT)
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

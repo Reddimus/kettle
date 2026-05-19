@@ -850,6 +850,48 @@ mod conformance {
         );
     }
 
+    #[test]
+    fn nel_index_reverse_index() {
+        // NEL (ESC E): CR+LF to the next line.
+        let (mut t, mut p) = harness(6, 3);
+        feed(&mut t, &mut p, b"ab\x1bEcd");
+        assert_eq!(row_text(&t, 0), "ab");
+        assert_eq!(row_text(&t, 1), "cd");
+
+        // IND (ESC D): down one line, column preserved.
+        let (mut t2, mut p2) = harness(6, 3);
+        feed(&mut t2, &mut p2, b"X\x1bDY");
+        assert_eq!(row_text(&t2, 0), "X");
+        assert_eq!(row_text(&t2, 1), " Y", "IND keeps the column");
+
+        // RI (ESC M): up one line, column preserved.
+        let (mut t3, mut p3) = harness(6, 3);
+        feed(&mut t3, &mut p3, b"\x1b[2;1Hb\x1bMa");
+        assert_eq!(row_text(&t3, 0), " a", "RI moved up, kept column");
+        assert_eq!(row_text(&t3, 1), "b");
+    }
+
+    #[test]
+    fn decid_replies_like_da1() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        feed(&mut t, &mut p, b"\x1bZ"); // DECID
+        let reply = drain_pty(&rx);
+        assert!(
+            reply.starts_with("\x1b[?") && reply.ends_with('c'),
+            "DECID should reply like DA1 (CSI ? … c), got {reply:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_blink_mode_emits_event() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        feed(&mut t, &mut p, b"\x1b[?12h"); // DECSET 12 = cursor blink on
+        let got = rx
+            .try_iter()
+            .any(|ev| matches!(ev, TermEvent::CursorBlinkingChange));
+        assert!(got, "?12h should signal a cursor-blink change");
+    }
+
     // NOTE: SS2/SS3 single-shift (ESC N / ESC O) and HTS (ESC H, custom
     // tab stops) are not reliably handled by alacritty_terminal, so no
     // conformance test asserts them — see ROADMAP.
