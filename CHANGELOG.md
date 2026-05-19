@@ -7,6 +7,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 52 clipboard policy** (`osc52 = off|copy|paste|both`, default
+  `copy`): clipboard *reads* via OSC 52 — which let a possibly-remote
+  program exfiltrate your system clipboard — are now **denied by
+  default** (an empty, well-formed reply is sent); writes remain
+  allowed. Configurable per the new key (alias `clipboard`).
 - Hardened **URL opening**: a URI from terminal output (an OSC 8
   hyperlink or autodetected link, opened via Ctrl/Cmd-click or hint
   mode) is now run through `links::is_safe_url` before the OS handler —

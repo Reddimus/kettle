@@ -29,6 +29,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `cursor-style` | `block`\|`underline`\|`bar` | `block` | |
 | `cursor-style-blink` | bool | `true` | |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
+| `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read |
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |

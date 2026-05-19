@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Security: OSC 52 clipboard *read* denied by default
+      (`osc52 = off|copy|paste|both`, default `copy`) — blocks remote
+      clipboard exfiltration; empty well-formed reply (+1 test).
 - [x] Security: untrusted URIs from terminal output are scheme-allowlist
       checked (`links::is_safe_url`) before the OS opener — blocks
       custom-scheme handler abuse, controls, traversal (+1 test).

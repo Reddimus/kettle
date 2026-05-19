@@ -48,6 +48,33 @@ impl BellMode {
     }
 }
 
+/// OSC 52 clipboard policy. The **read** path lets a (possibly remote)
+/// program read your system clipboard, so it is denied by default —
+/// `Copy` allows programs to *set* the clipboard but not read it
+/// (xterm/kitty-style safe default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc52 {
+    /// Ignore OSC 52 entirely.
+    Off,
+    /// Allow clipboard *writes* only (default).
+    Copy,
+    /// Allow clipboard *reads* (paste-back) only.
+    Paste,
+    /// Allow both.
+    Both,
+}
+
+impl Osc52 {
+    /// May a program set the clipboard via OSC 52?
+    pub fn can_copy(self) -> bool {
+        matches!(self, Osc52::Copy | Osc52::Both)
+    }
+    /// May a program read the clipboard via OSC 52 (`?` query)?
+    pub fn can_paste(self) -> bool {
+        matches!(self, Osc52::Paste | Osc52::Both)
+    }
+}
+
 /// When the tab bar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarMode {
@@ -155,6 +182,8 @@ pub struct Config {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub bell: BellMode,
+    /// OSC 52 clipboard policy (default: writes only).
+    pub osc52: Osc52,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
     /// Opacity of unfocused split panes (1.0 = no dim).
@@ -196,6 +225,7 @@ impl Default for Config {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             bell: BellMode::Both,
+            osc52: Osc52::Copy,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             unfocused_split_opacity: 0.7,
@@ -369,6 +399,14 @@ impl Config {
                         "visual" | "flash" => BellMode::Visual,
                         "attention" | "urgent" => BellMode::Attention,
                         _ => BellMode::Both,
+                    }
+                }
+                "osc52" | "clipboard" => {
+                    cfg.osc52 = match e.value.as_str() {
+                        "off" | "none" | "disabled" | "false" => Osc52::Off,
+                        "paste" | "read" => Osc52::Paste,
+                        "both" | "all" | "true" => Osc52::Both,
+                        _ => Osc52::Copy,
                     }
                 }
                 "tab-bar" => {
@@ -635,6 +673,23 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn osc52_policy_parsing_and_safe_default() {
+        // Default allows writes, denies reads (clipboard exfil guard).
+        let d = Config::default().osc52;
+        assert_eq!(d, Osc52::Copy);
+        assert!(d.can_copy() && !d.can_paste());
+
+        assert_eq!(Config::parse_text("osc52 = off").osc52, Osc52::Off);
+        assert_eq!(Config::parse_text("osc52 = paste").osc52, Osc52::Paste);
+        assert_eq!(Config::parse_text("osc52 = both").osc52, Osc52::Both);
+        // `clipboard` alias + unknown value falls back to the safe default.
+        assert_eq!(Config::parse_text("clipboard = read").osc52, Osc52::Paste);
+        assert_eq!(Config::parse_text("osc52 = bogus").osc52, Osc52::Copy);
+        assert!(!Osc52::Off.can_copy() && !Osc52::Off.can_paste());
+        assert!(Osc52::Both.can_copy() && Osc52::Both.can_paste());
     }
 
     #[test]

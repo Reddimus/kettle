@@ -438,16 +438,25 @@ impl App {
                     TermEvent::ResetTitle => pane.title = "kettle".into(),
                     TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
                     TermEvent::ClipboardStore(_, s) => {
-                        if let Some(cb) = &mut self.clipboard {
+                        // OSC 52 write — gated by policy (default: allowed).
+                        if self.cfg.osc52.can_copy()
+                            && let Some(cb) = &mut self.clipboard
+                        {
                             let _ = cb.set_text(s);
                         }
                     }
                     TermEvent::ClipboardLoad(_, fmt) => {
-                        let text = self
-                            .clipboard
-                            .as_mut()
-                            .and_then(|c| c.get_text().ok())
-                            .unwrap_or_default();
+                        // OSC 52 read lets a (remote) program exfiltrate the
+                        // clipboard; denied by default — reply empty so the
+                        // protocol stays well-formed without leaking.
+                        let text = if self.cfg.osc52.can_paste() {
+                            self.clipboard
+                                .as_mut()
+                                .and_then(|c| c.get_text().ok())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
                         pane.term.write(fmt(&text).as_bytes());
                     }
                     TermEvent::Bell => bell = true,
