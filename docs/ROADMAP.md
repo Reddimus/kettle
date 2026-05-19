@@ -247,6 +247,9 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Security: untrusted URIs from terminal output are scheme-allowlist
+      checked (`links::is_safe_url`) before the OS opener — blocks
+      custom-scheme handler abuse, controls, traversal (+1 test).
 - [x] Search follows matches into scrollback: the viewport scrolls to
       the active match (≈⅓ from top), deduped per match/query so manual
       scroll still works. Pure `search::reveal_offset` (+1 test).

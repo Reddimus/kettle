@@ -1073,7 +1073,9 @@ impl App {
 
     fn act_hint(&mut self, h: &HintTarget) {
         if h.kind == kettle_core::hints::Kind::Url {
-            if let Err(e) = open::that_detached(&h.text) {
+            if !kettle_core::links::is_safe_url(&h.text) {
+                log::warn!("refused to open unsafe URL: {}", h.text);
+            } else if let Err(e) = open::that_detached(&h.text) {
                 log::warn!("failed to open {}: {e}", h.text);
             }
         } else if let Some(cb) = self.clipboard.as_mut() {
@@ -1454,7 +1456,9 @@ impl ApplicationHandler<UserEvent> for App {
                     && (self.mods.control_key() || self.mods.super_key())
                     && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
                 {
-                    if let Err(e) = open::that_detached(&uri) {
+                    if !kettle_core::links::is_safe_url(&uri) {
+                        log::warn!("refused to open unsafe URL: {uri}");
+                    } else if let Err(e) = open::that_detached(&uri) {
                         log::warn!("failed to open {uri}: {e}");
                     }
                     return;

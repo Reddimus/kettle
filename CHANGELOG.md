@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Security
+- Hardened **URL opening**: a URI from terminal output (an OSC 8
+  hyperlink or autodetected link, opened via Ctrl/Cmd-click or hint
+  mode) is now run through `links::is_safe_url` before the OS handler —
+  only `http(s)`/`ftp(s)`/`mailto`/`file://` are allowed; custom
+  schemes (`javascript:`, `vscode:`, `data:`, …), control characters,
+  whitespace, `file://` path traversal, and absurd lengths are
+  refused. Closes a known terminal scheme-handler abuse vector.
+
 ### Fixed
 - Scrollback **search now scrolls the viewport to the active match**:
   matches in history (and `Tab`/`Shift+Tab` cycling onto them) bring

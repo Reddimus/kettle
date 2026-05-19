@@ -102,3 +102,55 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
     }
     out
 }
+
+/// Whether a URI from terminal output is safe to hand to the OS opener.
+/// Terminal output is untrusted: an OSC 8 hyperlink (or a crafted line)
+/// can carry an arbitrary URI, and custom schemes (`vscode:`, `ms-…`,
+/// `javascript:`, app handlers that exec) are a known abuse/RCE vector.
+/// We allow only a conservative scheme allowlist and reject controls,
+/// whitespace, and absurd lengths. Pure — fully unit tested.
+pub fn is_safe_url(uri: &str) -> bool {
+    if uri.is_empty() || uri.len() > 4096 {
+        return false;
+    }
+    if uri.chars().any(|c| c.is_control() || c == ' ') {
+        return false;
+    }
+    let Some((scheme, rest)) = uri.split_once(':') else {
+        return false; // no scheme → not opened
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" | "ftp" | "ftps" | "mailto" => !rest.is_empty(),
+        // Allow local files but never a traversal payload.
+        "file" => uri.starts_with("file://") && !uri.contains(".."),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_url;
+
+    #[test]
+    fn allows_web_and_mail_rejects_custom_schemes() {
+        assert!(is_safe_url("https://example.com/a?b=c#d"));
+        assert!(is_safe_url("http://10.0.0.1:8080/x"));
+        assert!(is_safe_url("ftp://host/file"));
+        assert!(is_safe_url("mailto:a@b.com"));
+        assert!(is_safe_url("file:///etc/hostname"));
+
+        // Custom / dangerous schemes are refused.
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url("vscode://x"));
+        assert!(!is_safe_url("ms-cxh://x"));
+        assert!(!is_safe_url("data:text/html,<script>"));
+        // No scheme, empty, control chars, traversal, oversized.
+        assert!(!is_safe_url("example.com"));
+        assert!(!is_safe_url(""));
+        assert!(!is_safe_url("https://e\nvil/x"));
+        assert!(!is_safe_url("https://has space/x"));
+        assert!(!is_safe_url("file://../../etc/passwd"));
+        assert!(!is_safe_url(&format!("https://{}", "a".repeat(5000))));
+        assert!(!is_safe_url("https:"), "scheme with empty target");
+    }
+}
