@@ -352,6 +352,10 @@
       color *query* bug. Renderer now calls `resolve_query(258,…)`
       so override wins over theme. +1 test (OSC 10/11/12 set
       populates slots 256/257/258 exactly).
+- [x] **OSC 7 cwd handles UTF-8 percent-encoded paths.** Shells
+      encode each UTF-8 byte separately (`%C3%A9` for `é`); the old
+      parser produced `Ã©`. Now decodes into a byte buffer and
+      converts via `from_utf8_lossy`. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

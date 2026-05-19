@@ -413,7 +413,13 @@ fn parse_osc7(s: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    let mut out = String::with_capacity(path.len());
+    // Decode into a *byte* buffer first: shells percent-encode each UTF-8
+    // byte of a non-ASCII path individually (zsh's `print -P %d` emits
+    // `%C3%A9` for `é`), so we need to reassemble the bytes before
+    // interpreting them as UTF-8. The old code pushed each decoded byte as
+    // a `char`, which gave `Ã©` instead of `é` and corrupted every cwd
+    // outside the ASCII range.
+    let mut bytes = Vec::with_capacity(path.len());
     let b = path.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -421,14 +427,16 @@ fn parse_osc7(s: &str) -> Option<String> {
             && i + 2 < b.len()
             && let Ok(c) = u8::from_str_radix(&path[i + 1..i + 3], 16)
         {
-            out.push(c as char);
+            bytes.push(c);
             i += 3;
             continue;
         }
-        out.push(b[i] as char);
+        bytes.push(b[i]);
         i += 1;
     }
-    Some(out)
+    // Lossy → invalid byte sequences become U+FFFD instead of dropping the
+    // whole report; a partly-corrupted path is more useful than no path.
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {

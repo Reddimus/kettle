@@ -58,6 +58,33 @@ mod tests {
     }
 
     #[test]
+    fn osc7_percent_decodes_utf8_paths_correctly() {
+        // Shells (zsh `print -P %d`, bash via `printf`) percent-encode
+        // each *UTF-8 byte* of a non-ASCII filename individually, so a
+        // path ending in `café` arrives as `caf%C3%A9` — two encoded
+        // bytes that together form U+00E9 (é). The old parser pushed
+        // each decoded byte as a `char`, which gave the Latin-1 garbage
+        // `cafÃ©` and broke prompt-tracking on any non-ASCII directory.
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"\x1b]7;file://host/home/u/caf%C3%A9\x1b\\");
+        let cwd = chunks.iter().find_map(|c| match c {
+            Chunk::Cwd(p) => Some(p.clone()),
+            _ => None,
+        });
+        assert_eq!(cwd.as_deref(), Some("/home/u/café"));
+
+        // Mixed: space + UTF-8 + plain. Combines the three cases that
+        // were each broken in isolation.
+        let mut e2 = Extractor::new();
+        let chunks2 = e2.feed(b"\x1b]7;file:///tmp/work%20dir/caf%C3%A9/x\x07");
+        let cwd2 = chunks2.iter().find_map(|c| match c {
+            Chunk::Cwd(p) => Some(p.clone()),
+            _ => None,
+        });
+        assert_eq!(cwd2.as_deref(), Some("/tmp/work dir/café/x"));
+    }
+
+    #[test]
     fn osc7_and_osc133_are_consumed() {
         let mut e = Extractor::new();
         let chunks = e.feed(b"x\x1b]7;file://host/tmp/work%20dir\x1b\\y\x1b]133;A\x1b\\z");

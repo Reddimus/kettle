@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 7 cwd percent-decoding handles UTF-8 paths correctly.**
+  Shells (zsh `print -P %d`, bash `printf '\\e]7;…'`) percent-encode
+  each *UTF-8 byte* of a non-ASCII filename individually — `café`
+  arrives as `caf%C3%A9`. The old parser pushed each decoded byte
+  as a `char`, which produced the Latin-1 garbage `cafÃ©` and broke
+  new-tab/split cwd inheritance, the window title's `{cwd}`
+  placeholder, and the OSC 7 session-restore path for every user
+  with a non-ASCII directory in their tree. Fixed by decoding into
+  a `Vec<u8>` and converting via `from_utf8_lossy`. +1 conformance
+  test covering non-ASCII alone and mixed (`%20` space + `%C3%A9` +
+  ASCII).
 - **OSC 12 (set cursor color) now actually paints the cursor.**
   Companion bug to the OSC 4/10/11/12 *query* path shipped two
   weeks ago: the engine already parsed `OSC 12 ; rgb:RR/GG/BB ST`
