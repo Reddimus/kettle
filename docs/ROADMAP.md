@@ -203,9 +203,15 @@
       shown; group lifetime cascades (+2 tests, 102 workspace). Non-
       placeholder / chained parents remain a sub-item.
 
+- [x] kitty relative placements: **non-placeholder parents** (a regular
+      placement's abs_line/col) **and relative chains** — pure
+      `resolve_chain` walks child→parent with a depth bound of 8
+      (`ETOODEEP`/cycles → not drawn); origins unified from placeholder
+      cells + the image registry (+1 test, 103 workspace). The kitty
+      graphics protocol surface is now complete.
+
 ## Next (in priority order)
-- [ ] kitty relative placements: non-placeholder parents + relative
-      chains (depth ≤ 8); broader `vttest` sweep
+- [ ] Broader `vttest`-style conformance sweep; detachable mux server
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

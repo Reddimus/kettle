@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- kitty relative placements: parents can now also be **regular
+  placements** (not just placeholders) and **relative chains** are
+  resolved — a pure `resolve_chain` walks child→parent with a depth
+  bound of 8 (kitty `ETOODEEP`; cycles are bounded, not infinite), with
+  parent origins unified from placeholder cells and the image registry.
+  This completes the kitty graphics protocol surface.
 - kitty relative placements **now render** when the parent is a visible
   Unicode-placeholder (virtual) image: the child image is drawn `(h,v)`
   cells from the parent's placeholder origin (the min abs-line/column of

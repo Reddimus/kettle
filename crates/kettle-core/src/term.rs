@@ -17,7 +17,7 @@ use portable_pty::{CommandBuilder, PtySize};
 use crate::event::{EventProxy, TermEvent, Waker};
 use crate::images::{
     AnimEntry, Animations, Images, Placement, RelEntry, Relatives, VirtualEntry, Virtuals,
-    relative_origin,
+    relative_origin, resolve_chain,
 };
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
@@ -484,28 +484,51 @@ impl Terminal {
     /// are skipped (the relative is simply not shown). Non-placeholder /
     /// chained parents are a later sub-item (see ROADMAP).
     pub fn relative_tiles(&self) -> Vec<Placement> {
-        let Ok(relatives) = self.relatives.lock() else {
-            return Vec::new();
+        // Snapshot the relatives, then drop the lock before taking the
+        // grid / images locks (keeps a single lock-acquisition order).
+        let entries: Vec<(u32, RelEntry)> = {
+            let Ok(rel) = self.relatives.lock() else {
+                return Vec::new();
+            };
+            if rel.is_empty() {
+                return Vec::new();
+            }
+            rel.iter().map(|(&(c, _), e)| (c, e.clone())).collect()
         };
-        if relatives.is_empty() {
-            return Vec::new();
-        }
-        // Per parent image id: the minimum (abs_line, col) of its cells.
-        let mut origin: std::collections::HashMap<u32, (i64, usize)> =
+        // Concrete origins: a parent is either a placeholder/virtual image
+        // (top-left of its cells) or a regular placement (its abs_line/col).
+        let mut origins: std::collections::HashMap<u32, (i64, usize)> =
             std::collections::HashMap::new();
+        let mut note = |id: u32, abs: i64, col: usize| {
+            origins
+                .entry(id)
+                .and_modify(|o: &mut (i64, usize)| {
+                    o.0 = o.0.min(abs);
+                    o.1 = o.1.min(col);
+                })
+                .or_insert((abs, col));
+        };
         for (abs, col, res) in self.placeholder_cells() {
-            let e = origin.entry(res.image_id).or_insert((abs, col));
-            e.0 = e.0.min(abs);
-            e.1 = e.1.min(col);
+            note(res.image_id, abs, col);
         }
-        if origin.is_empty() {
-            return Vec::new();
+        if let Ok(imgs) = self.images.lock() {
+            for p in imgs.iter() {
+                if let Some(id) = p.id {
+                    note(id, p.abs_line, p.col);
+                }
+            }
         }
+        // child image id -> (parent image id, h, v), for chain walking.
+        let rels: std::collections::HashMap<u32, (u32, i32, i32)> = entries
+            .iter()
+            .map(|(c, e)| (*c, (e.parent_img, e.h, e.v)))
+            .collect();
         let (cw, chh) = self.cell_px.lock().map(|p| *p).unwrap_or((8, 16));
         let (cw, chh) = (cw.max(1) as u32, chh.max(1) as u32);
         let mut out = Vec::new();
-        for (&(cimg, _), e) in relatives.iter() {
-            let Some(&(pa, pc)) = origin.get(&e.parent_img) else {
+        for (cimg, e) in &entries {
+            // kitty requires a chain depth of at least 8.
+            let Some((pa, pc)) = resolve_chain(e.parent_img, &rels, &origins, 8) else {
                 continue;
             };
             let (abs, col) = relative_origin(pa, pc, e.h, e.v);
@@ -515,7 +538,7 @@ impl Terminal {
                 cell_cols: e.img.width.div_ceil(cw) as usize,
                 cell_rows: e.img.height.div_ceil(chh) as usize,
                 img: e.img.clone(),
-                id: Some(cimg),
+                id: Some(*cimg),
                 z: 0,
             });
         }

@@ -62,6 +62,29 @@ pub fn relative_origin(min_abs: i64, min_col: usize, h: i32, v: i32) -> (i64, us
     (abs, col)
 }
 
+/// Resolve a parent image's on-screen origin, following a chain of relative
+/// placements. `origins` maps an image id to a concrete origin (a real
+/// placement or a placeholder's top-left). `rels` maps a relative child
+/// image id to its `(parent_img, h, v)`. The walk is bounded by
+/// `max_depth`; exceeding it (or a cycle) yields `None` — kitty's
+/// `ETOODEEP` (`graphics-protocol.rst` requires depth ≥ 8). Pure.
+pub fn resolve_chain(
+    parent: u32,
+    rels: &HashMap<u32, (u32, i32, i32)>,
+    origins: &HashMap<u32, (i64, usize)>,
+    max_depth: u32,
+) -> Option<(i64, usize)> {
+    if let Some(&o) = origins.get(&parent) {
+        return Some(o);
+    }
+    if max_depth == 0 {
+        return None;
+    }
+    let &(grandparent, h, v) = rels.get(&parent)?;
+    let base = resolve_chain(grandparent, rels, origins, max_depth - 1)?;
+    Some(relative_origin(base.0, base.1, h, v))
+}
+
 /// A kitty animation: the full display sequence (`imgs[0]` = base/root
 /// frame) with each frame's gap (ms), the control state, and the wall
 /// clock the playback timing is measured from.
@@ -98,7 +121,8 @@ pub fn prune(images: &Images, oldest_abs: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::relative_origin;
+    use super::{relative_origin, resolve_chain};
+    use std::collections::HashMap;
 
     #[test]
     fn relative_origin_offsets_and_clamps() {
@@ -108,5 +132,31 @@ mod tests {
         assert_eq!(relative_origin(10, 4, 0, 0), (10, 4));
         // Negative past the origin clamps to 0 (no wrap/underflow).
         assert_eq!(relative_origin(1, 1, -9, -9), (0, 0));
+    }
+
+    #[test]
+    fn resolve_chain_walks_and_bounds_depth() {
+        // Image 1 has a concrete origin (a real/placeholder placement).
+        let origins = HashMap::from([(1u32, (100i64, 10usize))]);
+        // 2 → relative to 1 (+1,+1); 3 → relative to 2 (+2,0).
+        let rels = HashMap::from([(2u32, (1u32, 1, 1)), (3u32, (2u32, 2, 0))]);
+        // Direct concrete parent.
+        assert_eq!(resolve_chain(1, &rels, &origins, 8), Some((100, 10)));
+        // One hop: 2's origin = 1's origin + (1,1).
+        assert_eq!(resolve_chain(2, &rels, &origins, 8), Some((101, 11)));
+        // Two hops: 3 → 2 → 1.  (101,11) + (0,2) = (101,13).
+        assert_eq!(resolve_chain(3, &rels, &origins, 8), Some((101, 13)));
+        // Unknown parent with no chain → None.
+        assert_eq!(resolve_chain(9, &rels, &origins, 8), None);
+
+        // A 9-link chain exceeds max_depth 8 → None (ETOODEEP); a cycle
+        // is likewise bounded, not infinite.
+        let mut deep = HashMap::new();
+        for i in 2u32..=10 {
+            deep.insert(i, (i - 1, 0, 0));
+        }
+        assert_eq!(resolve_chain(10, &deep, &origins, 8), None);
+        let cyc = HashMap::from([(5u32, (6u32, 0, 0)), (6u32, (5u32, 0, 0))]);
+        assert_eq!(resolve_chain(5, &cyc, &origins, 8), None);
     }
 }
