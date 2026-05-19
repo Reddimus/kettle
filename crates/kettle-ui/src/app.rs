@@ -937,6 +937,24 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // Left-click on the tab bar switches tabs.
+                let tb = self.tab_bar_h();
+                if bcode == 0 && tb > 0.0 && (self.cursor.y as f32) < tb {
+                    let n = self.mux.tabs.len();
+                    if n > 0 {
+                        let w = self
+                            .renderer
+                            .as_ref()
+                            .map(|r| r.surface_size().0 as f32)
+                            .unwrap_or(800.0);
+                        let idx = ((self.cursor.x as f32 / (w / n as f32)) as usize).min(n - 1);
+                        self.mux.active = idx;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 let area = self.area();
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
                 if bcode == 0

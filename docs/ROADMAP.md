@@ -115,6 +115,8 @@
 - [x] Conformance: NEL/IND/RI line ops (column-preserving), DECID
       reply, cursor-blink mode (?12) event (40 conformance tests)
 
+- [x] Clickable tab bar: left-click a tab segment to switch tabs
+
 ## Next (in priority order)
 - [ ] Conformance: DECSED/DECSEL selective erase, XTWINOPS report,
       tab navigation (CHT/CBT)
