@@ -19,7 +19,7 @@ GitHub runners for every platform:
 ```sh
 # Linux build deps (Debian/Ubuntu)
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
-  libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
+  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
 
 git clone https://github.com/Reddimus/kettle
 cd kettle

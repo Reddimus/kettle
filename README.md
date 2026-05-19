@@ -44,7 +44,7 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 ```sh
 # Linux build deps (Debian/Ubuntu)
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
-  libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
+  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
 
 cargo run --release
 ```
