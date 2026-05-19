@@ -69,6 +69,8 @@ pub struct App {
     fullscreen: bool,
     cursor: PhysicalPosition<f64>,
     selecting: bool,
+    /// Dragging the focused pane's scrollbar thumb.
+    dragging_scrollbar: bool,
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
@@ -131,6 +133,7 @@ impl App {
             fullscreen: false,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
+            dragging_scrollbar: false,
             mouse_btn: None,
             links: Vec::new(),
             ssh_input: None,
@@ -266,13 +269,21 @@ impl App {
     /// Returns `true` if it handled the click (so it won't start a
     /// selection).
     fn scrollbar_jump(&mut self, area: Rect, px: f32, py: f32) -> bool {
+        self.scrollbar_at(area, px, py, true)
+    }
+
+    /// Map a pointer position to a viewport jump on the focused pane's
+    /// scrollbar. With `require_zone`, only the right-edge ~8 px strip
+    /// counts (initial click); during a drag the x is ignored so the
+    /// grab follows the pointer's y anywhere.
+    fn scrollbar_at(&mut self, area: Rect, px: f32, py: f32, require_zone: bool) -> bool {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
             return false;
         }
         let Some((rx, ry, rw, rh)) = self.focused_rect(area) else {
             return false;
         };
-        if px < rx + rw - 8.0 || px > rx + rw || py < ry || py > ry + rh {
+        if require_zone && (px < rx + rw - 8.0 || px > rx + rw || py < ry || py > ry + rh) {
             return false;
         }
         let Some(p) = self.mux.focused() else {
@@ -1318,6 +1329,15 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
+                if self.dragging_scrollbar {
+                    let area = self.area();
+                    let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+                    self.scrollbar_at(area, px, py, false);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.selecting {
                     let area = self.area();
                     self.update_selection(area);
@@ -1401,8 +1421,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Click the scrollbar to jump the viewport (left button).
+                // Click the scrollbar to jump the viewport, then drag it.
                 if bcode == 0 && self.scrollbar_jump(area, px, py) {
+                    self.dragging_scrollbar = true;
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -1453,6 +1474,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.copy_selection();
                     }
                     self.selecting = false;
+                    self.dragging_scrollbar = false;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
