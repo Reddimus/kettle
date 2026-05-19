@@ -20,6 +20,16 @@ pub fn thumb(rows: usize, hist: usize, off: usize, track: f32) -> Option<(f32, f
     Some((y, h))
 }
 
+/// True when new output appeared since the previous frame and the user
+/// asked for `scroll-on-output` (Alacritty `scroll_on_output`). The history
+/// snapshot from the prior redraw is `prev`; `current` is the value now.
+/// `None` previous means we haven't seen a frame yet — never scroll
+/// (otherwise the very first paint would yank the cursor away from the
+/// origin). Pure, +tests so the rule lives outside the render path.
+pub fn should_scroll_on_output(enabled: bool, prev: Option<usize>, current: usize) -> bool {
+    enabled && prev.is_some_and(|p| current > p)
+}
+
 /// The `display_offset` a click/drag at `yrel` pixels down the `track` maps
 /// to: the clicked fraction becomes the top of the viewport. Clamped to
 /// `0..=hist`.
@@ -57,6 +67,24 @@ mod tests {
         // Minimum thumb height is enforced.
         let (_, hmin) = thumb(1, 100_000, 0, 300.0).unwrap();
         assert_eq!(hmin, 12.0);
+    }
+
+    #[test]
+    fn should_scroll_on_output_rules() {
+        // Disabled → never scrolls, regardless of growth.
+        assert!(!should_scroll_on_output(false, Some(10), 20));
+        // First frame (no prev) → never scrolls (otherwise the initial
+        // paint would unfocus the origin on every launch).
+        assert!(!should_scroll_on_output(true, None, 0));
+        assert!(!should_scroll_on_output(true, None, 9999));
+        // No growth (equal or shrank) → nothing to chase. Shrinking
+        // happens when the screen is resized and lines fold into history,
+        // which isn't "new output."
+        assert!(!should_scroll_on_output(true, Some(50), 50));
+        assert!(!should_scroll_on_output(true, Some(50), 40));
+        // Growth → scroll iff enabled.
+        assert!(should_scroll_on_output(true, Some(50), 51));
+        assert!(should_scroll_on_output(true, Some(0), 1));
     }
 
     #[test]

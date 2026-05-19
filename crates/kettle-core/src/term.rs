@@ -1141,6 +1141,30 @@ mod conformance {
     }
 
     #[test]
+    fn osc_color_set_query_reset_round_trip_through_engine() {
+        // Round-trip companion to the OSC query test: confirm OSC 4 set +
+        // OSC 104 reset actually move the engine's `Colors` slot (so our
+        // `kettle_render::resolve_query` will reflect changes live —
+        // tested separately in kettle-render). This guards against an
+        // upstream regression silently disconnecting the set/reset path
+        // from the OSC 4 query path we ship.
+        let (mut t, mut p, _rx) = harness_rx(8, 2);
+        // Initially the engine has no override for palette 1.
+        assert!(t.colors()[1].is_none(), "expected no override pre-set");
+        // OSC 4 ; 1 ; rgb:11/22/33  → set.
+        feed(&mut t, &mut p, b"\x1b]4;1;rgb:11/22/33\x07");
+        let after_set = t.colors()[1].expect("OSC 4 set must populate slot 1");
+        assert_eq!(
+            (after_set.r, after_set.g, after_set.b),
+            (0x11, 0x22, 0x33),
+            "engine must store the override exactly"
+        );
+        // OSC 104 ; 1  → reset that index only.
+        feed(&mut t, &mut p, b"\x1b]104;1\x07");
+        assert!(t.colors()[1].is_none(), "OSC 104 ; 1 must clear slot 1");
+    }
+
+    #[test]
     fn xtwinops_text_area_size_pixels_formats_csi4_reply() {
         // CSI 14 t — text-area pixel size. The engine raises
         // TextAreaSizeRequest(fmt) and expects the caller to plug in cell

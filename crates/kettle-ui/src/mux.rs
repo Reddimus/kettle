@@ -34,6 +34,10 @@ pub struct Pane {
     pub rx: Receiver<TermEvent>,
     pub title: String,
     pub closed: bool,
+    /// Scrollback `history_size()` observed at the *previous* redraw — used
+    /// to detect new output for `scroll-on-output`. `None` while no frame
+    /// has been drawn yet (so the first frame doesn't look like growth).
+    pub last_history: Option<usize>,
 }
 
 pub enum Node {
@@ -220,6 +224,7 @@ impl Mux {
                 rx,
                 title: "kettle".into(),
                 closed: false,
+                last_history: None,
             },
         );
         Ok(id)

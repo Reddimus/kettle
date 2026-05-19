@@ -207,6 +207,15 @@ pub struct Config {
     pub cursor_blink_interval: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
+    /// When the user types while scrolled back in scrollback, jump back to
+    /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
+    /// xterm `scrollKey`). Default `true`.
+    pub scroll_on_keystroke: bool,
+    /// When new output arrives while the user is scrolled back, jump to the
+    /// bottom of the screen (Alacritty `scrolling.history.scroll_on_output`,
+    /// xterm `scrollTtyOutput`). Default `false` so reading old output isn't
+    /// interrupted by a chatty background process.
+    pub scroll_on_output: bool,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -249,6 +258,8 @@ impl Default for Config {
             split_divider_color: None,
             cursor_blink_interval: 530,
             copy_on_select: true,
+            scroll_on_keystroke: true,
+            scroll_on_output: false,
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
@@ -481,6 +492,10 @@ impl Config {
                     }
                 }
                 "copy-on-select" => cfg.copy_on_select = e.value != "false",
+                "scroll-on-keystroke" | "scroll-on-input" => {
+                    cfg.scroll_on_keystroke = e.value != "false";
+                }
+                "scroll-on-output" => cfg.scroll_on_output = e.value != "false",
                 "font-feature" => {
                     for tok in e.value.split(',') {
                         if let Some(f) = FontFeature::parse(tok) {
@@ -837,6 +852,22 @@ mod config_tests {
             Config::parse_text("unfocused-split-opacity = 5").unfocused_split_opacity,
             1.0
         );
+    }
+
+    #[test]
+    fn scroll_behavior_defaults_and_parse() {
+        // Defaults match Alacritty's: keystroke yanks you to the bottom
+        // (so typing into a scrolled-back history is never confusing),
+        // output does not (a chatty background process won't tear you
+        // away from the page you're reading).
+        let d = Config::default();
+        assert!(d.scroll_on_keystroke);
+        assert!(!d.scroll_on_output);
+        let c = Config::parse_text("scroll-on-keystroke = false\nscroll-on-output = true\n");
+        assert!(!c.scroll_on_keystroke);
+        assert!(c.scroll_on_output);
+        // Alacritty's `scroll-on-input` alias is honored too.
+        assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
     }
 
     #[test]

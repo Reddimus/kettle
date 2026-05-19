@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`scroll-on-keystroke` (alias `scroll-on-input`) + `scroll-on-
+  output`** (Alacritty / xterm parity): two new bools governing
+  scrollback behavior. `scroll-on-keystroke` defaults `true` (typing
+  yanks you to the bottom — the longstanding behavior, now opt-out
+  so pinning the viewport while typing is possible) and `scroll-on-
+  output` defaults `false` (a chatty background process won't tear
+  you away from the page you're reading; flip it on to chase the
+  newest line). Output detection uses a pure
+  `kettle_core::scrollbar::should_scroll_on_output` helper (history-
+  size diff against the previous frame; first frame is a no-op) so
+  the rule lives outside the render path. +1 config-parse test, +1
+  pure-helper test.
+- **OSC color set/reset round-trip conformance** — end-to-end test
+  that `OSC 4 ; 1 ; rgb:…` writes into the engine's `Colors` slot and
+  `OSC 104 ; 1` clears it. Guards the connection between OSC color
+  set/reset (parser → engine) and the OSC 4/10/11/12 *query* reply
+  path shipped last week — together they prove a full xparsecolor
+  loop works.
 - **DEC mode 12 (cursor blink) now honors the running program.**
   `CSI ?12 h` / `?12 l` is the standard way for vim, neovim, and
   shell prompts to ask the terminal for a solid (steady) or blinking

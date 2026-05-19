@@ -305,6 +305,14 @@
       `cursor_style().blinking` per pane via a `cursor_blinking()`
       accessor; `CursorBlinkingChange` resets the blink phase so
       blink-off shows a solid cursor instantly. +1 test.
+- [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
+      xterm parity). Keystroke default `true` (current behavior, now
+      opt-out); output default `false` so background chatter doesn't
+      tear you away from the page you're reading. Output detection
+      via pure `kettle_core::scrollbar::should_scroll_on_output`
+      (per-pane history-size diff; first frame is a no-op). +2 tests.
+      Also added an OSC 4 set / OSC 104 reset round-trip conformance
+      test pairing with last cycle's OSC 4/10/11/12 query path.
 
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)

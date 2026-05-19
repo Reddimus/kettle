@@ -896,6 +896,31 @@ impl App {
         if self.mux.reap() {
             return;
         }
+        // scroll-on-output: if new output landed in any pane since the
+        // previous frame, optionally yank that pane back to the bottom.
+        // Tracking is per-pane (each one drifts independently when only
+        // its background process emits) and uses the pure
+        // `should_scroll_on_output` rule so the "what counts as new
+        // output" decision lives outside the render path.
+        let want_sob = self.cfg.scroll_on_output;
+        for pane in self.mux.panes.values_mut() {
+            let now = pane
+                .term
+                .term
+                .lock()
+                .ok()
+                .map(|t| {
+                    use kettle_core::Dimensions;
+                    t.grid().history_size()
+                })
+                .unwrap_or(0);
+            if kettle_core::scrollbar::should_scroll_on_output(want_sob, pane.last_history, now)
+                && let Ok(mut t) = pane.term.term.lock()
+            {
+                t.scroll_display(Scroll::Bottom);
+            }
+            pane.last_history = Some(now);
+        }
         self.update_search();
         self.update_links();
         let overlay = self.overlay();
@@ -1752,7 +1777,15 @@ impl ApplicationHandler<UserEvent> for App {
                         self.mux.broadcast_write(&bytes);
                     } else if let Some(p) = self.mux.focused() {
                         p.term.write(&bytes);
-                        if let Ok(mut t) = p.term.term.lock() {
+                        // Yank back to the bottom *if* the user wants it
+                        // (Ghostty/Alacritty default `scroll-on-keystroke`).
+                        // Disabling lets you pin the viewport while typing —
+                        // useful for ed-style line editors and code reading
+                        // sessions where you're typing search terms while
+                        // the screen stays put.
+                        if self.cfg.scroll_on_keystroke
+                            && let Ok(mut t) = p.term.term.lock()
+                        {
                             t.scroll_display(Scroll::Bottom);
                         }
                     }
