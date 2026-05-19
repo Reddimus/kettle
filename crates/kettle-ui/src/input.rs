@@ -229,7 +229,15 @@ pub fn encode(
 pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     let body = text.replace("\r\n", "\r").replace('\n', "\r");
     if bracketed {
-        let safe = body.replace("\x1b[201~", "");
+        // Strip *both* bracketed-paste markers from the body. The closing
+        // marker is the well-known injection target (close the bracket
+        // early to make the shell auto-run the remainder); the opening
+        // marker is the same class of bug going the other way — a paste
+        // containing `\x1b[200~` can confuse some shells into treating our
+        // genuine closer as "still pasted text" and never leaving paste
+        // mode, swallowing further input. Alacritty/iTerm2/WezTerm all
+        // strip both.
+        let safe = body.replace("\x1b[200~", "").replace("\x1b[201~", "");
         let mut v = Vec::with_capacity(safe.len() + 12);
         v.extend_from_slice(b"\x1b[200~");
         v.extend_from_slice(safe.as_bytes());
@@ -259,6 +267,30 @@ mod tests {
             p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
             1,
             "embedded bracketed-paste end marker must be stripped"
+        );
+    }
+
+    #[test]
+    fn paste_strips_injected_start_marker() {
+        // Embedded `\x1b[200~` is the other half of the bracketed-paste
+        // injection family: it can confuse shells into thinking they're
+        // entering paste mode mid-way, so our real `\x1b[201~` at the end
+        // doesn't actually exit paste mode. Defense in depth — Alacritty /
+        // iTerm2 / WezTerm all strip both. Same shape as the close-marker
+        // test above so the contract is documented in pairs.
+        let p = paste_payload("evil\x1b[200~rm -rf /", true);
+        assert_eq!(
+            p.windows(6).filter(|w| *w == b"\x1b[200~").count(),
+            1,
+            "embedded bracketed-paste start marker must be stripped"
+        );
+        // Closing marker should still be exactly one (the wrapper's).
+        assert_eq!(p.windows(6).filter(|w| *w == b"\x1b[201~").count(), 1);
+        // Body between wrappers is the original text minus the marker.
+        assert!(
+            std::str::from_utf8(&p).unwrap().contains("evilrm -rf /"),
+            "body after strip: {}",
+            String::from_utf8_lossy(&p)
         );
     }
 

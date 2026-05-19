@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Bracketed paste also strips the *opening* marker `\x1b[200~`.**
+  The injection-guard added earlier (and tested in
+  `paste_strips_injected_end_marker`) only filtered the closing
+  marker `\x1b[201~` — the well-known attack vector that ends paste
+  mode early and lets the shell auto-execute the remainder. But the
+  opening marker is the same class of bug on the other side: a
+  paste containing `\x1b[200~` can confuse some shells into thinking
+  they're entering paste mode mid-way, so our genuine `\x1b[201~` at
+  the wrapper's end doesn't actually exit it — subsequent typed
+  input is then absorbed as paste content. Alacritty / iTerm2 /
+  WezTerm all strip both. +1 test (`paste_strips_injected_start_
+  marker`) pairs the contract symmetrically with the close-marker
+  test.
 - **OSC 7 cwd percent-decoding handles UTF-8 paths correctly.**
   Shells (zsh `print -P %d`, bash `printf '\\e]7;…'`) percent-encode
   each *UTF-8 byte* of a non-ASCII filename individually — `café`

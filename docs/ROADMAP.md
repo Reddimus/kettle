@@ -356,6 +356,11 @@
       encode each UTF-8 byte separately (`%C3%A9` for `é`); the old
       parser produced `Ã©`. Now decodes into a byte buffer and
       converts via `from_utf8_lossy`. +1 test.
+- [x] **Bracketed paste strips both 200~ and 201~ markers.** The
+      close-marker injection was already guarded, but a hostile
+      paste containing the *open* marker could trap the shell in
+      paste mode past the wrapper's real close. +1 test paired
+      symmetrically with the existing close-marker test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
