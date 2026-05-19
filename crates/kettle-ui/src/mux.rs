@@ -194,10 +194,11 @@ impl Mux {
         ch: u16,
         waker: Waker,
         cwd: Option<&str>,
+        argv: &[String],
     ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
         let term = Terminal::new(
-            cfg.shell.as_deref(),
+            argv,
             cwd,
             cfg.scrollback,
             cols.max(1),
@@ -225,6 +226,11 @@ impl Mux {
         match n {
             Node::Leaf(id) => SNode::Leaf {
                 cwd: self.panes.get(id).and_then(|p| p.term.current_dir()),
+                cmd: self
+                    .panes
+                    .get(id)
+                    .map(|p| p.term.argv.clone())
+                    .unwrap_or_default(),
             },
             Node::Split { dir, ratio, a, b } => SNode::Split {
                 vertical: *dir == Dir::Vertical,
@@ -259,8 +265,13 @@ impl Mux {
         mk: &dyn Fn() -> Waker,
     ) -> Result<Node> {
         match n {
-            SNode::Leaf { cwd } => {
-                let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref())?;
+            SNode::Leaf { cwd, cmd } => {
+                let argv = if cmd.is_empty() {
+                    shell_argv(cfg)
+                } else {
+                    cmd.clone()
+                };
+                let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref(), &argv)?;
                 Ok(Node::Leaf(id))
             }
             SNode::Split {
@@ -314,7 +325,30 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None)?;
+        let argv = shell_argv(cfg);
+        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
+        self.tabs.push(Tab {
+            root: Node::Leaf(id),
+            focus: id,
+        });
+        self.active = self.tabs.len() - 1;
+        Ok(())
+    }
+
+    /// Open a new tab running `ssh -t <target>` (SSH multiplexing).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_ssh_tab(
+        &mut self,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+        target: &str,
+    ) -> Result<()> {
+        let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
+        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -337,7 +371,8 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None)?;
+        let argv = shell_argv(cfg);
+        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
@@ -544,6 +579,13 @@ impl Mux {
                     .unwrap_or_else(|| format!("tab {}", i + 1))
             })
             .collect()
+    }
+}
+
+fn shell_argv(cfg: &Config) -> Vec<String> {
+    match &cfg.shell {
+        Some(s) => vec![s.clone()],
+        None => Vec::new(),
     }
 }
 

@@ -28,6 +28,7 @@ to print it. The file is **watched and reloaded live**.
 | `cursor-style-blink` | bool | `true` | |
 | `font-feature` | string | — | `-liga` disables ligatures |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
+| `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
 | `keybind` | `trigger=action` | Terminator set | Repeatable |
 
 ## Keybind grammar
@@ -43,6 +44,6 @@ to print it. The file is **watched and reloaded live**.
 `decrease_font_size`, `reset_font_size`, `start_search`, `broadcast_all`,
 `broadcast_off`, `toggle_fullscreen`, `reset`, `scroll_page_up`,
 `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `prev_prompt`,
-`next_prompt`, `reload_config`.
+`next_prompt`, `new_ssh`, `reload_config`.
 
 See [`kettle.example.config`](kettle.example.config).

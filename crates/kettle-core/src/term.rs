@@ -50,13 +50,16 @@ pub struct Terminal {
     pub prompts: Arc<Mutex<Vec<i64>>>,
     /// Latest working directory reported via OSC 7.
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// The argv this pane was launched with (empty = default shell);
+    /// persisted so SSH/remote panes can be restored.
+    pub argv: Vec<String>,
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        shell: Option<&str>,
+        argv: &[String],
         cwd: Option<&str>,
         scrollback: usize,
         cols: usize,
@@ -74,8 +77,14 @@ impl Terminal {
             pixel_height: cell_h * rows as u16,
         })?;
 
-        let mut cmd = match shell {
-            Some(s) => CommandBuilder::new(s),
+        let mut cmd = match argv.split_first() {
+            Some((prog, rest)) => {
+                let mut c = CommandBuilder::new(prog);
+                for a in rest {
+                    c.arg(a);
+                }
+                c
+            }
             None => CommandBuilder::new_default_prog(),
         };
         cmd.env("TERM", "xterm-256color");
@@ -193,6 +202,7 @@ impl Terminal {
             images,
             prompts,
             cwd: cwd_cell,
+            argv: argv.to_vec(),
             cell_px,
         })
     }

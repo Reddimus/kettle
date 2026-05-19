@@ -53,6 +53,9 @@ pub struct Overlay {
     pub search_index: usize,
     pub highlights: Vec<HighlightRect>,
     pub links: Vec<LinkRect>,
+    /// `Some(typed)` while the SSH launcher is open.
+    pub ssh_query: Option<String>,
+    pub ssh_hint: String,
 }
 
 /// One tiled pane to draw this frame.
@@ -350,6 +353,27 @@ impl Renderer {
                     overlay.search_index + 1
                 },
                 overlay.search_count
+            );
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some(q) = &overlay.ssh_query {
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[4], 0.96));
+            let label = format!(
+                "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
+                overlay.ssh_hint
             );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);

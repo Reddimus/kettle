@@ -31,6 +31,9 @@
       cwd serialized to session.json, restored on launch, autosaved on
       structural changes + exit
 
+- [x] SSH multiplexing: per-pane argv, `Ctrl+Shift+S` SSH launcher with
+      configured `ssh-host` tab-complete, SSH tabs persisted in sessions
+
 ## Next (in priority order)
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)

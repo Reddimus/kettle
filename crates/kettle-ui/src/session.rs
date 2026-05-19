@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub enum SNode {
     Leaf {
         cwd: Option<String>,
+        /// argv the pane ran (empty = default shell); persists SSH panes.
+        #[serde(default)]
+        cmd: Vec<String>,
     },
     Split {
         /// `true` = stacked (horizontal divider); `false` = side-by-side.

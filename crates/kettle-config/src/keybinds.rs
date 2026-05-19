@@ -83,6 +83,7 @@ pub enum Action {
     ScrollToBottom,
     JumpPrevPrompt,
     JumpNextPrompt,
+    OpenSsh,
     ReloadConfig,
     GotoTab(u8),
 }
@@ -130,6 +131,7 @@ impl Action {
             "scroll_to_bottom" => ScrollToBottom,
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
+            "new_ssh" | "ssh" => OpenSsh,
             "reload_config" => ReloadConfig,
             _ => return None,
         })
@@ -241,6 +243,7 @@ pub fn defaults() -> Bindings {
     bind(cs, Char('m'), ReloadConfig);
     bind(c, Up, JumpPrevPrompt);
     bind(c, Down, JumpNextPrompt);
+    bind(cs, Char('s'), OpenSsh);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
     bind(Mods::SHIFT, Home, ScrollToTop);

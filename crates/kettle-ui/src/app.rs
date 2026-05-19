@@ -36,6 +36,7 @@ pub struct App {
     selecting: bool,
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
+    ssh_input: Option<String>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -73,6 +74,7 @@ impl App {
             selecting: false,
             mouse_btn: None,
             links: Vec::new(),
+            ssh_input: None,
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -314,10 +316,26 @@ impl App {
             })
             .collect();
 
+        let (ssh_query, ssh_hint) = match &self.ssh_input {
+            Some(q) => {
+                let hint = if self.cfg.ssh_hosts.is_empty() {
+                    "(type user@host)".to_string()
+                } else {
+                    let names: Vec<&str> =
+                        self.cfg.ssh_hosts.iter().map(|(n, _)| n.as_str()).collect();
+                    format!("hosts: {}", names.join(", "))
+                };
+                (Some(q.clone()), hint)
+            }
+            None => (None, String::new()),
+        };
+
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
                 links,
+                ssh_query,
+                ssh_hint,
                 ..Overlay::default()
             };
         }
@@ -343,6 +361,8 @@ impl App {
             search_index: s.index,
             highlights,
             links,
+            ssh_query,
+            ssh_hint,
         }
     }
 
@@ -532,6 +552,9 @@ impl App {
                     }
                 }
             }
+            Action::OpenSsh => {
+                self.ssh_input = Some(String::new());
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft | Action::MoveTabRight => {}
             Action::GotoTab(n) => {
@@ -583,6 +606,64 @@ impl App {
             _ => {
                 if let Some(t) = text {
                     self.mux.search.query.push_str(t);
+                }
+            }
+        }
+    }
+
+    fn ssh_key(&mut self, key: &Key, text: Option<&str>) {
+        match key {
+            Key::Named(NamedKey::Escape) => self.ssh_input = None,
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(q) = self.ssh_input.as_mut() {
+                    q.pop();
+                }
+            }
+            Key::Named(NamedKey::Tab) => {
+                let typed = self.ssh_input.clone().unwrap_or_default();
+                if let Some((n, _)) = self
+                    .cfg
+                    .ssh_hosts
+                    .iter()
+                    .find(|(n, _)| n.starts_with(&typed) && !typed.is_empty())
+                {
+                    self.ssh_input = Some(n.clone());
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let typed = self.ssh_input.take().unwrap_or_default();
+                let target = self
+                    .cfg
+                    .ssh_hosts
+                    .iter()
+                    .find(|(n, _)| *n == typed)
+                    .map(|(_, t)| t.clone())
+                    .or_else(|| {
+                        if !typed.trim().is_empty() {
+                            Some(typed.trim().to_string())
+                        } else {
+                            self.cfg.ssh_hosts.first().map(|(_, t)| t.clone())
+                        }
+                    });
+                if let Some(target) = target {
+                    let area = self.area();
+                    let (cols, rows) = self.grid_of(area);
+                    let (cw, ch) = self.cell_px();
+                    if let Err(e) =
+                        self.mux
+                            .new_ssh_tab(&self.cfg, cols, rows, cw, ch, self.waker(), &target)
+                    {
+                        log::error!("ssh launch failed: {e}");
+                    }
+                    self.resize_all();
+                    self.save_session();
+                }
+            }
+            _ => {
+                if let Some(t) = text
+                    && let Some(q) = self.ssh_input.as_mut()
+                {
+                    q.push_str(t);
                 }
             }
         }
@@ -840,6 +921,14 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 let text = event.text.as_ref().map(|s| s.as_str());
+
+                if self.ssh_input.is_some() {
+                    self.ssh_key(&event.logical_key, text);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
 
                 if self.mux.search.open {
                     self.search_key(&event.logical_key, text);

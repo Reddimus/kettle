@@ -43,6 +43,8 @@ pub struct Config {
     pub keybinds: Bindings,
     /// Shell override; `None` uses `$SHELL` / platform default.
     pub shell: Option<String>,
+    /// Named SSH targets: `ssh-host = name=user@host` (repeatable).
+    pub ssh_hosts: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -63,6 +65,7 @@ impl Default for Config {
             search_background: Rgb::new(0xe0, 0xaf, 0x68),
             keybinds: keybinds::defaults(),
             shell: None,
+            ssh_hosts: Vec::new(),
         }
     }
 }
@@ -189,6 +192,12 @@ impl Config {
                     cfg.font_ligatures = false;
                 }
                 "command" | "shell" => cfg.shell = Some(e.value.clone()),
+                "ssh-host" => {
+                    if let Some((name, target)) = e.value.split_once('=') {
+                        cfg.ssh_hosts
+                            .push((name.trim().to_string(), target.trim().to_string()));
+                    }
+                }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
                 _ => {}
             }

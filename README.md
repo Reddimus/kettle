@@ -33,6 +33,9 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   works (X10 + SGR 1006).
 - **Session restore** — the tab/split tree and each pane's working directory
   are saved and restored across launches.
+- **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
+  `ssh-host` names with tab-complete, or any `user@host`); SSH tabs persist
+  across sessions.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 
