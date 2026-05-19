@@ -1,8 +1,73 @@
-//! Translate winit keyboard events into PTY byte sequences (xterm-compatible,
-//! honoring application-cursor-key mode).
+//! Translate winit keyboard and mouse events into PTY byte sequences
+//! (xterm-compatible, honoring application-cursor-key and mouse modes).
 
 use kettle_core::TermMode;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+/// Which mouse-tracking mode the application has requested.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MouseTracking {
+    /// No tracking — kettle does local selection/scroll.
+    Off,
+    /// Report press/release only.
+    Click,
+    /// Report press/release + drag (button held).
+    Drag,
+    /// Report all motion.
+    Motion,
+}
+
+pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
+    let sgr = mode.contains(TermMode::SGR_MOUSE);
+    let t = if mode.contains(TermMode::MOUSE_MOTION) {
+        MouseTracking::Motion
+    } else if mode.contains(TermMode::MOUSE_DRAG) {
+        MouseTracking::Drag
+    } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+        MouseTracking::Click
+    } else {
+        MouseTracking::Off
+    };
+    (t, sgr)
+}
+
+/// Encode a mouse event. `btn`: 0=left,1=middle,2=right,64=wheel-up,
+/// 65=wheel-down. `col`/`row` are 0-based grid coordinates.
+#[allow(clippy::too_many_arguments)]
+pub fn mouse_encode(
+    sgr: bool,
+    btn: u8,
+    pressed: bool,
+    motion: bool,
+    col: usize,
+    row: usize,
+    mods: ModifiersState,
+) -> Vec<u8> {
+    let mut cb = btn as u32;
+    if motion {
+        cb += 32;
+    }
+    if mods.shift_key() {
+        cb += 4;
+    }
+    if mods.alt_key() {
+        cb += 8;
+    }
+    if mods.control_key() {
+        cb += 16;
+    }
+    let x = col + 1;
+    let y = row + 1;
+    if sgr {
+        let kind = if pressed { 'M' } else { 'm' };
+        format!("\x1b[<{cb};{x};{y}{kind}").into_bytes()
+    } else {
+        // Legacy X10: clamp to the 1..223 representable range.
+        let enc = |v: usize| (v.min(223) as u8).wrapping_add(32);
+        let b = (cb.min(223) as u8).wrapping_add(32);
+        vec![0x1b, b'[', b'M', b, enc(x), enc(y)]
+    }
+}
 
 /// Encode a key press to the bytes that should be written to the PTY.
 /// Returns `None` if the key produces no output.

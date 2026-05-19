@@ -34,6 +34,7 @@ pub struct App {
     fullscreen: bool,
     cursor: PhysicalPosition<f64>,
     selecting: bool,
+    mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -70,6 +71,7 @@ impl App {
             fullscreen: false,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
+            mouse_btn: None,
             links: Vec::new(),
             _watcher: watcher,
         };
@@ -268,6 +270,33 @@ impl App {
         self.links
             .iter()
             .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
+    }
+
+    fn focused_mode(&mut self) -> kettle_core::TermMode {
+        self.mux
+            .focused()
+            .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
+            .unwrap_or(kettle_core::TermMode::empty())
+    }
+
+    /// Forward a mouse event to the app via the active tracking protocol.
+    /// Returns `true` when it was consumed (so kettle skips local handling).
+    fn send_mouse(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
+        let (track, sgr) = input::mouse_tracking(self.focused_mode());
+        if track == input::MouseTracking::Off {
+            return false;
+        }
+        if motion && track != input::MouseTracking::Motion && self.mouse_btn.is_none() {
+            return track != input::MouseTracking::Off; // consume, no report
+        }
+        let Some((row, col)) = self.cursor_cell() else {
+            return false;
+        };
+        let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, self.mods);
+        if let Some(p) = self.mux.focused() {
+            p.term.write(&seq);
+        }
+        true
     }
 
     fn overlay(&self) -> Overlay {
@@ -660,6 +689,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                if let Some(btn) = self.mouse_btn {
+                    // Drag while a button is held — report motion if tracked.
+                    if self.send_mouse(btn, true, true) {
+                        return;
+                    }
+                }
                 if self.selecting {
                     let area = self.area();
                     self.update_selection(area);
@@ -672,12 +707,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
             } => {
+                let bcode = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
                 let area = self.area();
-                // Ctrl/Cmd + click opens a hyperlink under the cursor.
-                if (self.mods.control_key() || self.mods.super_key())
+                // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
+                if bcode == 0
+                    && (self.mods.control_key() || self.mods.super_key())
                     && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
                 {
                     if let Err(e) = open::that_detached(&uri) {
@@ -687,22 +729,53 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.mux
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
-                self.begin_selection(area);
+                if self.send_mouse(bcode, true, false) {
+                    self.mouse_btn = Some(bcode);
+                    return;
+                }
+                if bcode == 0 {
+                    self.begin_selection(area);
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
-                button: MouseButton::Left,
+                button,
                 ..
-            } => self.selecting = false,
+            } => {
+                let bcode = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
+                if self.mouse_btn == Some(bcode) {
+                    self.mouse_btn = None;
+                    if self.send_mouse(bcode, false, false) {
+                        return;
+                    }
+                }
+                if bcode == 0 {
+                    self.selecting = false;
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() as i32 * 3,
                     winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
                 };
-                if lines != 0 {
+                if lines == 0 {
+                    return;
+                }
+                let (track, _) = input::mouse_tracking(self.focused_mode());
+                if track != input::MouseTracking::Off {
+                    let btn = if lines > 0 { 64 } else { 65 };
+                    for _ in 0..lines.abs().min(8) {
+                        self.send_mouse(btn, true, false);
+                    }
+                } else {
                     if let Some(pane) = self.mux.focused()
                         && let Ok(mut t) = pane.term.term.lock()
                     {

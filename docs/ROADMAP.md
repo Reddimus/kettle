@@ -21,9 +21,10 @@
 - [x] Image protocols: Sixel + kitty graphics + iTerm2 OSC 1337, extracted
       ahead of the VT parser, decoded to RGBA, GPU-composited, scroll-anchored
 
-## Next (in priority order)
+- [x] Mouse reporting passthrough (X10 + SGR 1006): click/drag/wheel to
+      vim/tmux/htop/fzf; local selection/scroll when tracking is off
 
-- [ ] Mouse reporting passthrough (apps that request SGR mouse)
+## Next (in priority order)
 - [ ] kitty graphics advanced ops (placement-by-id, deletion, Unicode
       placeholders, animation)
 - [ ] Shell integration (OSC 133) + prompt jumping
