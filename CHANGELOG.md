@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 12 (set cursor color) now actually paints the cursor.**
+  Companion bug to the OSC 4/10/11/12 *query* path shipped two
+  weeks ago: the engine already parsed `OSC 12 ; rgb:RR/GG/BB ST`
+  and populated `Colors[258]`, but the renderer hard-wired the
+  cursor quad to `theme.cursor` so the override never reached the
+  screen. Drawing now resolves via `kettle_render::color
+  ::resolve_query(258, theme, term_colors)` — runtime override
+  wins, theme value is the fallback. The same precedence rule the
+  *query* path returns, so OSC 12 set + OSC 12 ? now agree.
+  Confirmed end-to-end via a new test asserting OSC 10/11/12 SET
+  populate engine slots 256 / 257 / 258 with the exact xparsecolor
+  values.
 - **`move_tab_left` / `move_tab_right` actions now actually move
   the tab.** They were bound to `Ctrl+Shift+PageUp` / `PageDown` in
   the default keymap (Terminator parity), parsed correctly, and

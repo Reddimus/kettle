@@ -909,14 +909,22 @@ impl Renderer {
         if draw_cursor {
             let bx = ox + cp.column.0 as f32 * cw;
             let by = oy + cp.line.0 as f32 * ch;
+            // OSC 12 cursor color override (stored in `term_colors[258]`)
+            // takes precedence over the theme — same precedence rule the
+            // OSC 4/10/11/12 *query* path returns. Without this, programs
+            // could set the cursor color but the renderer kept drawing the
+            // theme cursor (a silent drop, mirror of the OSC color-query
+            // bug that was fixed two weeks ago for the *read* direction).
+            let cursor_color =
+                color::resolve_query(258, theme, term_colors).unwrap_or(theme.cursor);
             // Hollow outline — used by the unfocused-window state *and* when
             // the running program asks for `HollowBlock` (the DECSCUSR
             // semantics most apps treat as "I'm not in this pane right now").
             if !window_focused || shape == EShape::HollowBlock {
-                quads.push(rect(bx, by, cw, 1.0, theme.cursor, 1.0));
-                quads.push(rect(bx, by + ch - 1.0, cw, 1.0, theme.cursor, 1.0));
-                quads.push(rect(bx, by, 1.0, ch, theme.cursor, 1.0));
-                quads.push(rect(bx + cw - 1.0, by, 1.0, ch, theme.cursor, 1.0));
+                quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
+                quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
+                quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
+                quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
             } else if cursor_visible {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
@@ -924,7 +932,7 @@ impl Renderer {
                     // Engine variants we draw as a solid block.
                     EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 0.55, ch, 0.0),
                 };
-                quads.push(rect(bx, by + yoff, cwidth, cheight, theme.cursor, alpha));
+                quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
             }
         }
 

@@ -346,6 +346,12 @@
       `Ctrl+Shift+PageUp/Down` silently did nothing. New
       `Mux::move_active_tab(delta) -> bool` swaps with clamp (no
       wrap). +1 test.
+- [x] **OSC 12 (set cursor color) reaches the render path.**
+      Engine parsed it and populated `Colors[258]`, renderer
+      hard-wired `theme.cursor` — silent drop, mirror of the OSC
+      color *query* bug. Renderer now calls `resolve_query(258,…)`
+      so override wins over theme. +1 test (OSC 10/11/12 set
+      populates slots 256/257/258 exactly).
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

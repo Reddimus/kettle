@@ -1181,6 +1181,36 @@ mod conformance {
     }
 
     #[test]
+    fn osc_10_11_12_set_populate_default_color_slots() {
+        // OSC 10/11/12 SET should populate the engine's `Colors[256..=258]`
+        // slots (default fg, default bg, cursor) so the renderer's
+        // `resolve_query` reflects the override on the next frame. Without
+        // this round-trip, OSC 12 (set cursor color) was a silent drop in
+        // the render path — see commit notes for cycle 56. Confirms the
+        // pair: OSC 4 set was tested in cycle 47; OSC 10/11/12 are the
+        // close siblings that use the same Colors slots.
+        for (input, idx) in &[
+            (b"\x1b]10;rgb:11/22/33\x07" as &[u8], 256usize),
+            (b"\x1b]11;rgb:44/55/66\x07", 257),
+            (b"\x1b]12;rgb:77/88/99\x07", 258),
+        ] {
+            let (mut t, mut p, _rx) = harness_rx(8, 2);
+            assert!(t.colors()[*idx].is_none(), "slot {idx} clean pre-set");
+            feed(&mut t, &mut p, input);
+            let c = t.colors()[*idx].unwrap_or_else(|| panic!("slot {idx} unset after {input:?}"));
+            // The exact values from the xparsecolor input (engine packs
+            // each `RR` byte pair into a single u8).
+            let want = match idx {
+                256 => (0x11, 0x22, 0x33),
+                257 => (0x44, 0x55, 0x66),
+                258 => (0x77, 0x88, 0x99),
+                _ => unreachable!(),
+            };
+            assert_eq!((c.r, c.g, c.b), want, "wrong color for slot {idx}");
+        }
+    }
+
+    #[test]
     fn osc_color_set_query_reset_round_trip_through_engine() {
         // Round-trip companion to the OSC query test: confirm OSC 4 set +
         // OSC 104 reset actually move the engine's `Colors` slot (so our
