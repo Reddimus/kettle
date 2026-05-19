@@ -37,7 +37,8 @@ cargo test --workspace
   DECALN screen alignment, REP repeat-char, G1 charset via SO/SI,
   RIS full reset, EL erase-left, ED erase-below, ECH erase-in-place, ICH, CHA/HPA/VPA, DECSC-restores-SGR, DA2 secondary
   device attributes, SU/SD scroll, DECSCUSR cursor shape, wide CJK
-  (2 cells + spacer) and wide-char wrap. The automatable,
+  (2 cells + spacer) and wide-char wrap, combining-mark zero-width,
+  OSC 4 palette query, DECRQM mode report. The automatable,
   regression-proof core of a `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;

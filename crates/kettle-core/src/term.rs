@@ -742,6 +742,51 @@ mod conformance {
         assert_eq!(t.grid()[Point::new(Line(1), Column(0))].c, '世');
     }
 
-    // NOTE: SS2/SS3 single-shift (ESC N / ESC O) is not implemented by
-    // alacritty_terminal, so no conformance test asserts it — see ROADMAP.
+    #[test]
+    fn combining_mark_is_zero_width() {
+        let (mut t, mut p) = harness(6, 2);
+        // 'e' + combining acute accent: one cell, mark stored as zerowidth.
+        feed(&mut t, &mut p, "e\u{0301}X".as_bytes());
+        let g = t.grid();
+        let base = &g[Point::new(Line(0), Column(0))];
+        assert_eq!(base.c, 'e');
+        assert_eq!(
+            base.zerowidth(),
+            Some(&['\u{0301}'][..]),
+            "combining mark attaches to the base cell"
+        );
+        assert_eq!(
+            g[Point::new(Line(0), Column(1))].c,
+            'X',
+            "next glyph is in the very next cell (mark took no column)"
+        );
+    }
+
+    #[test]
+    fn osc4_palette_query_emits_color_request() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        // Query palette entry 1.
+        feed(&mut t, &mut p, b"\x1b]4;1;?\x07");
+        let got_idx = rx.try_iter().find_map(|ev| match ev {
+            TermEvent::ColorRequest(idx, _) => Some(idx),
+            _ => None,
+        });
+        assert_eq!(got_idx, Some(1), "OSC 4 ; 1 ; ? requests palette index 1");
+    }
+
+    #[test]
+    fn decrqm_reports_mode_state() {
+        let (mut t, mut p, rx) = harness_rx(8, 2);
+        // Enable bracketed paste, then DECRQM-query it (CSI ? 2004 $ p).
+        feed(&mut t, &mut p, b"\x1b[?2004h\x1b[?2004$p");
+        let reply = drain_pty(&rx);
+        assert!(
+            reply.contains("2004;1") && reply.ends_with("$y"),
+            "DECRPM should report mode 2004 as set, got {reply:?}"
+        );
+    }
+
+    // NOTE: SS2/SS3 single-shift (ESC N / ESC O) and HTS (ESC H, custom
+    // tab stops) are not reliably handled by alacritty_terminal, so no
+    // conformance test asserts them — see ROADMAP.
 }

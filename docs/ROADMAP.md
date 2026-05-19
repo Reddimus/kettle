@@ -98,9 +98,13 @@
       (underline/beam/block), wide CJK = 2 cells + WIDE_CHAR_SPACER,
       wide-char wraps when it can't fit (29 conformance tests)
 
+- [x] Conformance: combining mark = zero-width on base cell, OSC 4
+      palette query -> ColorRequest, DECRQM reports mode state
+      (32 conformance tests). HTS custom tab stops unreliable upstream.
+
 ## Next (in priority order)
-- [ ] Conformance: combining marks / zero-width, OSC 4 palette query,
-      DECRQM mode query, tab clear (TBC) variants
+- [ ] Conformance: OSC 52 clipboard, OSC 8 hyperlink cell carry,
+      DECSET 1049 alt-screen save/restore content
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides
