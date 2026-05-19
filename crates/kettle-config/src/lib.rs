@@ -197,6 +197,9 @@ pub struct Config {
     /// active pane's OSC title or "kettle"), `{cwd}` (active pane's cwd
     /// or empty), `{tab}` (1-based active tab index).
     pub window_title_format: String,
+    /// Template for each tab segment in the tab bar. Placeholders:
+    /// `{n}` (1-based tab index), `{title}` (focused pane's title).
+    pub tab_format: String,
     pub scrollbar: ScrollbarMode,
     /// Explicit split-divider/border color (else theme palette).
     pub split_divider_color: Option<Rgb>,
@@ -241,6 +244,7 @@ impl Default for Config {
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
             window_title_format: "{title} — kettle".to_string(),
+            tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
             cursor_blink_interval: 530,
@@ -452,6 +456,11 @@ impl Config {
                 "window-title-format" | "title-format" => {
                     if !e.value.trim().is_empty() {
                         cfg.window_title_format = e.value.clone();
+                    }
+                }
+                "tab-format" | "tab-title-format" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.tab_format = e.value.clone();
                     }
                 }
                 "scrollbar" => {
@@ -700,6 +709,19 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn tab_format_default_and_parse() {
+        let d = Config::default();
+        assert_eq!(d.tab_format, "{n}: {title}");
+        let c = Config::parse_text("tab-format = [{n}] {title}");
+        assert_eq!(c.tab_format, "[{n}] {title}");
+        let c2 = Config::parse_text("tab-title-format = {title}");
+        assert_eq!(c2.tab_format, "{title}");
+        // Empty value keeps the default.
+        let c3 = Config::parse_text("tab-format =   ");
+        assert_eq!(c3.tab_format, d.tab_format);
     }
 
     #[test]

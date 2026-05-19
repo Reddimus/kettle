@@ -7,6 +7,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`tab-format`** (alias `tab-title-format`): user-templatable per-tab
+  label (default `{n}: {title}`) via the shared `template::fill`;
+  unknown placeholders pass through verbatim; the trailing `✕` is
+  still appended by the renderer. +1 test.
 - **`window-title-format`** (alias `title-format`, Ghostty/WezTerm
   parity): template the OS window title with `{title}` / `{cwd}` /
   `{tab}` placeholders; `{{`/`}}` escape literal braces; unknown

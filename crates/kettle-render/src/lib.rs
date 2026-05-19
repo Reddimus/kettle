@@ -554,7 +554,11 @@ impl Renderer {
                 let (_, _, w, _) = s.rect;
                 // chars that fit: segment minus the ✕ zone, ~cell_w each.
                 let maxc = (((w - tabbar.height) / cw) as usize).clamp(3, 24);
-                let label = format!(" {}: {}  ✕", s.idx + 1, truncate(&s.title, maxc));
+                let n = (s.idx + 1).to_string();
+                let title = truncate(&s.title, maxc);
+                let body =
+                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
+                let label = format!(" {body}  ✕");
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(w), Some(tabbar.height));
