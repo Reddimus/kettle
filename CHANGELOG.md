@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- The OS **window title now follows the active pane** — switching tabs
+  or focusing another split retitles the window (not just on OSC title
+  events), with empty/placeholder titles falling back to `kettle`. The
+  `set_title` call is deduped so it isn't a per-frame syscall.
 - **Rectangular (block) selection**: hold `Alt` and drag to select a
   column block (iTerm2/Alacritty/WezTerm parity), via a pure
   `selection_kind(clicks, alt)` mapping; word/line still copy on press,

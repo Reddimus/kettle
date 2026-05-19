@@ -24,6 +24,17 @@ pub enum UserEvent {
     ReloadConfig,
 }
 
+/// The OS window title for the active pane's title: `"<t> — kettle"`, or
+/// just `"kettle"` when the pane has no meaningful title.
+fn window_title(pane_title: &str) -> String {
+    let t = pane_title.trim();
+    if t.is_empty() || t == "kettle" {
+        "kettle".to_string()
+    } else {
+        format!("{t} — kettle")
+    }
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -70,6 +81,8 @@ pub struct App {
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
     last_click: Option<(std::time::Instant, usize, usize, u8)>,
+    /// Last OS window title set (dedupe `set_title` syscalls).
+    last_title: String,
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
@@ -121,6 +134,7 @@ impl App {
             last_blink: std::time::Instant::now(),
             last_bell: None,
             last_click: None,
+            last_title: String::new(),
             startup,
             _watcher: watcher,
         };
@@ -336,17 +350,12 @@ impl App {
     }
 
     fn drain_events(&mut self) {
-        let mut title: Option<String> = None;
         let mut bell = false;
-        let focus = self.mux.active_focus();
-        for (id, pane) in self.mux.panes.iter_mut() {
+        for pane in self.mux.panes.values_mut() {
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
                     TermEvent::Title(t) => {
-                        pane.title = t.clone();
-                        if Some(*id) == focus {
-                            title = Some(t);
-                        }
+                        pane.title = t;
                     }
                     TermEvent::ResetTitle => pane.title = "kettle".into(),
                     TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
@@ -380,10 +389,24 @@ impl App {
                 w.request_user_attention(Some(UserAttentionType::Informational));
             }
         }
-        if let Some(t) = title
-            && let Some(w) = &self.window
-        {
-            w.set_title(&format!("{t} — kettle"));
+    }
+
+    /// Keep the OS window title in sync with the *active* pane's title —
+    /// including after tab/focus switches, not only on OSC title events.
+    /// Deduped so it isn't a syscall every frame.
+    fn sync_window_title(&mut self) {
+        let active = self
+            .mux
+            .active_focus()
+            .and_then(|id| self.mux.panes.get(&id))
+            .map(|p| p.title.as_str())
+            .unwrap_or("kettle");
+        let want = window_title(active);
+        if want != self.last_title {
+            if let Some(w) = &self.window {
+                w.set_title(&want);
+            }
+            self.last_title = want;
         }
     }
 
@@ -637,6 +660,8 @@ impl App {
 
     fn redraw(&mut self) {
         self.drain_events();
+        // Reflect the active pane (incl. after tab/focus switches).
+        self.sync_window_title();
         // Advance the cursor blink phase (configurable half-period).
         if self.cfg.cursor_blink
             && self.window_focused
@@ -1513,6 +1538,17 @@ impl ApplicationHandler<UserEvent> for App {
 mod tests {
     use super::selection_kind;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn window_title_formats_and_falls_back() {
+        use super::window_title;
+        assert_eq!(window_title("vim README.md"), "vim README.md — kettle");
+        assert_eq!(window_title("  spaced  "), "spaced — kettle");
+        // Empty / placeholder titles → just the app name.
+        assert_eq!(window_title(""), "kettle");
+        assert_eq!(window_title("   "), "kettle");
+        assert_eq!(window_title("kettle"), "kettle");
+    }
 
     #[test]
     fn selection_kind_maps_clicks_and_alt() {

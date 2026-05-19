@@ -247,6 +247,8 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] OS window title tracks the **active** pane (tab/focus switches,
+      not only OSC events); deduped; pure `window_title` (+1 test).
 - [x] Alt-drag **rectangular (block) selection** (`SelectionType::Block`,
       iTerm2/Alacritty/WezTerm parity) via a pure `selection_kind`
       mapping (+1 test); copy-on-select fires on release for drags.
