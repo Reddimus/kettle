@@ -210,8 +210,15 @@
       cells + the image registry (+1 test, 103 workspace). The kitty
       graphics protocol surface is now complete.
 
+- [x] Broader conformance sweep: IRM insert mode (shift-right),
+      DECTCEM cursor visibility (`?25`), LNM mode bit (`CSI 20h/l`),
+      DECCKM/DECKPAM application cursor+keypad, mouse-tracking DECSET
+      flags (`?1000/1002/1003/1006`) set+clear — 5 end-to-end tests
+      (108 workspace). LNM LF→CRLF output untranslated upstream (noted).
+
 ## Next (in priority order)
-- [ ] Broader `vttest`-style conformance sweep; detachable mux server
+- [ ] Detachable mux server (remote attach); native macOS menu;
+      code-signed/notarized macOS build; Windows MSI
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

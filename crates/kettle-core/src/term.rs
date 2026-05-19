@@ -1297,10 +1297,79 @@ mod conformance {
         assert_eq!(drain_pty(&rx2), "\x1b[?6c", "CSI 0 c == CSI c");
     }
 
+    #[test]
+    fn irm_insert_mode_shifts_right() {
+        // Default (replace) vs IRM (CSI 4 h): inserting pushes text right.
+        let (mut t, mut p) = harness(10, 2);
+        feed(&mut t, &mut p, b"ABCD\x1b[1;1H\x1b[4hX");
+        assert_eq!(row_text(&t, 0), "XABCD", "IRM inserts, shifting right");
+        feed(&mut t, &mut p, b"\x1b[4l\x1b[1;1HZ");
+        assert_eq!(row_text(&t, 0), "ZABCD", "4 l → back to replace");
+    }
+
+    #[test]
+    fn dectcem_cursor_visibility_mode() {
+        let (mut t, mut p) = harness(6, 2);
+        assert!(t.mode().contains(TermMode::SHOW_CURSOR), "shown by default");
+        feed(&mut t, &mut p, b"\x1b[?25l");
+        assert!(!t.mode().contains(TermMode::SHOW_CURSOR), "?25 l hides");
+        feed(&mut t, &mut p, b"\x1b[?25h");
+        assert!(t.mode().contains(TermMode::SHOW_CURSOR), "?25 h shows");
+    }
+
+    #[test]
+    fn lnm_newline_mode_sets_flag() {
+        // CSI 20 h sets LNM; 20 l clears it. (alacritty_terminal tracks the
+        // mode but does not itself translate LF→CRLF on output, so only the
+        // mode bit — the conformant, observable part — is asserted here.)
+        let (mut t, mut p) = harness(8, 2);
+        assert!(!t.mode().contains(TermMode::LINE_FEED_NEW_LINE));
+        feed(&mut t, &mut p, b"\x1b[20h");
+        assert!(t.mode().contains(TermMode::LINE_FEED_NEW_LINE), "20 h sets");
+        feed(&mut t, &mut p, b"\x1b[20l");
+        assert!(
+            !t.mode().contains(TermMode::LINE_FEED_NEW_LINE),
+            "20 l clears LNM"
+        );
+    }
+
+    #[test]
+    fn app_cursor_and_keypad_modes() {
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"\x1b[?1h");
+        assert!(t.mode().contains(TermMode::APP_CURSOR), "DECCKM set");
+        feed(&mut t, &mut p, b"\x1b=");
+        assert!(t.mode().contains(TermMode::APP_KEYPAD), "DECKPAM set");
+        feed(&mut t, &mut p, b"\x1b[?1l\x1b>");
+        assert!(!t.mode().contains(TermMode::APP_CURSOR));
+        assert!(!t.mode().contains(TermMode::APP_KEYPAD), "DECKPNM clears");
+    }
+
+    #[test]
+    fn mouse_tracking_modes_set_and_clear_flags() {
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"\x1b[?1000h");
+        assert!(t.mode().contains(TermMode::MOUSE_REPORT_CLICK));
+        feed(&mut t, &mut p, b"\x1b[?1002h\x1b[?1006h");
+        assert!(t.mode().contains(TermMode::MOUSE_DRAG), "?1002 = drag");
+        assert!(t.mode().contains(TermMode::SGR_MOUSE), "?1006 = SGR enc");
+        feed(&mut t, &mut p, b"\x1b[?1003h");
+        assert!(
+            t.mode().contains(TermMode::MOUSE_MOTION),
+            "?1003 = any-motion"
+        );
+        feed(&mut t, &mut p, b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+        assert!(
+            !t.mode().intersects(TermMode::MOUSE_MODE),
+            "all tracking off"
+        );
+    }
+
     // NOTE: XTWINOPS CSI 14 t (pixel size) routes through a windowing
     // callback (Event::TextAreaSizeRequest) so it has no deterministic
     // headless reply and is exercised by the live app, not asserted here.
     // SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
-    // stops) and DECSCA/DECSEL selective-erase are not reliably handled by
-    // alacritty_terminal, so no conformance test asserts them — see ROADMAP.
+    // stops), DECSCA/DECSEL selective-erase and LNM LF→CRLF *output*
+    // translation are not applied by alacritty_terminal, so no conformance
+    // test asserts those behaviors (only LNM's mode bit) — see ROADMAP.
 }

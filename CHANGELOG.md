@@ -30,6 +30,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- VT conformance sweep: IRM insert mode (`CSI 4h` shifts text right),
+  DECTCEM cursor visibility (`CSI ?25 h/l`), LNM mode bit
+  (`CSI 20 h/l`), DECCKM + DECKPAM/DECKPNM application cursor/keypad
+  modes, and mouse-tracking DECSET flags (`?1000/?1002/?1003/?1006`)
+  set and cleared — 5 end-to-end tests through the real vte path.
 - kitty relative placements: parents can now also be **regular
   placements** (not just placeholders) and **relative chains** are
   resolved — a pure `resolve_chain` walks child→parent with a depth
