@@ -71,3 +71,129 @@ pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Minimum-contrast guard (WezTerm `minimum_contrast` parity).
+//
+// Pure WCAG 2.0 relative-luminance math + a binary-search adjuster that
+// lightens or darkens the foreground until its contrast with the
+// background reaches a target ratio. Used by the renderer to keep text
+// readable on low-contrast themes; off (ratio ≤ 1.0) preserves colors.
+
+fn srgb_to_linear(c: u8) -> f64 {
+    let c = c as f64 / 255.0;
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG 2.0 relative luminance for an sRGB color (0.0 black .. 1.0 white).
+pub fn relative_luminance(rgb: Rgb) -> f64 {
+    0.2126 * srgb_to_linear(rgb.r) + 0.7152 * srgb_to_linear(rgb.g) + 0.0722 * srgb_to_linear(rgb.b)
+}
+
+/// WCAG 2.0 contrast ratio (1.0..=21.0). Symmetric in its arguments.
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+fn lerp(a: u8, b: u8, t: f64) -> u8 {
+    (a as f64 + (b as f64 - a as f64) * t.clamp(0.0, 1.0)).round() as u8
+}
+
+fn blend(fg: Rgb, target: Rgb, t: f64) -> Rgb {
+    Rgb::new(
+        lerp(fg.r, target.r, t),
+        lerp(fg.g, target.g, t),
+        lerp(fg.b, target.b, t),
+    )
+}
+
+/// Return `fg` adjusted toward the higher-contrast endpoint (white or
+/// black, relative to `bg`) until the WCAG contrast ratio reaches
+/// `min_ratio`. `min_ratio <= 1.0` is a no-op. Pure — binary-searches
+/// the blend parameter to keep theme tint as much as possible.
+pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
+    if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
+        return fg;
+    }
+    // Push the fg toward whichever extreme is *farther* from the bg's
+    // luminance — that gains contrast fastest.
+    let bg_l = relative_luminance(bg);
+    let target = if bg_l < 0.5 {
+        Rgb::new(255, 255, 255)
+    } else {
+        Rgb::new(0, 0, 0)
+    };
+    // If even the extreme can't reach min_ratio (clamped 21:1), return it.
+    if contrast_ratio(target, bg) < min_ratio {
+        return target;
+    }
+    // 14 iterations resolves t to ~1/16384 — pixel-imperceptible.
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        if contrast_ratio(blend(fg, target, mid), bg) >= min_ratio {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    blend(fg, target, hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contrast_ratio_extremes_and_symmetry() {
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        // White-on-black is 21:1; identical colors are 1:1; symmetric.
+        assert!((contrast_ratio(w, k) - 21.0).abs() < 1e-9);
+        assert!((contrast_ratio(k, w) - 21.0).abs() < 1e-9);
+        assert!((contrast_ratio(w, w) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn with_min_contrast_is_a_noop_when_ratio_already_met() {
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        // 21:1 already exceeds any sane threshold.
+        assert_eq!(with_min_contrast(w, k, 7.0), w);
+        // Disabled (≤ 1.0) returns the input unchanged.
+        let gray = Rgb::new(128, 128, 128);
+        assert_eq!(with_min_contrast(gray, gray, 1.0), gray);
+        assert_eq!(with_min_contrast(gray, gray, 0.0), gray);
+    }
+
+    #[test]
+    fn with_min_contrast_lifts_low_contrast_text() {
+        // Mid-gray on dark bg is hard to read; ask for 4.5:1 (WCAG AA).
+        let bg = Rgb::new(20, 20, 30);
+        let fg = Rgb::new(80, 80, 90);
+        let out = with_min_contrast(fg, bg, 4.5);
+        assert!(
+            contrast_ratio(out, bg) + 1e-6 >= 4.5,
+            "got {} for {out:?}",
+            contrast_ratio(out, bg)
+        );
+        // Direction: dark bg ⇒ lifted toward white (out is brighter).
+        assert!(relative_luminance(out) > relative_luminance(fg));
+    }
+
+    #[test]
+    fn with_min_contrast_darkens_on_light_bg() {
+        let bg = Rgb::new(240, 240, 240);
+        let fg = Rgb::new(180, 180, 180);
+        let out = with_min_contrast(fg, bg, 4.5);
+        assert!(contrast_ratio(out, bg) + 1e-6 >= 4.5);
+        // Light bg ⇒ darkened toward black.
+        assert!(relative_luminance(out) < relative_luminance(fg));
+    }
+}

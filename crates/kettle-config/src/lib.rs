@@ -190,6 +190,8 @@ pub struct Config {
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
     pub scroll_multiplier: f32,
+    /// WCAG minimum contrast ratio (text vs background); `0.0` = off.
+    pub minimum_contrast: f32,
     pub scrollbar: ScrollbarMode,
     /// Explicit split-divider/border color (else theme palette).
     pub split_divider_color: Option<Rgb>,
@@ -232,6 +234,7 @@ impl Default for Config {
             tab_bar_pos: TabBarPos::Top,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
+            minimum_contrast: 0.0,
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
             cursor_blink_interval: 530,
@@ -433,6 +436,11 @@ impl Config {
                 "scroll-multiplier" | "mouse-scroll-multiplier" => {
                     if let Ok(v) = e.value.parse::<f32>() {
                         cfg.scroll_multiplier = v.clamp(0.1, 50.0);
+                    }
+                }
+                "minimum-contrast" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.minimum_contrast = v.clamp(0.0, 21.0);
                     }
                 }
                 "scrollbar" => {
@@ -681,6 +689,25 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn minimum_contrast_default_and_clamps() {
+        assert_eq!(Config::default().minimum_contrast, 0.0);
+        assert_eq!(
+            Config::parse_text("minimum-contrast = 4.5").minimum_contrast,
+            4.5
+        );
+        assert_eq!(
+            Config::parse_text("minimum-contrast = -1").minimum_contrast,
+            0.0,
+            "clamped to 0"
+        );
+        assert_eq!(
+            Config::parse_text("minimum-contrast = 99").minimum_contrast,
+            21.0,
+            "clamped to 21:1"
+        );
     }
 
     #[test]

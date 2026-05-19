@@ -830,6 +830,11 @@ impl Renderer {
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
+            // Lift fg toward the higher-contrast extreme if the theme/SGR
+            // combo falls below the configured WCAG ratio (off by default).
+            if cfg.minimum_contrast > 1.0 {
+                fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
+            }
             let bold = flags.contains(Flags::BOLD);
             let italic = flags.contains(Flags::ITALIC);
             let hidden = flags.contains(Flags::HIDDEN);

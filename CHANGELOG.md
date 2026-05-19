@@ -7,6 +7,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`minimum-contrast`** (WezTerm parity) — keep text readable on
+  low-contrast themes by lifting each cell's foreground toward
+  white/black until it meets a configured WCAG 2.0 ratio (`0.0` = off,
+  `4.5` ≈ AA, `7.0` ≈ AAA). Pure `color::with_min_contrast` over
+  `relative_luminance`/`contrast_ratio` (+4 tests).
 - Mouse-wheel scroll speed is now configurable: `scroll-multiplier`
   (alias `mouse-scroll-multiplier`, default `1.0` ≈ 3 lines per notch,
   clamped 0.1–50) scales both `LineDelta` and `PixelDelta` input;
