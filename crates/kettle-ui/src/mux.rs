@@ -510,14 +510,21 @@ impl Mux {
 
     pub fn close_tab(&mut self) -> bool {
         let a = self.active;
-        if a < self.tabs.len() {
+        self.close_tab_at(a)
+    }
+
+    /// Close the tab at `idx` (all its panes). Returns true if no tabs remain.
+    pub fn close_tab_at(&mut self, idx: usize) -> bool {
+        if idx < self.tabs.len() {
             let mut ids = Vec::new();
-            collect_ids(&self.tabs[a].root, &mut ids);
+            collect_ids(&self.tabs[idx].root, &mut ids);
             for id in ids {
                 self.panes.remove(&id);
             }
-            self.tabs.remove(a);
-            if self.active >= self.tabs.len() && self.active > 0 {
+            self.tabs.remove(idx);
+            // Keep `active` valid: clamp if it ran off the end, or shift
+            // left if a tab before it was removed.
+            if (self.active >= self.tabs.len() || self.active > idx) && self.active > 0 {
                 self.active -= 1;
             }
         }
@@ -647,5 +654,29 @@ mod node_tests {
         let ids: Vec<u64> = rects.iter().map(|(i, _)| *i).collect();
         assert!(ids.contains(&1) && ids.contains(&2) && ids.contains(&3));
         assert_eq!(rects.len(), 3);
+    }
+
+    #[test]
+    fn close_tab_at_keeps_active_valid() {
+        // Build a 3-tab mux without spawning real terminals.
+        let mut m = Mux::new();
+        for id in 1..=3u64 {
+            m.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+            });
+        }
+        m.active = 2; // third tab
+        // Close the first tab → active shifts left to stay on the same tab.
+        assert!(!m.close_tab_at(0));
+        assert_eq!(m.tabs.len(), 2);
+        assert_eq!(m.active, 1);
+        // Close the (now) last tab while it's active → clamps.
+        m.active = 1;
+        assert!(!m.close_tab_at(1));
+        assert_eq!(m.active, 0);
+        // Closing the final tab reports "empty".
+        assert!(m.close_tab_at(0));
+        assert!(m.tabs.is_empty());
     }
 }

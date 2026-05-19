@@ -64,6 +64,43 @@ pub struct Overlay {
     pub bell: f32,
 }
 
+/// Pixel rectangle `(x, y, w, h)`.
+pub type Rect4 = (f32, f32, f32, f32);
+
+/// One tab segment in the tab bar.
+pub struct TabSeg {
+    pub idx: usize,
+    /// Full segment rect.
+    pub rect: Rect4,
+    /// Close-button (✕) hit rect within the segment.
+    pub close: Rect4,
+    pub title: String,
+    pub active: bool,
+}
+
+/// The tab bar geometry — computed once in the UI, used for both drawing
+/// (here) and click hit-testing (app), so there is a single source of truth.
+pub struct TabBar {
+    /// Bar height in px (0 = hidden).
+    pub height: f32,
+    /// Top-left Y of the bar (0 for top position, `surface_h - h` for bottom).
+    pub y: f32,
+    pub segments: Vec<TabSeg>,
+    /// The trailing "new tab" (+) button rect.
+    pub new_tab: Rect4,
+}
+
+impl TabBar {
+    pub fn hidden() -> Self {
+        TabBar {
+            height: 0.0,
+            y: 0.0,
+            segments: Vec::new(),
+            new_tab: (0.0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
 /// One tiled pane to draw this frame.
 pub struct PaneView<'a> {
     /// Pixel rect `(x, y, w, h)` within the surface.
@@ -86,6 +123,7 @@ pub struct Renderer {
     viewport: Viewport,
     text_renderer: TextRenderer,
     pane_buffers: Vec<TextBuffer>,
+    tab_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
     search_buffer: TextBuffer,
 
@@ -182,6 +220,7 @@ impl Renderer {
             viewport,
             text_renderer,
             pane_buffers: Vec::new(),
+            tab_buffers: Vec::new(),
             tabbar_buffer,
             search_buffer,
             quads,
@@ -220,9 +259,7 @@ impl Renderer {
     pub fn render_frame(
         &mut self,
         panes: &[PaneView<'_>],
-        tabs: &[String],
-        active_tab: usize,
-        tab_bar_h: f32,
+        tabbar: &TabBar,
         cfg: &Config,
         overlay: &Overlay,
     ) -> Result<()> {
@@ -246,26 +283,30 @@ impl Renderer {
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        // Tab bar.
-        if tab_bar_h > 0.0 {
-            quads.push(rect(0.0, 0.0, sw, tab_bar_h, theme.palette[8], 1.0));
-            let seg = if tabs.is_empty() {
-                sw
-            } else {
-                sw / tabs.len() as f32
-            };
-            for (i, _) in tabs.iter().enumerate() {
-                if i == active_tab {
-                    quads.push(rect(
-                        i as f32 * seg,
-                        0.0,
-                        seg,
-                        tab_bar_h,
-                        theme.background,
-                        1.0,
-                    ));
+        // Tab bar background + per-segment chrome (text added later).
+        if tabbar.height > 0.0 {
+            let by = tabbar.y;
+            quads.push(rect(0.0, by, sw, tabbar.height, theme.palette[8], 1.0));
+            for s in &tabbar.segments {
+                let (x, _, w, _) = s.rect;
+                if s.active {
+                    quads.push(rect(x, by, w, tabbar.height, theme.background, 1.0));
+                    // Active accent bar on the left edge.
+                    quads.push(rect(x, by, 2.0, tabbar.height, theme.palette[4], 1.0));
                 }
+                // Thin separator on the right of each segment.
+                quads.push(rect(
+                    x + w - 1.0,
+                    by,
+                    1.0,
+                    tabbar.height,
+                    theme.background,
+                    0.5,
+                ));
             }
+            // New-tab (+) button background.
+            let (nx, _, nw, _) = tabbar.new_tab;
+            quads.push(rect(nx, by, nw, tabbar.height, theme.palette[8], 1.0));
         }
 
         // Per-pane grid + dividers/border.
@@ -419,25 +460,41 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Tab-bar text.
-        let mut have_tabs = false;
-        if tab_bar_h > 0.0 && !tabs.is_empty() {
-            have_tabs = true;
-            let line: String = tabs
-                .iter()
-                .enumerate()
-                .map(|(i, t)| {
-                    let mark = if i == active_tab { "▌" } else { " " };
-                    format!("{mark} {}: {}   ", i + 1, truncate(t, 18))
-                })
-                .collect();
+        // Tab-bar text: one buffer per segment + the `+` button.
+        let have_tabs = tabbar.height > 0.0 && !tabbar.segments.is_empty();
+        if have_tabs {
+            while self.tab_buffers.len() < tabbar.segments.len() {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.tab_buffers.push(b);
+            }
+            for (bi, s) in tabbar.segments.iter().enumerate() {
+                let (_, _, w, _) = s.rect;
+                // chars that fit: segment minus the ✕ zone, ~cell_w each.
+                let maxc = (((w - tabbar.height) / cw) as usize).clamp(3, 24);
+                let label = format!(" {}: {}  ✕", s.idx + 1, truncate(&s.title, maxc));
+                let buf = &mut self.tab_buffers[bi];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(w), Some(tabbar.height));
+                buf.set_text(
+                    &mut self.font_system,
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+            // `+` button glyph.
             self.tabbar_buffer
                 .set_metrics(&mut self.font_system, metrics);
-            self.tabbar_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(tab_bar_h));
+            self.tabbar_buffer.set_size(
+                &mut self.font_system,
+                Some(tabbar.new_tab.2),
+                Some(tabbar.height),
+            );
             self.tabbar_buffer.set_text(
                 &mut self.font_system,
-                &line,
+                " +",
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
@@ -474,16 +531,36 @@ impl Renderer {
             });
         }
         if have_tabs {
+            let ty = tabbar.y as i32;
+            let tb = (tabbar.y + tabbar.height) as i32;
+            for (bi, s) in tabbar.segments.iter().enumerate() {
+                let (x, _, w, _) = s.rect;
+                areas.push(TextArea {
+                    buffer: &self.tab_buffers[bi],
+                    left: x + 6.0,
+                    top: tabbar.y + 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: x as i32,
+                        top: ty,
+                        right: (x + w) as i32,
+                        bottom: tb,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
+            let (nx, _, nw, _) = tabbar.new_tab;
             areas.push(TextArea {
                 buffer: &self.tabbar_buffer,
-                left: 6.0,
-                top: 4.0,
+                left: nx + 4.0,
+                top: tabbar.y + 4.0,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: tab_bar_h as i32,
+                    left: nx as i32,
+                    top: ty,
+                    right: (nx + nw) as i32,
+                    bottom: tb,
                 },
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],

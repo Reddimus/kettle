@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
+use kettle_config::{TabBarMode, TabBarPos};
 use kettle_core::{Scroll, TermEvent};
-use kettle_render::{HighlightRect, Overlay, PaneView, Renderer};
+use kettle_render::{HighlightRect, Overlay, PaneView, Renderer, TabBar, TabSeg};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -106,7 +107,12 @@ impl App {
     }
 
     fn tab_bar_h(&self) -> f32 {
-        if self.mux.tabs.len() > 1 {
+        let show = match self.cfg.tab_bar {
+            TabBarMode::Off => false,
+            TabBarMode::Auto => self.mux.tabs.len() > 1,
+            TabBarMode::Always => true,
+        };
+        if show {
             self.renderer
                 .as_ref()
                 .map(|r| r.cell_h + 8.0)
@@ -116,7 +122,7 @@ impl App {
         }
     }
 
-    /// Content area below the tab bar, in physical pixels.
+    /// Content area for panes (excludes the tab bar), in physical pixels.
     fn area(&self) -> Rect {
         let (w, h) = self
             .renderer
@@ -124,7 +130,56 @@ impl App {
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
         let tb = self.tab_bar_h();
-        (0.0, tb, w as f32, (h as f32 - tb).max(1.0))
+        match self.cfg.tab_bar_pos {
+            TabBarPos::Top => (0.0, tb, w as f32, (h as f32 - tb).max(1.0)),
+            TabBarPos::Bottom => (0.0, 0.0, w as f32, (h as f32 - tb).max(1.0)),
+        }
+    }
+
+    /// Tab-bar geometry — the single source of truth shared by the renderer
+    /// (drawing) and the click hit-testing below.
+    fn tab_bar(&self) -> TabBar {
+        let height = self.tab_bar_h();
+        if height <= 0.0 {
+            return TabBar::hidden();
+        }
+        let (w, h) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let (sw, sh) = (w as f32, h as f32);
+        let y = match self.cfg.tab_bar_pos {
+            TabBarPos::Top => 0.0,
+            TabBarPos::Bottom => sh - height,
+        };
+        let titles = self.mux.tab_titles();
+        let n = titles.len().max(1);
+        // Trailing square "+" button.
+        let plus_w = height;
+        let strip = (sw - plus_w).max(plus_w);
+        let seg_w = strip / n as f32;
+        let segments = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let x = i as f32 * seg_w;
+                TabSeg {
+                    idx: i,
+                    rect: (x, y, seg_w, height),
+                    // ✕ hit zone = the trailing `height`-wide square.
+                    close: (x + seg_w - height, y, height, height),
+                    title: t.clone(),
+                    active: i == self.mux.active,
+                }
+            })
+            .collect();
+        TabBar {
+            height,
+            y,
+            segments,
+            new_tab: (sw - plus_w, y, plus_w, height),
+        }
     }
 
     fn grid_of(&self, rect: Rect) -> (usize, usize) {
@@ -470,9 +525,8 @@ impl App {
         self.update_links();
         let overlay = self.overlay();
         let area = self.area();
-        let tab_bar_h = self.tab_bar_h();
+        let tabbar = self.tab_bar();
         let active = self.mux.active;
-        let titles = self.mux.tab_titles();
         let layout = self.mux.layout(active, area);
         let focus = self.mux.active_focus();
 
@@ -499,9 +553,7 @@ impl App {
                 images: imgs.clone(),
             })
             .collect();
-        if let Err(e) =
-            renderer.render_frame(&panes, &titles, active, tab_bar_h, &self.cfg, &overlay)
-        {
+        if let Err(e) = renderer.render_frame(&panes, &tabbar, &self.cfg, &overlay) {
             log::warn!("render error: {e}");
         }
     }
@@ -937,21 +989,39 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                // Left-click on the tab bar switches tabs.
-                let tb = self.tab_bar_h();
-                if bcode == 0 && tb > 0.0 && (self.cursor.y as f32) < tb {
-                    let n = self.mux.tabs.len();
-                    if n > 0 {
-                        let w = self
-                            .renderer
-                            .as_ref()
-                            .map(|r| r.surface_size().0 as f32)
-                            .unwrap_or(800.0);
-                        let idx = ((self.cursor.x as f32 / (w / n as f32)) as usize).min(n - 1);
-                        self.mux.active = idx;
-                        if let Some(win) = &self.window {
-                            win.request_redraw();
+                // Tab-bar interactions (left = switch / close-✕ / new-+;
+                // middle = close that tab).
+                let bar = self.tab_bar();
+                let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+                let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
+                    px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
+                };
+                if bar.height > 0.0
+                    && py >= bar.y
+                    && py < bar.y + bar.height
+                    && (bcode == 0 || bcode == 1)
+                {
+                    if bcode == 0 && in_bar(bar.new_tab, px, py) {
+                        let area = self.area();
+                        let (cols, rows) = self.grid_of(area);
+                        let (cw, ch) = self.cell_px();
+                        let _ = self
+                            .mux
+                            .new_tab(&self.cfg, cols, rows, cw, ch, self.waker());
+                    } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
+                        let close = bcode == 1 || in_bar(seg.close, px, py);
+                        if close {
+                            if self.mux.close_tab_at(seg.idx) {
+                                event_loop.exit();
+                                return;
+                            }
+                        } else {
+                            self.mux.active = seg.idx;
                         }
+                    }
+                    self.resize_all();
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
                     }
                     return;
                 }

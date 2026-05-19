@@ -46,6 +46,24 @@ impl BellMode {
     }
 }
 
+/// When the tab bar is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarMode {
+    /// Never shown.
+    Off,
+    /// Shown only when there is more than one tab.
+    Auto,
+    /// Always shown.
+    Always,
+}
+
+/// Where the tab bar sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarPos {
+    Top,
+    Bottom,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: String,
@@ -63,6 +81,8 @@ pub struct Config {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub bell: BellMode,
+    pub tab_bar: TabBarMode,
+    pub tab_bar_pos: TabBarPos,
     pub font_ligatures: bool,
     pub search_foreground: Rgb,
     pub search_background: Rgb,
@@ -90,6 +110,8 @@ impl Default for Config {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             bell: BellMode::Both,
+            tab_bar: TabBarMode::Always,
+            tab_bar_pos: TabBarPos::Top,
             font_ligatures: true,
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
             search_background: Rgb::new(0xe0, 0xaf, 0x68),
@@ -257,6 +279,19 @@ impl Config {
                         _ => BellMode::Both,
                     }
                 }
+                "tab-bar" => {
+                    cfg.tab_bar = match e.value.as_str() {
+                        "off" | "none" | "false" => TabBarMode::Off,
+                        "auto" => TabBarMode::Auto,
+                        _ => TabBarMode::Always,
+                    }
+                }
+                "tab-bar-position" => {
+                    cfg.tab_bar_pos = match e.value.as_str() {
+                        "bottom" => TabBarPos::Bottom,
+                        _ => TabBarPos::Top,
+                    }
+                }
                 "font-feature" if (e.value.contains("-liga") || e.value.contains("liga off")) => {
                     cfg.font_ligatures = false;
                 }
@@ -372,6 +407,22 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn tab_bar_config() {
+        let d = Config::default();
+        assert_eq!(d.tab_bar, TabBarMode::Always);
+        assert_eq!(d.tab_bar_pos, TabBarPos::Top);
+        assert_eq!(
+            Config::parse_text("tab-bar = auto").tab_bar,
+            TabBarMode::Auto
+        );
+        assert_eq!(Config::parse_text("tab-bar = off").tab_bar, TabBarMode::Off);
+        assert_eq!(
+            Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
+            TabBarPos::Bottom
+        );
     }
 
     #[test]

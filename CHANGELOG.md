@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   (left/right); `split_horiz`/`split_vert` action names corrected.
 
 ### Added
+- Tab bar redesign: per-tab close **✕** (click to close), trailing
+  **+** new-tab button, **middle-click** a tab to close it,
+  always-shown by default, active-tab accent, title eliding. New
+  config `tab-bar` (off|auto|always) and `tab-bar-position`
+  (top|bottom). Geometry is a single source of truth shared by the
+  renderer and click hit-testing.
 - VT conformance suite — 35 end-to-end tests through the real
   `vte`+`alacritty_terminal` path: CUP/erase/SGR/tabs, scroll region,
   charsets, ICH/DCH/IL/DL, DECSC/DECRC, autowrap, origin mode, DECALN,

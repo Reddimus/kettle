@@ -29,6 +29,8 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `cursor-style` | `block`\|`underline`\|`bar` | `block` | |
 | `cursor-style-blink` | bool | `true` | |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
+| `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
+| `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
 | `font-feature` | string | — | `-liga` disables ligatures |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
