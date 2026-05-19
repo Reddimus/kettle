@@ -8,6 +8,7 @@ pub mod fuzzy;
 pub mod keybinds;
 pub mod palette;
 pub mod parse;
+pub mod template;
 pub mod theme;
 
 use std::path::{Path, PathBuf};
@@ -192,6 +193,10 @@ pub struct Config {
     pub scroll_multiplier: f32,
     /// WCAG minimum contrast ratio (text vs background); `0.0` = off.
     pub minimum_contrast: f32,
+    /// Template for the OS window title. Placeholders: `{title}` (the
+    /// active pane's OSC title or "kettle"), `{cwd}` (active pane's cwd
+    /// or empty), `{tab}` (1-based active tab index).
+    pub window_title_format: String,
     pub scrollbar: ScrollbarMode,
     /// Explicit split-divider/border color (else theme palette).
     pub split_divider_color: Option<Rgb>,
@@ -235,6 +240,7 @@ impl Default for Config {
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
+            window_title_format: "{title} — kettle".to_string(),
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
             cursor_blink_interval: 530,
@@ -441,6 +447,11 @@ impl Config {
                 "minimum-contrast" => {
                     if let Ok(v) = e.value.parse::<f32>() {
                         cfg.minimum_contrast = v.clamp(0.0, 21.0);
+                    }
+                }
+                "window-title-format" | "title-format" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.window_title_format = e.value.clone();
                     }
                 }
                 "scrollbar" => {
@@ -689,6 +700,20 @@ mod config_tests {
         );
         assert!(BellMode::Both.visual() && BellMode::Both.attention());
         assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
+    }
+
+    #[test]
+    fn window_title_format_default_and_parse() {
+        let d = Config::default();
+        assert_eq!(d.window_title_format, "{title} — kettle");
+        // Non-empty overrides take effect; alias `title-format` accepted.
+        let c = Config::parse_text("window-title-format = [{tab}] {title}");
+        assert_eq!(c.window_title_format, "[{tab}] {title}");
+        let c2 = Config::parse_text("title-format = {cwd} - {title}");
+        assert_eq!(c2.window_title_format, "{cwd} - {title}");
+        // Empty value keeps the default (avoids an unusable blank title).
+        let c3 = Config::parse_text("window-title-format =   ");
+        assert_eq!(c3.window_title_format, d.window_title_format);
     }
 
     #[test]

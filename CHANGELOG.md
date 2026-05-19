@@ -7,6 +7,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`window-title-format`** (alias `title-format`, Ghostty/WezTerm
+  parity): template the OS window title with `{title}` / `{cwd}` /
+  `{tab}` placeholders; `{{`/`}}` escape literal braces; unknown
+  placeholders are left as literal text (typos visible). Pure
+  `kettle_config::template::fill` + 4 tests.
 - **`minimum-contrast`** (WezTerm parity) — keep text readable on
   low-contrast themes by lifting each cell's foreground toward
   white/black until it meets a configured WCAG 2.0 ratio (`0.0` = off,

@@ -53,15 +53,17 @@ fn clamp_osc52(s: &str, max: usize) -> &str {
 /// 1 MiB — generous for real copies, bounded against abuse.
 const OSC52_MAX: usize = 1 << 20;
 
-/// The OS window title for the active pane's title: `"<t> — kettle"`, or
-/// just `"kettle"` when the pane has no meaningful title.
-fn window_title(pane_title: &str) -> String {
+/// Render the OS window title from the user's `window-title-format`
+/// template with the active pane's title / cwd / 1-based tab index. Falls
+/// back to plain `"kettle"` when the pane has no meaningful title (so the
+/// template doesn't yield e.g. `" — kettle"`).
+fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> String {
     let t = pane_title.trim();
     if t.is_empty() || t == "kettle" {
-        "kettle".to_string()
-    } else {
-        format!("{t} — kettle")
+        return "kettle".to_string();
     }
+    let tab = tab.to_string();
+    kettle_config::template::fill(template, &[("title", t), ("cwd", cwd), ("tab", &tab)])
 }
 
 /// Map a click count + the Alt modifier to a selection type: double =
@@ -511,13 +513,14 @@ impl App {
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
     fn sync_window_title(&mut self) {
-        let active = self
+        let pane = self
             .mux
             .active_focus()
-            .and_then(|id| self.mux.panes.get(&id))
-            .map(|p| p.title.as_str())
-            .unwrap_or("kettle");
-        let want = window_title(active);
+            .and_then(|id| self.mux.panes.get(&id));
+        let title = pane.map(|p| p.title.as_str()).unwrap_or("kettle");
+        let cwd = pane.and_then(|p| p.term.current_dir()).unwrap_or_default();
+        let tab = self.mux.active + 1;
+        let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
         if want != self.last_title {
             if let Some(w) = &self.window {
                 w.set_title(&want);
@@ -1760,12 +1763,23 @@ mod tests {
     #[test]
     fn window_title_formats_and_falls_back() {
         use super::window_title;
-        assert_eq!(window_title("vim README.md"), "vim README.md — kettle");
-        assert_eq!(window_title("  spaced  "), "spaced — kettle");
-        // Empty / placeholder titles → just the app name.
-        assert_eq!(window_title(""), "kettle");
-        assert_eq!(window_title("   "), "kettle");
-        assert_eq!(window_title("kettle"), "kettle");
+        let dflt = "{title} — kettle";
+        assert_eq!(
+            window_title(dflt, "vim README.md", "", 1),
+            "vim README.md — kettle"
+        );
+        assert_eq!(window_title(dflt, "  spaced  ", "", 1), "spaced — kettle");
+        // Empty / placeholder titles → just the app name (the template
+        // never produces a stub like " — kettle").
+        assert_eq!(window_title(dflt, "", "", 1), "kettle");
+        assert_eq!(window_title(dflt, "   ", "", 1), "kettle");
+        assert_eq!(window_title(dflt, "kettle", "", 1), "kettle");
+        // Custom templates can use {tab} and {cwd}.
+        let t = "[{tab}] {title} ({cwd})";
+        assert_eq!(
+            window_title(t, "vim", "/home/k/Repos/kettle", 2),
+            "[2] vim (/home/k/Repos/kettle)"
+        );
     }
 
     #[test]
