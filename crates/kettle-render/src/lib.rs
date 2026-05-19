@@ -718,7 +718,7 @@ impl Renderer {
                 nb += 1;
             }
             let mut a = Attrs::new()
-                .family(Family::Name(family))
+                .family(Family::Name(cfg.family_for(*bold, *italic)))
                 .color(GColor::rgb(fg.r, fg.g, fg.b));
             if *bold {
                 a = a.weight(Weight::BOLD);
@@ -728,11 +728,18 @@ impl Renderer {
             }
             rich.push((text.clone(), a));
         }
+        // Advanced shaping enables programming ligatures (calt/liga);
+        // Basic disables them when the user turns ligatures off.
+        let shaping = if cfg.font_ligatures {
+            Shaping::Advanced
+        } else {
+            Shaping::Basic
+        };
         buf.set_rich_text(
             &mut self.font_system,
             rich.iter().map(|(s, a)| (s.as_str(), a.clone())),
             &default_attrs,
-            Shaping::Advanced,
+            shaping,
             None,
         );
         buf.shape_until_scroll(&mut self.font_system, false);

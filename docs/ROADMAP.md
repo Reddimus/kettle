@@ -54,7 +54,11 @@
 - [x] kitty graphics advanced ops: `a=t` transmit-only store, `a=p`
       place-by-id, `a=d` delete (all / by id), `z=` z-index ordering
 
+- [x] Per-style font family overrides (`font-family-bold/italic/
+      bold-italic`) + ligature toggle (Advanced vs Basic shaping)
+
 ## Next (in priority order)
+- [ ] Broader `vttest` conformance sweep + fixes
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

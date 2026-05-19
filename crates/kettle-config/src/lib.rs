@@ -28,6 +28,10 @@ pub enum CursorStyle {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: String,
+    /// Per-style family overrides (fall back to `font_family`).
+    pub font_family_bold: Option<String>,
+    pub font_family_italic: Option<String>,
+    pub font_family_bold_italic: Option<String>,
     pub font_size: f32,
     pub theme_name: String,
     pub theme: Theme,
@@ -51,6 +55,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             font_family: font::FAMILY.to_string(),
+            font_family_bold: None,
+            font_family_italic: None,
+            font_family_bold_italic: None,
             font_size: 13.0,
             theme_name: "TokyoNight Night".to_string(),
             theme: Theme::by_name("TokyoNight Night"),
@@ -71,6 +78,17 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Font family to use for a given style, falling back to `font_family`.
+    pub fn family_for(&self, bold: bool, italic: bool) -> &str {
+        let pick = match (bold, italic) {
+            (true, true) => self.font_family_bold_italic.as_deref(),
+            (true, false) => self.font_family_bold.as_deref(),
+            (false, true) => self.font_family_italic.as_deref(),
+            (false, false) => None,
+        };
+        pick.unwrap_or(&self.font_family)
+    }
+
     /// Standard config path: `$XDG_CONFIG_HOME/kettle/config` (or the platform
     /// equivalent).
     pub fn default_path() -> Option<PathBuf> {
@@ -104,6 +122,9 @@ impl Config {
         for e in parse::parse(text) {
             match e.key.as_str() {
                 "font-family" => cfg.font_family = e.value.clone(),
+                "font-family-bold" => cfg.font_family_bold = Some(e.value.clone()),
+                "font-family-italic" => cfg.font_family_italic = Some(e.value.clone()),
+                "font-family-bold-italic" => cfg.font_family_bold_italic = Some(e.value.clone()),
                 "font-size" => {
                     if let Ok(v) = e.value.parse() {
                         cfg.font_size = v;
@@ -269,5 +290,17 @@ mod config_tests {
         let tr = keybinds::parse_trigger("ctrl+shift+o").unwrap();
         assert_eq!(tr, Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('o')));
         assert!(keybinds::parse_trigger("alt+up").is_some());
+    }
+
+    #[test]
+    fn per_style_font_families() {
+        let c = Config::parse_text(
+            "font-family = Main\nfont-family-italic = Cursive\n\
+             font-feature = -liga\n",
+        );
+        assert_eq!(c.family_for(false, false), "Main");
+        assert_eq!(c.family_for(true, false), "Main"); // falls back
+        assert_eq!(c.family_for(false, true), "Cursive");
+        assert!(!c.font_ligatures, "-liga disables ligatures");
     }
 }
