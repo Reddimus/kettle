@@ -24,6 +24,23 @@ pub enum UserEvent {
     ReloadConfig,
 }
 
+/// Cap an OSC 52 clipboard payload so a hostile program can't make the
+/// terminal allocate/set an unbounded clipboard. Truncates on a UTF-8
+/// char boundary at or below `max` bytes (xterm/kitty also bound this).
+fn clamp_osc52(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// 1 MiB — generous for real copies, bounded against abuse.
+const OSC52_MAX: usize = 1 << 20;
+
 /// The OS window title for the active pane's title: `"<t> — kettle"`, or
 /// just `"kettle"` when the pane has no meaningful title.
 fn window_title(pane_title: &str) -> String {
@@ -442,7 +459,7 @@ impl App {
                         if self.cfg.osc52.can_copy()
                             && let Some(cb) = &mut self.clipboard
                         {
-                            let _ = cb.set_text(s);
+                            let _ = cb.set_text(clamp_osc52(&s, OSC52_MAX).to_string());
                         }
                     }
                     TermEvent::ClipboardLoad(_, fmt) => {
@@ -1696,6 +1713,20 @@ impl ApplicationHandler<UserEvent> for App {
 mod tests {
     use super::selection_kind;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn clamp_osc52_bounds_and_keeps_char_boundary() {
+        use super::clamp_osc52;
+        assert_eq!(clamp_osc52("hello", 1024), "hello"); // under cap → as-is
+        assert_eq!(clamp_osc52("abcdef", 3), "abc"); // truncated
+        // Never splits a multibyte char: "é" is 2 bytes; cap 1 → empty.
+        assert_eq!(clamp_osc52("é", 1), "");
+        assert_eq!(clamp_osc52("aé", 2), "a");
+        assert_eq!(clamp_osc52("", 0), "");
+        // Result always within the byte cap.
+        let big = "x".repeat(5000);
+        assert!(clamp_osc52(&big, 1000).len() <= 1000);
+    }
 
     #[test]
     fn window_title_formats_and_falls_back() {

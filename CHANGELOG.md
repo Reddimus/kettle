@@ -7,6 +7,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- OSC 52 clipboard **writes are now size-capped** (1 MiB, truncated on
+  a UTF-8 char boundary) so a hostile program can't push an unbounded
+  payload into the system clipboard.
 - **OSC 52 clipboard policy** (`osc52 = off|copy|paste|both`, default
   `copy`): clipboard *reads* via OSC 52 — which let a possibly-remote
   program exfiltrate your system clipboard — are now **denied by

@@ -247,6 +247,8 @@
       (WezTerm/iTerm/kitty parity); stale dir → default fallback
       (`usable_cwd`, +1 test).
 
+- [x] Security: OSC 52 clipboard *writes* size-capped (1 MiB, char-
+      boundary safe) against unbounded-payload abuse (+1 test).
 - [x] Security: OSC 52 clipboard *read* denied by default
       (`osc52 = off|copy|paste|both`, default `copy`) — blocks remote
       clipboard exfiltration; empty well-formed reply (+1 test).
@@ -286,10 +288,10 @@
       first tab. `kettle_ui::run_with(Options)` (+1 parse test).
 
 ## Next (in priority order)
-- [ ] Detachable mux server (remote attach); native macOS menu;
-      code-signed/notarized macOS build; Windows MSI
-- [ ] Detachable mux server (remote attach); broader `vttest` sweep
-- [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
+- [ ] Detachable mux server (remote attach)
+- [ ] Native macOS menu bar
+- [ ] Code-signed/notarized macOS build; Windows MSI installer
+- [ ] Broader `vttest` conformance sweep
 
 ## Quality bar each cycle
 
