@@ -30,6 +30,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Docs: `ARCHITECTURE.md` refreshed to the current system — crate
+  responsibilities, the side-channel chunk set
+  (VirtualImage/Animation/RelativePlacement), the per-pane registries,
+  the animation redraw tick, an accurate test count, and a **new
+  mermaid diagram of the kitty graphics pipeline** (decode → registries
+  → placeholder/relative/animation render).
 - Search is now a **real regex with smart-case**: the `Ctrl+Shift+F`
   pattern is compiled as a regex (alternation, anchors, `\b`, …),
   case-insensitive unless it contains an uppercase character
