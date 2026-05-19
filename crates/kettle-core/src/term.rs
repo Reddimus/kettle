@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
 use anyhow::Result;
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
 use kettle_vt::{Chunk, Extractor, PromptKind};
@@ -78,6 +78,7 @@ impl Terminal {
         cell_w: u16,
         cell_h: u16,
         cursor_blink: bool,
+        cursor_shape: CursorShape,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
     ) -> Result<Terminal> {
@@ -117,13 +118,15 @@ impl Terminal {
         let mut reader = pair.master.try_clone_reader()?;
 
         let proxy = EventProxy::new(event_tx, waker.clone());
-        // Seed the engine's *default* cursor blink from the user config; the
+        // Seed the engine's *default* cursor style from the user config; the
         // engine seeds `cursor_style` lazily from this, and programs can flip
-        // it at runtime via DEC mode 12 (`CSI ?12 h/l`), which we honor live
-        // through `cursor_blinking()` below.
+        // both fields at runtime — `?12 h/l` for blinking (honored live via
+        // `cursor_blinking()` below) and DECSCUSR `CSI Ps SP q` for shape
+        // (honored live via the engine's `renderable_content().cursor.shape`,
+        // read by the renderer per-frame).
         let default_cursor_style = alacritty_terminal::vte::ansi::CursorStyle {
             blinking: cursor_blink,
-            ..Default::default()
+            shape: cursor_shape,
         };
         let tconf = TermConfig {
             scrolling_history: scrollback,
@@ -1079,6 +1082,33 @@ mod conformance {
         assert_eq!(t.renderable_content().cursor.shape, CursorShape::Beam);
         feed(&mut t, &mut p, b"\x1b[1 q"); // 1 = (blinking) block
         assert_eq!(t.renderable_content().cursor.shape, CursorShape::Block);
+    }
+
+    #[test]
+    fn dec_mode_25_hide_collapses_renderable_cursor_to_hidden() {
+        // Cursor visibility (DEC ?25) and cursor shape (DECSCUSR `q`) are
+        // tracked in different places in the engine; `RenderableContent`
+        // *folds* them so the renderer only has to look at one field. This
+        // test pins that contract — what the renderer reads is `Hidden` the
+        // moment a program clears ?25, even if the shape was set to
+        // something else first. Otherwise we'd silently keep drawing a
+        // cursor at TUI apps that asked us not to (less, fzf full-screen).
+        use alacritty_terminal::vte::ansi::CursorShape;
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"\x1b[1 q"); // shape = block (visible default)
+        assert_eq!(t.renderable_content().cursor.shape, CursorShape::Block);
+        feed(&mut t, &mut p, b"\x1b[?25l"); // ?25 cleared = hide cursor
+        assert_eq!(
+            t.renderable_content().cursor.shape,
+            CursorShape::Hidden,
+            "DEC ?25 l must collapse the renderable cursor to Hidden"
+        );
+        feed(&mut t, &mut p, b"\x1b[?25h"); // ?25 set = show again
+        assert_eq!(
+            t.renderable_content().cursor.shape,
+            CursorShape::Block,
+            "DEC ?25 h restores the previous shape"
+        );
     }
 
     #[test]

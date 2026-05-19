@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **DECSCUSR cursor shape & DEC ?25 visibility now honor the
+  running program.** Vim / neovim / fish flip cursor shape per-mode
+  (`CSI 1 SP q` block in normal, `CSI 5 SP q` beam in insert,
+  `CSI 3 SP q` underline in replace), and full-screen TUIs hide the
+  cursor with `CSI ?25 l`. The renderer ignored both and always drew
+  the static `cursor-style` config shape — so insert mode looked the
+  same as normal mode, and the cursor stayed visible over `less`/
+  `fzf`/`htop`. Fixed by seeding the engine's `default_cursor_style`
+  from `cursor-style` at pane creation (so the user's static config
+  is still the default) and reading the live
+  `RenderableContent.cursor.shape` per frame — which the engine
+  collapses `?25 l` into `CursorShape::Hidden` for, so a single
+  guard handles both DECSCUSR and visibility. Added a new
+  `HollowBlock` shape for when programs ask for an outline (vim's
+  `:set guicursor` does this). +3 tests (config→engine mapping;
+  engine ↔ ?25 hide/show round-trip; existing DECSCUSR shape test
+  retained).
 - **`scroll-on-keystroke` (alias `scroll-on-input`) + `scroll-on-
   output`** (Alacritty / xterm parity): two new bools governing
   scrollback behavior. `scroll-on-keystroke` defaults `true` (typing

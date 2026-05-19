@@ -305,6 +305,14 @@
       `cursor_style().blinking` per pane via a `cursor_blinking()`
       accessor; `CursorBlinkingChange` resets the blink phase so
       blink-off shows a solid cursor instantly. +1 test.
+- [x] **DECSCUSR cursor shape + DEC ?25 visibility from the running
+      program.** Vim/neovim/fish flip shape per-mode and full-screen
+      TUIs hide the cursor; both were ignored — renderer used the
+      static `cursor-style` config. Now seeds the engine's
+      `default_cursor_style` from the config and reads
+      `RenderableContent.cursor.shape` (which the engine collapses
+      `?25 l` into `Hidden`, single guard for both). Added
+      `HollowBlock` rendering. +2 tests.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

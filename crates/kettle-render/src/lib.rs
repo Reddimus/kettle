@@ -21,7 +21,7 @@ use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
-use kettle_config::{Config, CursorStyle, Rgb, ScrollbarMode};
+use kettle_config::{Config, Rgb, ScrollbarMode};
 use kettle_core::EventProxy;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -897,21 +897,32 @@ impl Renderer {
         }
 
         // Cursor: hollow when the window is unfocused, blink-aware otherwise.
+        // Shape comes from the engine's live `RenderableContent.cursor.shape`
+        // which DECSCUSR (`CSI Ps SP q`) updates per-pane — vim/neovim/fish
+        // use this to flip between block/underline/beam for normal/insert/
+        // replace modes. The engine is seeded from `cfg.cursor_style` at pane
+        // creation so the default still matches the user's config.
+        use alacritty_terminal::vte::ansi::CursorShape as EShape;
         let cp = content.cursor.point;
-        if cp.line.0 >= 0 && pv.focused {
+        let shape = content.cursor.shape;
+        let draw_cursor = shape != EShape::Hidden && cp.line.0 >= 0 && pv.focused;
+        if draw_cursor {
             let bx = ox + cp.column.0 as f32 * cw;
             let by = oy + cp.line.0 as f32 * ch;
-            if !window_focused {
-                // Hollow outline (1px) like xterm/most terminals.
+            // Hollow outline — used by the unfocused-window state *and* when
+            // the running program asks for `HollowBlock` (the DECSCUSR
+            // semantics most apps treat as "I'm not in this pane right now").
+            if !window_focused || shape == EShape::HollowBlock {
                 quads.push(rect(bx, by, cw, 1.0, theme.cursor, 1.0));
                 quads.push(rect(bx, by + ch - 1.0, cw, 1.0, theme.cursor, 1.0));
                 quads.push(rect(bx, by, 1.0, ch, theme.cursor, 1.0));
                 quads.push(rect(bx + cw - 1.0, by, 1.0, ch, theme.cursor, 1.0));
             } else if cursor_visible {
-                let (cwidth, alpha, cheight, yoff) = match cfg.cursor_style {
-                    CursorStyle::Bar => (cw * 0.15, 1.0, ch, 0.0),
-                    CursorStyle::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                    CursorStyle::Block => (cw, 0.55, ch, 0.0),
+                let (cwidth, alpha, cheight, yoff) = match shape {
+                    EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
+                    EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
+                    // Engine variants we draw as a solid block.
+                    EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 0.55, ch, 0.0),
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, theme.cursor, alpha));
             }

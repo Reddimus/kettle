@@ -5,8 +5,21 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use kettle_config::Config;
-use kettle_core::{TermEvent, Terminal, Waker};
+use kettle_config::{Config, CursorStyle};
+use kettle_core::{CursorShape, TermEvent, Terminal, Waker};
+
+/// Map the kettle config cursor style to the engine's seed shape. `Bar` and
+/// `Beam` are the same thing under different names (vertical thin stroke);
+/// the engine has more variants (`HollowBlock`, `Hidden`) that only ever
+/// arrive via DECSCUSR from a running program, so they're never the
+/// *default*.
+fn engine_cursor_shape(s: CursorStyle) -> CursorShape {
+    match s {
+        CursorStyle::Block => CursorShape::Block,
+        CursorStyle::Underline => CursorShape::Underline,
+        CursorStyle::Bar => CursorShape::Beam,
+    }
+}
 
 use crate::session::{SNode, STab, Session};
 
@@ -212,6 +225,7 @@ impl Mux {
             cw,
             ch,
             cfg.cursor_blink,
+            engine_cursor_shape(cfg.cursor_style),
             tx,
             waker,
         )?;
@@ -679,6 +693,20 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    #[test]
+    fn engine_cursor_shape_maps_config_to_engine() {
+        // Block / Underline are 1:1. `Bar` (kettle config name) → `Beam`
+        // (engine name) — same thin vertical stroke. The engine also has
+        // `HollowBlock` and `Hidden` but those only ever arrive via
+        // DECSCUSR/DEC?25 from a running program, never as a seed.
+        assert_eq!(engine_cursor_shape(CursorStyle::Block), CursorShape::Block);
+        assert_eq!(
+            engine_cursor_shape(CursorStyle::Underline),
+            CursorShape::Underline
+        );
+        assert_eq!(engine_cursor_shape(CursorStyle::Bar), CursorShape::Beam);
+    }
 
     #[test]
     fn usable_cwd_keeps_only_existing_dirs() {
