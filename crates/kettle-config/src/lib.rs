@@ -323,8 +323,15 @@ mod config_tests {
     fn terminator_default_keybinds() {
         let b = keybinds::defaults();
         let t = |m: Mods, k: Key| b.get(&Trigger::new(m, k)).cloned();
+        // Terminator parity: Ctrl+Shift+O = split horizontally (top/bottom
+        // = SplitDown); Ctrl+Shift+E = split vertically (left/right
+        // = SplitRight).
         assert_eq!(
             t(Mods::CTRL | Mods::SHIFT, Key::Char('o')),
+            Some(Action::SplitDown)
+        );
+        assert_eq!(
+            t(Mods::CTRL | Mods::SHIFT, Key::Char('e')),
             Some(Action::SplitRight)
         );
         assert_eq!(

@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- Split keys now match Terminator exactly: `Ctrl+Shift+O` splits
+  horizontally (top/bottom), `Ctrl+Shift+E` splits vertically
+  (left/right); `split_horiz`/`split_vert` action names corrected.
+
 ### Added
 - VT conformance suite — 35 end-to-end tests through the real
   `vte`+`alacritty_terminal` path: CUP/erase/SGR/tabs, scroll region,

@@ -65,8 +65,8 @@ kettle --check-config     # validate config: resolved settings + unknown keys
 
 | Action | Bind | Action | Bind |
 |---|---|---|---|
-| Split right | `Ctrl+Shift+O` | New tab | `Ctrl+Shift+T` |
-| Split down | `Ctrl+Shift+E` | Close pane | `Ctrl+Shift+W` |
+| Split top/bottom | `Ctrl+Shift+O` | New tab | `Ctrl+Shift+T` |
+| Split left/right | `Ctrl+Shift+E` | Close pane | `Ctrl+Shift+W` |
 | Focus next/prev pane | `Ctrl+Shift+N` / `P` | Close window | `Ctrl+Shift+Q` |
 | Next/prev tab | `Ctrl+PgDn` / `PgUp` | Copy / Paste | `Ctrl+Shift+C` / `V` |
 | **Search** | **`Ctrl+Shift+F`** | Fullscreen | `F11` |

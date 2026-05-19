@@ -100,8 +100,11 @@ impl Action {
             "previous_tab" | "prev_tab" => PrevTab,
             "move_tab_left" => MoveTabLeft,
             "move_tab_right" => MoveTabRight,
-            "new_split:right" | "split_right" | "split_horiz" => SplitRight,
-            "new_split:down" | "split_down" | "split_vert" => SplitDown,
+            // Terminator semantics: split_horiz = horizontal divider
+            // (panes top/bottom) = our SplitDown; split_vert = vertical
+            // divider (panes left/right) = our SplitRight.
+            "new_split:right" | "split_right" | "split_vert" => SplitRight,
+            "new_split:down" | "split_down" | "split_horiz" => SplitDown,
             "split_auto" => SplitAuto,
             "close_surface" | "close_pane" | "close_term" => ClosePane,
             "close_window" => CloseWindow,
@@ -201,8 +204,10 @@ pub fn defaults() -> Bindings {
     let mut bind = |mods: Mods, k: Key, act: Action| {
         m.insert(Trigger::new(mods, k), act);
     };
-    bind(cs, Char('o'), SplitRight);
-    bind(cs, Char('e'), SplitDown);
+    // Terminator parity: Ctrl+Shift+O = split horizontally (top/bottom),
+    // Ctrl+Shift+E = split vertically (left/right).
+    bind(cs, Char('o'), SplitDown);
+    bind(cs, Char('e'), SplitRight);
     bind(cs, Char('a'), SplitAuto);
     bind(cs, Char('t'), NewTab);
     bind(cs, Char('w'), ClosePane);
