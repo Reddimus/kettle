@@ -30,6 +30,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   config `tab-bar` (off|auto|always) and `tab-bar-position`
   (top|bottom). Geometry is a single source of truth shared by the
   renderer and click hit-testing.
+- Font-feature tuning: `font-feature` now parses real OpenType tags
+  (`liga`, `calt`, `ss01`, `cv01`, `zero`, …) with `+tag` / `-tag` /
+  `tag=N` / `tag on|off` dialects, repeatable and comma-separated, and
+  applies them through cosmic-text `FontFeatures` on top of the coarse
+  ligature toggle (explicit settings win; Advanced shaping kept whenever
+  any feature is set). Cited: Ghostty `font-feature`, kitty
+  `font_features`.
 - kitty placeholders: the **placement id** is now decoded from each
   cell's underline color (256/truecolor/named), feeding the spec's
   run-grouping and left-inheritance so cells of different placements no

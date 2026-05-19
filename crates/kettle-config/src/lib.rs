@@ -73,6 +73,69 @@ pub enum ScrollbarMode {
     Always,
 }
 
+/// One OpenType feature override: a 4-byte tag (space-padded, e.g. `liga`,
+/// `calt`, `ss01`, `zero`, `cv01`) and its value (`0` = off, `1` = on, or a
+/// font-specific alternate index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontFeature {
+    pub tag: [u8; 4],
+    pub value: u32,
+}
+
+impl FontFeature {
+    /// Parse one `font-feature` token. Accepts the common dialects:
+    /// `liga` / `+liga` / `liga on` / `liga=1` (enable),
+    /// `-liga` / `liga off` / `liga=0` (disable), `cv01=2` / `ss05 3`
+    /// (explicit value). Tag = 1–4 ASCII alphanumerics, right-padded with
+    /// spaces. Returns `None` if it isn't a well-formed feature token.
+    pub fn parse(tok: &str) -> Option<FontFeature> {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            return None;
+        }
+        let (mut name, mut value): (&str, Option<u32>) = (tok, None);
+        // Leading +/- sign form.
+        if let Some(rest) = tok.strip_prefix('-') {
+            name = rest;
+            value = Some(0);
+        } else if let Some(rest) = tok.strip_prefix('+') {
+            name = rest;
+            value = Some(1);
+        }
+        // `tag=N`, `tag N`, `tag on`, `tag off` forms.
+        if value.is_none() {
+            let split = name
+                .split_once('=')
+                .or_else(|| name.split_once(char::is_whitespace));
+            if let Some((n, v)) = split {
+                name = n.trim();
+                let v = v.trim();
+                value = Some(match v {
+                    "on" | "true" | "yes" => 1,
+                    "off" | "false" | "no" => 0,
+                    _ => v.parse().ok()?,
+                });
+            }
+        }
+        let name = name.trim();
+        if name.is_empty() || name.len() > 4 || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let mut tag = [b' '; 4];
+        tag[..name.len()].copy_from_slice(name.as_bytes());
+        Some(FontFeature {
+            tag,
+            value: value.unwrap_or(1),
+        })
+    }
+
+    /// Whether this token toggles a ligature-class feature (so the coarse
+    /// `font_ligatures` flag stays consistent with explicit settings).
+    pub fn is_ligature(&self) -> bool {
+        matches!(&self.tag, b"liga" | b"clig" | b"calt" | b"dlig")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: String,
@@ -102,6 +165,9 @@ pub struct Config {
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
     pub font_ligatures: bool,
+    /// Explicit OpenType feature overrides (`font-feature`, repeatable),
+    /// applied on top of the ligature toggle. Later entries win.
+    pub font_features: Vec<FontFeature>,
     pub search_foreground: Rgb,
     pub search_background: Rgb,
     pub keybinds: Bindings,
@@ -136,6 +202,7 @@ impl Default for Config {
             cursor_blink_interval: 530,
             copy_on_select: true,
             font_ligatures: true,
+            font_features: Vec::new(),
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
             search_background: Rgb::new(0xe0, 0xaf, 0x68),
             keybinds: keybinds::defaults(),
@@ -338,8 +405,15 @@ impl Config {
                     }
                 }
                 "copy-on-select" => cfg.copy_on_select = e.value != "false",
-                "font-feature" if (e.value.contains("-liga") || e.value.contains("liga off")) => {
-                    cfg.font_ligatures = false;
+                "font-feature" => {
+                    for tok in e.value.split(',') {
+                        if let Some(f) = FontFeature::parse(tok) {
+                            if f.is_ligature() {
+                                cfg.font_ligatures = f.value != 0;
+                            }
+                            cfg.font_features.push(f);
+                        }
+                    }
                 }
                 "command" | "shell" => cfg.shell = Some(e.value.clone()),
                 "ssh-host" => {
@@ -440,6 +514,112 @@ mod config_tests {
         assert_eq!(c.family_for(true, false), "Main"); // falls back
         assert_eq!(c.family_for(false, true), "Cursive");
         assert!(!c.font_ligatures, "-liga disables ligatures");
+        // `-liga` is also recorded as an explicit liga=0 feature.
+        assert_eq!(
+            c.font_features,
+            vec![FontFeature {
+                tag: *b"liga",
+                value: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn font_feature_token_parsing() {
+        let p = FontFeature::parse;
+        assert_eq!(
+            p("liga"),
+            Some(FontFeature {
+                tag: *b"liga",
+                value: 1
+            })
+        );
+        assert_eq!(
+            p("+calt"),
+            Some(FontFeature {
+                tag: *b"calt",
+                value: 1
+            })
+        );
+        assert_eq!(
+            p("-liga"),
+            Some(FontFeature {
+                tag: *b"liga",
+                value: 0
+            })
+        );
+        assert_eq!(
+            p("zero=1"),
+            Some(FontFeature {
+                tag: *b"zero",
+                value: 1
+            })
+        );
+        assert_eq!(
+            p("ss05 3"),
+            Some(FontFeature {
+                tag: *b"ss05",
+                value: 3
+            })
+        );
+        assert_eq!(
+            p("calt off"),
+            Some(FontFeature {
+                tag: *b"calt",
+                value: 0
+            })
+        );
+        // 3-char tag is right-padded with a space; bogus tokens rejected.
+        assert_eq!(
+            p("cv1"),
+            Some(FontFeature {
+                tag: *b"cv1 ",
+                value: 1
+            })
+        );
+        assert_eq!(p(""), None);
+        assert_eq!(p("toolongtag"), None);
+        assert_eq!(p("ss01=x"), None);
+        assert!(
+            FontFeature {
+                tag: *b"calt",
+                value: 0
+            }
+            .is_ligature()
+        );
+        assert!(
+            !FontFeature {
+                tag: *b"zero",
+                value: 1
+            }
+            .is_ligature()
+        );
+    }
+
+    #[test]
+    fn font_features_collected_and_ligature_flag_tracks() {
+        // Comma-separated list; explicit +liga re-enables, ss01 added.
+        let c = Config::parse_text("font-feature = +liga, ss01, zero=1\n");
+        assert!(c.font_ligatures, "+liga keeps ligatures on");
+        assert_eq!(
+            c.font_features,
+            vec![
+                FontFeature {
+                    tag: *b"liga",
+                    value: 1
+                },
+                FontFeature {
+                    tag: *b"ss01",
+                    value: 1
+                },
+                FontFeature {
+                    tag: *b"zero",
+                    value: 1
+                },
+            ]
+        );
+        // Default config carries no explicit features.
+        assert!(Config::default().font_features.is_empty());
     }
 
     #[test]

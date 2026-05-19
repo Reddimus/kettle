@@ -36,7 +36,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `split-divider-color` | color | theme | Pane border/divider color |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
 | `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
-| `font-feature` | string | — | `-liga` disables ligatures |
+| `font-feature` | string | — | OpenType feature(s), repeatable / comma-list. Forms: `liga`, `+calt`, `-liga`, `liga off`, `ss01`, `cv01=2`, `zero 1`. Applied on top of the ligature toggle |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
 | `keybind` | `trigger=action` | Terminator set | Repeatable |

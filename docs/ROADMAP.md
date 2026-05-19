@@ -153,9 +153,15 @@
       color (drives spec run-grouping / left-inheritance; +1 test, 90
       workspace tests).
 
+- [x] Font-feature tuning: `font-feature` parses real OpenType tags
+      (`liga/calt/ss01/cv01/zero/…`) with `+`/`-`/`= N`/`on`/`off`
+      dialects (repeatable, comma-lists), applied via cosmic-text
+      `FontFeatures` on top of the ligature toggle; per-style family
+      overrides already shipped (`FontFeature`, 92 tests). Cited:
+      Ghostty `font-feature`, kitty `font_features`.
+
 ## Next (in priority order)
 - [ ] kitty placeholders: animation frames + relative placements
-- [ ] Ligature tuning + per-style font family overrides
 - [ ] Detachable mux server (remote attach); broader `vttest` sweep
 - [ ] Code-signed/notarized macOS build; Windows MSI; native macOS menu
 

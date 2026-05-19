@@ -16,6 +16,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
+use glyphon::cosmic_text::{FeatureTag, FontFeatures};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
@@ -832,7 +833,10 @@ impl Renderer {
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
             Some((rh - cfg.padding_y * 2.0).max(1.0)),
         );
-        let default_attrs = Attrs::new().family(Family::Name(family));
+        let ff = font_features(cfg);
+        let default_attrs = Attrs::new()
+            .family(Family::Name(family))
+            .font_features(ff.clone());
         let mut rich: Vec<(String, Attrs)> = Vec::new();
         let mut nb = 0usize;
         for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
@@ -842,6 +846,7 @@ impl Renderer {
             }
             let mut a = Attrs::new()
                 .family(Family::Name(cfg.family_for(*bold, *italic)))
+                .font_features(ff.clone())
                 .color(GColor::rgb(fg.r, fg.g, fg.b));
             if *bold {
                 a = a.weight(Weight::BOLD);
@@ -851,9 +856,10 @@ impl Renderer {
             }
             rich.push((text.clone(), a));
         }
-        // Advanced shaping enables programming ligatures (calt/liga);
-        // Basic disables them when the user turns ligatures off.
-        let shaping = if cfg.font_ligatures {
+        // Advanced shaping applies OpenType features (ligatures, ss##,
+        // cv##, …). Drop to Basic only when ligatures are off *and* there
+        // are no explicit features to honor — the fast path with no shaping.
+        let shaping = if cfg.font_ligatures || !cfg.font_features.is_empty() {
             Shaping::Advanced
         } else {
             Shaping::Basic
@@ -867,6 +873,23 @@ impl Renderer {
         );
         buf.shape_until_scroll(&mut self.font_system, false);
     }
+}
+
+/// OpenType features to shape pane text with: the coarse ligature toggle
+/// expressed as `liga/clig/calt/dlig = 0` when off, then the user's explicit
+/// `font-feature` overrides applied on top (so they can re-enable or tune
+/// individual features). Cited: Ghostty `font-feature`, kitty `font_features`.
+fn font_features(cfg: &Config) -> FontFeatures {
+    let mut ff = FontFeatures::new();
+    if !cfg.font_ligatures {
+        for tag in [b"liga", b"clig", b"calt", b"dlig"] {
+            ff.disable(FeatureTag::new(tag));
+        }
+    }
+    for f in &cfg.font_features {
+        ff.set(FeatureTag::new(&f.tag), f.value);
+    }
+    ff
 }
 
 fn truncate(s: &str, n: usize) -> String {
