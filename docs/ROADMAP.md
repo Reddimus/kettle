@@ -81,8 +81,12 @@
       flash and/or cross-platform window-attention (taskbar/dock
       urgency) when unfocused, cleared on focus — no audio deps
 
+- [x] Conformance: DECALN screen alignment, REP repeat-char, G1 via
+      SO/SI charset invocation (17 conformance tests). SS2/SS3
+      single-shift is unsupported upstream (alacritty_terminal) — noted.
+
 ## Next (in priority order)
-- [ ] Conformance: charset G1/G2/G3 invocation, REP (repeat), DECALN
+- [ ] Conformance: DECSTR soft reset, ED/EL variants, DA2/XTVERSION
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements
 - [ ] Ligature tuning + per-style font family overrides

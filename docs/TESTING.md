@@ -33,7 +33,8 @@ cargo test --workspace
   DECSC/DECRC save-restore, DECAWM autowrap, DECOM origin mode, plus
   device responses captured via the real EventProxy PTY write-back —
   DSR 6n cursor-position report, primary Device Attributes,
-  SGR dim/underline/strikeout + curly-underline (4:3) + reset. The
+  SGR dim/underline/strikeout + curly-underline (4:3) + reset,
+  DECALN screen alignment, REP repeat-char, G1 charset via SO/SI. The
   automatable, regression-proof core of a `vttest` sweep.
 - **kettle-ui** (5 tests): split-tree layout tiles with no gaps/overlap,
   `remove_leaf` collapses to the sibling, nested splits keep every leaf;

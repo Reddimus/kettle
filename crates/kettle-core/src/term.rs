@@ -571,4 +571,35 @@ mod conformance {
         );
         assert!(!b.flags.contains(Flags::DIM), "SGR 0 reset cleared dim");
     }
+
+    #[test]
+    fn decaln_fills_screen_with_e() {
+        let (mut t, mut p) = harness(4, 3);
+        feed(&mut t, &mut p, b"\x1b#8"); // DEC screen alignment test
+        for r in 0..3 {
+            assert_eq!(row_text(&t, r), "EEEE", "DECALN fills row {r}");
+        }
+    }
+
+    #[test]
+    fn rep_repeats_last_graphic_char() {
+        let (mut t, mut p) = harness(8, 2);
+        // 'A' then REP 3 -> "AAAA".
+        feed(&mut t, &mut p, b"A\x1b[3b");
+        assert_eq!(row_text(&t, 0), "AAAA");
+    }
+
+    #[test]
+    fn charset_g1_via_so_si() {
+        let (mut t, mut p) = harness(6, 2);
+        // Designate DEC special graphics into G1, SO -> G1, SI -> back to G0.
+        feed(&mut t, &mut p, b"\x1b)0\x0eqx\x0fy");
+        let cs: Vec<char> = row_text(&t, 0).chars().collect();
+        assert_eq!(cs[0], '\u{2500}', "G1 q -> horizontal line");
+        assert_eq!(cs[1], '\u{2502}', "G1 x -> vertical line");
+        assert_eq!(cs[2], 'y', "SI returned to ASCII G0");
+    }
+
+    // NOTE: SS2/SS3 single-shift (ESC N / ESC O) is not implemented by
+    // alacritty_terminal, so no conformance test asserts it — see ROADMAP.
 }
