@@ -77,8 +77,11 @@
 - [x] Mouse-encoding unit tests: SGR(1006) + legacy X10, press/release,
       shift/ctrl/motion modifier bits, wheel; tracking-mode detection
 
+- [x] Configurable bell (`bell = off|visual|attention|both`): visual
+      flash and/or cross-platform window-attention (taskbar/dock
+      urgency) when unfocused, cleared on focus — no audio deps
+
 ## Next (in priority order)
-- [ ] Audible-bell option + per-profile config; bell-on-focus suppression
 - [ ] Conformance: charset G1/G2/G3 invocation, REP (repeat), DECALN
 - [ ] kitty graphics: Unicode placeholders, animation frames, relative
       placements

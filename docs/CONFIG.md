@@ -27,6 +27,7 @@ to print it. The file is **watched and reloaded live**.
 | `background-opacity` | float | `1.0` | 0..1 |
 | `cursor-style` | `block`\|`underline`\|`bar` | `block` | |
 | `cursor-style-blink` | bool | `true` | |
+| `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `font-feature` | string | — | `-liga` disables ligatures |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |

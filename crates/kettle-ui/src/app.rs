@@ -12,7 +12,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Fullscreen, UserAttentionType, Window, WindowId};
 
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
@@ -276,7 +276,15 @@ impl App {
             }
         }
         if bell {
-            self.last_bell = Some(std::time::Instant::now());
+            if self.cfg.bell.visual() {
+                self.last_bell = Some(std::time::Instant::now());
+            }
+            if self.cfg.bell.attention()
+                && !self.window_focused
+                && let Some(w) = &self.window
+            {
+                w.request_user_attention(Some(UserAttentionType::Informational));
+            }
         }
         if let Some(t) = title
             && let Some(w) = &self.window
@@ -1026,6 +1034,9 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(p) = self.mux.focused()
                 {
                     p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
+                }
+                if f && let Some(w) = &self.window {
+                    w.request_user_attention(None); // clear urgency on focus
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();

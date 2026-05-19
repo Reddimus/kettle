@@ -25,6 +25,27 @@ pub enum CursorStyle {
     Bar,
 }
 
+/// How the terminal reacts to `BEL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BellMode {
+    Off,
+    /// Brief full-surface flash.
+    Visual,
+    /// Request window attention (taskbar/dock urgency) when unfocused.
+    Attention,
+    /// Both visual flash and window attention.
+    Both,
+}
+
+impl BellMode {
+    pub fn visual(self) -> bool {
+        matches!(self, BellMode::Visual | BellMode::Both)
+    }
+    pub fn attention(self) -> bool {
+        matches!(self, BellMode::Attention | BellMode::Both)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: String,
@@ -41,6 +62,7 @@ pub struct Config {
     pub background_opacity: f32,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
+    pub bell: BellMode,
     pub font_ligatures: bool,
     pub search_foreground: Rgb,
     pub search_background: Rgb,
@@ -67,6 +89,7 @@ impl Default for Config {
             background_opacity: 1.0,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
+            bell: BellMode::Both,
             font_ligatures: true,
             search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
             search_background: Rgb::new(0xe0, 0xaf, 0x68),
@@ -209,6 +232,14 @@ impl Config {
                     }
                 }
                 "cursor-style-blink" => cfg.cursor_blink = e.value != "false",
+                "bell" => {
+                    cfg.bell = match e.value.as_str() {
+                        "off" | "none" | "false" => BellMode::Off,
+                        "visual" | "flash" => BellMode::Visual,
+                        "attention" | "urgent" => BellMode::Attention,
+                        _ => BellMode::Both,
+                    }
+                }
                 "font-feature" if (e.value.contains("-liga") || e.value.contains("liga off")) => {
                     cfg.font_ligatures = false;
                 }
@@ -302,5 +333,18 @@ mod config_tests {
         assert_eq!(c.family_for(true, false), "Main"); // falls back
         assert_eq!(c.family_for(false, true), "Cursive");
         assert!(!c.font_ligatures, "-liga disables ligatures");
+    }
+
+    #[test]
+    fn bell_mode_parsing() {
+        assert_eq!(Config::default().bell, BellMode::Both);
+        assert_eq!(Config::parse_text("bell = off").bell, BellMode::Off);
+        assert_eq!(Config::parse_text("bell = visual").bell, BellMode::Visual);
+        assert_eq!(
+            Config::parse_text("bell = attention").bell,
+            BellMode::Attention
+        );
+        assert!(BellMode::Both.visual() && BellMode::Both.attention());
+        assert!(!BellMode::Off.visual() && !BellMode::Off.attention());
     }
 }

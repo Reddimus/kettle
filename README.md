@@ -31,6 +31,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
 - **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
   works (X10 + SGR 1006); focus-event reporting (DEC ?1004) too.
+- **Configurable bell** — visual flash and/or window-attention
+  (taskbar/dock urgency); `bell = off|visual|attention|both`.
 - **Polished input** — safe bracketed paste (newline-normalized,
   injection-guarded), double-click word / triple-click line selection with
   auto-copy, focus-aware hollow cursor, configurable blink, visual bell.
