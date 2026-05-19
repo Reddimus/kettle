@@ -34,6 +34,7 @@ pub struct App {
     fullscreen: bool,
     cursor: PhysicalPosition<f64>,
     selecting: bool,
+    links: Vec<kettle_core::Link>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -69,6 +70,7 @@ impl App {
             fullscreen: false,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
+            links: Vec::new(),
             _watcher: watcher,
         };
         event_loop.run_app(&mut app)?;
@@ -254,10 +256,41 @@ impl App {
         }
     }
 
+    /// `(row, col)` of the mouse within the focused pane, if any.
+    fn cursor_cell(&self) -> Option<(usize, usize)> {
+        let rect = self.focused_rect(self.area())?;
+        let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+        Some((p.line.0.max(0) as usize, p.column.0))
+    }
+
+    fn link_at_cursor(&self) -> Option<&kettle_core::Link> {
+        let (row, col) = self.cursor_cell()?;
+        self.links
+            .iter()
+            .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
+    }
+
     fn overlay(&self) -> Overlay {
+        let hover = self.cursor_cell();
+        let links = self
+            .links
+            .iter()
+            .map(|l| kettle_render::LinkRect {
+                col: l.start_col,
+                row: l.row,
+                width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
+                hover: hover
+                    .map(|(r, c)| r == l.row && c >= l.start_col && c <= l.end_col)
+                    .unwrap_or(false),
+            })
+            .collect();
+
         let s = &self.mux.search;
         if !s.open {
-            return Overlay::default();
+            return Overlay {
+                links,
+                ..Overlay::default()
+            };
         }
         let highlights = s
             .matches
@@ -280,7 +313,16 @@ impl App {
             search_count: s.matches.len(),
             search_index: s.index,
             highlights,
+            links,
         }
+    }
+
+    fn update_links(&mut self) {
+        self.links = self
+            .mux
+            .focused()
+            .and_then(|p| p.term.term.lock().ok().map(|t| kettle_core::links(&t)))
+            .unwrap_or_default();
     }
 
     fn redraw(&mut self) {
@@ -289,6 +331,7 @@ impl App {
             return;
         }
         self.update_search();
+        self.update_links();
         let overlay = self.overlay();
         let area = self.area();
         let tab_bar_h = self.tab_bar_h();
@@ -618,9 +661,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.selecting {
                     let area = self.area();
                     self.update_selection(area);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                }
+                if (self.selecting || !self.links.is_empty())
+                    && let Some(w) = &self.window
+                {
+                    w.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
@@ -629,6 +674,15 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 let area = self.area();
+                // Ctrl/Cmd + click opens a hyperlink under the cursor.
+                if (self.mods.control_key() || self.mods.super_key())
+                    && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
+                {
+                    if let Err(e) = open::that_detached(&uri) {
+                        log::warn!("failed to open {uri}: {e}");
+                    }
+                    return;
+                }
                 self.mux
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
                 self.begin_selection(area);

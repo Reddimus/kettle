@@ -35,13 +35,23 @@ pub struct HighlightRect {
     pub active: bool,
 }
 
-/// Search-bar overlay state.
+/// A hyperlink underline in a pane's viewport (grid coords).
+#[derive(Clone, Copy)]
+pub struct LinkRect {
+    pub col: usize,
+    pub row: usize,
+    pub width: usize,
+    pub hover: bool,
+}
+
+/// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
     pub search_query: Option<String>,
     pub search_count: usize,
     pub search_index: usize,
     pub highlights: Vec<HighlightRect>,
+    pub links: Vec<LinkRect>,
 }
 
 /// One tiled pane to draw this frame.
@@ -256,6 +266,26 @@ impl Renderer {
             quads.push(rect(rx + rw - 1.0, ry, 1.0, rh, border, 1.0));
 
             self.build_pane(i, pv, cfg, &family, &mut quads);
+
+            // Hyperlink underlines (all panes show them; brighter on hover).
+            for ln in &overlay.links {
+                if !pv.focused {
+                    break;
+                }
+                let col = if ln.hover {
+                    theme.palette[6]
+                } else {
+                    theme.palette[4]
+                };
+                quads.push(rect(
+                    rx + pad_x + ln.col as f32 * cw,
+                    ry + pad_y + ln.row as f32 * ch + ch - 1.5,
+                    ln.width as f32 * cw,
+                    1.5,
+                    col,
+                    1.0,
+                ));
+            }
 
             // Search highlights are drawn over the focused pane.
             if pv.focused {

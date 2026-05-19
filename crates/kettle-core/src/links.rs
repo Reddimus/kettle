@@ -1,0 +1,104 @@
+//! Hyperlink discovery: explicit OSC 8 links carried on cells, plus
+//! autodetected URLs in the visible grid.
+
+use alacritty_terminal::Term;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point};
+use regex::Regex;
+use std::sync::OnceLock;
+
+use crate::event::EventProxy;
+
+/// A clickable link in viewport (visible-row) coordinates.
+#[derive(Debug, Clone)]
+pub struct Link {
+    pub row: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub uri: String,
+}
+
+fn url_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
+}
+
+fn trim_trailing(s: &str) -> &str {
+    s.trim_end_matches(['.', ',', ')', ']', '}', '\'', '"', ';', ':'])
+}
+
+/// All links visible in the current viewport. Explicit OSC 8 links take
+/// precedence over autodetected URLs on the same cells.
+pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let rows = grid.screen_lines();
+    let mut out: Vec<Link> = Vec::new();
+
+    for row in 0..rows {
+        // OSC 8 runs: consecutive cells sharing a hyperlink URI.
+        let mut c = 0usize;
+        while c < cols {
+            let cell = &grid[Point::new(Line(row as i32), Column(c))];
+            if let Some(h) = cell.hyperlink() {
+                let uri = h.uri().to_string();
+                let start = c;
+                while c < cols {
+                    let cc = &grid[Point::new(Line(row as i32), Column(c))];
+                    match cc.hyperlink() {
+                        Some(h2) if h2.uri() == uri => c += 1,
+                        _ => break,
+                    }
+                }
+                out.push(Link {
+                    row,
+                    start_col: start,
+                    end_col: c.saturating_sub(1),
+                    uri,
+                });
+            } else {
+                c += 1;
+            }
+        }
+
+        // Autodetected URLs (skip cells already covered by an OSC 8 link).
+        let mut text = String::with_capacity(cols);
+        let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
+        for col in 0..cols {
+            let ch = grid[Point::new(Line(row as i32), Column(col))].c;
+            for _ in 0..ch.len_utf8() {
+                col_of_byte.push(col);
+            }
+            text.push(ch);
+        }
+        for m in url_re().find_iter(&text) {
+            let matched = trim_trailing(m.as_str());
+            if matched.is_empty() {
+                continue;
+            }
+            let s = col_of_byte.get(m.start()).copied().unwrap_or(0);
+            let e = col_of_byte
+                .get(m.start() + matched.len().saturating_sub(1))
+                .copied()
+                .unwrap_or(s);
+            if out
+                .iter()
+                .any(|l| l.row == row && !(e < l.start_col || s > l.end_col))
+            {
+                continue;
+            }
+            let uri = if matched.starts_with("www.") {
+                format!("https://{matched}")
+            } else {
+                matched.to_string()
+            };
+            out.push(Link {
+                row,
+                start_col: s,
+                end_col: e,
+                uri,
+            });
+        }
+    }
+    out
+}

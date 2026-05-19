@@ -16,12 +16,12 @@
 - [x] Clipboard (OSC 52 + copy/paste), keyboard input encoding, IME text
 
 - [x] Mouse drag text selection + wheel scrollback
+- [x] Hyperlinks: OSC 8 + URL autodetection, underline + Ctrl/Cmd-click to open
 
 ## Next (in priority order)
 
 - [ ] Mouse reporting passthrough (apps that request SGR mouse)
 - [ ] Sixel + kitty graphics + iTerm2 OSC 1337 image protocols (`kettle-vt`)
-- [ ] Hyperlink (OSC 8) + URL autodetection, click to open
 - [ ] Shell integration (OSC 133) + prompt jumping
 - [ ] Session save/restore (pane tree + cwd) and layouts
 - [ ] Ligature tuning + per-style font family overrides

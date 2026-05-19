@@ -23,6 +23,8 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
   setup.
 - **Search overlay** — `Ctrl+Shift+F`, regex, highlight + cycle.
+- **Hyperlinks** — OSC 8 + URL autodetection, underlined with hover, open
+  with `Ctrl`/`Cmd`+click.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 
