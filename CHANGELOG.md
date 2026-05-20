@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/TESTING.md` per-crate counts refreshed and shifted to
+  `+N` range form.** Cycle-172/179/214 fixed top-level "workspace
+  has X tests" claims in INSTALL / ARCHITECTURE / TESTING /
+  CONTRIBUTING. The per-crate sub-counts in TESTING.md were still
+  the old `~33` / `~56` / `~75` / `~10` / `~37` / `2` numbers from
+  cycle 128-ish; some had drifted (`~56` → 74, `~75` → 82,
+  `~37` → 40, `2` → 4). Refreshed each to a "+N" range form
+  (`~70+` / `~80+` / `~40+` / `~4`) so the figures stay useful as
+  rough orders of magnitude without going precisely stale every
+  few cycles.
+
 ### Internal
 - **CI smoke also verifies `--list-actions` and `--list-keybinds`
   produce plausible counts.** Existing smoke verified `--list-themes`

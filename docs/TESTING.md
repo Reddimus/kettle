@@ -29,7 +29,7 @@ order-of-magnitude snapshots rather than exact figures (run `cargo test
   interleaved stream passes through intact in well under 5 s
   (linear-time / bounded-memory guard).
 
-- **kettle-config** (~56 tests): TokyoNight Night is the verified
+- **kettle-config** (~70+ tests): TokyoNight Night is the verified
   default palette; Ghostty `key = value` overrides, repeats, `palette`
   (0..=15 + cycle-124 out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
@@ -43,7 +43,7 @@ order-of-magnitude snapshots rather than exact figures (run `cargo test
   empty-value resets for every string-config key; cycle-118
   `clamp_font_size` bounds.
 
-- **kettle-core VT conformance** (~75 tests): drives the *real*
+- **kettle-core VT conformance** (~80+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
   grid/cursor/SGR/mode state across a broad `vttest`-style sweep —
   text + `\r\n` + CUP addressing, erase-line/erase-display, SGR
@@ -71,7 +71,7 @@ order-of-magnitude snapshots rather than exact figures (run `cargo test
   the offscreen GPU pipeline self-test (real wgpu pipelines compile
   + render through Vulkan/Metal/DX12).
 
-- **kettle-ui** (~37 tests): split-tree layout tiles with no
+- **kettle-ui** (~40+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
   splits keep every leaf; `Node::leaf_ids` DFS-order +
   `nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
@@ -86,7 +86,7 @@ order-of-magnitude snapshots rather than exact figures (run `cargo test
   modified-key SS3/CSI table; paste payload bracketing +
   injection-guard.
 
-- **kettle** (binary, 2 tests): clap argv parsing for the cycle-30
+- **kettle** (binary, ~4 tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105
   `format_ssh_hosts` table renderer (sort + column alignment +
   empty fallback).
