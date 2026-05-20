@@ -13,9 +13,17 @@ use kettle_core::{CursorShape, TermEvent, Terminal, Waker};
 /// cwd-basename fallback fills in for those once OSC 7 arrives. SSH panes
 /// have no local cwd, so we surface the target inline (`ssh me@box`) so a
 /// tab full of them is distinguishable while connections are
-/// establishing. Pure so the argv → title decision is unit-tested.
+/// establishing. For any *other* explicit `-e PROG` (e.g. `kettle -e htop`,
+/// `kettle -e vim file`), the user has already told us what's running —
+/// surface that program's basename instead of the generic "kettle", since
+/// many TUIs (htop, top, less, vim's default, …) never emit OSC 2 and
+/// have no usable cwd to back-fill from. Pure so the argv → title decision
+/// is unit-tested.
 fn initial_pane_title(argv: &[String]) -> String {
-    if argv.first().map(String::as_str) == Some("ssh") {
+    let Some(arg0) = argv.first().map(String::as_str) else {
+        return "kettle".into();
+    };
+    if arg0 == "ssh" {
         let host = argv
             .iter()
             .skip(1)
@@ -28,7 +36,41 @@ fn initial_pane_title(argv: &[String]) -> String {
             format!("ssh {host}")
         };
     }
-    "kettle".into()
+    // Basename of the program path — `/usr/bin/htop` → `htop`. Falls back
+    // to the raw arg if it has no path separators.
+    let base = std::path::Path::new(arg0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(arg0);
+    // Shells are intentionally placeholders: the cwd-basename fallback
+    // (`~/repos/kettle` → `kettle`) is more useful than the literal "bash".
+    // List covers POSIX shells + common alt-shells; case-sensitive because
+    // argv comes through unchanged on Unix and Windows shells go by other
+    // names (cmd.exe, powershell.exe).
+    const SHELLS: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "nu",
+        "elvish",
+        "xonsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "cmd.exe",
+        "powershell.exe",
+        "pwsh.exe",
+    ];
+    if SHELLS.contains(&base) {
+        return "kettle".into();
+    }
+    base.to_string()
 }
 
 /// Map the kettle config cursor style to the engine's seed shape. `Bar` and
@@ -839,6 +881,12 @@ mod node_tests {
         assert_eq!(initial_pane_title(&[]), "kettle");
         assert_eq!(initial_pane_title(&["bash".into()]), "kettle");
         assert_eq!(initial_pane_title(&["zsh".into(), "-i".into()]), "kettle");
+        // Path-qualified shell is still treated as a shell (basename match).
+        assert_eq!(initial_pane_title(&["/bin/bash".into()]), "kettle");
+        assert_eq!(initial_pane_title(&["/usr/bin/fish".into()]), "kettle");
+        // Windows shells too — names differ from POSIX so list them explicitly.
+        assert_eq!(initial_pane_title(&["pwsh.exe".into()]), "kettle");
+        assert_eq!(initial_pane_title(&["cmd.exe".into()]), "kettle");
         // SSH: surface the target so the tab is identifiable while
         // connecting. `-t`/`-A`/etc are skipped to find the host.
         assert_eq!(
@@ -848,6 +896,17 @@ mod node_tests {
         assert_eq!(initial_pane_title(&["ssh".into(), "box".into()]), "ssh box");
         // `ssh` with no positional arg → just "ssh" (rare but defined).
         assert_eq!(initial_pane_title(&["ssh".into(), "-V".into()]), "ssh");
+        // Explicit `-e PROG` for non-shells uses the program basename, so
+        // `kettle -e htop` doesn't show the generic "kettle" forever
+        // (htop never emits OSC 2 and has no useful cwd to back-fill from).
+        assert_eq!(initial_pane_title(&["htop".into()]), "htop");
+        assert_eq!(initial_pane_title(&["/usr/bin/htop".into()]), "htop");
+        assert_eq!(initial_pane_title(&["vim".into(), "file.rs".into()]), "vim");
+        assert_eq!(
+            initial_pane_title(&["python3".into(), "script.py".into()]),
+            "python3"
+        );
+        assert_eq!(initial_pane_title(&["tmux".into()]), "tmux");
     }
 
     #[test]

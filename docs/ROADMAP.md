@@ -506,6 +506,19 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`kettle -e PROG` seeds the tab title from PROG basename.**
+      Cycle 93 fixed SSH; cycles 89/90 backfilled cwd-basename
+      for shells. The gap that remained: any *other* explicit
+      `-e` program (`htop`, `vim`, `tmux`, `python3 script.py`)
+      stayed at "kettle" forever because most TUIs never emit
+      OSC 2 and inherit the launching cwd (so cwd-basename gives
+      you your repo name, not the program). `initial_pane_title`
+      now extracts `Path::file_name(argv[0])` and uses it as the
+      seed, with a hand-curated shell allow-list (POSIX shells,
+      Windows shells, nu/elvish/xonsh) that still routes through
+      the "kettle" placeholder so the cwd-basename fallback runs
+      for shells — where the directory name is genuinely more
+      useful than the literal "bash". +5 assertions.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

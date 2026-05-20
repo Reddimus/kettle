@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **Explicit `kettle -e PROG` seeds the tab title from PROG.** Cycle 93
+  surfaced `ssh <target>` for SSH panes but every *other* program
+  launched with `-e` still showed the generic "kettle" placeholder
+  forever: `kettle -e htop`, `kettle -e vim`, `kettle -e tmux` all
+  fell through to the shell-default branch even though the user had
+  just told us exactly what's running. Worse, the cycle-89 cwd-basename
+  fallback doesn't help for these — `htop`/`top`/`less` and most
+  full-screen TUIs never emit OSC 2 and either inherit the launching
+  cwd (so the basename is your repo, not the program) or have none at
+  all. `initial_pane_title(argv)` now extracts the **basename of
+  `argv[0]`** as the seed (`/usr/bin/htop` → `htop`), with a hand-curated
+  shell allow-list (`bash`, `zsh`, `fish`, `dash`, `ash`, `ksh`, `csh`,
+  `tcsh`, `nu`, `elvish`, `xonsh`, `pwsh`, `powershell`, plus the
+  `.exe` Windows spellings and `cmd`) that still routes through the
+  "kettle" placeholder so the cwd-basename fallback runs — for shells
+  the directory name is genuinely more useful than the literal "bash".
+  SSH is still special-cased ahead of the basename path so
+  `ssh me@box` keeps its argument. The function stays pure; the test
+  grew five new assertions covering `htop` / `/usr/bin/htop` /
+  `vim file.rs` / `python3 script.py` / `tmux` plus path-qualified
+  shells (`/bin/bash`, `/usr/bin/fish`) and the Windows shell names.
+
 ### Security
 - **SSH tab title seeded from the target.** Fresh SSH tabs
   (Ctrl+Shift+S launcher, restored sessions with an `ssh` argv)
