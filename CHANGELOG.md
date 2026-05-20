@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Added
+- **Focused-pane border tints yellow when broadcast is on.**
+  Cycle-178 follow-up: the tab-bar accent flipped to yellow on
+  broadcast, but with `tab-bar = auto` (the default) and only one
+  tab open (the common single-window case), the tab bar is hidden
+  and the cycle-178 indicator becomes invisible. The user could
+  toggle broadcast on, forget about it, and lose track of where
+  their keystrokes were going. This cycle adds a complementary
+  per-pane indicator: when broadcast is on, the focused-pane
+  border flips from `palette[4]` (theme accent blue, the standard
+  focused-split color) to `palette[3]` (yellow, matching the
+  cycle-178 tab-bar accent). Works regardless of `tab-bar` mode
+  — even with the tab bar fully disabled (`tab-bar = off`) the
+  user sees the visual cue. Inactive panes keep their normal
+  divider color (broadcast is scoped to the active tab,
+  cycle-112 invariant). No new test (render-time tint
+  conditional, same pattern as cycle 178).
+
 - **`clear_history` action — clear scrollback without resetting the
   terminal.** Every modern terminal exposes this (kitty
   `clear_terminal`, iTerm2 "Clear Buffer", WezTerm

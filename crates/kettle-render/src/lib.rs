@@ -447,8 +447,25 @@ impl Renderer {
             // (defaults to theme `palette[8]`, the dim color) and
             // `focused-split-color` for the focused pane (defaults to
             // theme `palette[4]`, the accent blue).
+            //
+            // Cycle 184: when broadcast / group-input mode is on, the
+            // focused-pane border flips to theme palette[3] (yellow,
+            // the same warning slot the tab-bar accent uses in cycle
+            // 178). The tab-bar indicator alone wasn't enough: with
+            // `tab-bar = auto` and only one tab open (the default
+            // single-window case), the tab bar is hidden and the
+            // user has no visual cue that broadcast is active.
+            // Per-pane border-color shift works regardless of tab-bar
+            // state. Inactive panes keep their normal divider color
+            // — broadcast is scoped to the active tab (cycle-112
+            // invariant) and the focused-pane border is the single
+            // most-visible chrome element on every layout.
             let border = if pv.focused {
-                cfg.focused_split_color.unwrap_or(theme.palette[4])
+                if tabbar.broadcast {
+                    theme.palette[3]
+                } else {
+                    cfg.focused_split_color.unwrap_or(theme.palette[4])
+                }
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
             };

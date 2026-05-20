@@ -964,6 +964,13 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Focused-pane border tints yellow on broadcast.**
+      Cycle-178 follow-up: the tab-bar accent works only when
+      the tab bar is visible. `tab-bar = auto` + single tab
+      (default single-window) hides the bar — broadcast had no
+      visual cue. Focused-pane border now flips from
+      palette[4] (blue) to palette[3] (yellow) when broadcast
+      is on, regardless of tab-bar mode.
 - [x] **`clear_history` action — clear scrollback without
       resetting the terminal.** Writes `CSI 3 J`. Aliases
       `clear_scrollback` / `clear_buffer`. Honors broadcast.
