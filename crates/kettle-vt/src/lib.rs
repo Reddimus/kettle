@@ -43,6 +43,59 @@ mod tests {
     }
 
     #[test]
+    fn osc1_icon_name_rewrites_to_osc2_window_title() {
+        // vim / tmux / ranger / mc emit OSC 1 (icon name) to set their
+        // "short" tab title. VTE/alacritty silently drop OSC 1 (their
+        // dispatch only matches "0" and "2"), so the title disappeared.
+        // kitty / iTerm2 / Gnome Terminal / Konsole treat OSC 1 the
+        // same as OSC 2; we rewrite the leading byte so VTE picks it
+        // up downstream and `TermEvent::Title` actually fires.
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"\x1b]1;short label\x07");
+        // Only a Pass chunk — no consumed handler. The bytes are
+        // forwarded with OSC `2` so the VT engine sets the title.
+        let forwarded: Vec<u8> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(forwarded, b"\x1b]2;short label\x07");
+
+        // ST-terminated form is rewritten too (vim uses `\e\\` more
+        // often than `\a`).
+        let mut e2 = Extractor::new();
+        let chunks2 = e2.feed(b"\x1b]1;vim - file.rs\x1b\\");
+        let forwarded2: Vec<u8> = chunks2
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(forwarded2, b"\x1b]2;vim - file.rs\x1b\\");
+
+        // OSC 0 / OSC 2 are untouched (we don't want to double-rewrite
+        // or accidentally munge a real OSC 2). The previous test
+        // (`non_image_osc_passes_through`) already pins OSC 0; pin OSC
+        // 2 here too for symmetry.
+        let mut e3 = Extractor::new();
+        let chunks3 = e3.feed(b"\x1b]2;real title\x07");
+        let forwarded3: Vec<u8> = chunks3
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(forwarded3, b"\x1b]2;real title\x07");
+    }
+
+    #[test]
     fn non_image_osc_passes_through() {
         let mut e = Extractor::new();
         let chunks = e.feed(b"\x1b]0;my title\x07");

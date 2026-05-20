@@ -506,6 +506,15 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **OSC 1 (icon name) rewrites to OSC 2 in the extractor.**
+      VTE/alacritty silently drop OSC 1 entirely; their dispatch
+      only matches `"0" | "2"`. But vim / tmux / ranger / mc
+      emit OSC 1 to set their *short* (tab-intended) title — so
+      those titles never appeared. kitty / iTerm2 / Gnome
+      Terminal / Konsole all alias OSC 1 to OSC 2. The
+      extractor now rewrites the leading payload byte from `1`
+      to `2` so VTE picks it up downstream; BEL and ST
+      terminators both handled. +1 test.
 - [x] **OSC 104 (no-param) + OSC 110/111/112 reset
       conformance pins.** Set-side conformance was tested
       across cycles 47/56/65/66; the matching reset-side path

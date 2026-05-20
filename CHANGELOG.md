@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **OSC 1 (icon name) now sets the tab title.** xterm distinguishes
+  OSC 0 (icon + title), OSC 1 (icon only) and OSC 2 (title only);
+  VTE/alacritty's dispatch only matches `"0" | "2"` and silently
+  drops OSC 1 entirely. But vim / tmux / ranger / mc emit OSC 1
+  to set their *short* title — exactly the string a tabbed
+  terminal wants in the tab bar — so those titles disappeared in
+  kettle. kitty / iTerm2 / Gnome Terminal / Konsole all treat OSC 1
+  the same as OSC 2 in modern (tabbed) terminals; the icon-name
+  distinction predates tabs. The extractor now rewrites the
+  leading byte of OSC 1 payloads from `1` to `2` so VTE picks them
+  up downstream and `TermEvent::Title` fires normally. Bracket-
+  ST and BEL terminators both handled (vim uses `\e\\`; xterm
+  uses `\a`). OSC 0 / OSC 2 left untouched. +1 test
+  (`osc1_icon_name_rewrites_to_osc2_window_title`).
+
 ### Tests
 - **Pin OSC 104 (no-param) and OSC 110/111/112 reset conformance.**
   Cycle 47 pinned OSC 104;N (single-index reset). Cycle 56/65/66

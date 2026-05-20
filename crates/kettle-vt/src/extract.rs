@@ -193,7 +193,7 @@ impl Extractor {
     }
 
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
-        let seq = std::mem::take(&mut self.seq);
+        let mut seq = std::mem::take(&mut self.seq);
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
 
         // OSC 133 shell-integration marks are consumed (not forwarded).
@@ -209,6 +209,18 @@ impl Extractor {
                 out.push(Chunk::Cwd(path));
             }
             return;
+        }
+        // OSC 1 (icon name) — VTE/alacritty drop it entirely (their
+        // dispatch table only matches "0" and "2"), but vim / tmux /
+        // ranger / mc emit it to set the *short* title intended for
+        // tabs and iconified-window labels. xterm's distinction
+        // between icon name and window title isn't useful in modern
+        // tabbed terminals, so kitty / iTerm2 / Gnome Terminal /
+        // Konsole all treat OSC 1 the same as OSC 2. Rewrite the
+        // first byte of the payload from `1` to `2` so VTE picks it
+        // up; everything downstream then behaves identically.
+        if mode == Mode::Osc && seq.starts_with(b"1;") {
+            seq[0] = b'2';
         }
 
         enum R {
