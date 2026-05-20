@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Local paste capped at 4 MiB.** OSC 52 (remote-program write
+  into the system clipboard) was capped at 1 MiB back in cycle 47;
+  the reverse direction (`paste_clipboard` reads the user's
+  clipboard into the PTY) was uncapped — a user with a 1 GB file
+  on the clipboard could shove every byte into the PTY in one
+  shot and freeze the terminal until the program at the other end
+  drained the pipe. 4 MiB fits any realistic code-review / log-
+  snippet paste; bigger pastes are almost certainly fat-finger.
+  Reuses the existing `clamp_osc52` byte-clamper (UTF-8 char-
+  boundary preserved).
 - **Tab title truncation honors display columns, not chars.** The
   `truncate(s, n)` helper used `chars().count()` to decide whether
   to cut — but every CJK character or emoji is 2 cells wide in the

@@ -53,6 +53,16 @@ fn clamp_osc52(s: &str, max: usize) -> &str {
 /// 1 MiB — generous for real copies, bounded against abuse.
 const OSC52_MAX: usize = 1 << 20;
 
+/// 4 MiB cap on a *local* clipboard paste. The OSC 52 cap above guards
+/// against a hostile remote program pushing an unbounded payload into
+/// the system clipboard; this guards the reverse direction — a user
+/// accidentally pastes a multi-GB file and kettle would otherwise feed
+/// every byte into the PTY in one shot, freezing the terminal until
+/// the program at the other end (cat? vim?) drained the pipe. 4 MiB
+/// fits any realistic code-review / log-snippet paste with room to
+/// spare; bigger pastes are almost certainly a fat-finger.
+const LOCAL_PASTE_MAX: usize = 4 << 20;
+
 /// Pure geometry: is the mouse y-coordinate inside the tab bar's vertical
 /// band? `bar_h` is the bar height in pixels, `surface_h` is total window
 /// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
@@ -500,10 +510,16 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Cap a runaway paste at 4 MiB on a UTF-8 char boundary so an
+        // accidental "paste this 1 GB log" doesn't shove every byte into
+        // the PTY in one go. `clamp_osc52` is named for OSC 52 but it's a
+        // generic byte-clamper that preserves char boundaries — exactly
+        // what we want for any paste channel.
+        let text = clamp_osc52(&text, LOCAL_PASTE_MAX);
         let bracketed = self
             .focused_mode()
             .contains(kettle_core::TermMode::BRACKETED_PASTE);
-        let bytes = input::paste_payload(&text, bracketed);
+        let bytes = input::paste_payload(text, bracketed);
         if let Some(p) = self.mux.focused() {
             p.term.write(&bytes);
         }

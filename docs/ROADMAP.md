@@ -423,6 +423,10 @@
 - [x] **Tab title `truncate` honors display columns.** CJK chars
       and emoji (2 cells each) no longer overflow the tab segment.
       Uses `UnicodeWidthChar::width()`. +1 test.
+- [x] **Local paste capped at 4 MiB.** Pair to the OSC 52 1 MiB
+      cap (cycle 47) — guards against accidentally pasting a multi-
+      GB file from the clipboard and freezing the PTY. Reuses
+      `clamp_osc52` byte-clamper.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
