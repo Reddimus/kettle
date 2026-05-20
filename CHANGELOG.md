@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### CI
+- **Release tarballs now also ship `shell-integration/` alongside
+  the binary.** Cycle 229 embedded the snippets into the binary
+  via `include_str!`, so `kettle --shell-integration bash >> ~/.bashrc`
+  works without the source tree. The standalone files are still
+  useful for users who want to read or customize them before
+  sourcing, and for discoverability via `ls`. Linux tarball
+  ships them at `kettle/shell-integration/`; macOS .app bundle
+  ships them at `Contents/Resources/shell-integration/`; Windows
+  zip ships them at `shell-integration/` next to the .exe.
+
 ### Added
 - **`kettle --shell-integration <bash|zsh|fish>` — one-command
   install of the OSC 133 shell snippet.** Cycle 227 added the

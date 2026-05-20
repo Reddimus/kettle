@@ -68,6 +68,13 @@ jobs:
           cp packaging/linux/kettle.svg     dist/kettle/packaging/linux/
           cp packaging/linux/kettle-*.png   dist/kettle/packaging/linux/ || true
           install -Dm755 scripts/install.sh dist/kettle/install.sh
+          # Cycle 230: also ship the OSC 133 shell-integration snippets
+          # so a user can read/customize them before sourcing. The same
+          # bodies are embedded into the binary via include_str! (cycle
+          # 229), so `./kettle/kettle --shell-integration bash >> ~/.bashrc`
+          # works without these files; they're a discoverability +
+          # source-of-truth aid, not a runtime requirement.
+          cp -r shell-integration dist/kettle/
           tar -C dist -czf ${{ matrix.artifact }} kettle
 
       - name: Package (macOS .app bundle)
@@ -93,6 +100,11 @@ jobs:
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
           cp LICENSE NOTICE README.md "$APP/Contents/Resources/"
+          # Cycle 230: shell-integration snippets in Resources/ so a
+          # macOS user can read them alongside the LICENSE / NOTICE
+          # without needing the source tree. Same content as the
+          # binary's embedded copies (see cycle 229).
+          cp -r shell-integration "$APP/Contents/Resources/"
           (cd dist && zip -r ../${{ matrix.artifact }} kettle.app)
 
       - name: Package (Windows)
@@ -108,6 +120,10 @@ jobs:
           # if the user moves the .exe out of its install directory.
           Copy-Item packaging/windows/kettle.ico dist/kettle/
           Copy-Item LICENSE,NOTICE,README.md dist/kettle/
+          # Cycle 230: shell-integration snippets — useful for Windows
+          # users running Git Bash, MSYS2, or WSL inside kettle on
+          # ConPTY. Same files as on the other platforms.
+          Copy-Item -Recurse shell-integration dist/kettle/
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 
       - uses: actions/upload-artifact@v4
