@@ -14,8 +14,8 @@ struct Cli {
     list_themes: bool,
 
     /// Print the keymap (trigger → action) and exit. Honors `--config FILE`
-    /// to show the *effective* keymap after overrides + unbinds (cycle 103);
-    /// without it, shows the built-in defaults.
+    /// to show the *effective* keymap after overrides + unbinds; without it,
+    /// shows the built-in defaults.
     #[arg(long)]
     list_keybinds: bool,
 
@@ -50,7 +50,9 @@ struct Cli {
     /// Use this config file instead of the default path. Honored by every
     /// introspection command (`--check-config`, `--list-keybinds`,
     /// `--list-ssh-hosts`, `--screenshot`, `--config-path`) as well as the
-    /// windowed run. A non-existent path is a hard error (cycle 106) — the
+    /// windowed run. The path must be an existing regular file: a missing
+    /// path is a hard error, and so is a directory (typing `--config
+    /// ~/.config/kettle` when you meant the file inside it). The
     /// out-of-the-box default-path fallback only kicks in when this flag
     /// is omitted entirely.
     #[arg(long = "config", value_name = "FILE")]
@@ -533,5 +535,48 @@ mod tests {
         // Defaults: no overrides.
         let d = Cli::try_parse_from(["kettle"]).unwrap();
         assert!(d.exec.is_empty() && d.working_directory.is_none() && d.config.is_none());
+    }
+
+    #[test]
+    fn cli_help_text_has_no_internal_cycle_refs() {
+        // `--help` is the very first contact most users have with the CLI.
+        // Earlier cycles' rustdoc-style notes ("(cycle 103)", "(cycle 106)")
+        // helped *me* trace audit history during development but leak as
+        // mysterious-looking parentheticals when piped to a real terminal
+        // user. The audit trail lives in CHANGELOG and code comments; the
+        // user-facing help text should not.
+        //
+        // Walk every argument's long+short help string and assert none
+        // contain "cycle " — same shape as cycle 116's
+        // `defaults_has_no_shadow_collisions` drift guard, but for the
+        // CLI's user-facing surface instead of the keybind defaults.
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        for arg in cmd.get_arguments() {
+            for txt in arg
+                .get_help()
+                .iter()
+                .map(|s| s.to_string())
+                .chain(arg.get_long_help().iter().map(|s| s.to_string()))
+            {
+                assert!(
+                    !txt.to_ascii_lowercase().contains("cycle "),
+                    "internal `cycle N` ref leaked into --help text for {:?}: {txt:?}",
+                    arg.get_id(),
+                );
+            }
+        }
+        // Same for the top-level about/long-about strings.
+        let about = cmd.get_about().map(|s| s.to_string()).unwrap_or_default();
+        let long = cmd
+            .get_long_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        for txt in [about, long] {
+            assert!(
+                !txt.to_ascii_lowercase().contains("cycle "),
+                "internal `cycle N` ref leaked into --help about text: {txt:?}",
+            );
+        }
     }
 }

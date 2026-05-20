@@ -964,6 +964,16 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`kettle --help` no longer leaks internal `cycle N` refs.**
+      `--list-keybinds` and `--config` doc comments shipped audit-
+      trail parentheticals in their `--help` output; rewrote in
+      plain English, dropped the cycle refs. `--config` description
+      now also covers the cycle-164 directory-rejection behavior
+      (which had been a silent change since cycle 164 landed).
+      Regression test walks every clap Arg's help/long-help and
+      the top-level about/long-about, asserting no "cycle " token
+      leaks back in — same drift-guard shape as cycle 116's
+      defaults_has_no_shadow_collisions. +1 test.
 - [x] **Theme bundling resists `.DS_Store` / `Thumbs.db` / editor
       backup junk.** `build.rs` only skipped exact `LICENSE` /
       `README.md`. A macOS / Windows checkout (or a maintainer who

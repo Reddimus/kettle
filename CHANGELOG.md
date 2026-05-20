@@ -7,6 +7,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`kettle --help` no longer leaks internal cycle references, and
+  `--config` documents the cycle-164 directory rejection.** The
+  rustdoc-style doc comments for `--list-keybinds` and `--config`
+  carried internal audit trail like `(cycle 103)` and
+  `(cycle 106)` — useful for me reading the source, mysterious
+  parentheticals when a user runs `kettle --help` in a real
+  terminal. The `--config` description also still said "non-existent
+  path is a hard error" with no mention that cycle 164 extended the
+  check to reject directories too (typing `--config ~/.config/kettle`
+  when you meant `.../kettle/config` is now a hard error, not a
+  silent fallback to defaults).
+  Fix: rewrote both doc comments to describe the *user-facing*
+  behavior in plain English, dropping the cycle refs (the audit
+  trail lives in code comments and CHANGELOG, where it belongs).
+  Added a regression test that walks every clap `Arg`'s help and
+  long-help (plus the top-level about/long-about) and asserts none
+  contain the substring `"cycle "` — same shape as the cycle-116
+  `defaults_has_no_shadow_collisions` drift guard, but for the
+  CLI's user-facing surface. +1 test (236 total).
+
 - **Bundled-theme filter is robust to OS/editor junk in
   `assets/themes/`.** `build.rs` skipped only the exact filenames
   `LICENSE` and `README.md`. A maintainer cloning the repo on
