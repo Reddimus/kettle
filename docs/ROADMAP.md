@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Session-restore theme check agrees with by_name
+      case-handling.** `Theme::list().contains(&name)` is
+      case-sensitive; `Theme::by_name` is case-insensitive.
+      A lowercase-stored theme name would skip the
+      restore. Now both use case-insensitive comparison.
 - [x] **Live config reload only fires for actual config
       file changes.** The notify watcher reloaded on
       every event in the dir; cycle 109's atomic session

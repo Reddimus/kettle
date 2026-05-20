@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Session restore agrees with `Theme::by_name` on case.**
+  The session-restore branch checked `Theme::list().contains
+  (&name)` (case-sensitive verbatim string match) before
+  applying a stored theme, but `Theme::by_name(name)` is
+  case-insensitive (cycle 0). A session written by an older
+  kettle build, or hand-edited, holding a lowercase theme
+  name (`tokyonight night`) would fail the verbatim
+  `contains` check and stay on the default theme — even
+  though `by_name` would have happily resolved it. Now
+  the check uses `iter().any(|n| n.eq_ignore_ascii_case
+  (name))` so the gate agrees with the apply.
+
+### Fixed
 - **Live config reload no longer fires on unrelated file
   events.** The `notify` watcher watched the config file's
   *directory* (NonRecursive) and reloaded on every event.

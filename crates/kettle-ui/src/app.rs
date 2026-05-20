@@ -1855,8 +1855,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // A theme picked at runtime last session sticks until
                     // the user changes it again or reloads the config.
                     if let Some(name) = s.theme.as_deref()
-                        && name != self.cfg.theme_name
-                        && kettle_config::Theme::list().contains(&name)
+                        && !name.eq_ignore_ascii_case(&self.cfg.theme_name)
+                        // Case-insensitive — `Theme::by_name` is already
+                        // case-insensitive (cycle 0), and a session
+                        // written by an older kettle (or hand-edited)
+                        // might hold a lowercase theme name that the
+                        // pre-cycle-152 `contains(&name)` would reject
+                        // verbatim despite the theme existing. Match
+                        // `by_name`'s semantics here so the check
+                        // agrees with the apply.
+                        && kettle_config::Theme::list()
+                            .iter()
+                            .any(|n| n.eq_ignore_ascii_case(name))
                     {
                         self.cfg.theme_name = name.to_string();
                         self.cfg.theme = kettle_config::Theme::by_name(name);
