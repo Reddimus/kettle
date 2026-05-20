@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **`kettle-core` crate-level doc lists every public module.**
+  Cycle-207 sibling for the next crate over. The original kettle-core
+  doc said "PTY management, the `alacritty_terminal` grid/VT engine
+  glue, the UI event bridge, and buffer search" — missed `links`
+  (OSC 8 + autodetect), `hints` (Ctrl+Shift+H targets), `images`
+  (kitty graphics registries), `scrollbar` (scroll-on-output
+  detection), and `url_trim` (cycle 166 bracket-balance helper).
+  Now: per-module breakdown with intra-doc links. `cargo doc -p
+  kettle-core --no-deps` reports zero warnings (had to disambiguate
+  `search`/`links` between the module name and the re-exported
+  function name via `mod@`).
+
 - **`kettle-ui` crate-level doc lists what's actually in the crate.**
   Original doc (one-liner from early development) mentioned only
   "winit application, tab/pane multiplexer, keyboard input
