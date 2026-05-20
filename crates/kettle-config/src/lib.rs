@@ -407,6 +407,34 @@ impl Config {
                     let want = v.trim().to_ascii_lowercase();
                     Theme::list().iter().any(|n| n.to_ascii_lowercase() == want)
                 }
+                // Enum-typed config values: each apply arm above has a
+                // `_ => DefaultVariant` fallthrough, so a typo (`bell =
+                // loud`, `cursor-style = wibble`, `scrollbar = sometimes`)
+                // silently falls back to the default without any user-
+                // visible warning. Pin the documented variants here so
+                // `--check-config` flags unknown values; the list mirrors
+                // the apply arms exactly.
+                "cursor-style" => matches!(v.as_str(), "block" | "underline" | "bar"),
+                "bell" => matches!(
+                    v.as_str(),
+                    "off" | "none" | "false" | "visual" | "flash" | "attention" | "urgent" | "both"
+                ),
+                "osc52" | "clipboard" => matches!(
+                    v.as_str(),
+                    "off"
+                        | "none"
+                        | "disabled"
+                        | "false"
+                        | "paste"
+                        | "read"
+                        | "both"
+                        | "all"
+                        | "true"
+                        | "copy"
+                ),
+                "tab-bar" => matches!(v.as_str(), "off" | "none" | "false" | "auto" | "always"),
+                "tab-bar-position" => matches!(v.as_str(), "top" | "bottom"),
+                "scrollbar" => matches!(v.as_str(), "never" | "off" | "false" | "auto" | "always"),
                 // `palette = N=#hex` — both halves have to parse.
                 "palette" => v.split_once('=').is_some_and(|(i, h)| {
                     i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
@@ -1019,6 +1047,61 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_unknown_enum_values() {
+        // Each enum config has an `_ => Default` arm — a typo silently
+        // falls back to the default. Now flagged for every documented
+        // enum key.
+        let bad = Config::detect_malformed_values(
+            "cursor-style = wibble\n\
+             bell = loud\n\
+             osc52 = sometimes\n\
+             clipboard = maybe\n\
+             tab-bar = sticky\n\
+             tab-bar-position = side\n\
+             scrollbar = occasionally\n",
+        );
+        assert_eq!(
+            bad.len(),
+            7,
+            "all seven bad enum values should be flagged: {bad:?}"
+        );
+        assert!(bad.iter().any(|b| b.contains("cursor-style")));
+        assert!(bad.iter().any(|b| b.contains("tab-bar-position")));
+        // Every documented variant (and alias) passes cleanly.
+        let ok = Config::detect_malformed_values(
+            "cursor-style = block\n\
+             cursor-style = underline\n\
+             cursor-style = bar\n\
+             bell = off\n\
+             bell = none\n\
+             bell = false\n\
+             bell = visual\n\
+             bell = flash\n\
+             bell = attention\n\
+             bell = urgent\n\
+             bell = both\n\
+             osc52 = off\n\
+             osc52 = none\n\
+             osc52 = paste\n\
+             osc52 = read\n\
+             osc52 = both\n\
+             osc52 = all\n\
+             osc52 = true\n\
+             osc52 = copy\n\
+             clipboard = off\n\
+             tab-bar = auto\n\
+             tab-bar = always\n\
+             tab-bar = off\n\
+             tab-bar-position = top\n\
+             tab-bar-position = bottom\n\
+             scrollbar = never\n\
+             scrollbar = auto\n\
+             scrollbar = always\n",
+        );
+        assert!(ok.is_empty(), "all valid enum variants: {ok:?}");
     }
 
     #[test]

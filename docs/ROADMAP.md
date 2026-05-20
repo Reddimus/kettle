@@ -473,6 +473,10 @@
       on a typo; now scans against `Theme::list()` so a
       copy-pasted theme name from another terminal's config
       flags loudly. +1 test.
+- [x] **`--check-config` catches unknown enum values.**
+      `cursor-style`/`bell`/`osc52`/`tab-bar`/`tab-bar-position`/
+      `scrollbar` all had `_ => Default` fallthrough — typos
+      flagged as malformed-value now. +1 test (7 bad + ~25 good).
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

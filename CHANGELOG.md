@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now catches unknown enum values.** Every
+  enum-typed config arm (`cursor-style`, `bell`, `osc52` /
+  `clipboard`, `tab-bar`, `tab-bar-position`, `scrollbar`) has an
+  `_ => DefaultVariant` fallthrough — a typo like `cursor-style =
+  wibble`, `bell = loud`, `scrollbar = sometimes` silently fell
+  back to the default. The list of valid variants per key now
+  lives alongside the apply arm (mirrored exactly), and
+  `detect_malformed_values` flags anything not in the documented
+  set. Sample after-fix output:
+
+      status:  3 issue(s):
+        - malformed value: cursor-style = "wibble"
+        - malformed value: bell = "loud"
+        - malformed value: scrollbar = "sometimes"
+
+  +1 test covering 7 bad + ~25 good values (every variant + alias
+  per key).
 - **`--check-config` now catches unknown theme names.**
   `Theme::by_name` silently falls back to TokyoNight Night on an
   unknown name. A user copying `theme = …` from another terminal's
