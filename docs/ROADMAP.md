@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Mouse focus changes also reset blink phase.**
+      Extracted cycle 135's pre/post into `focus_key()` +
+      `note_focus_change(pre)` helpers; click-a-tab and
+      click-a-pane now share the keyboard path's blink-
+      reset behavior. Three call sites, one helper pair.
 - [x] **Any focus-changing action resets blink phase.**
       Extends cycle 134 from `Action::Reset` to every action
       that flips which pane has focus (NextTab/PrevTab/

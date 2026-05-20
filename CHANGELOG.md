@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Mouse-driven focus changes also reset the blink phase.**
+  Cycle 135 caught the keyboard path; this cycle extends to:
+  - Clicking a tab in the tab bar to switch tabs.
+  - Clicking inside a pane to focus it (`Mux::focus_at`).
+  Both could leave the new pane's cursor invisible for up to
+  one `blink_interval` after the click, depending on the
+  half-period the timer happened to be on. Extracted the
+  cycle-135 pre/post pattern into shared helpers
+  (`focus_key()` + `note_focus_change(pre)`) so the three
+  focus-changing entry points (`handle_action`, tab-bar
+  click, content-area click) all use one implementation.
+
 - **Any focus-changing action also resets cursor blink phase.**
   Cycle 134 fixed it for `Action::Reset` specifically. The same
   "where's my cursor?" surprise applied to every focus-changing

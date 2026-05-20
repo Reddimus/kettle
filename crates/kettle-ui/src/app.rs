@@ -1202,22 +1202,35 @@ impl App {
         }
     }
 
+    /// Snapshot the focused `(tab, leaf)` pair. Paired with
+    /// `note_focus_change` to detect whether an operation moved focus
+    /// and, if so, reset the cursor blink phase so the new pane's
+    /// cursor is visible immediately (cycle 135 pattern, extracted to
+    /// a helper in cycle 136 so the mouse-driven paths can share it).
+    fn focus_key(&self) -> (usize, Option<u64>) {
+        (self.mux.active, self.mux.active_focus())
+    }
+
+    /// If the focused `(tab, leaf)` changed since `pre`, land the
+    /// cursor visible on the new pane right away.
+    fn note_focus_change(&mut self, pre: (usize, Option<u64>)) {
+        if self.focus_key() != pre {
+            self.blink_on = true;
+            self.last_blink = std::time::Instant::now();
+        }
+    }
+
     fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         let area = self.area();
         let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
         let waker = self.waker();
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can
-        // detect any focus change the action causes. Cycle 134 reset
-        // the blink phase on `Action::Reset` so the cursor was
-        // immediately visible after a "fresh start"; cycle 135 extends
-        // that to *any* focus-changing action (NextTab, PrevTab,
-        // GotoTab, FocusNext/Prev/Up/Down/Left/Right, ToggleZoom, …).
-        // Without this a user hitting Alt+Right to jump to the next
-        // pane would briefly see no cursor if the blink was on its
-        // off-half — exactly the case where you've just told kettle
-        // "show me where to type next."
-        let pre_focus = (self.mux.active, self.mux.active_focus());
+        // detect any focus change the action causes. Cycles 134/135
+        // landed this for keyboard-driven actions; cycle 136 extended
+        // to mouse paths via the shared `focus_key` / `note_focus_change`
+        // helpers.
+        let pre_focus = self.focus_key();
         match action {
             Action::NewTab => {
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
@@ -1453,11 +1466,7 @@ impl App {
         }
         // Cycle 135 (cont.): if focus moved as a result of the action,
         // land the cursor visible on the new pane right away.
-        let post_focus = (self.mux.active, self.mux.active_focus());
-        if pre_focus != post_focus {
-            self.blink_on = true;
-            self.last_blink = std::time::Instant::now();
-        }
+        self.note_focus_change(pre_focus);
         self.resize_all();
         self.save_session();
         if let Some(w) = &self.window {
@@ -1941,7 +1950,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 return;
                             }
                         } else {
+                            let pre = self.focus_key();
                             self.mux.active = seg.idx;
+                            self.note_focus_change(pre);
                         }
                     }
                     self.resize_all();
@@ -1963,8 +1974,10 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                let pre = self.focus_key();
                 self.mux
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
+                self.note_focus_change(pre);
                 if self.send_mouse(bcode, true, false) {
                     self.mouse_btn = Some(bcode);
                     return;
