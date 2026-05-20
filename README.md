@@ -84,7 +84,8 @@ kettle -e ssh -t host     # (-e consumes the rest of the args)
 | Focus next/prev pane | `Ctrl+Shift+N` / `P` | Close window | `Ctrl+Shift+Q` |
 | Next/prev tab | `Ctrl+PgDn` / `PgUp` | Copy / Paste | `Ctrl+Shift+C` / `V` |
 | **Search** | **`Ctrl+Shift+F`** | Fullscreen | `F11` |
-| Resize split | `Shift+Arrows` or `Ctrl+Shift+Arrows` | Directional focus | `Alt+Arrows` |
+| Resize split | `Shift+Arrows` | Directional focus | `Alt+Arrows` |
+| Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Scroll to top/bottom | `Shift+Home/End` |
 | Font in/out/reset | `Ctrl + +` / `-` / `0` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
 

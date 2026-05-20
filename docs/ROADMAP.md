@@ -506,6 +506,18 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Cycle-110 keybind collision fixed.** Cycle 110's
+      `Ctrl+Shift+Up/Down → ScrollLineUp/Down` was silently
+      shadowing the older `Ctrl+Shift+Arrows → Resize<dir>`
+      quartet for Up/Down (Left/Right still resized — half
+      shadow, fully inconsistent). The Resize-via-Ctrl+Shift
+      quartet was a duplicate of `Shift+Arrows → Resize<dir>`
+      (already bound), so dropping it costs nothing. Test grew
+      negative guards on `Ctrl+Shift+Left/Right` being free,
+      positive guards on `Shift+Arrows → Resize<dir>`. README
+      keybind table updated to reflect both fixes (drop the
+      `Ctrl+Shift+Arrows` resize column, add a scroll-line /
+      page / top-bottom row).
 - [x] **`--check-config` echoes `font-feature` count + per-
       style font-family overrides.** Symmetric with the
       existing `ssh: N host(s) configured` line: opt-in keys

@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **Cycle-110 keybind collision dropped:** the `Ctrl+Shift+Arrows
+  → Resize<dir>` quartet was bound at line 412–415 of
+  `keybinds.rs` defaults, then cycle 110 added `Ctrl+Shift+Up /
+  Ctrl+Shift+Down → ScrollLineUp/Down` at line 462–463 of the
+  same function. HashMap insertion order put the scroll-line
+  binds last, **silently shadowing** the Resize-Up/Down chord
+  while Resize-Left/Right remained mapped — an inconsistent
+  four-direction map (Up/Down scroll, Left/Right resize) that
+  passed cargo test but failed user expectation. The defaults
+  now drop the Ctrl+Shift+Arrows resize quartet entirely;
+  `Shift+Arrows` is the only canonical resize chord (already
+  bound at line 418–421 from before, so no resize chord was
+  actually lost — just the duplicate). README's keybind table
+  updated to remove the `Ctrl+Shift+Arrows` resize column and
+  to add a new row for the Scroll-line / Scroll-page / Scroll-
+  top/bottom chord family. Cycle-110 test
+  (`scroll_line_up_down_bound_to_ctrl_shift_arrows`) grew
+  positive guards on `Shift+Arrows → Resize<dir>` for all four
+  directions and *negative* guards that `Ctrl+Shift+Left/Right`
+  are unbound (prevents a future reintroduction of the
+  collision).
+
 ### Changed
 - **`--check-config` echoes `font-feature` count and per-style
   font-family overrides.** Previously the summary surfaced

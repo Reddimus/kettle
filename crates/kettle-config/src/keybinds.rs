@@ -409,10 +409,13 @@ pub fn defaults() -> Bindings {
     bind(a, Down, FocusDown);
     bind(a, Left, FocusLeft);
     bind(a, Right, FocusRight);
-    bind(cs, Up, ResizeUp);
-    bind(cs, Down, ResizeDown);
-    bind(cs, Left, ResizeLeft);
-    bind(cs, Right, ResizeRight);
+    // Resize splits with Shift+Arrows only — cycle 110 took
+    // `Ctrl+Shift+Up/Down` for `ScrollLineUp/Down`, so binding
+    // `Ctrl+Shift+Left/Right` to Resize alone would have given an
+    // inconsistent four-direction map (Up/Down scroll, Left/Right
+    // resize). Drop the Ctrl+Shift+Arrows resize quartet entirely;
+    // Shift+Arrows is the canonical Terminator-default chord. The
+    // README and keybind table reflect this from cycle 115 onward.
     // Terminator-style Shift+Arrow split resize.
     let sh = Mods::SHIFT;
     bind(sh, Up, ResizeUp);
@@ -528,6 +531,12 @@ mod tests {
         // shipped only PageUp/PageDown (Shift) and Top/Bottom (Shift
         // Home/End). Ctrl+Shift+Up/Down fills the gap with the most
         // commonly-used chord across modern terminals.
+        //
+        // Cycle 115 added a regression guard: this binding collided
+        // with the previous Ctrl+Shift+Arrows → Resize quartet, so
+        // the Resize-via-Ctrl+Shift+Arrows defaults were dropped
+        // entirely. Shift+Arrows is now the canonical resize chord
+        // (the README and example config match).
         let d = defaults();
         let cs = Mods::CTRL | Mods::SHIFT;
         assert_eq!(
@@ -546,6 +555,31 @@ mod tests {
             Some(&Action::JumpPrevPrompt),
             "JumpPrev/Next (Ctrl+Up/Down) must coexist with Ctrl+Shift+Up/Down"
         );
+        // Cycle-115 guards: the Ctrl+Shift+Arrows → Resize quartet is
+        // GONE (would silently shadow ScrollLineUp/Down). Shift+Arrows
+        // is the only resize chord now.
+        assert!(
+            !d.contains_key(&Trigger::new(cs, Key::Left)),
+            "Ctrl+Shift+Left must NOT be bound (avoid Resize/Scroll inconsistency)"
+        );
+        assert!(
+            !d.contains_key(&Trigger::new(cs, Key::Right)),
+            "Ctrl+Shift+Right must NOT be bound (avoid Resize/Scroll inconsistency)"
+        );
+        for k in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            let trig = Trigger::new(Mods::SHIFT, k);
+            assert!(
+                matches!(
+                    d.get(&trig),
+                    Some(Action::ResizeUp)
+                        | Some(Action::ResizeDown)
+                        | Some(Action::ResizeLeft)
+                        | Some(Action::ResizeRight)
+                ),
+                "Shift+{k:?} should map to a Resize action: {:?}",
+                d.get(&trig)
+            );
+        }
     }
 
     #[test]
