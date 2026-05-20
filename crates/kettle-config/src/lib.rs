@@ -1201,7 +1201,25 @@ mod config_tests {
             let parent = file_abs.parent().expect("doc has a parent dir");
             let mut i = 0usize;
             let mut checked = 0usize;
+            // Cycle 234: backtick-aware (same fix as cycle 233 applied
+            // to the cycle-232 link guard). Currently this guard's
+            // scope (README + docs/*.md) doesn't include any docs
+            // with `![…](…)` strings inside backticks, but CHANGELOG.md
+            // does have them as textual examples and a future cycle
+            // extending this scanner's scope would hit the same trap
+            // cycle 232 hit. Add the same `in_code` state guard
+            // proactively so the two scanners stay consistent.
+            let mut in_code = false;
             while i + 2 < bytes.len() {
+                if bytes[i] == b'`' {
+                    in_code = !in_code;
+                    i += 1;
+                    continue;
+                }
+                if in_code {
+                    i += 1;
+                    continue;
+                }
                 if bytes[i] == b'!' && bytes[i + 1] == b'[' {
                     let alt_close = match text[i + 2..].find(']') {
                         Some(j) => i + 2 + j,
