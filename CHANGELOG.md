@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Tests
+- **VT conformance: individual SGR-off codes
+  (22/23/24/27/29).** `sgr_truecolor_bold_and_reset` and
+  `sgr_underline_dim_strike` covered SGR *set* codes; the
+  attribute-off codes weren't tested. These matter for nested
+  styling: nvim / tmux / less / `git diff --color` set an
+  attribute, write, then unset *that one* attribute and
+  continue with the remaining accumulated SGR state. A
+  regression in the SGR-22 path would silently leave bold set
+  on cells the tool thought it had cleared. New
+  `sgr_individual_attribute_resets` stacks the full set
+  (bold + dim + italic + underline + inverse + strike), then
+  walks each off-code and asserts only the matching flag
+  clears while the others stay set. SGR 25 (blink off) is
+  documented in the test but not asserted —
+  `alacritty_terminal`'s `Cell::flags` deliberately doesn't
+  track BLINK (render-time concern, not a cell attribute).
+
 ## [1.2.0] — 2026-05-20
 
 Second minor release. Theme: **finish the first-launch

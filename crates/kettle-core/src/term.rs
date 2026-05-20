@@ -1868,6 +1868,82 @@ mod conformance {
     }
 
     #[test]
+    fn sgr_individual_attribute_resets() {
+        // Cycle 238: VT conformance gap. SGR `set` codes are well
+        // tested (`sgr_truecolor_bold_and_reset`,
+        // `sgr_underline_dim_strike`, …) but the individual
+        // attribute-*off* codes weren't:
+        //   * SGR 22 — normal intensity (clears bold *and* dim)
+        //   * SGR 23 — not italic
+        //   * SGR 24 — not underlined (clears all underline styles)
+        //   * SGR 27 — not reversed
+        //   * SGR 29 — not strikethrough
+        // These matter for tools that emit nested styling: nvim /
+        // tmux / less / `git diff --color` set an attribute, write,
+        // unset just that attribute, and continue with the rest of
+        // their accumulated SGR state. Without these we'd silently
+        // diverge from xterm behavior (cells AFTER the `not X`
+        // would carry residual flags).
+        //
+        // Note on SGR 25 / blink: `alacritty_terminal`'s `Cell::flags`
+        // bitfield deliberately doesn't track BLINK (blink is a
+        // render-time concern, not a cell attribute). SGR 5 / 25 are
+        // accepted at the parser layer but produce no cell-flag
+        // change; we don't assert on them here.
+        let (mut t, mut p) = harness(20, 2);
+        // Stack: bold + dim + italic + underline + reverse + strike.
+        // (Skip blink — see note above.)
+        feed(&mut t, &mut p, b"\x1b[1;2;3;4;7;9mA");
+        let a = &t.grid()[Point::new(Line(0), Column(0))];
+        assert!(a.flags.contains(Flags::BOLD), "SGR 1 set");
+        assert!(a.flags.contains(Flags::DIM), "SGR 2 set");
+        assert!(a.flags.contains(Flags::ITALIC), "SGR 3 set");
+        assert!(a.flags.contains(Flags::UNDERLINE), "SGR 4 set");
+        assert!(a.flags.contains(Flags::INVERSE), "SGR 7 set");
+        assert!(a.flags.contains(Flags::STRIKEOUT), "SGR 9 set");
+
+        // SGR 22 → clears BOTH bold and dim (normal intensity).
+        feed(&mut t, &mut p, b"\x1b[22mB");
+        let b = &t.grid()[Point::new(Line(0), Column(1))];
+        assert!(!b.flags.contains(Flags::BOLD), "SGR 22 clears bold");
+        assert!(!b.flags.contains(Flags::DIM), "SGR 22 clears dim");
+        // The other flags must still be set.
+        assert!(b.flags.contains(Flags::ITALIC), "SGR 22 keeps italic");
+        assert!(b.flags.contains(Flags::UNDERLINE), "SGR 22 keeps underline");
+        assert!(b.flags.contains(Flags::INVERSE), "SGR 22 keeps inverse");
+        assert!(b.flags.contains(Flags::STRIKEOUT), "SGR 22 keeps strikeout");
+
+        // SGR 23 → italic off only.
+        feed(&mut t, &mut p, b"\x1b[23mC");
+        let c = &t.grid()[Point::new(Line(0), Column(2))];
+        assert!(!c.flags.contains(Flags::ITALIC), "SGR 23 clears italic");
+        assert!(c.flags.contains(Flags::UNDERLINE), "SGR 23 keeps underline");
+
+        // SGR 24 → underline off (any style).
+        feed(&mut t, &mut p, b"\x1b[24mD");
+        let d = &t.grid()[Point::new(Line(0), Column(3))];
+        assert!(
+            !d.flags.contains(Flags::UNDERLINE),
+            "SGR 24 clears underline"
+        );
+        assert!(d.flags.contains(Flags::INVERSE), "SGR 24 keeps inverse");
+
+        // SGR 27 → inverse off.
+        feed(&mut t, &mut p, b"\x1b[27mE");
+        let e = &t.grid()[Point::new(Line(0), Column(4))];
+        assert!(!e.flags.contains(Flags::INVERSE), "SGR 27 clears inverse");
+        assert!(e.flags.contains(Flags::STRIKEOUT), "SGR 27 keeps strikeout");
+
+        // SGR 29 → strikeout off.
+        feed(&mut t, &mut p, b"\x1b[29mF");
+        let f = &t.grid()[Point::new(Line(0), Column(5))];
+        assert!(
+            !f.flags.contains(Flags::STRIKEOUT),
+            "SGR 29 clears strikeout"
+        );
+    }
+
+    #[test]
     fn app_cursor_and_keypad_modes() {
         let (mut t, mut p) = harness(6, 2);
         feed(&mut t, &mut p, b"\x1b[?1h");
