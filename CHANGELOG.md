@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`ToggleBroadcastAll` now scopes broadcast to the active tab,
+  not every pane in every tab.** `broadcast_write` walked
+  `self.panes.values_mut()` — the *whole* pane map, including
+  panes in other tabs. A user with `broadcast = true` typing in
+  one tab had their keystroke echoed into every pane across
+  every tab (often unrelated work, often where they specifically
+  *didn't* want their fan-out keystroke landing — `rm`, `git
+  push`, anything). Terminator's `broadcast_all` is per-tab,
+  iTerm2's "Send Input to All Sessions" defaults per-window,
+  kitty's `send_text` targets the current tab. Kettle now
+  matches: `Mux::broadcast_write` walks `tabs[active].root.
+  leaf_ids()` instead. New `Node::leaf_ids() -> Vec<u64>`
+  helper (DFS-order, symmetric with the existing `nth_leaf` /
+  `leaf_index_of`). +1 test (`leaf_ids_walks_dfs_order`).
 - **`Action::Reset` (Ctrl+Shift+R) now also sweeps kettle's local
   UI state.** Sending RIS (`ESC c`) to the engine reset the grid /
   DEC modes / alt-screen, but kettle owns several pieces of state

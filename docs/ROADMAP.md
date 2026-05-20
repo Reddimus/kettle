@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Broadcast scoped to the active tab (not every pane).**
+      `Mux::broadcast_write` was iterating the entire panes
+      map — typing one char with broadcast on echoed into other
+      tabs' panes too (often unrelated work). Now walks
+      `tabs[active].root.leaf_ids()`. New `Node::leaf_ids ->
+      Vec<u64>`. +1 test.
 - [x] **`Action::Reset` sweeps kettle's local UI state too.**
       RIS (`ESC c`) reset the engine but selection, search,
       command palette, hint mode, and SSH launcher all

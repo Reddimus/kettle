@@ -164,6 +164,28 @@ impl Node {
         walk(self, target, &mut idx)
     }
 
+    /// All leaf ids in DFS-order. Used by `broadcast_write` to scope
+    /// broadcast input to one tab's panes rather than every pane in every
+    /// tab (cycle 112 — `Action::ToggleBroadcastAll` was originally
+    /// "every pane in the whole mux", a footgun for users with several
+    /// tabs since typing one char would echo into every pane everywhere;
+    /// per-tab matches Terminator's `broadcast_all` and is what users
+    /// actually mean when they're paralleling SSH sessions).
+    pub fn leaf_ids(&self) -> Vec<u64> {
+        fn walk(n: &Node, out: &mut Vec<u64>) {
+            match n {
+                Node::Leaf(id) => out.push(*id),
+                Node::Split { a, b, .. } => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(self, &mut v);
+        v
+    }
+
     /// Leaf id at DFS-order position `n`, or the first leaf if `n` is past
     /// the end (graceful fallback so a session pointing to a no-longer-
     /// existent pane still produces a focused tab).
@@ -782,9 +804,23 @@ impl Mux {
         self.tabs.is_empty()
     }
 
+    /// Send `bytes` to every pane in the **active tab** (not every tab in
+    /// the mux). Cycle 112 fix: the old implementation broadcast across
+    /// every pane in every tab — typing one character with broadcast on
+    /// echoed into the user's other tabs too (often unrelated work, often
+    /// where the user *didn't* want their fan-out keystroke). Terminator's
+    /// `broadcast_all` is per-window-per-tab; iTerm2's "Send Input to All
+    /// Sessions" defaults per-window; kitty's `send_text` targets all
+    /// windows in the current tab. We follow that convention.
     pub fn broadcast_write(&mut self, bytes: &[u8]) {
-        for p in self.panes.values_mut() {
-            p.term.write(bytes);
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let ids = tab.root.leaf_ids();
+        for id in ids {
+            if let Some(p) = self.panes.get_mut(&id) {
+                p.term.write(bytes);
+            }
         }
     }
 
@@ -962,6 +998,26 @@ mod node_tests {
         match n.remove_leaf(2) {
             Err(Some(Node::Leaf(1))) => {}
             _ => panic!("removing one child should collapse to the sibling"),
+        }
+    }
+
+    #[test]
+    fn leaf_ids_walks_dfs_order() {
+        // Same DFS-order traversal that nth_leaf / leaf_index_of /
+        // session-save use, so any caller switching between these
+        // helpers gets a consistent enumeration. Used by broadcast_write
+        // (cycle 112) to scope broadcast input to a single tab.
+        let single = Node::Leaf(7);
+        assert_eq!(single.leaf_ids(), vec![7]);
+        // Build:  Split(a=Leaf(1), b=Split(a=Leaf(2), b=Leaf(3)))
+        // DFS:    [1, 2, 3]
+        let mut n = Node::Leaf(1);
+        n.split_leaf(1, 2, Dir::Horizontal);
+        n.split_leaf(2, 3, Dir::Vertical);
+        assert_eq!(n.leaf_ids(), vec![1, 2, 3]);
+        // Symmetric with nth_leaf for the same positions.
+        for (i, id) in n.leaf_ids().iter().enumerate() {
+            assert_eq!(n.nth_leaf(i), *id);
         }
     }
 
