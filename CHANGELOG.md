@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **CI smoke also verifies `--list-actions` and `--list-keybinds`
+  produce plausible counts.** Existing smoke verified `--list-themes`
+  > 400 entries (catches `theme_filter` over-rejection). Added the
+  same range-stable check for `--list-actions` (`> 50`, current 82
+  — headroom for new action variants without going stale) and
+  `--list-keybinds` (`> 40`, current 58 — headroom for cycle-115-
+  style chord-shadow rebalances while still catching an empty
+  defaults() regression). Pairs with cycle 215's `--version` and
+  `--check-config` grep assertions for full CLI-surface smoke
+  coverage.
+
 - **CI's CLI-smoke step now exercises `--version` and `--check-config`.**
   Pre-cycle, the smoke step ran `--config-path` and `--list-themes`
   but not `--version` (which exercises the cycle-192/195 build.rs

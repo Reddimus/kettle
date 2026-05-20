@@ -60,6 +60,23 @@ jobs:
           # it exits 0 and includes the kettle: build-identity line.
           cargo run -q -p kettle -- --check-config | grep -E '^kettle:  [0-9]'
           cargo run -q -p kettle -- --config-path
+          # `--list-themes` should always be 500+ entries (the bundled
+          # iTerm2-Color-Schemes ghostty set). A regression in
+          # `theme_filter` that over-rejects (cycle 167 / 186 / 187 /
+          # 190) would drop the count below 400.
           cargo run -q -p kettle -- --list-themes > themes.txt
           test "$(wc -l < themes.txt)" -gt 400
+          # `--list-actions` should list every action name + aliases,
+          # plus the parametric/unbind tail lines. Floor at 50 leaves
+          # plenty of headroom; a missing-action regression would
+          # drop the count fast (each Action variant tends to have
+          # 2-3 alias rows).
+          cargo run -q -p kettle -- --list-actions > actions.txt
+          test "$(wc -l < actions.txt)" -gt 50
+          # `--list-keybinds` should show the default Terminator-
+          # compatible set (~55 chords). Floor at 40 keeps the assertion
+          # from going stale on cycle-115-style chord-shadow rebalances
+          # while still catching "I accidentally cleared `defaults()`".
+          cargo run -q -p kettle -- --list-keybinds > keybinds.txt
+          test "$(wc -l < keybinds.txt)" -gt 40
         shell: bash
