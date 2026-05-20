@@ -161,6 +161,101 @@ pub enum Action {
     GotoTab(u8),
 }
 
+/// Every accepted action token, in the canonical form the user types in
+/// `keybind = …`. One name per row; alias rows are present too (so users
+/// who learned Terminator's `go_next` see it here alongside Ghostty's
+/// `focus_next`). Sorted for stable output. Followed by a one-line
+/// `goto_tab:N` blurb — the parametric form can't be enumerated.
+///
+/// Powers `kettle --list-actions`, the inverse of `Action::from_name`.
+/// A `--check-config` cycle (cycle 85) catches typos at validation time;
+/// `--list-actions` is the *forward* discovery for users writing a new
+/// keybind from scratch.
+///
+/// Kept in sync with `Action::from_name` via the test
+/// `action_names_round_trip_through_from_name`.
+pub fn action_names() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = vec![
+        "copy",
+        "copy_to_clipboard",
+        "paste",
+        "paste_from_clipboard",
+        "new_tab",
+        "close_tab",
+        "next_tab",
+        "previous_tab",
+        "prev_tab",
+        "move_tab_left",
+        "move_tab_right",
+        "new_split:right",
+        "split_right",
+        "split_vert",
+        "new_split:down",
+        "split_down",
+        "split_horiz",
+        "split_auto",
+        "close_surface",
+        "close_pane",
+        "close_term",
+        "close_window",
+        "new_window",
+        "focus_next",
+        "go_next",
+        "focus_prev",
+        "go_prev",
+        "goto_split:up",
+        "go_up",
+        "goto_split:down",
+        "go_down",
+        "goto_split:left",
+        "go_left",
+        "goto_split:right",
+        "go_right",
+        "resize_up",
+        "resize_down",
+        "resize_left",
+        "resize_right",
+        "toggle_split_zoom",
+        "toggle_zoom",
+        "increase_font_size",
+        "zoom_in",
+        "decrease_font_size",
+        "zoom_out",
+        "reset_font_size",
+        "zoom_normal",
+        "start_search",
+        "search",
+        "broadcast_all",
+        "group_all",
+        "broadcast_off",
+        "ungroup_all",
+        "toggle_fullscreen",
+        "full_screen",
+        "reset",
+        "scroll_page_up",
+        "scroll_page_down",
+        "scroll_to_top",
+        "scroll_to_bottom",
+        "jump_to_prompt_prev",
+        "prev_prompt",
+        "jump_to_prompt_next",
+        "next_prompt",
+        "new_ssh",
+        "ssh",
+        "command_palette",
+        "palette",
+        "hint_mode",
+        "hints",
+        "quick_select",
+        "next_theme",
+        "prev_theme",
+        "previous_theme",
+        "reload_config",
+    ];
+    v.sort_unstable();
+    v
+}
+
 impl Action {
     pub(crate) fn from_name(s: &str) -> Option<Action> {
         use Action::*;
@@ -439,6 +534,38 @@ mod tests {
                 "{t:?} should map to {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn action_names_round_trip_through_from_name() {
+        // Drift guard: every name `action_names()` lists must parse
+        // back to Some(Action) via `from_name`. If a new action lands
+        // in `from_name` but no row is added to `action_names`,
+        // `kettle --list-actions` will silently omit it; if a row in
+        // `action_names` typos a name, `from_name` will return None
+        // and the published list ships a useless token. Either way
+        // this test fails.
+        let names = action_names();
+        // Sanity: enumeration is non-trivial. If this drops to 0, the
+        // bug is in `action_names`, not in `from_name`.
+        assert!(
+            names.len() >= 40,
+            "expected at least 40 documented actions; got {}",
+            names.len()
+        );
+        for n in &names {
+            assert!(
+                Action::from_name(n).is_some(),
+                "action_names returned {n:?} but from_name rejects it"
+            );
+        }
+        // Also pin `goto_tab:N` (the only parametric form). It isn't
+        // in `action_names` because N is unbounded, but it must parse.
+        assert!(Action::from_name("goto_tab:1").is_some());
+        // And `unbind` is intentionally NOT a listed action — it's a
+        // sentinel for `apply_keybind`, not a real Action variant.
+        assert!(!names.contains(&"unbind"));
+        assert!(Action::from_name("unbind").is_none());
     }
 
     #[test]

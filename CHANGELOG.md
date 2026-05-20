@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle --list-actions` enumerates every valid `keybind` action
+  name.** The onboarding gap inverse of `--list-keybinds`: that one
+  shows what's currently bound; this one shows what `keybind =
+  trigger=…` values are valid. Previously, a user writing a new
+  binding from scratch had to either read the kettle source or
+  invoke `--check-config` after each guess to confirm a name parsed
+  — both fall short of "I want to see the menu". 75 documented
+  action tokens (including every alias — `focus_next` /
+  `go_next` / `previous_tab` / `prev_tab`), sorted alphabetically,
+  followed by two tail lines documenting the parametric
+  `goto_tab:N` form and the `unbind` sentinel (which isn't an
+  Action variant but is accepted by `apply_keybind`). New pure
+  helper `keybinds::action_names() -> Vec<&'static str>`. Kept in
+  sync with `Action::from_name` via a drift test
+  (`action_names_round_trip_through_from_name`) that asserts every
+  listed name parses back to `Some(Action)` — a typo in the list
+  or a forgotten alias both fail it.
+
 ### Changed
 - **`kettle --list-keybinds` honors `--config FILE` (or the default
   config path) and shows the *effective* keymap.** Previously the

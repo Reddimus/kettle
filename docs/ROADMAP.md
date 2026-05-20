@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--list-actions` enumerates valid `keybind` action
+      names.** Onboarding inverse of `--list-keybinds`: shows
+      what `trigger=…` values parse, sorted, with the
+      parametric `goto_tab:N` and `unbind` sentinel as footer
+      lines. New `keybinds::action_names() -> Vec<&'static
+      str>`; drift-tested against `Action::from_name`. +1 test.
 - [x] **`--list-keybinds` honors `--config` and shows the
       *effective* keymap.** Previously always printed defaults;
       no CLI way to confirm overrides + unbinds. New

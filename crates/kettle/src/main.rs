@@ -17,6 +17,10 @@ struct Cli {
     #[arg(long)]
     list_keybinds: bool,
 
+    /// Print every accepted action name (for `keybind = trigger=action`) and exit.
+    #[arg(long)]
+    list_actions: bool,
+
     /// Print the resolved config path and exit.
     #[arg(long)]
     config_path: bool,
@@ -79,6 +83,20 @@ fn main() -> anyhow::Result<()> {
         for name in kettle_config::Theme::list() {
             println!("{name}");
         }
+        return Ok(());
+    }
+    if cli.list_actions {
+        // Onboarding pair to `--list-keybinds`: that one shows what's
+        // currently bound; this one shows what `keybind = trigger=…`
+        // values are valid. Without this, users writing a new bind had
+        // to grep the source or hit `--check-config` to confirm a name
+        // they guessed. `goto_tab:N` is parametric, so it gets a
+        // one-line tail blurb instead of an enumeration.
+        for name in kettle_config::keybinds::action_names() {
+            println!("{name}");
+        }
+        println!("goto_tab:N    (parametric; N is 1-based, 1..=255)");
+        println!("unbind        (sentinel; removes the default — also: none, null, false, empty)");
         return Ok(());
     }
     if cli.list_keybinds {
