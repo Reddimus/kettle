@@ -381,6 +381,11 @@
       memory.** Plain BS still = DEL (0x7F), Alt+BS still =
       ESC+DEL — only the Ctrl flavor was collapsing to plain.
       Alacritty/xterm/Ghostty parity. +1 test.
+- [x] **`Alt+1..9` direct tab access** (kitty / Terminator /
+      iTerm2 / Ghostty). `Action::GotoTab(u8)` handler existed but
+      was orphaned — no `goto_tab:N` parser and no default keybind.
+      Now bound by default + `keybind = alt+5=goto_tab:5` parses
+      (1-based; 0 rejected to surface the ambiguity). +2 tests.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

@@ -57,13 +57,15 @@ any unrecognized keys). The file is **watched and reloaded live**.
 `home`/`end`, `enter`, `tab`, `plus`/`minus`/`equal`).
 
 `action` is one of: `copy`, `paste`, `new_tab`, `close_tab`, `next_tab`,
-`previous_tab`, `new_split:right`, `new_split:down`, `split_auto`,
-`close_pane`, `close_window`, `new_window`, `focus_next`, `focus_prev`,
-`goto_split:{up,down,left,right}`, `increase_font_size`,
-`decrease_font_size`, `reset_font_size`, `start_search`, `broadcast_all`,
-`broadcast_off`, `toggle_fullscreen`, `reset`, `scroll_page_up`,
-`scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `prev_prompt`,
-`next_prompt`, `new_ssh`, `command_palette`, `hint_mode`, `next_theme`,
-`prev_theme`, `reload_config`.
+`previous_tab`, `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based,
+N is the tab number — `goto_tab:1` is the first tab), `new_split:right`,
+`new_split:down`, `split_auto`, `close_pane`, `close_window`, `new_window`,
+`focus_next`, `focus_prev`, `goto_split:{up,down,left,right}`,
+`increase_font_size`, `decrease_font_size`, `reset_font_size`,
+`start_search`, `broadcast_all`, `broadcast_off`, `toggle_fullscreen`,
+`reset`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`,
+`scroll_to_bottom`, `prev_prompt`, `next_prompt`, `new_ssh`,
+`command_palette`, `hint_mode`, `next_theme`, `prev_theme`,
+`reload_config`.
 
 See [`kettle.example.config`](kettle.example.config).

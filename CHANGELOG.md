@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`Alt+1..9` jumps to tab 1..9** (kitty / Terminator / iTerm2 /
+  Ghostty parity). The `Action::GotoTab(u8)` handler has existed
+  since the early cycles, but `Action::from_name` had no parser
+  for `goto_tab:N` strings and no default keybind, so the action
+  was orphaned — users could neither bind it via config nor trigger
+  it at all. Now: defaults bind Alt+1..Alt+9 → GotoTab(0..8), and
+  config strings `keybind = alt+5=goto_tab:5` work (1-based to
+  match the user's mental model; refused on `0` to surface the
+  ambiguity rather than silently aliasing first-tab). Alt+0 is
+  kept free for users who want to bind "last tab" manually.
+  +2 tests (defaults table + parser rules incl. zero-rejection).
 - **`Ctrl+Backspace` now sends BS (0x08) for delete-word muscle
   memory.** xterm/alacritty/Ghostty all distinguish the chord:
   plain Backspace → DEL (0x7F, readline `backward-delete-char`),

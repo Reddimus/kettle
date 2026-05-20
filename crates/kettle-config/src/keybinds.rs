@@ -191,7 +191,19 @@ impl Action {
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,
-            _ => return None,
+            // `goto_tab:N` where N is 1-based (Terminator / kitty syntax —
+            // "Alt+1 = first tab" is the user mental model). Internally we
+            // store the zero-based index so the handler can clamp against
+            // `tabs.len()` without an off-by-one dance.
+            other => {
+                if let Some(rest) = other.strip_prefix("goto_tab:")
+                    && let Ok(n) = rest.parse::<u8>()
+                    && n >= 1
+                {
+                    return Some(GotoTab(n - 1));
+                }
+                return None;
+            }
         })
     }
 }
@@ -310,6 +322,12 @@ pub fn defaults() -> Bindings {
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
     bind(Mods::SHIFT, Home, ScrollToTop);
     bind(Mods::SHIFT, End, ScrollToBottom);
+    // Alt+1..9 jumps to tab 1..9 (kitty / Terminator / Ghostty parity).
+    // No-op when the requested tab doesn't exist — the app-side handler
+    // already clamps against `tabs.len()`.
+    for n in 1u8..=9 {
+        bind(a, Char((b'0' + n) as char), GotoTab(n - 1));
+    }
     m
 }
 
@@ -336,6 +354,47 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn alt_digit_keys_go_to_tab() {
+        let d = defaults();
+        // Alt+1 → GotoTab(0), …, Alt+9 → GotoTab(8). Every modern terminal
+        // binds these (kitty / Terminator / iTerm2 / Ghostty). User mental
+        // model is 1-based ("Alt+1 = first tab"); internally we store the
+        // zero-based index the handler indexes into `tabs`.
+        for n in 1u8..=9 {
+            let t = Trigger::new(Mods::ALT, Key::Char((b'0' + n) as char));
+            match d.get(&t) {
+                Some(Action::GotoTab(i)) => assert_eq!(*i, n - 1, "Alt+{n} → tab {}", n - 1),
+                other => panic!("Alt+{n} not bound to GotoTab: {other:?}"),
+            }
+        }
+        // Alt+0 is *not* bound (browsers use Cmd+9 for "last tab" but kitty
+        // / Terminator don't bind 0, so neither do we — kept free for the
+        // user to bind manually if they want "last tab" semantics).
+        let t0 = Trigger::new(Mods::ALT, Key::Char('0'));
+        assert!(!d.contains_key(&t0), "Alt+0 should be free");
+    }
+
+    #[test]
+    fn from_name_parses_goto_tab_one_based() {
+        // `goto_tab:1` is the first tab — 1-based to match the keybind
+        // intuition. Internally → GotoTab(0).
+        assert!(matches!(
+            Action::from_name("goto_tab:1"),
+            Some(Action::GotoTab(0))
+        ));
+        assert!(matches!(
+            Action::from_name("goto_tab:9"),
+            Some(Action::GotoTab(8))
+        ));
+        // Zero is rejected (user mental model is 1-based; refuse the
+        // ambiguity rather than silently mapping it to GotoTab(0)).
+        assert!(Action::from_name("goto_tab:0").is_none());
+        // Garbage values → None so unknown-key reporting still kicks in.
+        assert!(Action::from_name("goto_tab:abc").is_none());
+        assert!(Action::from_name("goto_tab:").is_none());
     }
 
     #[test]
