@@ -1913,6 +1913,24 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let attrs = Window::default_attributes().with_title("kettle");
+        // Set WM_CLASS / Wayland app_id explicitly so GNOME / KDE
+        // task switchers, dock pins, and the `StartupWMClass=kettle`
+        // line in `packaging/linux/kettle.desktop` all line up. Without
+        // this the X11 WM_CLASS defaults to the cargo target name
+        // (still "kettle" for normal builds, but "kettle-bin" or
+        // similar for forks / renamed binaries), and Wayland windows
+        // show up as generic "Unknown" in the activities overview.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+        let attrs = {
+            // Both `WindowAttributesExtWayland::with_name` and
+            // `WindowAttributesExtX11::with_name` write to the same
+            // `platform_specific.name` field — calling either suffices.
+            // We pick X11 here and fully-qualify the call so the import
+            // doesn't put both methods in scope (which would make
+            // `attrs.with_name(…)` ambiguous).
+            use winit::platform::x11::WindowAttributesExtX11;
+            WindowAttributesExtX11::with_name(attrs, "kettle", "kettle")
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

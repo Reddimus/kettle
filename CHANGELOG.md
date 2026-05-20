@@ -6,6 +6,76 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-20
+
+First "ready for daily use" release. Eleven months and ~240 audit
+cycles after `v0.1.0` (the first-cross-platform release of
+2026-05-19), the suite is large enough, the docs are tight enough,
+and the desktop integration is good enough that we're ready to
+stop calling this pre-release software.
+
+### Highlights since 0.1.0
+- Full Ghostty-compatible config (`key = value`), 500+ bundled
+  themes (iTerm2-Color-Schemes / Ghostty ports), TokyoNight Night
+  as the verified default.
+- Terminator-style splits + tabs, broadcast input across panes,
+  search overlay, command palette, theme picker, session
+  save/restore (with corruption-backup contract), drag-drop file
+  paste, kitty/Sixel/iTerm2 image protocols, hyperlink + URL +
+  path + IP detection, OSC 7 cwd, OSC 133 prompt marks for
+  Ctrl+Up/Down navigation, OSC 8 hyperlinks, OSC 52 clipboard,
+  bracketed paste with injection guards, wide CJK + combining
+  marks.
+- GPU-accelerated rendering via wgpu (Vulkan/Metal/DX12) +
+  glyphon, with an offscreen self-test that runs in CI on all
+  three OSes.
+- Linux desktop integration: easy installer (`scripts/install.sh`),
+  XDG `.desktop` entry with `StartupWMClass=kettle`, terminal-style
+  SVG icon + PNG fallbacks at 32/48/64/128/256, WM_CLASS set
+  explicitly via winit so GNOME / KDE bind the launcher to running
+  windows.
+- macOS universal binary (x86_64 + aarch64), `.app` bundle with
+  Info.plist.
+- CI matrix on Linux + macOS + Windows: `fmt --check` → `clippy
+  -D warnings` → `cargo test --workspace` → `cargo doc -D
+  warnings` → headless GPU smoke (Linux) → CLI smoke with grep
+  assertions for `--version` / `--check-config` /
+  `--list-themes`>400 / `--list-actions`>50 / `--list-keybinds`>40
+  on every OS.
+
+### Added (this release cycle)
+- **Terminal-style SVG icon + PNG fallbacks at 32/48/64/128/256.**
+  TokyoNight palette `>_` motif. Lives at
+  `packaging/linux/kettle.{svg,*.png}` and is bundled into the
+  Linux release tarball alongside an extracted `install.sh`.
+- **`scripts/install.sh` — easy Linux desktop install.** No `sudo`
+  needed; drops the binary into `~/.local/bin/kettle`, the
+  launcher into `~/.local/share/applications/`, and icons into
+  `~/.local/share/icons/hicolor/{scalable,256x256,…}/apps/`. Works
+  both from a cloned repo (builds release first) AND from an
+  extracted release tarball (uses the bundled binary — detected
+  by the `kettle` file living next to the script). After install,
+  the kettle launcher appears in the GNOME Activities overview /
+  Ubuntu Super-key search / KDE Krunner. `--uninstall` removes
+  everything atomically.
+- **Explicit `WM_CLASS=kettle` / Wayland `app_id=kettle` on every
+  Linux window.** Without this, GNOME's task switcher and dock-pin
+  logic doesn't reliably associate running kettle windows with the
+  `StartupWMClass=kettle` line in the `.desktop` file. Set via
+  `winit::platform::x11::WindowAttributesExtX11::with_name` (the
+  same trait impl writes to the shared `platform_specific.name`
+  used by both Wayland and X11 backends).
+
+### Internal
+- **`[workspace.lints.clippy]` opens forward-guards against
+  `dbg_macro` / `todo` / `unimplemented`.** The codebase has zero
+  occurrences of all three today, so this is purely "lock the door
+  before someone walks through it." `clippy -- -D warnings` already
+  enforces them via warning level, but a manifest-level deny is
+  durable policy and survives a future `--warnings=allow`
+  invocation. Each crate's `Cargo.toml` opts in with
+  `[lints]\nworkspace = true`.
+
 ### CI
 - **`cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
   added on the Linux job.** Cycles 207-210 landed crate-level

@@ -8,11 +8,14 @@ authors.workspace = true
 # See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
 description = "kettle: PTY + alacritty_terminal VT glue, scrollback search, hyperlink/URL/path/IP detection, kitty/Sixel/iTerm2 image registries"
 
+[lints]
+workspace = true
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 crossbeam-channel = "0.5.15"
-kettle-vt = { version = "0.1.0", path = "../kettle-vt" }
+kettle-vt = { version = "1.0.0", path = "../kettle-vt" }
 log.workspace = true
 portable-pty = "0.9.0"
 regex.workspace = true

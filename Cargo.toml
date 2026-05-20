@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 # Cycle 213: edition was "2021" but every crate's Cargo.toml declared
 # "2024" individually. Bumped here to match reality and let crates
 # inherit via `edition.workspace = true`.
@@ -29,6 +29,30 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 regex = "1"
 unicode-width = "0.2"
+
+[workspace.lints.clippy]
+# Cycle 220: forward-guard against three patterns we never want
+# committed to main. `clippy -- -D warnings` already denies the
+# default clippy levels; this block opts each lint up to deny so
+# it survives a future `--warnings=allow` invocation and is
+# visible policy in the manifest rather than a CI flag.
+#
+# - `dbg_macro` — `dbg!(x)` is fine while debugging but leaks
+#   debug prints into release builds + tests if forgotten.
+# - `todo` / `unimplemented` — `todo!()` and `unimplemented!()`
+#   panic at runtime; they belong in scratchpads, not in committed
+#   main. A real not-yet-implemented surface should return a
+#   typed error so callers can decide.
+#
+# The codebase has zero occurrences of all three today, so this
+# is purely "lock the door before someone walks through it." If a
+# legitimate case ever arises (`todo!()` inside a freshly stubbed-
+# out branch during an in-progress feature), the contributor adds
+# `#[allow(clippy::todo)]` with a one-line justification, the same
+# pattern used everywhere else.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [profile.release]
 opt-level = 3

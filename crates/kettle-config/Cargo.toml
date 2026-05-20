@@ -11,6 +11,9 @@ authors.workspace = true
 # sub-crate. Each library crate overrides with what *it* does.
 description = "kettle: Ghostty-compatible config parsing, bundled theme set, embedded Nerd Font, keybinds, fuzzy matcher"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 bitflags = "2.11.1"

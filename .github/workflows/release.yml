@@ -56,10 +56,18 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/kettle
+          mkdir -p dist/kettle/packaging/linux
           cp target/release/kettle dist/kettle/
           cp LICENSE NOTICE README.md dist/kettle/
-          cp packaging/linux/kettle.desktop dist/kettle/
+          # Desktop integration assets — packaged at the SAME relative
+          # paths the in-tree `scripts/install.sh` expects, so a user
+          # who extracts the tarball can run `./kettle/install.sh` and
+          # get the binary + icon + .desktop entry installed under
+          # ~/.local/ without any further steps.
+          cp packaging/linux/kettle.desktop dist/kettle/packaging/linux/
+          cp packaging/linux/kettle.svg     dist/kettle/packaging/linux/
+          cp packaging/linux/kettle-*.png   dist/kettle/packaging/linux/ || true
+          install -Dm755 scripts/install.sh dist/kettle/install.sh
           tar -C dist -czf ${{ matrix.artifact }} kettle
 
       - name: Package (macOS .app bundle)

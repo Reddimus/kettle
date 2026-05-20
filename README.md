@@ -68,6 +68,19 @@ sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
 cargo run --release
 ```
 
+**Easy desktop install on Linux** — drop the binary, launcher entry, and
+icon into the standard XDG user paths so kettle shows up in the GNOME
+Activities overview / Ubuntu **Super-key** search / KDE Krunner:
+
+```sh
+./scripts/install.sh                  # from a cloned repo (builds release first)
+./install.sh                          # from a release tarball (uses bundled binary)
+./scripts/install.sh --uninstall      # remove everything later
+```
+
+See [`docs/INSTALL.md`](docs/INSTALL.md) for prebuilt release tarballs,
+macOS `.app`, and Windows packaging.
+
 ```sh
 kettle --list-themes        # list every bundled theme (~512)
 kettle --list-keybinds      # print the *effective* keymap (defaults + your overrides + unbinds)

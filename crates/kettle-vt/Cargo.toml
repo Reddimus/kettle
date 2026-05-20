@@ -8,6 +8,9 @@ authors.workspace = true
 # See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
 description = "kettle: streaming VT byte extractor — kitty/Sixel/iTerm2 image protocols, OSC 7 cwd, OSC 133 prompt marks, OSC 1→2 title rewrite"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 base64 = "0.22.1"
