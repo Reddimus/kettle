@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`--check-config` labels read errors as `i/o error:`, not the
+  misleading `malformed value:`.** Cycle-196 follow-up. Cycle 196
+  surfaced read failures by pushing them into the `malformed`
+  list — they then printed with the existing `- malformed
+  value:` prefix. Confusing: a permission-denied file isn't a
+  value-parsing failure. Now they get their own category with
+  an `i/o error:` prefix and are counted separately in the issues
+  total. Sample output diff:
+  ```
+  before:  - malformed value: could not read /path: ... (using defaults)
+  after:   - i/o error: could not read /path: ... (using defaults)
+  ```
+  Same exit-code semantics (still 1 when issues > 0). 243 tests
+  pass.
+
 ### Documentation
 - **`docs/UX-COMPARISON.md` matrix gains drag-and-drop file paths
   row.** Cycle 175 added drag-drop, cycle 182 made it bracketed-

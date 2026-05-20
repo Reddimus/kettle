@@ -244,7 +244,7 @@ fn main() -> anyhow::Result<()> {
         // once inside load_from_with_diagnostics). Harmless but
         // wasteful; now the read happens once.
         let mut read_error: Option<String> = None;
-        let (cfg, unknown, mut malformed) = match &path {
+        let (cfg, unknown, malformed) = match &path {
             Some(p) if p.exists() => match std::fs::read_to_string(p) {
                 Ok(text) => {
                     let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
@@ -252,18 +252,12 @@ fn main() -> anyhow::Result<()> {
                     (cfg, unknown, malformed)
                 }
                 Err(e) => {
-                    read_error = Some(format!(
-                        "could not read {}: {e} (using defaults)",
-                        p.display()
-                    ));
+                    read_error = Some(format!("could not read {}: {e}", p.display()));
                     (kettle_config::Config::default(), Vec::new(), Vec::new())
                 }
             },
             _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
-        if let Some(e) = &read_error {
-            malformed.push(e.clone());
-        }
         // Cycle 194: lead with the kettle build version + git SHA, so a
         // user pasting `--check-config` output into a bug report doesn't
         // also need to run `--version` separately. Matches the
@@ -357,12 +351,22 @@ fn main() -> anyhow::Result<()> {
                 styles_set.join(", ")
             );
         }
-        let issues = unknown.len() + malformed.len();
+        // Cycle 201: count and display I/O errors (cycle 196's read
+        // failures) as their own category rather than reusing the
+        // "malformed value:" prefix — a permission-denied file isn't
+        // a value-parsing failure, and labeling it as one was
+        // confusing the diagnostic. Read errors get an `i/o error:`
+        // line instead.
+        let io_count = if read_error.is_some() { 1 } else { 0 };
+        let issues = unknown.len() + malformed.len() + io_count;
         if issues == 0 {
             println!("status:  OK — no issues");
             return Ok(());
         }
         println!("status:  {issues} issue(s):");
+        if let Some(e) = &read_error {
+            println!("  - i/o error: {e} (using defaults)");
+        }
         for k in &unknown {
             println!("  - unknown key: {k}");
         }
