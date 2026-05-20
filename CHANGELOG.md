@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`kettle --check-config` exits non-zero when the config file
+  is unreadable (perm-denied / I/O error), instead of silently
+  returning "status: OK".** Pre-fix,
+  `load_from_with_diagnostics` returned defaults on any
+  `read_to_string` error and emitted a `warn` log to stderr.
+  `--check-config`'s stdout said "config: /path" then "status:
+  OK", and the exit code was 0 — making the user think their
+  config loaded fine. Bug-report shape: "I set
+  `theme = Catppuccin Mocha` but kettle keeps using TokyoNight,
+  and --check-config says everything's fine" → the file was
+  actually unreadable (umask, sudo'd kettle on a user-owned
+  file, network mount lost, etc.). Now the read error is
+  surfaced as a malformed-value entry so it shows in the
+  issues list and triggers `exit 1`:
+  ```
+  status:  1 issue(s):
+    - malformed value: could not read /etc/kettle.conf:
+      Permission denied (os error 13) (using defaults)
+  ```
+
 ### Added
 - **`--version` SHA tags with `+dirty` when the working tree has
   uncommitted changes.** Cycle 192 captured the git SHA; cycle

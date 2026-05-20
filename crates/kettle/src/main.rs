@@ -228,12 +228,31 @@ fn main() -> anyhow::Result<()> {
             .config
             .clone()
             .or_else(kettle_config::Config::default_path);
-        let (cfg, unknown, malformed) = match &path {
-            // Share `load_from_with_diagnostics` with the reload path so the
-            // two diagnostic sources can't drift on which lints they run.
-            Some(p) if p.exists() => kettle_config::Config::load_from_with_diagnostics(p),
+        // Cycle 196: surface read errors explicitly. Pre-fix,
+        // `load_from_with_diagnostics` silently returned defaults on
+        // any read error (permission denied, ENOENT-after-stat-race,
+        // I/O error) — the warn went to stderr but `--check-config`'s
+        // stdout said "status: OK" and exited 0, making the user
+        // think their config loaded. Now: probe `read_to_string`
+        // directly and turn a read failure into a malformed entry
+        // so it lands in the issues list with a non-zero exit code.
+        let mut read_error: Option<String> = None;
+        let (cfg, unknown, mut malformed) = match &path {
+            Some(p) if p.exists() => match std::fs::read_to_string(p) {
+                Ok(_) => kettle_config::Config::load_from_with_diagnostics(p),
+                Err(e) => {
+                    read_error = Some(format!(
+                        "could not read {}: {e} (using defaults)",
+                        p.display()
+                    ));
+                    (kettle_config::Config::default(), Vec::new(), Vec::new())
+                }
+            },
             _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
+        if let Some(e) = &read_error {
+            malformed.push(e.clone());
+        }
         // Cycle 194: lead with the kettle build version + git SHA, so a
         // user pasting `--check-config` output into a bug report doesn't
         // also need to run `--version` separately. Matches the
