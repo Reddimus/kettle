@@ -167,8 +167,19 @@ impl FontFeature {
         if name.is_empty() || name.len() > 4 || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
             return None;
         }
+        // OpenType feature tags are case-sensitive: the spec defines every
+        // standard tag in *lowercase* (`liga`, `clig`, `calt`, `cv01`,
+        // `ss05`…). A user writing `font-feature = LIGA on` would otherwise
+        // store an uppercase tag, which (a) fails `is_ligature()` so the
+        // coarse `font_ligatures` config flag stays stale, and (b) wouldn't
+        // be recognized by the cosmic-text / harfbuzz shaper downstream.
+        // Lowercase here so both checks see the canonical form. (Numeric
+        // chars like `cv01` are unaffected by the lowercasing.)
         let mut tag = [b' '; 4];
         tag[..name.len()].copy_from_slice(name.as_bytes());
+        for b in tag.iter_mut() {
+            b.make_ascii_lowercase();
+        }
         Some(FontFeature {
             tag,
             value: value.unwrap_or(1),
@@ -1243,6 +1254,58 @@ mod config_tests {
                 value: 1
             }
             .is_ligature()
+        );
+    }
+
+    #[test]
+    fn font_feature_tag_is_lowercased() {
+        // Cycle 169: OpenType feature tags are case-sensitive per spec and
+        // every standard tag is lowercase (`liga`, `clig`, `calt`, `cv01`,
+        // `ss05`…). A user writing `font-feature = LIGA on` had their tag
+        // stored verbatim as uppercase. Two consequences flowed from
+        // there:
+        // 1. `is_ligature()` matched only `b"liga"` (lowercase), so the
+        //    coarse `cfg.font_ligatures` flag wasn't flipped — the
+        //    user's "LIGA on" didn't tell the rest of the renderer
+        //    that ligatures were re-enabled.
+        // 2. The uppercase tag was passed verbatim to the cosmic-text
+        //    shaper, which uses the standard case-sensitive lookup
+        //    and silently ignores it.
+        // Net effect pre-fix: `font-feature = LIGA on` did nothing.
+        // Now `parse` lowercases the tag bytes so both checks see the
+        // canonical form.
+        let p = FontFeature::parse;
+        assert_eq!(
+            p("LIGA"),
+            Some(FontFeature {
+                tag: *b"liga",
+                value: 1
+            })
+        );
+        assert_eq!(
+            p("CV01=2"),
+            Some(FontFeature {
+                tag: *b"cv01",
+                value: 2
+            })
+        );
+        assert_eq!(
+            p("Ss05 3"),
+            Some(FontFeature {
+                tag: *b"ss05",
+                value: 3
+            })
+        );
+        // And the downstream ligature-tracking path agrees now.
+        let c = Config::parse_text("font-feature = -LIGA\n");
+        assert!(
+            !c.font_ligatures,
+            "uppercase -LIGA disables like lowercase -liga"
+        );
+        let c = Config::parse_text("font-feature = +CLIG\n");
+        assert!(
+            c.font_ligatures,
+            "uppercase +CLIG enables like lowercase +clig"
         );
     }
 

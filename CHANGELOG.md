@@ -7,6 +7,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`font-feature = LIGA on` (uppercase tag) now actually toggles
+  ligatures.** OpenType feature tags are case-sensitive per spec —
+  every standard tag is lowercase (`liga`, `clig`, `calt`, `cv01`,
+  `ss05`…). `FontFeature::parse` was storing whatever case the user
+  typed, so `LIGA on` had two silent failures: (1) `is_ligature()`
+  returned false because it only matched lowercase `liga`/`clig`/
+  `calt`/`dlig`, so the coarse `cfg.font_ligatures` flag stayed
+  stale and downstream code thought ligatures were still on; (2)
+  the uppercase tag was passed verbatim to the cosmic-text /
+  harfbuzz shaper, which uses a case-sensitive lookup and silently
+  ignored the unknown `LIGA` tag. Net effect pre-fix: the user's
+  `LIGA on` did nothing visible — ligatures didn't toggle, the
+  feature didn't apply.
+  Fix: `FontFeature::parse` lowercases the tag bytes before
+  returning. Both the `is_ligature()` check and the FeatureTag
+  passed to the shaper now see the canonical form. Test:
+  `font_feature_tag_is_lowercased` pins uppercase / mixed-case
+  inputs and asserts the downstream `cfg.font_ligatures` flag
+  toggles the same way it would for lowercase. +1 test (237 total).
+
 - **`kettle --help` no longer leaks internal cycle references, and
   `--config` documents the cycle-164 directory rejection.** The
   rustdoc-style doc comments for `--list-keybinds` and `--config`

@@ -964,6 +964,13 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`font-feature = LIGA on` (uppercase) now actually
+      toggles ligatures.** `FontFeature::parse` preserved the
+      user's case, but OpenType tags are case-sensitive (lowercase
+      per spec). The uppercase tag failed `is_ligature()` (so the
+      coarse `font_ligatures` flag stayed stale) AND was silently
+      ignored by the cosmic-text shaper. Lowercase the tag at
+      parse time. +1 test.
 - [x] **`kettle --help` no longer leaks internal `cycle N` refs.**
       `--list-keybinds` and `--config` doc comments shipped audit-
       trail parentheticals in their `--help` output; rewrote in
