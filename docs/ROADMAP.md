@@ -468,6 +468,11 @@
 - [x] **`--check-config` catches malformed `keybind = …` lines.**
       Bad trigger or unknown action no longer silently drops the
       binding without a warning. +1 test.
+- [x] **`--check-config` catches unknown theme names.**
+      `Theme::by_name` silently falls back to TokyoNight Night
+      on a typo; now scans against `Theme::list()` so a
+      copy-pasted theme name from another terminal's config
+      flags loudly. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

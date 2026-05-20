@@ -397,6 +397,16 @@ impl Config {
                     keybinds::parse_trigger(t.trim()).is_some()
                         && Action::from_name(a.trim()).is_some()
                 }),
+                // `theme = …` falls back to TokyoNight Night silently on
+                // an unknown name. Surface the typo so a user copying a
+                // theme name from another terminal's config sees that
+                // it's not in the bundled set (~512 themes including
+                // every Ghostty default). Case-insensitive match matches
+                // `Theme::by_name`'s resolution.
+                "theme" => {
+                    let want = v.trim().to_ascii_lowercase();
+                    Theme::list().iter().any(|n| n.to_ascii_lowercase() == want)
+                }
                 // `palette = N=#hex` — both halves have to parse.
                 "palette" => v.split_once('=').is_some_and(|(i, h)| {
                     i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
@@ -1009,6 +1019,27 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_unknown_theme_name() {
+        // `Theme::by_name` silently falls back to TokyoNight Night on
+        // unknown names — a user copying a theme name from another
+        // terminal's config (Alacritty's `colors.theme = my-theme`) got
+        // no warning their theme wasn't bundled. Now flagged.
+        let bad = Config::detect_malformed_values(
+            "theme = NonExistentTheme\n\
+             theme = also fake\n",
+        );
+        assert_eq!(bad.len(), 2, "both unknown themes flagged: {bad:?}");
+        assert!(bad.iter().any(|b| b.contains("NonExistentTheme")));
+        // Bundled themes pass (case-insensitive — `by_name` is too).
+        let ok = Config::detect_malformed_values(
+            "theme = TokyoNight Night\n\
+             theme = tokyonight night\n\
+             theme = Dracula\n",
+        );
+        assert!(ok.is_empty(), "all valid: {ok:?}");
     }
 
     #[test]

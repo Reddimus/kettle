@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now catches unknown theme names.**
+  `Theme::by_name` silently falls back to TokyoNight Night on an
+  unknown name. A user copying `theme = …` from another terminal's
+  config (Alacritty `colors.theme`, kitty `include theme.conf`)
+  got no warning their theme wasn't bundled. Extended
+  `detect_malformed_values` to scan against `Theme::list()`
+  case-insensitively (matching `by_name`'s resolution), so
+  `theme = NonExistent` now produces:
+
+      status:  1 issue(s):
+        - malformed value: theme = "NonExistent"
+
+  +1 test covering an unknown name, plus three valid names
+  (bundled, lowercase alias, and a different bundled theme).
 - **`--check-config` now catches malformed `keybind = …` lines.**
   `apply_keybind` silently dropped on a bad trigger (typo in
   modifier or key name) or unknown action — a user with
