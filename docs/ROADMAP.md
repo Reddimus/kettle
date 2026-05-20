@@ -506,6 +506,16 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Palette gained 5 missing actions + a drift guard.**
+      `ScrollLine{Up,Down}` (cycle 110), `ScrollPage{Up,Down}`,
+      `HintMode`, and `MoveTab{Left,Right}` had keybinds but
+      no palette label — Ctrl+Shift+K couldn't reach them.
+      New test `palette_includes_every_user_facing_action`
+      enumerates every Action variant via an explicit match
+      (compile-time exhaustiveness) and asserts each one is
+      either in the palette or in a curated `excluded` list
+      with a rationale. Catches future drift the same way
+      cycle 104's drift test does for `--list-actions`.
 - [x] **Shadow-collision audit guards `defaults()`.** New
       `defaults_audit() -> (Bindings, Vec<Trigger>)` records
       every bind call; new test asserts `map.len() ==

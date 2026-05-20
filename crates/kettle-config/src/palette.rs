@@ -16,6 +16,8 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Close tab", CloseTab),
         ("Next tab", NextTab),
         ("Previous tab", PrevTab),
+        ("Move tab left", MoveTabLeft),
+        ("Move tab right", MoveTabRight),
         ("Split right (vertical divider)", SplitRight),
         ("Split down (horizontal divider)", SplitDown),
         ("Split automatically", SplitAuto),
@@ -26,6 +28,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("New window", NewWindow),
         ("Close window", CloseWindow),
         ("Search scrollback", StartSearch),
+        ("Quick-select hints", HintMode),
         ("SSH launcher", OpenSsh),
         ("Copy", Copy),
         ("Paste", Paste),
@@ -35,6 +38,10 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Toggle fullscreen", ToggleFullscreen),
         ("Broadcast input to all panes", ToggleBroadcastAll),
         ("Stop broadcasting input", ToggleBroadcastOff),
+        ("Scroll up one line", ScrollLineUp),
+        ("Scroll down one line", ScrollLineDown),
+        ("Scroll page up", ScrollPageUp),
+        ("Scroll page down", ScrollPageDown),
         ("Scroll to top", ScrollToTop),
         ("Scroll to bottom", ScrollToBottom),
         ("Jump to previous prompt", JumpPrevPrompt),
@@ -62,6 +69,122 @@ pub fn rank(query: &str, cmds: &[(&'static str, Action)]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_includes_every_user_facing_action() {
+        // Cycle-117 drift guard. When cycle 110 added ScrollLineUp/Down,
+        // the palette quietly missed them — users couldn't reach the
+        // new actions via Ctrl+Shift+K. The class of "new Action variant
+        // landed but only the keymap and `--list-actions` know about it"
+        // is the same shape as cycle 104's drift between `from_name` and
+        // `action_names`. Pin it: every action *intended* for palette
+        // dispatch must appear, identifiable by ⩾1 entry whose Action
+        // matches the variant. Variants intentionally excluded from
+        // the palette (geometric / parametric / palette-itself) are
+        // listed explicitly below so a future excluded action is a
+        // conscious choice, not an oversight.
+        use Action::*;
+        let cmds = commands();
+        // Linear lookup over `cmds` (small list; readability wins). Action
+        // doesn't derive Hash, so HashSet isn't an option without an
+        // upstream change to keybinds.rs that this test shouldn't drag in.
+        let listed: Vec<&Action> = cmds.iter().map(|(_, a)| a).collect();
+        // Variants we *deliberately* skip in the palette: geometric
+        // motions (focus/resize directions — keyboard-only), parametric
+        // (GotoTab(N) — can't enumerate), the palette itself (`Ctrl+
+        // Shift+K` → CommandPalette would loop weirdly).
+        let excluded: &[Action] = &[
+            FocusUp,
+            FocusDown,
+            FocusLeft,
+            FocusRight,
+            ResizeUp,
+            ResizeDown,
+            ResizeLeft,
+            ResizeRight,
+            GotoTab(0), // placeholder for the parametric family
+            CommandPalette,
+        ];
+        // Enumerate every Action variant explicitly via this exhaustive
+        // list; if a future variant is added the match below fails to
+        // compile, forcing whoever added it to also categorize it.
+        let every_action: Vec<Action> = vec![
+            Copy,
+            Paste,
+            NewTab,
+            CloseTab,
+            NextTab,
+            PrevTab,
+            MoveTabLeft,
+            MoveTabRight,
+            SplitRight,
+            SplitDown,
+            SplitAuto,
+            ClosePane,
+            CloseWindow,
+            NewWindow,
+            FocusNext,
+            FocusPrev,
+            FocusUp,
+            FocusDown,
+            FocusLeft,
+            FocusRight,
+            ResizeUp,
+            ResizeDown,
+            ResizeLeft,
+            ResizeRight,
+            ToggleZoom,
+            IncreaseFontSize,
+            DecreaseFontSize,
+            ResetFontSize,
+            StartSearch,
+            ToggleBroadcastAll,
+            ToggleBroadcastOff,
+            ToggleFullscreen,
+            Reset,
+            ScrollPageUp,
+            ScrollPageDown,
+            ScrollLineUp,
+            ScrollLineDown,
+            ScrollToTop,
+            ScrollToBottom,
+            JumpPrevPrompt,
+            JumpNextPrompt,
+            OpenSsh,
+            ReloadConfig,
+            CommandPalette,
+            HintMode,
+            NextTheme,
+            PrevTheme,
+            GotoTab(0),
+        ];
+        // Compile-time exhaustiveness check: if a new Action variant is
+        // added, this match must be updated, which forces the developer
+        // to add a row to `every_action` above as well.
+        for a in &every_action {
+            match a {
+                Copy | Paste | NewTab | CloseTab | NextTab | PrevTab | MoveTabLeft
+                | MoveTabRight | SplitRight | SplitDown | SplitAuto | ClosePane | CloseWindow
+                | NewWindow | FocusNext | FocusPrev | FocusUp | FocusDown | FocusLeft
+                | FocusRight | ResizeUp | ResizeDown | ResizeLeft | ResizeRight | ToggleZoom
+                | IncreaseFontSize | DecreaseFontSize | ResetFontSize | StartSearch
+                | ToggleBroadcastAll | ToggleBroadcastOff | ToggleFullscreen | Reset
+                | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown | ScrollToTop
+                | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh | ReloadConfig
+                | CommandPalette | HintMode | NextTheme | PrevTheme | GotoTab(_) => {}
+            }
+        }
+        let missing: Vec<&Action> = every_action
+            .iter()
+            .filter(|a| !excluded.contains(a) && !listed.contains(a))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "palette missing actions: {missing:?} — either add them to \
+             commands() or add to the `excluded` list above with a \
+             one-line rationale"
+        );
+    }
 
     #[test]
     fn empty_query_returns_all_in_registry_order() {

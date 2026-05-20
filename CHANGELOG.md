@@ -6,7 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **Command palette gained Quick-select hints, Move tab
+  left/right, and the four scroll-line / scroll-page entries.**
+  When cycle 110 added `ScrollLineUp`/`ScrollLineDown`, the
+  defaults map + `--list-actions` + the keybind name table all
+  got updated, but the palette didn't — users invoking
+  Ctrl+Shift+K and typing "scroll" got only "Scroll to top /
+  bottom", no per-line nor per-page. Same drift for `HintMode`
+  (Ctrl+Shift+H quick-select labels) and `MoveTabLeft/Right`,
+  which had keybinds but no palette label. All five rows added,
+  in registry order that puts scroll motions near each other.
+
 ### Tests
+- **Palette drift guard: every actionable variant must appear
+  (or be explicitly excluded).** New test
+  `palette_includes_every_user_facing_action` enumerates every
+  `Action` variant via an explicit match (so a new variant
+  fails compilation until categorized), then asserts each
+  variant is in `commands()` OR in a hand-curated `excluded`
+  list with a one-line rationale (geometric directional
+  motions, parametric `GotoTab(N)`, the palette itself).
+  Catches the same shape as cycle 110's drift but on the
+  palette surface, so the next time a new Action lands without
+  a palette label the CI reports it.
 - **Shadow-collision audit added to `defaults()`.** Cycle 115
   found one keybind collision (the cycle-110-introduced
   `Ctrl+Shift+Up/Down` landing on top of the
