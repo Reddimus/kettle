@@ -26,7 +26,9 @@ Each cycle has the same shape:
    call site small — the helper does the work.
 4. **Pin the contract with a test.** Hand-rolled scenarios that
    would have failed pre-fix. Most cycles add 1–3 assertions; the
-   workspace runs ~225 tests at any given point and grows ~1/cycle.
+   workspace test suite grows ~1/cycle. Run `cargo test --workspace`
+   for today's count (CHANGELOG entries also name the count after each
+   cycle's `+N tests`).
 5. **Run the gate locally.**
    ```sh
    cargo fmt --all              # rewrite in place

@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`CONTRIBUTING.md` test-count claim reworded to range-stable.**
+  Said "workspace runs ~225 tests" — stale by 18 (we're at 243).
+  Cycle 172/179 fixed the same drift class in README/CONFIG/
+  INSTALL/ARCHITECTURE. CONTRIBUTING.md is contributor-leaning so
+  it was exempt from the drift guard, but it has the same problem.
+  Reworded to "workspace test suite grows ~1/cycle. Run
+  `cargo test --workspace` for today's count" so the count
+  doesn't go stale between audits.
+
 ### Internal
 - **Per-crate `Cargo.toml`s now inherit version / edition / license /
   repository / authors / description from `[workspace.package]`.**
