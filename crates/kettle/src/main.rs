@@ -142,6 +142,24 @@ fn main() -> anyhow::Result<()> {
             cfg.mouse_hide_while_typing, cfg.copy_on_select
         );
         println!(
+            "window:  padding={}x{} opacity={} unfocused-split={}",
+            cfg.padding_x, cfg.padding_y, cfg.background_opacity, cfg.unfocused_split_opacity
+        );
+        // Split-color overrides are individually opt-in (default = theme
+        // palette[4]/[8]); only echo when the user actually set one, so
+        // common defaulted configs stay terse.
+        if cfg.focused_split_color.is_some() || cfg.split_divider_color.is_some() {
+            let f = cfg
+                .focused_split_color
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+                .unwrap_or_else(|| "(theme)".into());
+            let d = cfg
+                .split_divider_color
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+                .unwrap_or_else(|| "(theme)".into());
+            println!("splits:  focused={f} divider={d}");
+        }
+        println!(
             "tabs:    bar={:?} pos={:?} format={:?}",
             cfg.tab_bar, cfg.tab_bar_pos, cfg.tab_format
         );

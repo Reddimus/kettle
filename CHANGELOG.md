@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` echoes window padding, opacity, and split
+  colors.** The cycle-59 expansion of `--check-config` grouped
+  many config gates but omitted `padding-x/y`,
+  `background-opacity`, `unfocused-split-opacity`, and the cycle-83
+  `focused-split-color` + companion `split-divider-color`. Added a
+  `window:` line for the always-present numerics and a conditional
+  `splits:` line for the opt-in overrides (only printed when at
+  least one is set, so defaulted configs stay terse):
+
+      window:  padding=8x8 opacity=1 unfocused-split=0.7
+      splits:  focused=#ff8800 divider=#404040
+
 - **OS window title also gets the cwd-basename fallback.** Cycle 89
   taught `Mux::tab_titles` to fall back to the cwd basename before
   the first OSC 2 — `window_title` (used for the OS-level title via
