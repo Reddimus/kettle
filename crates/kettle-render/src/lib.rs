@@ -196,13 +196,37 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        // Cycle 148: pick a real alpha-aware mode when the user wants
+        // transparency. The previous `caps.alpha_modes[0]` just took
+        // whatever the backend listed first — usually `Opaque`, which
+        // ignores the alpha channel from `Color { a: ... }` on the
+        // clear ops. So `background-opacity = 0.5` rendered as fully
+        // opaque on most surfaces. Prefer `PreMultiplied` (the
+        // standard for compositing) when opacity < 1.0, falling back
+        // through `PostMultiplied` → `Inherit` → `Auto` → whatever's
+        // first if nothing fancier is available. Opaque configs
+        // stay opaque (matching the surface's default behavior).
+        let want_transparency = cfg.background_opacity < 1.0;
+        let alpha_mode = if want_transparency {
+            [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::Auto,
+            ]
+            .into_iter()
+            .find(|m| caps.alpha_modes.contains(m))
+            .unwrap_or(caps.alpha_modes[0])
+        } else {
+            caps.alpha_modes[0]
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: width.max(1),
             height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

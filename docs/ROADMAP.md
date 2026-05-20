@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`background-opacity` produces real transparency.**
+      Surface used `caps.alpha_modes[0]` which is usually
+      `Opaque` — clear-op alpha got discarded by the
+      composite. Now prefer `PreMultiplied` →
+      `PostMultiplied` → `Inherit` → `Auto` when opacity
+      < 1.0. Opaque configs unchanged.
 - [x] **`Action::from_name` is case-insensitive +
       trimmed.** Same pattern as cycle 146 on the keybind
       action surface. `keybind = ctrl+shift+c = Copy`

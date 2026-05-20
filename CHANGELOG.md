@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`background-opacity` actually produces transparency.**
+  Real bug. The old surface config used
+  `alpha_mode: caps.alpha_modes[0]` — i.e. whatever the
+  backend listed first, which on most platforms is
+  `Opaque`. The `wgpu::Color { a: cfg.background_opacity }`
+  on the clear op then had its alpha channel discarded by
+  the surface composite, so `background-opacity = 0.5`
+  rendered as fully opaque. A user setting transparency
+  for a desktop-blur effect saw no difference between
+  `1.0` and `0.5`. Now when `background_opacity < 1.0` we
+  prefer `PreMultiplied → PostMultiplied → Inherit →
+  Auto` (the standard alpha modes for compositing),
+  falling back to whatever the backend lists first only
+  if none of those are supported. Opaque configs are
+  unchanged. Headless smoke still passes.
+
+### Fixed
 - **`Action::from_name` is now case-insensitive.** Same pattern
   as cycle 146's enum-key fix, applied to keybind action names.
   A user writing `keybind = ctrl+shift+c = Copy` (capitalized)
