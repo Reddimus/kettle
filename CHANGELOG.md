@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Theme filter is case-insensitive for OS desktop metadata.**
+  Cycle-167 follow-up. The bundled-theme filter's OS-metadata
+  branch (`Thumbs.db` / `desktop.ini` / macOS `Icon\r`) used an
+  exact-case `matches!`, while the editor-backup-suffix branch
+  below it was already case-insensitive. NTFS is case-preserving
+  but case-insensitive — a Windows checkout / Git Bash copy /
+  robocopy mishap could land `THUMBS.DB` or `Desktop.ini` in the
+  themes directory, slipping through the cycle-167 filter and
+  surfacing as a phantom "THUMBS.DB" theme with garbage palette.
+  Now both branches use the lowercased name. Test gains 4 more
+  asserts (THUMBS.DB / Thumbs.DB / Desktop.ini / DESKTOP.INI).
+
 - **`home_dir_fallback` caller now also gates on `is_dir`.**
   Cycles 162/180 made the helper probe HOME → USERPROFILE →
   APPDATA and filter empty values. But the caller fed whatever

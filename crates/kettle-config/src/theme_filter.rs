@@ -44,11 +44,18 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     // `Icon\r` is the macOS Finder "custom folder icon" file — the `\r`
     // (0x0D) at the end is part of the literal name. Not a duplicate of
     // `Icon\u{d}`; that *was* the duplicate, removed for clippy.
-    if matches!(name, "Thumbs.db" | "desktop.ini" | "Icon\r") {
+    //
+    // Case-insensitive (cycle 186): NTFS is case-preserving but
+    // case-insensitive, so a Windows checkout / copy / Git Bash session
+    // might store `THUMBS.DB` or `Desktop.ini` — same junk content,
+    // different bytes. The editor-suffix check below is already
+    // case-insensitive; this match brings the desktop-metadata case
+    // into line.
+    let lower = name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "thumbs.db" | "desktop.ini" | "icon\r") {
         return false;
     }
     // Editor backup-file patterns by suffix.
-    let lower = name.to_ascii_lowercase();
     if lower.ends_with('~')
         || lower.ends_with(".bak")
         || lower.ends_with(".orig")
@@ -87,6 +94,13 @@ mod tests {
         // Windows / Finder metadata that does NOT start with a dot.
         assert!(!is_bundled_theme_filename("Thumbs.db"));
         assert!(!is_bundled_theme_filename("desktop.ini"));
+        // Cycle 186: NTFS case-insensitive, so an upper- or mixed-case
+        // form of the same file (a Windows checkout / Git Bash copy /
+        // robocopy with mismatched casing) still has to be skipped.
+        assert!(!is_bundled_theme_filename("THUMBS.DB"));
+        assert!(!is_bundled_theme_filename("Thumbs.DB"));
+        assert!(!is_bundled_theme_filename("Desktop.ini"));
+        assert!(!is_bundled_theme_filename("DESKTOP.INI"));
 
         // Editor backup-file patterns.
         assert!(!is_bundled_theme_filename("MyTheme~"));
