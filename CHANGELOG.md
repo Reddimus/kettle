@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`--config /typo.conf` hard-fails instead of silently using
+  defaults.** Every downstream branch (windowed run, `--screenshot`,
+  every `--list-*` introspection, the `--check-config` fall-through)
+  silently dropped to `Config::default()` when the user named a
+  config file that didn't exist. So `kettle --config ~/typoconfig`
+  produced a screenshot with the bundled theme and no warning, a
+  keybinds list with no overrides, etc. — the user thought their
+  file was being read. Hard-fail at the top of `main` with
+  `Error: --config <path>: no such file` (exit 1) so the diagnostic
+  lands exactly where the typo is. Omitting `--config` (the
+  "kettle works out of the box" path) still falls back silently —
+  that's intentional. Same "silent-fallback on bad input" shape as
+  the cycle-44+ cluster, on the CLI surface.
+- **`--screenshot` uses the same `Config::load_from` path as
+  windowed startup and reload.** It was the lone hold-out: a
+  hand-rolled `parse_collect` call meant malformed values silently
+  defaulted with no `log::warn!` (the other paths warned), and
+  unknown keys never appeared. Now consistent across all entry
+  points.
+
 ### Added
 - **`kettle --list-ssh-hosts` prints the configured `ssh-host`
   entries.** Companion to `--check-config` (which reported only a

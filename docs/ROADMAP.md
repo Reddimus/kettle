@@ -506,6 +506,15 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--config /typo.conf` hard-fails (exit 1).** Every
+      downstream branch silently dropped to `Config::default()`
+      when the explicit `--config` path didn't exist. Hard-fail
+      at the top of `main` so the diagnostic lands where the
+      typo is. Omitting `--config` still falls back silently
+      (out-of-the-box path).
+- [x] **`--screenshot` uses `Config::load_from` like the rest.**
+      Lone hold-out using open-coded `parse_collect` that didn't
+      `log::warn!` on malformed values/unknown keys.
 - [x] **`--list-ssh-hosts` prints configured ssh-host entries.**
       Companion to `--check-config` (only the count) and the
       Ctrl+Shift+S launcher (in-window). Two-column table

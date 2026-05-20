@@ -83,6 +83,21 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
 
+    // Explicit `--config PATH` that doesn't exist is *almost certainly*
+    // a typo (the user wanted a specific file, not the default). Every
+    // downstream branch silently fell back to `Config::default()` in
+    // that case — the user got a screenshot / table / window with
+    // their carefully-crafted theme nowhere in sight and no clue why.
+    // Hard-fail before any branch runs so the error lands exactly
+    // where the typo is. Omitting `--config` (relying on the default
+    // path) still falls back silently — that's the intended "kettle
+    // works out of the box" behavior.
+    if let Some(p) = &cli.config
+        && !p.exists()
+    {
+        return Err(anyhow::anyhow!("--config {}: no such file", p.display()));
+    }
+
     if cli.list_themes {
         for name in kettle_config::Theme::list() {
             println!("{name}");
@@ -243,14 +258,20 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(out) = &cli.screenshot {
+        // Use `load_from` (same path the in-window reload uses) instead
+        // of an open-coded `parse_collect`: now a typo in the config
+        // emits the same `log::warn!` on stderr when generating a
+        // screenshot as it does when running interactively. Previously
+        // `--screenshot` was the only flag that silently swallowed
+        // both unknown keys *and* malformed values, which made it
+        // confusing when a screenshot didn't reflect what the user
+        // thought their config said.
         let cfg = match cli
             .config
             .clone()
             .or_else(kettle_config::Config::default_path)
         {
-            Some(p) if p.exists() => {
-                kettle_config::Config::parse_collect(&std::fs::read_to_string(p)?).0
-            }
+            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
         };
         // Clamp dimensions to a sane range — wgpu textures cap at 8192 px
