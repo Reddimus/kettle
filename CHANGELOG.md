@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` surfaces malformed numeric values.** Every
+  numeric/duration config arm was guarded with `if let Ok(v) =
+  e.value.parse() { … }` — clean code, but it silently fell back
+  to the default when the value didn't parse. A user writing
+  `font-size = 14px` or `scrollback = lots` saw a clean
+  `status: OK` from `--check-config` while their setting was being
+  ignored. New `Config::detect_malformed_values(text)` runs a
+  side scan after parse and lists the bad ones; the
+  `--check-config` body merges them with the unknown-key list:
+  ```
+  status:  3 issue(s):
+    - unknown key: invalid
+    - unknown key: unknown-key
+    - malformed value: font-size = "not_a_number"
+  ```
+  Catches font-size, padding-x/y, background-opacity,
+  unfocused-split-opacity, scroll-multiplier, minimum-contrast,
+  scrollback (special: accepts `infinite`/`unlimited`/integer),
+  and cursor-blink-interval. +1 test covering each. Side scan
+  keeps adding-new-validated-keys to one place instead of every
+  parse arm.
 - **`--screenshot --cols`/`--rows` clamp instead of crashing.**
   Passing a large value (`--cols 100000`) tried to allocate a
   texture exceeding wgpu's per-side limit (8192 px on most GPUs)

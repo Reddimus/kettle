@@ -337,6 +337,48 @@ impl Config {
         Self::parse_collect(text).0
     }
 
+    /// Scan a config text for keys whose value doesn't parse to the
+    /// expected numeric / enum form — those would silently fall back to
+    /// the default in `parse_collect`, leaving the user thinking their
+    /// `font-size = 14px` (or `scrollback = lots`, etc.) took effect.
+    /// Returns `"<key> = <value>"` strings; surfaced by `kettle
+    /// --check-config` so the user sees the typo. Keeps the scan
+    /// independent of the apply loop so adding a new validated key is
+    /// one line here, not a touch on every parse arm.
+    pub fn detect_malformed_values(text: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        for e in parse::parse(text) {
+            let v = &e.value;
+            let ok = match e.key.as_str() {
+                // Floats: clamped or otherwise, the parse itself has to
+                // succeed.
+                "font-size"
+                | "padding-x"
+                | "window-padding-x"
+                | "padding-y"
+                | "window-padding-y"
+                | "background-opacity"
+                | "unfocused-split-opacity"
+                | "scroll-multiplier"
+                | "mouse-scroll-multiplier"
+                | "minimum-contrast" => v.parse::<f32>().is_ok(),
+                // Special: scrollback accepts unlimited/infinite/0 as
+                // "no cap" plus any non-negative integer.
+                "scrollback" => {
+                    v.eq_ignore_ascii_case("infinite")
+                        || v.eq_ignore_ascii_case("unlimited")
+                        || v.parse::<usize>().is_ok()
+                }
+                "cursor-blink-interval" => v.parse::<u64>().is_ok(),
+                _ => true,
+            };
+            if !ok {
+                bad.push(format!("{} = {:?}", e.key, v));
+            }
+        }
+        bad
+    }
+
     /// Parse, also returning any unrecognized config keys (typo guard,
     /// surfaced by `kettle --check-config` and a startup `log::warn`).
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
@@ -887,6 +929,39 @@ mod config_tests {
         assert!(c.scroll_on_output);
         // Alacritty's `scroll-on-input` alias is honored too.
         assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_typos_silently_swallowed_by_parse() {
+        // Each of these was silently falling through to the default
+        // before — `parse_collect` would skip the `if let Ok(v) =
+        // parse()` arm and the user thought their setting took effect.
+        let bad = Config::detect_malformed_values(
+            "font-size = not_a_number\n\
+             padding-x = 4px\n\
+             background-opacity = high\n\
+             scroll-multiplier = fast\n\
+             cursor-blink-interval = forever\n\
+             scrollback = lots\n",
+        );
+        assert_eq!(bad.len(), 6, "all six should be flagged: {bad:?}");
+        assert!(bad.iter().any(|b| b.contains("font-size")));
+        assert!(bad.iter().any(|b| b.contains("scrollback")));
+        // Valid values pass cleanly.
+        let ok = Config::detect_malformed_values(
+            "font-size = 14\n\
+             padding-x = 6.5\n\
+             background-opacity = 0.8\n\
+             scrollback = infinite\n\
+             scrollback = 0\n\
+             cursor-blink-interval = 800\n",
+        );
+        assert!(ok.is_empty(), "all valid: {ok:?}");
+        // Unknown keys aren't *malformed* — that's a separate diagnostic
+        // (caught by `parse_collect`'s `unknown` Vec). detect_malformed
+        // intentionally returns empty for them so the two lists don't
+        // duplicate.
+        assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
     }
 
     #[test]

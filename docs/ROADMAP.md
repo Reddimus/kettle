@@ -409,6 +409,10 @@
       `[8, 200]` so a typo like `--cols 100000` no longer panics
       with the wgpu 8192-px texture-size validation error. The
       "wrote" line reports the actual cell dimensions used.
+- [x] **`--check-config` surfaces malformed numeric values**
+      (font-size, padding, opacity, scroll-multiplier, contrast,
+      scrollback, blink-interval). New
+      `Config::detect_malformed_values` side scan. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

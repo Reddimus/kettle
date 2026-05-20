@@ -103,12 +103,14 @@ fn main() -> anyhow::Result<()> {
             .config
             .clone()
             .or_else(kettle_config::Config::default_path);
-        let (cfg, unknown) = match &path {
+        let (cfg, unknown, malformed) = match &path {
             Some(p) if p.exists() => {
                 let text = std::fs::read_to_string(p)?;
-                kettle_config::Config::parse_collect(&text)
+                let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
+                let malformed = kettle_config::Config::detect_malformed_values(&text);
+                (cfg, unknown, malformed)
             }
-            _ => (kettle_config::Config::default(), Vec::new()),
+            _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
         match &path {
             Some(p) if p.exists() => println!("config:  {}", p.display()),
@@ -150,16 +152,19 @@ fn main() -> anyhow::Result<()> {
         if !cfg.ssh_hosts.is_empty() {
             println!("ssh:     {} host(s) configured", cfg.ssh_hosts.len());
         }
-        if unknown.is_empty() {
-            println!("status:  OK — no unrecognized keys");
+        let issues = unknown.len() + malformed.len();
+        if issues == 0 {
+            println!("status:  OK — no issues");
             return Ok(());
-        } else {
-            println!("status:  {} unrecognized key(s):", unknown.len());
-            for k in &unknown {
-                println!("  - {k}");
-            }
-            std::process::exit(1);
         }
+        println!("status:  {issues} issue(s):");
+        for k in &unknown {
+            println!("  - unknown key: {k}");
+        }
+        for k in &malformed {
+            println!("  - malformed value: {k}");
+        }
+        std::process::exit(1);
     }
 
     if let Some(out) = &cli.screenshot {
