@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **User-facing docs no longer leak internal `cycle N` references.**
+  Cycle 168 caught the audit-trail leak in `kettle --help`; this
+  cycle extends the cleanup to the markdown docs the README links
+  to. `docs/CONFIG.md` had two stragglers (`(cycle 138)` next to
+  the bool-alias prose, `(cycle 163)` next to the modifier-typo
+  rejection rule) — same mysterious-parenthetical UX issue as
+  `--help`. `docs/TESTING.md`'s lead now says "230+ tests" instead
+  of a specific cycle-number snapshot ("213 tests as of cycle 128")
+  that's been wrong for 40+ cycles; the per-crate counts below
+  remain order-of-magnitude. Regression test
+  `user_facing_docs_have_no_internal_cycle_refs` reads README.md,
+  docs/CONFIG.md, docs/INSTALL.md and scans for the pattern
+  `cycle <digit>` — same drift-guard shape as cycle 168 for the
+  CLI surface, but for the user-facing markdown surface.
+  TESTING.md / ROADMAP.md / CONTRIBUTING.md are intentionally
+  exempt (contributor-leaning, cycle refs serve as CHANGELOG
+  anchors). +1 test (239 total).
+
 ### Internal
 - **Two more blink-reset sites route through `reset_blink_phase()`.**
   The cycles 134-141 + 144 + 150 audit landed a shared

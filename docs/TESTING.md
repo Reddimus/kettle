@@ -14,9 +14,11 @@ cargo test --workspace
 
 ## What's covered (automated)
 
-**213 tests across the workspace** as of cycle 128 — see
-[CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions. Counts below
-are approximate snapshots; the workspace grows by 1–3 tests per audit cycle.
+**230+ tests across the workspace** — see
+[CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions. The workspace
+grows by 1–3 tests per audit cycle, so per-crate counts below are
+order-of-magnitude snapshots rather than exact figures (run `cargo test
+--workspace` for today's number).
 
 - **kettle-vt** (~33 tests): plain-text passthrough is byte-exact;
   iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)

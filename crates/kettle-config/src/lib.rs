@@ -1020,6 +1020,52 @@ mod config_tests {
     }
 
     #[test]
+    fn user_facing_docs_have_no_internal_cycle_refs() {
+        // Cycle 168 caught the audit-trail-in-doc-string issue on the
+        // clap CLI surface (`kettle --help` was emitting "(cycle 103)"
+        // / "(cycle 106)" parentheticals — mysterious to end users).
+        // Cycle 172 extends the drift guard to the user-facing markdown
+        // docs the README links to: CONFIG.md (config reference) and
+        // INSTALL.md (per-OS install + from-source). README itself
+        // mentions the word "cycle" in legitimate prose ("cycle the
+        // themes at runtime", "the audit-cycle pattern"), so the
+        // check has to be tighter than "contains 'cycle '" — match
+        // the internal-ref shape `cycle <digit>` instead.
+        //
+        // TESTING.md and ROADMAP.md are intentionally exempt — they're
+        // contributor-leaning docs where cycle refs serve as anchors
+        // to specific CHANGELOG entries, the same way they do in code
+        // comments. CONTRIBUTING.md documents the cycle-N pattern
+        // itself, so a literal reference there is part of the content.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+        for rel in ["README.md", "docs/CONFIG.md", "docs/INSTALL.md"] {
+            let path = repo_root.join(rel);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing user-facing doc {}: {e}", path.display()));
+            let lower = text.to_ascii_lowercase();
+            // Scan for "cycle <space> <digit>". `windows(7)` over bytes
+            // — keep it dependency-free; the docs are small enough
+            // that the linear scan is negligible.
+            let needle: &[u8] = b"cycle ";
+            for (i, w) in lower.as_bytes().windows(needle.len()).enumerate() {
+                if w == needle
+                    && let Some(&b) = lower.as_bytes().get(i + needle.len())
+                    && b.is_ascii_digit()
+                {
+                    panic!(
+                        "internal `cycle N` ref leaked into user-facing doc {}: \
+                         offset {} (`{}`)",
+                        rel,
+                        i,
+                        &text[i..(i + 12).min(text.len())]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn default_is_tokyonight_night() {
         let c = Config::default();
         assert_eq!(c.theme_name, "TokyoNight Night");

@@ -8,8 +8,8 @@ so hex colors work), and some keys may repeat.
 **Type notes.** `bool` keys accept the standard aliases (case-insensitive):
 `true` / `yes` / `on` / `1` / `enabled` / `enable` / `y` for true,
 and `false` / `no` / `off` / `0` / `disabled` / `disable` / `n` for false.
-Unrecognized values keep the current setting and surface in `--check-config`
-(cycle 138). Numeric keys with documented ranges
+Unrecognized values keep the current setting and surface in `--check-config`.
+Numeric keys with documented ranges
 (`font-size`, `background-opacity`, `unfocused-split-opacity`,
 `scroll-multiplier`, `minimum-contrast`, `cursor-blink-interval`) clamp at
 parse-time *and* flag out-of-range values via `--check-config`.
@@ -75,8 +75,8 @@ Keys: `a`..`z`, `f1`..`f12`, `up`/`down`/`left`/`right`,
 `page_up`/`page_down`, `home`/`end`, `enter`, `tab`, `plus`/`minus`/`equal`.
 
 A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
-flagged by `kettle --check-config` — it no longer silently degrades
-into a bare-key binding (cycle 163).
+flagged by `kettle --check-config` — it doesn't silently degrade
+into a bare-key binding.
 
 `action` is one of: `copy`, `paste`, `new_tab`, `close_tab`, `next_tab`,
 `previous_tab`, `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based,
