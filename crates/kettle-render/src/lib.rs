@@ -830,6 +830,13 @@ impl Renderer {
         let content = term.renderable_content();
         let term_colors = content.colors;
         let cols = term.grid().columns();
+        // Capture the selection range *before* the display iterator
+        // consumes its sibling field; cells inside this range get their
+        // fg swapped to `theme.selection_foreground` so dark-on-dark
+        // themes stay readable under the highlight. Without this, the
+        // configured `selection-foreground` color was parsed and stored
+        // but the renderer ignored it.
+        let selection_range = content.selection;
         // Match the surface clear-color so a cell whose bg resolves to the
         // active default (OSC 11 override or theme bg) doesn't paint a
         // redundant quad over the already-correct backdrop.
@@ -862,6 +869,13 @@ impl Renderer {
             let mut bg = color::resolve(cell.bg, theme, term_colors);
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
+            }
+            // Selection foreground override — applied *after* INVERSE so the
+            // selection always wins for readability (alacritty / iTerm2
+            // behavior). Without this, a cell with INVERSE under a selection
+            // would render as inverse-fg on selection-bg, often invisible.
+            if selection_range.is_some_and(|r| r.contains(point)) {
+                fg = theme.selection_foreground;
             }
             // Lift fg toward the higher-contrast extreme if the theme/SGR
             // combo falls below the configured WCAG ratio (off by default).

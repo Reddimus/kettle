@@ -427,6 +427,10 @@
       cap (cycle 47) — guards against accidentally pasting a multi-
       GB file from the clipboard and freezing the PTY. Reuses
       `clamp_osc52` byte-clamper.
+- [x] **`selection-foreground` actually applied.** Config key was
+      parsed but ignored at render time. Selected cells now get
+      `theme.selection_foreground` (applied after INVERSE so the
+      highlight always reads).
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

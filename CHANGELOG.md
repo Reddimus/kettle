@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`selection-foreground` is now actually applied.** The config
+  key was parsed, stored on `Theme.selection_foreground`, and then…
+  ignored by the renderer — selected cells kept their normal text
+  color. Dark text on a slightly darker selection background was
+  often unreadable. Fixed by capturing the
+  `RenderableContent.selection` range at the top of `build_pane`
+  and swapping `fg` to `theme.selection_foreground` for cells
+  whose point is in the range — applied *after* INVERSE so the
+  selection always wins for readability (cells with INVERSE under
+  a selection would otherwise render as inverse-fg on selection-bg,
+  often invisible).
 - **Local paste capped at 4 MiB.** OSC 52 (remote-program write
   into the system clipboard) was capped at 1 MiB back in cycle 47;
   the reverse direction (`paste_clipboard` reads the user's
