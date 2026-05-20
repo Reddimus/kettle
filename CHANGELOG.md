@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Bundled-theme filter is robust to OS/editor junk in
+  `assets/themes/`.** `build.rs` skipped only the exact filenames
+  `LICENSE` and `README.md`. A maintainer cloning the repo on
+  macOS and opening the themes folder in Finder would pollute the
+  bundled theme list with a `.DS_Store` "theme" whose contents are
+  binary garbage — and the count is publicly surfaced
+  (`kettle --list-themes`, README highlights). Same shape for a
+  Windows checkout with `Thumbs.db`, an Emacs swap file, or
+  `.swp`/`.bak`/`*~` backup files left over after editing a theme.
+  Fix: extracted `is_bundled_theme_filename(name) -> bool` into a
+  small `theme_filter` module the lib and `build.rs` share via
+  `include!`. The filter rejects dotfiles
+  (`.DS_Store`/`.gitignore`/`.directory`/etc.),
+  desktop-metadata files (`Thumbs.db`/`desktop.ini`/macOS
+  `Icon\r`), and editor backup-file suffixes (`~`/`.bak`/
+  `.orig`/`.swp`/`.swo`/`.tmp`, case-insensitive). +1 test
+  pinning all of the above plus four real theme names that must
+  still pass (235 total).
+
 - **Autodetected Wikipedia / Apple-docs / MDN URLs that legitimately
   end in `)` now stay clickable.** Both `links.rs` (the runtime
   hyperlink overlay) and `hints.rs` (`Ctrl+Shift+H` quick-select)

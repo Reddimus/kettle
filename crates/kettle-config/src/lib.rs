@@ -10,6 +10,7 @@ pub mod palette;
 pub mod parse;
 pub mod template;
 pub mod theme;
+mod theme_filter;
 
 use std::path::{Path, PathBuf};
 

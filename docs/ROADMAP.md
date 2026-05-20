@@ -964,6 +964,15 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Theme bundling resists `.DS_Store` / `Thumbs.db` / editor
+      backup junk.** `build.rs` only skipped exact `LICENSE` /
+      `README.md`. A macOS / Windows checkout (or a maintainer who
+      edited a theme with Vim, leaving a `.swp`) would surface
+      junk as a fake theme in `--list-themes`. New `theme_filter`
+      module rejects dotfiles, OS desktop metadata, and editor
+      backup suffixes; shared with `build.rs` via `include!` so
+      the lib's tests cover the same code the build script runs.
+      +1 test.
 - [x] **Wikipedia-style URLs stay clickable.** Both `links.rs`
       (OSC 8 + autodetect overlay) and `hints.rs` (Ctrl+Shift+H
       quick-select) had private `trim_trailing` functions that

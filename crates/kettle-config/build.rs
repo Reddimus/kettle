@@ -5,6 +5,12 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+// Pulled in via `include!` so the *exact* same filter logic ships in the
+// library (where it has unit tests) and is used by the build script (where
+// the test harness isn't available). When you change the filter in one
+// place it changes in both.
+include!("src/theme_filter.rs");
+
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
     let themes_dir = Path::new(&manifest).join("../../assets/themes");
@@ -21,7 +27,7 @@ fn main() {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if name == "LICENSE" || name == "README.md" {
+            if !is_bundled_theme_filename(&name) {
                 continue;
             }
             if let Ok(contents) = fs::read_to_string(&path) {
