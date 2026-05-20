@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`kettle --list-keybinds` renders `Ctrl+Plus` / `Ctrl+Minus` /
+  `Ctrl+Equal` for the punctuation keys, not the literal-`+`
+  ambiguity of `Ctrl++` / `Ctrl+-` / `Ctrl+=`.** `Trigger::label`
+  was uppercasing every `Char(c)` and joining with `+`, so the
+  default zoom-in binding (Ctrl++ for the `+` key) showed up as
+  `Ctrl++` — two adjacent `+` make it unclear whether the second
+  one is the separator's repetition or the key itself. Same
+  shape for `Ctrl+-` (zoom out: looks like a trailing dash) and
+  `Ctrl+=` (also zoom in: looks like an assignment). The parser
+  already accepts `plus` / `minus` / `equal` as named-key tokens
+  (the same way the user would type them in their config file);
+  the label now mirrors that convention so the row reads
+  `Ctrl+Plus  IncreaseFontSize` and a user copying it back into
+  their config file works without translation. Both kitty and
+  Ghostty render these as `Plus`/`Minus`/`Equal` for the same
+  reason. Test: pins the three named-token labels + two
+  unaffected punctuation chars (`,` `/`) + plain letter
+  regression. +1 test (238 total).
+
 - **`font-feature = LIGA on` (uppercase tag) now actually toggles
   ligatures.** OpenType feature tags are case-sensitive per spec —
   every standard tag is lowercase (`liga`, `clig`, `calt`, `cv01`,

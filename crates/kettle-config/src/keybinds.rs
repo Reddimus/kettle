@@ -56,6 +56,19 @@ impl Trigger {
             parts.push("Super".into());
         }
         parts.push(match self.key {
+            // Char punctuation that the parser accepts as a *named* token
+            // (`plus`/`minus`/`equal`, line 354-356) should round-trip
+            // through the label the same way — otherwise
+            // `kettle --list-keybinds` shows the default `Ctrl++` as
+            // literally `Ctrl++` (three `+` characters: separator + key)
+            // and the user can't tell whether the second `+` is the
+            // separator's repetition or the key itself. Cycle 170:
+            // emit `Plus`/`Minus`/`Equal` so the row reads
+            // `Ctrl+Plus  IncreaseFontSize`, matching how the user
+            // would type the chord in their config file.
+            Key::Char('+') => "Plus".into(),
+            Key::Char('-') => "Minus".into(),
+            Key::Char('=') => "Equal".into(),
             Key::Char(c) => c.to_ascii_uppercase().to_string(),
             Key::Up => "Up".into(),
             Key::Down => "Down".into(),
@@ -598,6 +611,31 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn trigger_label_uses_named_tokens_for_plus_minus_equal() {
+        // Cycle 170: the parser accepts `ctrl+plus` / `ctrl+minus` /
+        // `ctrl+equal` as named tokens for the punctuation keys
+        // (line 354-356). `label()` should mirror that, otherwise
+        // `kettle --list-keybinds` shows the default `Ctrl++`
+        // binding (font zoom-in) as the literal string `Ctrl++`
+        // — two adjacent `+` make it ambiguous whether the second
+        // one is the separator's repetition or the key. Same for
+        // `Ctrl+-` (zoom out, looks like a trailing dash) and
+        // `Ctrl+=` (also zoom in, looks like an assignment).
+        // Both kitty and Ghostty render these as `Plus`/`Minus`/
+        // `Equal` in their printed keymaps for the same reason.
+        let c = Mods::CTRL;
+        assert_eq!(Trigger::new(c, Key::Char('+')).label(), "Ctrl+Plus");
+        assert_eq!(Trigger::new(c, Key::Char('-')).label(), "Ctrl+Minus");
+        assert_eq!(Trigger::new(c, Key::Char('=')).label(), "Ctrl+Equal");
+        // Other punctuation that isn't a named-parse token still uses
+        // the raw char (uppercased where applicable).
+        assert_eq!(Trigger::new(c, Key::Char(',')).label(), "Ctrl+,");
+        assert_eq!(Trigger::new(c, Key::Char('/')).label(), "Ctrl+/");
+        // Plain letters unchanged — regression for the existing test.
+        assert_eq!(Trigger::new(c, Key::Char('a')).label(), "Ctrl+A");
     }
 
     #[test]

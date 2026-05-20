@@ -964,6 +964,13 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`Trigger::label` uses Plus/Minus/Equal for the punctuation
+      keys.** `Ctrl++` (zoom in) showed as `Ctrl++` — ambiguous on
+      first read. Parser already accepts `plus` / `minus` /
+      `equal` as named tokens; the label now mirrors that
+      convention so `--list-keybinds` rows can be copied back
+      into a config without translation. kitty + Ghostty render
+      these the same way. +1 test.
 - [x] **`font-feature = LIGA on` (uppercase) now actually
       toggles ligatures.** `FontFeature::parse` preserved the
       user's case, but OpenType tags are case-sensitive (lowercase
