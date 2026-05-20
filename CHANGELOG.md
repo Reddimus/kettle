@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Live config reload no longer fires on unrelated file
+  events.** The `notify` watcher watched the config file's
+  *directory* (NonRecursive) and reloaded on every event.
+  Cycle 109's atomic session save writes
+  `session.json.tmp.<pid>.<nanos>` then `rename`s it into
+  place — each save fires 3+ notify events
+  (create-temp / write-temp / rename), all of which used
+  to pointlessly trigger a config reload. Editor swap
+  files (`.config.swp`), theme caches, the user's own
+  `vim` editing some other file in `~/.config/kettle/` —
+  same story. Filter now matches `event.paths` against the
+  watched config file specifically, so only edits to the
+  config file itself cause a reload. No behavior change
+  for the intended path (user edits config in any editor;
+  notify fires for the config file; we reload).
+
+### Fixed
 - **DEC ?25l (hide cursor) is respected even when the window
   is unfocused.** The renderer's `draw_cursor` gate was
   `shape != Hidden && cp.line.0 >= 0 && pv.focused` — missing

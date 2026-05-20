@@ -222,15 +222,31 @@ impl App {
         let proxy = event_loop.create_proxy();
 
         // Watch the chosen config file's directory for live reload.
+        // Cycle 151: filter notify events by path so we only reload
+        // when the config file itself changes. Pre-fix, any file
+        // event in the config dir (session.json save, palette
+        // edits, theme cache, the user's text-editor swap files,
+        // …) triggered a reload. Particularly bad with cycle 109's
+        // atomic session save which writes `session.json.tmp.*`
+        // then `rename`s — each save fires 3+ notify events that
+        // all pointlessly reloaded the config. Match on `paths`
+        // containing the watched config file exactly.
         let mut watcher = None;
         if let Some(path) = startup.config.clone().or_else(Config::default_path)
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
+            let watched = path.clone();
             use notify::Watcher;
-            if let Ok(mut w) = notify::recommended_watcher(move |_| {
-                let _ = p.send_event(UserEvent::ReloadConfig);
-            }) {
+            if let Ok(mut w) =
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(ev) = res
+                        && ev.paths.iter().any(|p| p == &watched)
+                    {
+                        let _ = p.send_event(UserEvent::ReloadConfig);
+                    }
+                })
+            {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
                 watcher = Some(w);

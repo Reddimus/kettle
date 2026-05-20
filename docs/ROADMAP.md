@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Live config reload only fires for actual config
+      file changes.** The notify watcher reloaded on
+      every event in the dir; cycle 109's atomic session
+      save (write-temp + rename) was firing 3+ pointless
+      reloads per save. Filter on `event.paths == config`.
 - [x] **DEC ?25l hides cursor even when unfocused.** The
       `draw_cursor` gate forgot to check `cursor_visible`;
       the unfocused-window hollow-outline branch fell
