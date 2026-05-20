@@ -1316,6 +1316,8 @@ impl App {
             }
             Action::ScrollPageUp
             | Action::ScrollPageDown
+            | Action::ScrollLineUp
+            | Action::ScrollLineDown
             | Action::ScrollToTop
             | Action::ScrollToBottom => {
                 if let Some(p) = self.mux.focused()
@@ -1324,6 +1326,11 @@ impl App {
                     t.scroll_display(match action {
                         Action::ScrollPageUp => Scroll::PageUp,
                         Action::ScrollPageDown => Scroll::PageDown,
+                        // `Scroll::Delta(+n)` scrolls *back* (toward older
+                        // lines) — same sign convention the mouse-wheel
+                        // path uses; line-up = +1, line-down = -1.
+                        Action::ScrollLineUp => Scroll::Delta(1),
+                        Action::ScrollLineDown => Scroll::Delta(-1),
                         Action::ScrollToTop => Scroll::Top,
                         _ => Scroll::Bottom,
                     });

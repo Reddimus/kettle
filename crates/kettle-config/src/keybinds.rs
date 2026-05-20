@@ -148,6 +148,8 @@ pub enum Action {
     Reset,
     ScrollPageUp,
     ScrollPageDown,
+    ScrollLineUp,
+    ScrollLineDown,
     ScrollToTop,
     ScrollToBottom,
     JumpPrevPrompt,
@@ -234,6 +236,8 @@ pub fn action_names() -> Vec<&'static str> {
         "reset",
         "scroll_page_up",
         "scroll_page_down",
+        "scroll_line_up",
+        "scroll_line_down",
         "scroll_to_top",
         "scroll_to_bottom",
         "jump_to_prompt_prev",
@@ -298,6 +302,8 @@ impl Action {
             "reset" => Reset,
             "scroll_page_up" => ScrollPageUp,
             "scroll_page_down" => ScrollPageDown,
+            "scroll_line_up" => ScrollLineUp,
+            "scroll_line_down" => ScrollLineDown,
             "scroll_to_top" => ScrollToTop,
             "scroll_to_bottom" => ScrollToBottom,
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
@@ -448,6 +454,13 @@ pub fn defaults() -> Bindings {
     bind(cs, Char('h'), HintMode);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
+    // Ctrl+Shift+Up/Down for line-by-line scrollback. Matches Alacritty's
+    // `Ctrl+Shift+Up/Down → ScrollLineUp/Down` and the same chord on kitty
+    // (`shift+up/down`, but ctrl-shift conflicts less with shell history
+    // navigation than plain shift) and WezTerm (`Ctrl+Shift+UpArrow →
+    // ScrollByLine(-1)`).
+    bind(cs, Up, ScrollLineUp);
+    bind(cs, Down, ScrollLineDown);
     bind(Mods::SHIFT, Home, ScrollToTop);
     bind(Mods::SHIFT, End, ScrollToBottom);
     // Alt+1..9 jumps to tab 1..9 (kitty / Terminator / Ghostty parity).
@@ -506,6 +519,33 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn scroll_line_up_down_bound_to_ctrl_shift_arrows() {
+        // Cycle-110 bindings: Alacritty / kitty / WezTerm all bind a
+        // chord for line-by-line scrollback navigation, but kettle
+        // shipped only PageUp/PageDown (Shift) and Top/Bottom (Shift
+        // Home/End). Ctrl+Shift+Up/Down fills the gap with the most
+        // commonly-used chord across modern terminals.
+        let d = defaults();
+        let cs = Mods::CTRL | Mods::SHIFT;
+        assert_eq!(
+            d.get(&Trigger::new(cs, Key::Up)),
+            Some(&Action::ScrollLineUp)
+        );
+        assert_eq!(
+            d.get(&Trigger::new(cs, Key::Down)),
+            Some(&Action::ScrollLineDown)
+        );
+        // Page-scroll and jump-to-prompt still bound (regression guard;
+        // earlier cycles relied on these existing).
+        assert!(d.contains_key(&Trigger::new(Mods::SHIFT, Key::PageUp)));
+        assert_eq!(
+            d.get(&Trigger::new(Mods::CTRL, Key::Up)),
+            Some(&Action::JumpPrevPrompt),
+            "JumpPrev/Next (Ctrl+Up/Down) must coexist with Ctrl+Shift+Up/Down"
+        );
     }
 
     #[test]

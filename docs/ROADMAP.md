@@ -506,6 +506,10 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`scroll_line_up` / `scroll_line_down` actions
+      (Ctrl+Shift+Up/Down).** Filled the gap between full-screen
+      `Shift+PageUp/Down` and extreme `Shift+Home/End` —
+      Alacritty / kitty / WezTerm all ship this chord. +1 test.
 - [x] **`Session::save` is atomic (write-temp-then-rename).**
       Cycle 108 fixed the symptom of corrupted-session loads;
       this fixes the cause. Old `fs::write` was non-atomic —

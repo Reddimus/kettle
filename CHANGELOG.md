@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`scroll_line_up` / `scroll_line_down` actions bound to
+  `Ctrl+Shift+Up` / `Ctrl+Shift+Down`.** Alacritty, kitty, and
+  WezTerm all ship a keyboard chord for line-by-line scrollback;
+  kettle had only `Shift+PageUp/PageDown` (one full screen at a
+  time) and `Shift+Home/End` (jump to extremes). Filling the
+  gap in the middle. New `Action::ScrollLineUp` / `ScrollLineDown`
+  variants, `scroll_line_up` / `scroll_line_down` action names
+  (also surfaced by `--list-actions`), default bindings on
+  `Ctrl+Shift+Up/Down`. Sign matches the mouse-wheel path:
+  `Scroll::Delta(+1)` scrolls back. Ctrl+Up/Down stays bound to
+  `JumpPrev/NextPrompt` (cycle 47) — both coexist; only the
+  Ctrl+Shift+ versions are the new line-scroll. +1 test
+  (`scroll_line_up_down_bound_to_ctrl_shift_arrows`) covers the
+  new bindings + a regression guard that the existing
+  `JumpPrev/NextPrompt` (Ctrl+Up/Down) coexist.
+
 ### Fixed
 - **`Session::save` is now atomic and surfaces I/O errors.**
   Cycle 108 fixed the *symptom* (corrupted session.json restored
