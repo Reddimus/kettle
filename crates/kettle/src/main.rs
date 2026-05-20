@@ -89,19 +89,27 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
 
-    // Explicit `--config PATH` that doesn't exist is *almost certainly*
-    // a typo (the user wanted a specific file, not the default). Every
-    // downstream branch silently fell back to `Config::default()` in
-    // that case — the user got a screenshot / table / window with
+    // Explicit `--config PATH` must point at a regular file. Every
+    // downstream branch silently fell back to `Config::default()`
+    // otherwise — the user got a screenshot / table / window with
     // their carefully-crafted theme nowhere in sight and no clue why.
-    // Hard-fail before any branch runs so the error lands exactly
-    // where the typo is. Omitting `--config` (relying on the default
-    // path) still falls back silently — that's the intended "kettle
-    // works out of the box" behavior.
+    //
+    // Cycle 106 caught the "no such file" case. Cycle 164 extends the
+    // check to *not a regular file* (typically a directory — a user
+    // typing `--config ~/.config/kettle` instead of
+    // `--config ~/.config/kettle/config` would have `read_to_string`
+    // return an `IsADirectory` error, the diagnostics path would
+    // log a warning and use defaults, and the user would see the
+    // same "my config didn't apply" symptom as the no-such-file
+    // case). Same shape as `--working-directory` below: existence
+    // is necessary but not sufficient — also gate on the right type.
+    // Omitting `--config` (relying on the default path) still
+    // silently falls back to defaults; that's the intended
+    // "kettle works out of the box" behavior.
     if let Some(p) = &cli.config
-        && !p.exists()
+        && let Some(reason) = config_path_problem(p)
     {
-        return Err(anyhow::anyhow!("--config {}: no such file", p.display()));
+        return Err(anyhow::anyhow!("--config {}: {reason}", p.display()));
     }
     // Same shape for `--working-directory DIR` (cycle 107). The engine
     // silently falls back to `$HOME` when the directory doesn't exist
@@ -394,6 +402,24 @@ fn main() -> anyhow::Result<()> {
 
 /// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
 /// by name, two columns aligned to the longest name (floor 4 so single-
+/// Validate a `--config PATH` argument: must be an existing regular file.
+/// Returns `None` when the path is acceptable, or `Some(reason)` ready to
+/// slot into the CLI error template. Pure so the typo / wrong-kind paths
+/// (no such file, directory mistyped for the file inside) are unit-
+/// testable without spawning the binary. The matching `--working-directory`
+/// check is still inlined below — the messages differ (`not a regular file`
+/// vs `not a directory`) and the call site is short enough; extracting both
+/// into a shared kind-enum helper would add more glue than it removes.
+fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
+    if !p.exists() {
+        Some("no such file")
+    } else if !p.is_file() {
+        Some("not a regular file")
+    } else {
+        None
+    }
+}
+
 /// character names don't collapse the column), padded with two spaces.
 /// Empty input yields a single "(no ssh-host entries configured)" line so
 /// the user sees their config is empty rather than no output at all.
@@ -415,8 +441,38 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, format_ssh_hosts};
+    use super::{Cli, config_path_problem, format_ssh_hosts};
     use clap::Parser;
+
+    #[test]
+    fn config_path_problem_catches_missing_and_directory() {
+        use std::io::Write;
+        // Missing path → "no such file" (cycle 106 shape; preserved).
+        let missing = std::path::PathBuf::from("/definitely/not/a/real/path/kettle.conf");
+        assert_eq!(config_path_problem(&missing), Some("no such file"));
+
+        // Real temp dir: `--config DIR` was the cycle 164 gap. Pre-fix,
+        // `--config ~/.config/kettle` (where the file is `.config/kettle/config`
+        // and the user dropped the trailing component) silently fell back to
+        // defaults — `read_to_string` returned IsADirectory, `load_from_with_diagnostics`
+        // logged a warn and used defaults, and the user saw their carefully-
+        // crafted theme nowhere with no obvious cue why.
+        let tmp = std::env::temp_dir().join(format!("kettle-cycle164-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(config_path_problem(&tmp), Some("not a regular file"));
+
+        // Real regular file inside the temp dir → acceptable (None).
+        let file = tmp.join("config");
+        std::fs::File::create(&file)
+            .unwrap()
+            .write_all(b"theme = TokyoNight Night\n")
+            .unwrap();
+        assert_eq!(config_path_problem(&file), None);
+
+        // Cleanup so a re-run of the suite starts fresh.
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&tmp);
+    }
 
     #[test]
     fn format_ssh_hosts_sorts_and_aligns_columns() {

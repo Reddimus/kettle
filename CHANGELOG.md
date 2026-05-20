@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--config DIR` is now a hard error instead of a silent
+  fallback-to-defaults.** Cycle 106 made `--config` fail when the
+  path didn't exist. The matching "exists but isn't a regular file"
+  case (typically a directory — a user typing `--config ~/.config/kettle`
+  intending the file `~/.config/kettle/config`) wasn't covered. The
+  path passed the existence check, `read_to_string` returned an
+  `IsADirectory` error, `load_from_with_diagnostics` logged a
+  `warn`-level message most users miss, and downstream branches used
+  the default Config — the user saw the same "my theme is gone"
+  symptom as the cycle-106 no-such-file case but with no obvious
+  CLI-surface error to point at. Fix: hard-fail with
+  `--config PATH: not a regular file` when `p.exists() && !p.is_file()`,
+  mirroring the existing `--working-directory` shape (cycle 107).
+  Extracted as a pure `config_path_problem(&Path) -> Option<&str>`
+  helper so the truth table (missing / dir / regular file) is
+  unit-testable without spawning the binary. +1 test (228 total).
+
 - **Keybind modifier parsing recognizes `win`/`windows`/`meta`/`logo`
   as Super aliases, and *rejects* typo'd modifier names outright.**
   Before cycle 163, `parse_trigger` only knew `super`/`cmd`/`command`

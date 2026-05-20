@@ -964,6 +964,16 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`--config DIR` is now a hard error.** Cycle 106 caught
+      `--config /nonexistent` but `--config ~/.config/kettle`
+      (where the user dropped the trailing `/config` filename)
+      passed the existence check and silently fell back to defaults
+      because `read_to_string` returned IsADirectory and the
+      diagnostics path swallowed it as a `warn` log. Now the CLI
+      hard-fails before any downstream code runs — same shape as
+      cycle 107's `--working-directory`. Extracted
+      `config_path_problem` as a pure helper; tested against the
+      missing/dir/regular-file truth table. +1 test.
 - [x] **Keybind modifier parsing: Super-key aliases + strict
       rejection of typos.** `parse_trigger` only knew
       `super`/`cmd`/`command`; users copying `win+t` /
