@@ -732,12 +732,16 @@ impl App {
                         }
                     }
                     TermEvent::CursorBlinkingChange => {
-                        // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
-                        // redraw will pick up the new state from
-                        // `Terminal::cursor_blinking()`, but reset the blink
-                        // phase so going *blink-on* starts visible and
-                        // *blink-off* makes the cursor solid right away,
-                        // not on whatever half-period we'd otherwise land in.
+                        // DEC mode 12 (`CSI ?12 h/l`) just flipped. The
+                        // next redraw will pick up the new state from
+                        // `Terminal::cursor_blinking()`, but reset the
+                        // blink phase so going *blink-on* starts visible
+                        // and *blink-off* makes the cursor solid right
+                        // away — not on whatever half-period we'd
+                        // otherwise land in. (We're inside a
+                        // `self.mux.panes.values_mut()` loop here so
+                        // we can't call `self.reset_blink_phase()`;
+                        // the two field writes are the same body.)
                         self.blink_on = true;
                         self.last_blink = std::time::Instant::now();
                     }
@@ -1215,9 +1219,20 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, pre: (usize, Option<u64>)) {
         if self.focus_key() != pre {
-            self.blink_on = true;
-            self.last_blink = std::time::Instant::now();
+            self.reset_blink_phase();
         }
+    }
+
+    /// Force the next redraw to render the cursor visible. Shared by:
+    /// - the focus-change path (`note_focus_change`)
+    /// - `Action::Reset` (cycle 134) so a "fresh start" cursor is visible
+    /// - `CursorBlinkingChange` events (DEC ?12 program-driven toggle)
+    /// - the four modal Escape handlers (cycle 140) so closing the
+    ///   search/palette/hints/SSH overlay reveals the cursor immediately
+    ///   instead of waiting up to one blink interval.
+    fn reset_blink_phase(&mut self) {
+        self.blink_on = true;
+        self.last_blink = std::time::Instant::now();
     }
 
     fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
@@ -1378,9 +1393,10 @@ impl App {
                 // right as `blink_on` was false left the user staring
                 // at a missing cursor for up to one blink interval —
                 // confusing, because Reset is the chord users hit to
-                // recover from a visually-jammed terminal.
-                self.blink_on = true;
-                self.last_blink = std::time::Instant::now();
+                // recover from a visually-jammed terminal. Shares
+                // `reset_blink_phase` with cycle-135 focus-change and
+                // cycle-140 modal-close paths.
+                self.reset_blink_phase();
             }
             Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -1504,7 +1520,14 @@ impl App {
 
     fn search_key(&mut self, key: &Key, text: Option<&str>) {
         match key {
-            Key::Named(NamedKey::Escape) => self.mux.search.open = false,
+            Key::Named(NamedKey::Escape) => {
+                // Cycle 140: closing the search overlay reveals the
+                // pane's cursor underneath. Reset blink so the
+                // cursor is visible immediately — same UX argument
+                // as cycles 134/135 (focus + Reset paths).
+                self.mux.search.open = false;
+                self.reset_blink_phase();
+            }
             Key::Named(NamedKey::Enter) => {
                 let s = &mut self.mux.search;
                 if !s.matches.is_empty() {
@@ -1532,7 +1555,10 @@ impl App {
     /// it (open URLs, copy paths/hashes/IPs); `Esc` cancels.
     fn hint_key(&mut self, key: &Key, text: Option<&str>) {
         match key {
-            Key::Named(NamedKey::Escape) => self.hint_state = None,
+            Key::Named(NamedKey::Escape) => {
+                self.hint_state = None;
+                self.reset_blink_phase();
+            }
             Key::Named(NamedKey::Backspace) => {
                 if let Some((_, typed)) = self.hint_state.as_mut() {
                     typed.pop();
@@ -1585,7 +1611,10 @@ impl App {
             return;
         };
         match key {
-            Key::Named(NamedKey::Escape) => self.palette_input = None,
+            Key::Named(NamedKey::Escape) => {
+                self.palette_input = None;
+                self.reset_blink_phase();
+            }
             Key::Named(NamedKey::Backspace) => {
                 q.pop();
                 *sel = 0;
@@ -1624,7 +1653,10 @@ impl App {
 
     fn ssh_key(&mut self, key: &Key, text: Option<&str>) {
         match key {
-            Key::Named(NamedKey::Escape) => self.ssh_input = None,
+            Key::Named(NamedKey::Escape) => {
+                self.ssh_input = None;
+                self.reset_blink_phase();
+            }
             Key::Named(NamedKey::Backspace) => {
                 if let Some(q) = self.ssh_input.as_mut() {
                     q.pop();

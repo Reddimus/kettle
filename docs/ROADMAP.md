@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Modal-close paths reset blink phase.** Cycle 134
+      covered Action::Reset; cycles 135/136 the focus
+      changes. Escape closing search/palette/hint/ssh
+      overlays still left the cursor potentially invisible
+      for up to one blink_interval. Centralized via new
+      `reset_blink_phase` helper (5 call sites + 1 inline
+      for the borrow-conflicted CursorBlinkingChange).
 - [x] **`font-size` clamps at parse-time too.** Cycle 118
       clamped at renderer-time; cycle 131 added the
       diagnostic; this cycle clamps at parse so

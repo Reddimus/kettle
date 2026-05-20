@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Closing a modal overlay also resets the cursor blink
+  phase.** Cycle 134 fixed the chord-Reset path; cycles
+  135/136 covered focus changes (keyboard and mouse). The
+  four modal-close paths — Escape closing the search bar,
+  command palette, quick-select hints, or SSH launcher —
+  still left the cursor invisible for up to one
+  `blink_interval` after the close if it landed on the
+  off-half. Same "where's my cursor?" surprise on the
+  pane the overlay was hiding.
+  - New shared helper `fn reset_blink_phase(&mut self)`
+    centralizes the two-line reset (cycle 134's body)
+    so the five call sites — search-Escape, palette-Escape,
+    hint-Escape, ssh-Escape, and `Action::Reset` — all
+    use one path. The `note_focus_change` helper
+    (cycle 136) now delegates to it.
+  - The `CursorBlinkingChange` event handler (DEC ?12)
+    can't call the helper because it runs inside a
+    `self.mux.panes.values_mut()` loop (borrow conflict);
+    keeps the inline two-line body, documented with a
+    pointer to the helper.
+
 - **`font-size` clamps at parse-time, not just at render-time.**
   Cycle 118 added `clamp_font_size` in `Renderer::new` /
   `set_font_size`; cycle 131 surfaced out-of-range as a
