@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **OS mouse cursor is now the standard arrow over the tab bar and
+  modal overlays (not the text I-beam).** `sync_cursor_icon` only
+  considered two states — `Pointer` while a Ctrl-held URL was under
+  the mouse, and `Text` everywhere else — so hovering the clickable
+  tab bar, scrollbar-thumb-adjacent area, or any open modal (search
+  bar, command palette, hint mode, SSH launcher) showed the I-beam,
+  visually implying "this surface accepts text selection" when those
+  surfaces don't. The fix extracts a pure
+  `chrome_cursor_icon(in_tab_bar, modal_open) -> Option<CursorIcon>`
+  helper that returns `Some(Default)` for chrome and `None` for
+  content (the caller's existing Pointer/Text branch then runs),
+  plus a new `any_modal_open()` reader on `App` that mirrors
+  `close_all_modals`. iTerm2 / WezTerm / Ghostty / kitty all show
+  the standard arrow over their chrome — this brings kettle in
+  line. Test: the truth table of all four (in_tab_bar × modal_open)
+  states pinned in `app::tests::chrome_cursor_icon_overrides_only_for_chrome`.
+
 ### Documentation
 - **`CONTRIBUTING.md` documents the audit-cycle pattern.**
   After 150+ cycles the project has a distinctive workflow

@@ -63,6 +63,20 @@ const OSC52_MAX: usize = 1 << 20;
 /// spare; bigger pastes are almost certainly a fat-finger.
 const LOCAL_PASTE_MAX: usize = 4 << 20;
 
+/// Pure: when the mouse is over chrome (tab bar or any modal overlay), the
+/// OS cursor should be the standard arrow rather than the text I-beam —
+/// matches iTerm2 / WezTerm / Ghostty / kitty: chrome surfaces are
+/// clickable, not selectable, so the I-beam is visually misleading there.
+/// Returns `Some(Default)` for chrome, `None` to let the content-area
+/// caller decide between `Pointer` (URL-hover) and `Text`.
+fn chrome_cursor_icon(in_tab_bar: bool, modal_open: bool) -> Option<CursorIcon> {
+    if in_tab_bar || modal_open {
+        Some(CursorIcon::Default)
+    } else {
+        None
+    }
+}
+
 /// Pure geometry: is the mouse y-coordinate inside the tab bar's vertical
 /// band? `bar_h` is the bar height in pixels, `surface_h` is total window
 /// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
@@ -360,13 +374,20 @@ impl App {
         // a clickable link. Otherwise show the standard text-I-beam, the
         // affordance every modern terminal uses for "this surface accepts
         // mouse selection."
-        let want_pointer =
-            (self.mods.control_key() || self.mods.super_key()) && self.link_at_cursor().is_some();
-        let want = if want_pointer {
-            CursorIcon::Pointer
-        } else {
-            CursorIcon::Text
-        };
+        //
+        // Chrome surfaces (tab bar, open modal overlays) override that —
+        // they're clickable, not selectable, so the I-beam there is
+        // visually misleading. `chrome_cursor_icon` is the pure decision.
+        let chrome = chrome_cursor_icon(self.cursor_in_tab_bar(), self.any_modal_open());
+        let want = chrome.unwrap_or_else(|| {
+            let want_pointer = (self.mods.control_key() || self.mods.super_key())
+                && self.link_at_cursor().is_some();
+            if want_pointer {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Text
+            }
+        });
         if self.last_cursor_icon != Some(want)
             && let Some(w) = &self.window
         {
@@ -1251,6 +1272,17 @@ impl App {
         self.palette_input = None;
         self.hint_state = None;
         self.ssh_input = None;
+    }
+
+    /// `true` while any modal overlay (search bar, command palette, hint
+    /// mode, SSH launcher) is up. Mirrors `close_all_modals` so the two
+    /// stay in lock-step — extracted in cycle 161 to drive the cursor-icon
+    /// override (the OS arrow, not the I-beam, belongs over modal chrome).
+    fn any_modal_open(&self) -> bool {
+        self.mux.search.open
+            || self.palette_input.is_some()
+            || self.hint_state.is_some()
+            || self.ssh_input.is_some()
     }
 
     /// Force the next redraw to render the cursor visible. Shared by:
@@ -2463,6 +2495,24 @@ mod tests {
         // out of band so the wheel falls through to scrollback.
         assert!(!cursor_in_tab_bar_band(0.0, 0.0, 600.0, TabBarPos::Top));
         assert!(!cursor_in_tab_bar_band(0.0, 0.0, 600.0, TabBarPos::Bottom));
+    }
+
+    #[test]
+    fn chrome_cursor_icon_overrides_only_for_chrome() {
+        use super::chrome_cursor_icon;
+        use winit::window::CursorIcon;
+        // Content area, no modals → caller picks (None means "use content
+        // logic" — Text by default, Pointer over a Ctrl-held link).
+        assert_eq!(chrome_cursor_icon(false, false), None);
+        // Tab bar → Default arrow (clickable tabs are not selectable text).
+        assert_eq!(chrome_cursor_icon(true, false), Some(CursorIcon::Default));
+        // Modal up (search / palette / hints / SSH launcher) → Default arrow
+        // regardless of where the pointer is, so the I-beam doesn't bleed
+        // through onto the overlay.
+        assert_eq!(chrome_cursor_icon(false, true), Some(CursorIcon::Default));
+        // Both at once (modal opened while pointer happened to be over the
+        // tab bar) → still Default.
+        assert_eq!(chrome_cursor_icon(true, true), Some(CursorIcon::Default));
     }
 
     #[test]

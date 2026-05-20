@@ -964,6 +964,17 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **OS cursor matches every other GUI: arrow over chrome, I-beam
+      only over text.** `sync_cursor_icon` showed the text I-beam
+      everywhere the URL-hover Pointer didn't override it, including
+      the tab bar and modal overlays (search bar, command palette,
+      hint mode, SSH launcher) — none of which accept text
+      selection. iTerm2 / WezTerm / Ghostty / kitty all switch to
+      the standard arrow over chrome. The fix extracts a pure
+      `chrome_cursor_icon(in_tab_bar, modal_open) -> Option<CursorIcon>`
+      decision plus an `App::any_modal_open()` reader; the existing
+      Pointer/Text branch runs only when chrome doesn't override.
+      Test: all four (in_tab_bar × modal_open) states pinned. +1 test.
 
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)
