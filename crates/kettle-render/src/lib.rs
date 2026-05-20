@@ -5,6 +5,38 @@
 //! Multiple panes are tiled in a single frame: each pane gets its own
 //! cosmic-text buffer clipped to its rectangle; all backgrounds/UI go through
 //! one instanced quad pass and all text through one glyphon prepare/render.
+//!
+//! Pipeline order per frame (matters for transparency + dim overlays):
+//! 1. **Quads** — cell backgrounds, tab-bar chrome, focus borders,
+//!    cursor block / beam / underline / hollow outline. Active-tab + focused-
+//!    pane accents flip to theme `palette[3]` (yellow) while broadcast
+//!    mode is on so the user can see input is fan-out.
+//! 2. **Images** — kitty graphics / Sixel / iTerm2 OSC 1337 placements
+//!    composited per-pane with scrollback-anchored Y coords.
+//! 3. **Text** — glyphon `prepare` + `render`. Per-cell SGR resolution +
+//!    `Flags::DIM` half-blend + WCAG minimum-contrast lift (`minimum-contrast`
+//!    config) all happen here so they compose cleanly against the
+//!    backgrounds laid down by step 1.
+//! 4. **Overlay quads** — a *second* instanced pass for post-text chrome:
+//!    unfocused-pane dimming (theme bg at `1 - unfocused-split-opacity`)
+//!    and the per-pane scrollback scrollbar thumb. Drawn after text so the
+//!    dim actually covers glyphs.
+//!
+//! Modules (private; see source):
+//! - `color` — palette/cube/named-color resolution against the active
+//!   `Theme`, WCAG luminance + contrast-lift, SGR `Dim` half-blend,
+//!   OSC 4/10/11/12 query-reply formatting.
+//! - `quad` — `QuadPipeline` + `QuadInstance`. Reused twice per frame
+//!   (one instance for the main pass, one for the post-text overlay).
+//! - `imgpipe` — sampled-texture image-blit pipeline, used for kitty /
+//!   Sixel / iTerm2 placements.
+//!
+//! Headless paths: [`capture_png`] builds an offscreen device + texture
+//! chain, renders one representative frame, and copies it back via
+//! `copy_texture_to_buffer` — powers `kettle --screenshot`.
+//! [`offscreen_selftest`] compiles the WGSL shaders + sets up a tiny
+//! pipeline without ever creating a Surface, so CI can validate the GPU
+//! path under Xvfb without a real display.
 
 mod color;
 mod imgpipe;

@@ -7,6 +7,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **`kettle-render` and `kettle-vt` crate-level docs updated to
+  match what's actually in those crates.** Cycles 207/208/209
+  audited the three biggest crate docs (ui / core / config);
+  cycle 210 closes the sweep on the remaining two:
+  - `kettle-render`: pipeline order (quads → images → text →
+    overlay quads), the post-text overlay pass for
+    dim+scrollbar, the headless `capture_png` / `offscreen_selftest`
+    paths, the broadcast-mode accent flip on tab/border.
+  - `kettle-vt`: extractor's dual role for image protocols AND
+    OSC 7 (cwd) / OSC 133 (shell integration), the
+    `placeholder` module for kitty Unicode-placeholder
+    decoding. Both `cargo doc --no-deps` zero-warning.
+  All five workspace crates now have rustdoc landings that
+  match the contract a contributor would expect after reading
+  the CHANGELOG.
+
 - **`kettle-config` crate-level doc lists every public module.**
   Cycles 207/208 siblings. Original kettle-config one-liner mentioned
   "Ghostty-compatible config, bundled Ghostty theme set, embedded

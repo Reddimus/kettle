@@ -1,8 +1,33 @@
-//! kettle-vt: image-protocol support layered in front of the VT engine.
+//! kettle-vt: image-protocol + shell-integration extractor that sits in
+//! front of the VT engine.
 //!
-//! Sixel, the kitty graphics protocol and iTerm2 inline images are extracted
-//! from the PTY stream by [`Extractor`], decoded to RGBA [`ImageData`], and
-//! handed to the renderer for GPU compositing.
+//! Sixel (DCS), the kitty graphics protocol (APC `G`), and iTerm2 inline
+//! images (OSC 1337) are pulled out of the PTY byte stream by
+//! [`Extractor`], decoded to RGBA [`ImageData`], and handed to the
+//! renderer for GPU compositing. Everything else passes through
+//! byte-for-byte (BEL vs ST terminator preserved) so the engine still
+//! sees a correct VT stream.
+//!
+//! The extractor also handles two non-image protocols whose semantics
+//! belong upstream of the engine:
+//! - **OSC 7** (cwd report) — `Chunk::Cwd(path)` for the UI's cwd
+//!   tracker; powers session restore + new-tab/new-split inheriting the
+//!   focused pane's directory.
+//! - **OSC 133** (FinalTerm shell integration) — `Chunk::Prompt(kind)`
+//!   for the jump-to-prompt navigation (Ctrl+Up / Ctrl+Down).
+//!
+//! Modules (all `pub`):
+//! - [`extract`] — the state-machine `Extractor` itself; main entry
+//!   point [`Extractor::feed`].
+//! - [`sixel`] — Sixel DCS parser → `ImageData`.
+//! - [`kitty`] — kitty graphics protocol (a=t/T/p/a/c/d/f, chunked
+//!   payloads, animation frames + control, Unicode placeholder cells,
+//!   relative placements).
+//! - [`iterm`] — OSC 1337 inline-image decoder.
+//! - [`image`] — `ImageData` (RGBA pixel buffer + dimensions) and
+//!   `Placed` placement geometry shared by all three protocols.
+//! - [`placeholder`] — Unicode-placeholder (`U+10EEEE` + zero-width
+//!   diacritics) decode path for kitty `U=1` virtual placements.
 
 pub mod extract;
 pub mod image;
