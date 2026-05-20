@@ -317,6 +317,32 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(out) = &cli.screenshot {
+        // The renderer's `capture_png` writes via `image::save`, which
+        // dispatches on file extension and is compiled with PNG-only
+        // support (kettle-render/Cargo.toml: `features = ["png"]`).
+        // A typo'd `.jpg` / `.bmp` / no-extension argument used to
+        // reach `image::save` and surface a crate-internal error like
+        //   `The file extension `."txt"` was not recognized as an
+        //   image format`
+        // *after* doing all the GPU work — confusing and wasted. Pre-
+        // validate so the message is clear and the failure is cheap.
+        // Cycle 128.
+        match out.extension().and_then(|e| e.to_str()) {
+            Some(e) if e.eq_ignore_ascii_case("png") => {}
+            Some(e) => {
+                return Err(anyhow::anyhow!(
+                    "--screenshot {}: extension .{e} not supported; \
+                     only .png is built in",
+                    out.display()
+                ));
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "--screenshot {}: missing .png extension",
+                    out.display()
+                ));
+            }
+        }
         // Use `load_from` (same path the in-window reload uses) instead
         // of an open-coded `parse_collect`: now a typo in the config
         // emits the same `log::warn!` on stderr when generating a

@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`--screenshot foo.jpg` (or no extension) now fails up-front
+  with a clear error.** `capture_png` writes via `image::save`,
+  which dispatches on the file extension and is compiled
+  PNG-only (`kettle-render/Cargo.toml`: `image = { …, features
+  = ["png"] }`). A typo'd `.jpg` / `.bmp` / no-extension
+  argument used to reach `image::save` *after* all the GPU work
+  and surface a crate-internal error:
+  `The file extension `."txt"` was not recognized as an image
+  format`. Now pre-validated at the CLI surface:
+  - `--screenshot foo.txt` → `Error: --screenshot foo.txt:
+    extension .txt not supported; only .png is built in`
+    (exit 1)
+  - `--screenshot foo` → `Error: --screenshot foo: missing
+    .png extension` (exit 1)
+  - `--screenshot foo.PNG` → still works (case-insensitive)
+  Same shape as the cycle-106/107 hard-fails on `--config /typo`
+  and `--working-directory /typo` — surface bad input at the CLI
+  surface, not deep in the engine.
+
 ### Documentation
 - **README Quick-start CLI block matches reality.** Same drift
   cycle 126 caught in `--help` was also present in README's

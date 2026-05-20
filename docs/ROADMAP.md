@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--screenshot` pre-validates `.png` extension.**
+      Sibling to the cycle-106/107 CLI hard-fails. Bad
+      extensions used to surface as a cryptic crate-internal
+      error AFTER full GPU work; now caught up-front with a
+      named error (case-insensitive `.png` ok).
 - [x] **README Quick-start block catches up to the
       introspection surface.** Missing `--list-actions`,
       `--list-ssh-hosts`, `--screenshot`; `--list-keybinds`
