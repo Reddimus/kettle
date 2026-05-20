@@ -94,6 +94,20 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
   uses theme `palette[3]` (yellow) on both the active tab segment's
   accent and the focused-pane border, so the user can see broadcast is
   on regardless of `tab-bar` mode.
+- **Drag-and-drop file paths** — iTerm2 (long history; macOS-conventional);
+  kitty `paste_from_drop` config; WezTerm `WindowEvent::DroppedFile` handler;
+  GTK provides this builtin for Terminator. kettle's variant in
+  `kettle-ui/src/app.rs` `WindowEvent::DroppedFile`: shell-quote the path
+  via the pure helper `shell_quote_path` (POSIX single-quote escape,
+  `'\''` for embedded apostrophes — works on bash/zsh/fish/pwsh-7+),
+  append a trailing space so `cat ` + drop + Enter Just Works, then route
+  through `input::paste_payload(text, bracketed)` so vim / fzf / mc with
+  bracketed paste enabled get the bytes wrapped in `\e[200~ … \e[201~`
+  (no per-char normal-mode interpretation). Broadcast-aware: with group
+  input on, the path goes to every pane in the active tab using
+  `broadcast_paste`, which reads each pane's `BRACKETED_PASTE` mode
+  separately for the wrap (a broadcast set containing one shell + one
+  vim doesn't break either of them).
 
 ## Tab-bar hit regions
 

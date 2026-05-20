@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **`docs/UX-COMPARISON.md` drag-and-drop entry gains a citation
+  paragraph.** Cycle 200 added the matrix row but didn't add the
+  matching Citations paragraph (which cycle 193 had done for its
+  broadcast row). The Citations paragraph explains iTerm2 /
+  kitty `paste_from_drop` / WezTerm / GTK origin, plus kettle's
+  three-property combination: shell-quote (cycle 175), bracketed-
+  paste-safe wrap (cycle 182), and per-pane broadcast aware (the
+  cycle 173/174 sibling pattern). Closes the cycle-200 docs gap.
+
 - **`--config` `--help` text documents the cycle-198 unreadable-
   file hard-fail.** The clap doc comment mentioned only the
   cycle-106/164 cases (missing file, directory). Cycle 198 added
