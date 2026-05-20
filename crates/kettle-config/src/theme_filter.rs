@@ -93,7 +93,10 @@ mod tests {
         assert!(!is_bundled_theme_filename("Solarized.bak"));
         assert!(!is_bundled_theme_filename("Solarized.orig"));
         assert!(!is_bundled_theme_filename("Solarized.swp"));
-        assert!(!is_bundled_theme_filename("Solarized.SWP"), "case-insensitive");
+        assert!(
+            !is_bundled_theme_filename("Solarized.SWP"),
+            "case-insensitive"
+        );
         assert!(!is_bundled_theme_filename("temp.tmp"));
     }
 }
