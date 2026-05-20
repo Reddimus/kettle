@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **Visual indicator when broadcast (group-input) mode is on.**
+  Pre-cycle, toggling broadcast via Ctrl+Shift+G (or the command
+  palette) flipped the input-routing flag with no UI cue — every
+  keystroke went to every pane in the active tab, but the user
+  had no way to tell at a glance. Cycle 173/174 sealed up the
+  broadcast scoping (keystrokes / scroll-on-keystroke / paste);
+  this cycle adds the obvious missing piece — a warning-yellow
+  accent (theme palette[3]) on the active tab segment's left
+  edge when broadcast is on. Inactive tabs stay normal (broadcast
+  is scoped to the active tab; cycle-112 invariant). No new
+  config key: uses the theme's standard ANSI yellow slot so it
+  works automatically with every bundled theme. No new test
+  (render-time tint; the conditional is a 4-line if/else read
+  from `tabbar.broadcast`).
+
 ### Fixed
 - **Session restore canonicalizes the theme name the same way parse
   does.** Cycle-176 sibling. The session.json file holds whatever

@@ -508,6 +508,8 @@ impl App {
             y,
             segments,
             new_tab: (sw - plus_w, y, plus_w, height),
+            // Cycle 178: broadcast indicator on the active tab.
+            broadcast: self.mux.broadcast,
         }
     }
 

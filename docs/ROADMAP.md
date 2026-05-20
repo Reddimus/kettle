@@ -964,6 +964,11 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Visual indicator when broadcast mode is on.** Active tab's
+      left-edge accent flips to theme yellow (palette[3]) when
+      broadcast is enabled — closes the loop on cycles 173/174.
+      Inactive tabs stay normal (broadcast is per-active-tab,
+      cycle-112 invariant). No new config key.
 - [x] **Session restore canonicalizes theme name same as parse.**
       Cycle-176 sibling. Restore path used to re-store whatever
       lowercase/typo'd name the session file held; now routes

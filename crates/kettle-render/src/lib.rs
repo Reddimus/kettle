@@ -107,6 +107,13 @@ pub struct TabBar {
     pub segments: Vec<TabSeg>,
     /// The trailing "new tab" (+) button rect.
     pub new_tab: Rect4,
+    /// Cycle 178: visual indicator that broadcast / group-input mode is
+    /// on. Without this, the user can forget broadcast is enabled and
+    /// type to one pane expecting it to stay local — every keystroke
+    /// goes to every pane in the active tab silently. The renderer
+    /// tints the active tab segment with a warning accent when set;
+    /// inactive tabs (which aren't affected by broadcast) stay normal.
+    pub broadcast: bool,
 }
 
 impl TabBar {
@@ -116,6 +123,7 @@ impl TabBar {
             y: 0.0,
             segments: Vec::new(),
             new_tab: (0.0, 0.0, 0.0, 0.0),
+            broadcast: false,
         }
     }
 }
@@ -401,7 +409,20 @@ impl Renderer {
                 if s.active {
                     quads.push(rect(x, by, w, tabbar.height, default_bg, 1.0));
                     // Active accent bar on the left edge.
-                    quads.push(rect(x, by, 2.0, tabbar.height, theme.palette[4], 1.0));
+                    // Cycle 178: when broadcast / group-input mode is on,
+                    // use a warning-yellow accent (theme palette index 3,
+                    // the standard ANSI "yellow" slot) for the active tab
+                    // so the user can't forget broadcast is enabled and
+                    // type to one pane expecting it to stay local. Other
+                    // tabs are unaffected — broadcast is scoped to the
+                    // active tab (cycle-112 invariant), so only the
+                    // active segment's accent flips.
+                    let accent = if tabbar.broadcast {
+                        theme.palette[3]
+                    } else {
+                        theme.palette[4]
+                    };
+                    quads.push(rect(x, by, 2.0, tabbar.height, accent, 1.0));
                 }
                 // Thin separator on the right of each segment.
                 quads.push(rect(
