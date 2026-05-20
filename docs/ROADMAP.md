@@ -420,6 +420,9 @@
 - [x] **Ctrl+Plus font-zoom works on US layouts.** `Ctrl+Shift+=`
       and `Ctrl+Shift++` (the actual chord users press when they
       think "Ctrl+Plus") and Ctrl+Shift+-/_ now bound. +1 test.
+- [x] **Tab title `truncate` honors display columns.** CJK chars
+      and emoji (2 cells each) no longer overflow the tab segment.
+      Uses `UnicodeWidthChar::width()`. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

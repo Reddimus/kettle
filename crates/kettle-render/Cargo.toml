@@ -14,4 +14,5 @@ kettle-core = { version = "0.1.0", path = "../kettle-core" }
 log.workspace = true
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
+unicode-width.workspace = true
 wgpu = "29.0.3"

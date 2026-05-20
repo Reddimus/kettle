@@ -1032,13 +1032,31 @@ fn font_features(cfg: &Config) -> FontFeatures {
     ff
 }
 
+/// Truncate `s` to at most `n` **display columns** (not chars), adding `…`
+/// when something was cut. CJK characters and emoji are wide (2 cells
+/// each), so a char-count truncation overflows the tab segment / title
+/// when these are present; this honors the cell width that the renderer
+/// actually paints into. The ellipsis itself is 1 cell so we reserve a
+/// column for it.
 fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n.saturating_sub(1)).collect();
-        format!("{t}…")
+    use unicode_width::UnicodeWidthChar;
+    let total: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
+    if total <= n {
+        return s.to_string();
     }
+    let limit = n.saturating_sub(1); // reserve 1 col for the `…`
+    let mut acc = 0usize;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if acc + w > limit {
+            break;
+        }
+        out.push(c);
+        acc += w;
+    }
+    out.push('…');
+    out
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
@@ -1554,5 +1572,35 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_respects_display_columns_not_chars() {
+        // ASCII: 1 col per char. Trivially fits.
+        assert_eq!(truncate("hello", 10), "hello");
+        // ASCII overflow: keep n-1 chars, append `…` (1 col).
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
+        // CJK: each char is 2 cells. "中文中文" = 8 cells. Limit 8 = fits.
+        assert_eq!(truncate("中文中文", 8), "中文中文");
+        // CJK overflow: 8 cells doesn't fit in 6, reserve 1 col for `…`
+        // → can fit at most 2 chars (4 cells) + `…` (1 col) = 5 cols ≤ 6.
+        // Greedy: 2 chars + ellipsis.
+        assert_eq!(truncate("中文中文", 6), "中文…");
+        // Mixed ASCII + CJK: "abc中文" = 3+4 = 7 cells. Limit 5 →
+        // overflow; reserve 1 col, take 4 cols worth = "abc" + ellipsis.
+        // (next char is `中` (2 cols), 3+2=5 > 4-limit-after-ellipsis-reserve,
+        // so stops at 3 ASCII chars.)
+        assert_eq!(truncate("abc中文", 5), "abc…");
+        // Limit 0 / 1: edge cases. limit=0 always returns just `…` if
+        // anything was cut, but a truly-empty string fits in 0.
+        assert_eq!(truncate("", 0), "");
+        assert_eq!(truncate("a", 0), "…");
+        // Total-equals-limit: no ellipsis (everything fits exactly).
+        assert_eq!(truncate("中", 2), "中");
     }
 }

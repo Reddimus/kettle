@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Tab title truncation honors display columns, not chars.** The
+  `truncate(s, n)` helper used `chars().count()` to decide whether
+  to cut — but every CJK character or emoji is 2 cells wide in the
+  rendered tab segment, so a title like `中文中文中文` (6 chars / 12
+  cells) sailed past the segment width without being trimmed and
+  overflowed visually. Now sums `UnicodeWidthChar::width()` of each
+  char and reserves 1 column for the trailing `…`. Pure helper,
+  +1 test covering ASCII / CJK / mixed / edge cases (limit=0,
+  exact-fit).
 - **`Ctrl+Plus` font-zoom muscle memory works on US layouts.** On
   a US keyboard the `+` glyph lives on `Shift+=` — pressing what a
   user thinks of as "Ctrl+Plus" actually sends `mods=Ctrl+Shift,
