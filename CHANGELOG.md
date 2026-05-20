@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Build
+- **macOS release builds are now actually universal (`x86_64` +
+  `aarch64`).** The release workflow's artifact has been named
+  `kettle-macos-universal.zip` since the project's first
+  tagged release scaffolding, but the underlying binary was
+  whatever single architecture `macos-latest` happened to be
+  (currently arm64, but historically x86_64). An Intel-Mac
+  user downloading the "universal" archive got a binary
+  their CPU couldn't run; an Apple-Silicon user got a
+  potentially-Rosetta-translated x86_64 binary, slow and
+  unnecessary. Now the workflow:
+  - Adds both `x86_64-apple-darwin` and `aarch64-apple-darwin`
+    targets to the toolchain.
+  - Builds release artifacts for each.
+  - Combines them with `lipo -create` into a single
+    universal2 binary at `target/release/kettle`.
+  - The existing `.app` packaging step copies that universal
+    binary unchanged.
+  Linux and Windows still do the native single-arch build.
+
 ### Fixed
 - **`--check-config` no longer flags empty values as malformed.**
   parse.rs documents the "empty value resets the key"

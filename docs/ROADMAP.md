@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **macOS release build is actually universal.**
+      Artifact has been named `kettle-macos-universal.zip`
+      since project genesis but contained a single-arch
+      binary. Now uses dual `cargo build --target` +
+      `lipo -create` to produce a true universal2 binary.
+      Linux + Windows native unchanged.
 - [x] **`--check-config` skips empty values.** parse.rs
       documents empty-as-reset semantics; runtime honors it
       (cycle 121/122 + every enum/bool/numeric defaulting on

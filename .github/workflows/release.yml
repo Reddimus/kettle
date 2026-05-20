@@ -32,7 +32,26 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p kettle
+      # Build: macOS gets a real universal2 binary (cycle 159 — the
+      # artifact has been named `kettle-macos-universal.zip` since
+      # cycle 0 but the underlying binary was single-arch from
+      # whatever runner architecture macos-latest happened to be).
+      # Linux + Windows: native release build.
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin -p kettle
+          cargo build --release --target aarch64-apple-darwin -p kettle
+          mkdir -p target/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/kettle \
+            target/aarch64-apple-darwin/release/kettle \
+            -output target/release/kettle
+          file target/release/kettle
+      - name: Build (Linux / Windows)
+        if: runner.os != 'macOS'
+        run: cargo build --release -p kettle
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
