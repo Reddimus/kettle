@@ -60,9 +60,10 @@ struct Cli {
     /// Use this config file instead of the default path. Honored by every
     /// introspection command (`--check-config`, `--list-keybinds`,
     /// `--list-ssh-hosts`, `--screenshot`, `--config-path`) as well as the
-    /// windowed run. The path must be an existing regular file: a missing
-    /// path is a hard error, and so is a directory (typing `--config
-    /// ~/.config/kettle` when you meant the file inside it). The
+    /// windowed run. The path must be an existing, regular, readable
+    /// file: a missing path is a hard error, a directory is a hard error
+    /// (typing `--config ~/.config/kettle` when you meant the file inside
+    /// it), and a permission-denied file is a hard error too. The
     /// out-of-the-box default-path fallback only kicks in when this flag
     /// is omitted entirely.
     #[arg(long = "config", value_name = "FILE")]

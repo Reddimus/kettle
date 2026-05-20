@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`--config` `--help` text documents the cycle-198 unreadable-
+  file hard-fail.** The clap doc comment mentioned only the
+  cycle-106/164 cases (missing file, directory). Cycle 198 added
+  the permission-denied class — the doc didn't reflect it.
+  Updated to "must be an existing, regular, readable file" with
+  all three hard-fail conditions enumerated. Same docs/runtime
+  drift shape as cycle 168 (which originally removed internal
+  `cycle N` refs from clap help). The drift-guard test still
+  passes (no `cycle <digit>` substring introduced).
+
 ### Fixed
 - **`--check-config` labels read errors as `i/o error:`, not the
   misleading `malformed value:`.** Cycle-196 follow-up. Cycle 196
