@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### CI
+- **Packaging smoke runs on every push, not just on tag cut.** The
+  `release.yml` workflow only fires on `v*` tag push, so a
+  regression like "remove a PNG from `packaging/macos/kettle.iconset`"
+  or "delete `packaging/windows/kettle.ico`" only surfaces at the
+  next release — by which point bisect-and-revert is the only
+  remedy. New CI steps run `iconutil -c icns` on the macOS runner
+  and `file packaging/windows/kettle.ico` on the Windows runner,
+  each verifying the produced/shipped file is well-formed
+  (macOS: real .icns, > 100 KB; Windows: ≥ 4 resolutions). Catches
+  malformed iconsets at PR time, not release time.
+
 ## [1.0.1] — 2026-05-20
 
 Patch release: ships the macOS `.icns` + Windows `.ico` packaging

@@ -33,6 +33,48 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Packaging smoke — macOS .icns
+        # Cycle 221: the release.yml's iconutil step only fires on a
+        # `v*` tag push, so a regression like "remove a PNG from
+        # packaging/macos/kettle.iconset" only surfaces at the next
+        # release cut — by which point bisect-and-revert is the only
+        # remedy. Running iconutil on every macOS CI build catches
+        # malformed iconsets immediately. iconutil ships with macOS;
+        # no installs needed.
+        if: runner.os == 'macOS'
+        run: |
+          iconutil -c icns packaging/macos/kettle.iconset -o /tmp/kettle.icns
+          file /tmp/kettle.icns | grep -q "Mac OS X icon" \
+            || { echo "iconutil produced a non-icns file"; file /tmp/kettle.icns; exit 1; }
+          # Sanity-check size — a tiny .icns means iconutil silently
+          # produced an empty container. Real one is ~300 KB; floor
+          # at 100 KB catches the regression while staying tolerant
+          # of icon redesigns.
+          size=$(stat -f%z /tmp/kettle.icns)
+          test "$size" -gt 100000 \
+            || { echo "icns too small ($size bytes) — iconutil likely produced an empty container"; exit 1; }
+          echo "iconutil OK ($size bytes)"
+      - name: Packaging smoke — Windows .ico
+        # Same logic as the macOS step: the winresource build-dep
+        # already compiles via `cargo build --workspace --all-targets`
+        # above (so a missing .ico file aborts the build), but we also
+        # want to confirm the .ico itself is well-formed and
+        # multi-resolution (a single-size .ico means the
+        # auto-resize step in our `convert` command degraded).
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          test -f packaging/windows/kettle.ico
+          # `file` on Windows comes with Git for Windows — covers our use.
+          file packaging/windows/kettle.ico | grep -q "MS Windows icon" \
+            || { echo "kettle.ico is not a Windows icon"; file packaging/windows/kettle.ico; exit 1; }
+          # Multi-resolution check: the `file` output includes the
+          # number of icons. The release recipe asks for 6 sizes; floor
+          # at 4 to keep headroom for future tweaks.
+          count=$(file packaging/windows/kettle.ico | grep -oE '[0-9]+ icons' | grep -oE '^[0-9]+')
+          test "${count:-0}" -ge 4 \
+            || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
+          echo "kettle.ico OK (${count} resolutions)"
       - name: Rustdoc (Linux, warnings denied)
         # Cycle 219: rustdoc has its own warning class (broken
         # intra-doc-links, missing docs on public items, malformed
