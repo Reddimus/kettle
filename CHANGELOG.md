@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **README status block updated from "early but functional" to
+  "v1.0 — ready for daily use".** The old wording dated back to
+  pre-v0.1.0 and was the first paragraph a reader saw on
+  github.com/Reddimus/kettle. Now points to the latest release page
+  for prebuilt binaries (Linux tarball + installer, macOS universal
+  `.app`, Windows zip with embedded `.ico`) and summarizes the CI
+  matrix shape (fmt → clippy → test → doc → headless GPU smoke →
+  CLI + packaging smoke on every push). Passes the cycle-172
+  drift guard (`cycle <digit>` and `<digit> workspace tests`
+  patterns) because the rewrite intentionally uses range-stable
+  prose, no hardcoded counts, no internal `cycle N` refs.
+
 ### CI
 - **Packaging smoke runs on every push, not just on tag cut.** The
   `release.yml` workflow only fires on `v*` tag push, so a

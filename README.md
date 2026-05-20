@@ -4,8 +4,13 @@ A fast, cross-platform, GPU-accelerated terminal emulator written in Rust —
 combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 **Alacritty** and **WezTerm** into one tool.
 
-> Status: early but functional. A single window with tabs, panes, search,
-> themes and a bundled Nerd Font works today on Linux/macOS/Windows. See
+> **Status: v1.0 — ready for daily use** on Linux, macOS and Windows 11.
+> See [latest release](https://github.com/Reddimus/kettle/releases/latest)
+> for prebuilt binaries (Linux tarball with installer, macOS universal
+> `.app`, Windows zip with embedded `.ico`). The CI matrix runs on all
+> three OSes every push: `fmt` → `clippy -D warnings` → `cargo test
+> --workspace` → `cargo doc -D warnings` → headless GPU smoke (Linux) →
+> CLI smoke + packaging smoke on every OS. See
 > [docs/ROADMAP.md](docs/ROADMAP.md) for what is landing next.
 
 ## Highlights
