@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Mux::reap` doesn't silently shift focus to a
+      different tab.** When a tab BEFORE active died, the
+      trailing-only clamp left `active` indexing the wrong
+      tab (the tab that filled the removed slot). Now
+      decrements `active` per-removal when `ti < *active`.
+      Logic extracted to pure `reap_tabs(&mut Vec<Tab>,
+      &mut usize, &[u64])`. +1 test covers 5 scenarios.
 - [x] **`--screenshot` dynamically caps cells to fit the
       wgpu 8192-per-side texture limit.** Cycle 69's static
       `[20, 400]×[8, 200]` clamps were safe at small fonts but

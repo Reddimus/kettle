@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Mux::reap` keeps `active` pointed at the same *tab*, not
+  the same numeric index.** When a tab's last pane exited, the
+  tab was removed from `self.tabs`, shifting every later tab
+  left by one — but `self.active` was only adjusted by a
+  trailing clamp ("if it ran off the end, pull it back"). So
+  the case "a tab BEFORE active died" silently shifted focus to
+  a different tab without any user action: focused on tab B
+  (index 1), tab A dies → tabs become [B, C], `active` was 1
+  → now indexes C instead of B. The fix decrements `active`
+  whenever `ti < *active` at the moment of tab removal; if
+  `ti == *active` (the user IS on the dying tab) focus
+  naturally falls on the right-neighbor (matches every
+  modern terminal). Logic extracted to pure `pub(crate) fn
+  reap_tabs(&mut Vec<Tab>, &mut usize, &[u64])` so the
+  active-index bookkeeping is unit-testable without spawning
+  real PTYs to populate `self.panes`. +1 test
+  (`reap_tabs_keeps_active_pointed_at_the_same_tab`) covers
+  all five scenarios: leftmost-dies-while-mid-active,
+  leftmost-dies-while-rightmost-active, active-itself-dies
+  (right-neighbor takeover), active-is-last-and-dies
+  (trailing clamp), and multi-tab death.
 - **`--screenshot` caps cells to fit the wgpu 8192-per-side
   texture limit at any font size.** Cycle 69 added static
   `--cols ≤ 400 / --rows ≤ 200` clamps, but at a clamped 72pt

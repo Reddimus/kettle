@@ -793,29 +793,57 @@ impl Mux {
                 }
             })
             .collect();
-        for id in dead {
-            self.panes.remove(&id);
+        for id in &dead {
+            self.panes.remove(id);
+        }
+        Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
+        self.tabs.is_empty()
+    }
+
+    /// Pure helper for `reap`'s tab-mutation step: walk every tab,
+    /// prune dead panes from its split tree, drop any tab whose tree
+    /// collapses to empty, and keep `active` pointing at the *same
+    /// tab the user is focused on* after the shift (not the same
+    /// numeric index). Extracted so the active-index bookkeeping is
+    /// testable without spawning real PTYs to populate `self.panes`.
+    pub(crate) fn reap_tabs(tabs: &mut Vec<Tab>, active: &mut usize, dead_ids: &[u64]) {
+        for id in dead_ids {
             let mut ti = 0;
-            while ti < self.tabs.len() {
-                let root = std::mem::replace(&mut self.tabs[ti].root, Node::Leaf(0));
-                match root.remove_leaf(id) {
+            while ti < tabs.len() {
+                let root = std::mem::replace(&mut tabs[ti].root, Node::Leaf(0));
+                match root.remove_leaf(*id) {
                     Ok(n) => {
-                        self.tabs[ti].root = n;
-                        if !self.tabs[ti].root.contains(self.tabs[ti].focus) {
-                            self.tabs[ti].focus = self.tabs[ti].root.first_leaf();
+                        tabs[ti].root = n;
+                        if !tabs[ti].root.contains(tabs[ti].focus) {
+                            tabs[ti].focus = tabs[ti].root.first_leaf();
                         }
                         ti += 1;
                     }
                     Err(_) => {
-                        self.tabs.remove(ti);
+                        tabs.remove(ti);
+                        // Cycle 120: keep `active` pointing at the
+                        // same tab the user is focused on after the
+                        // shift, not the same numeric index. Removing
+                        // a tab at `ti < active` shifts every later
+                        // tab left by one, so subtract one from
+                        // active. `ti == active` (the user IS focused
+                        // on the tab being closed): leave active
+                        // alone so focus naturally falls on the tab
+                        // that takes its slot (the previous tab+1,
+                        // matching every modern terminal — close
+                        // current tab, focus moves to its right
+                        // neighbor; the trailing-clamp below catches
+                        // the case where active was the last tab).
+                        if ti < *active {
+                            *active -= 1;
+                        }
                     }
                 }
             }
         }
-        if self.active >= self.tabs.len() && self.active > 0 {
-            self.active = self.tabs.len().saturating_sub(1);
+        if *active >= tabs.len() && *active > 0 {
+            *active = tabs.len().saturating_sub(1);
         }
-        self.tabs.is_empty()
     }
 
     /// Send `bytes` to every pane in the **active tab** (not every tab in
@@ -1111,6 +1139,78 @@ mod node_tests {
         // Closing the final tab reports "empty".
         assert!(m.close_tab_at(0));
         assert!(m.tabs.is_empty());
+    }
+
+    #[test]
+    fn reap_tabs_keeps_active_pointed_at_the_same_tab() {
+        // Cycle-120 contract. `reap` used to handle only the "active
+        // tab was the last one and the list shrunk" case via the
+        // trailing clamp, missing the much more common "a tab BEFORE
+        // active died" case which silently shifted what `active`
+        // pointed to. Each scenario builds a fresh `tabs` Vec where
+        // we can recognize each tab by its single leaf id, then
+        // calls `reap_tabs` with the dead set and asserts which
+        // leaf id `active` now indexes.
+        fn tab(id: u64) -> Tab {
+            Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                zoomed: false,
+            }
+        }
+        // Scenario 1 (the cycle-120 bug): focused on the middle tab
+        // (B); the leftmost tab (A) dies. Pre-fix: active stayed 1
+        // and now indexed C — focus silently jumped past B. Post-
+        // fix: active decrements to 0 so it still points at B.
+        let mut tabs = vec![tab(1), tab(2), tab(3)];
+        let mut active = 1; // B
+        Mux::reap_tabs(&mut tabs, &mut active, &[1]); // A dies
+        assert_eq!(tabs.len(), 2);
+        match tabs[active].root {
+            Node::Leaf(id) => assert_eq!(id, 2, "still focused on B"),
+            _ => panic!("expected leaf"),
+        }
+        // Scenario 2: focused on the rightmost (C); leftmost (A) dies.
+        // Pre-fix: trailing-clamp didn't fire (active was still in
+        // bounds), so active=2 became C's new neighbor — wrong.
+        // Post-fix: decrements 2→1, still C.
+        let mut tabs = vec![tab(1), tab(2), tab(3)];
+        let mut active = 2;
+        Mux::reap_tabs(&mut tabs, &mut active, &[1]);
+        match tabs[active].root {
+            Node::Leaf(id) => assert_eq!(id, 3, "still focused on C"),
+            _ => panic!("expected leaf"),
+        }
+        // Scenario 3: the active tab itself dies. Focus should fall
+        // on its right neighbor (matches every modern terminal's
+        // close-current-tab behavior).
+        let mut tabs = vec![tab(1), tab(2), tab(3)];
+        let mut active = 1; // B
+        Mux::reap_tabs(&mut tabs, &mut active, &[2]); // B dies
+        assert_eq!(tabs.len(), 2);
+        match tabs[active].root {
+            Node::Leaf(id) => assert_eq!(id, 3, "active falls on right neighbor"),
+            _ => panic!("expected leaf"),
+        }
+        // Scenario 4: active is the LAST tab and dies — trailing-clamp
+        // brings active back to the new last tab (the existing
+        // behavior; regression guard).
+        let mut tabs = vec![tab(1), tab(2), tab(3)];
+        let mut active = 2;
+        Mux::reap_tabs(&mut tabs, &mut active, &[3]);
+        match tabs[active].root {
+            Node::Leaf(id) => assert_eq!(id, 2, "active clamped to new last"),
+            _ => panic!("expected leaf"),
+        }
+        // Scenario 5: multiple dead. focused on C (index 2); A and B
+        // both die.
+        let mut tabs = vec![tab(1), tab(2), tab(3), tab(4)];
+        let mut active = 2; // C
+        Mux::reap_tabs(&mut tabs, &mut active, &[1, 2]); // A + B die
+        match tabs[active].root {
+            Node::Leaf(id) => assert_eq!(id, 3, "still focused on C"),
+            _ => panic!("expected leaf"),
+        }
     }
 
     #[test]
