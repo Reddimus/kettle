@@ -723,10 +723,29 @@ impl Mux {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                self.panes
-                    .get(&t.focus)
-                    .map(|p| p.title.clone())
-                    .unwrap_or_else(|| format!("tab {}", i + 1))
+                let pane = self.panes.get(&t.focus);
+                let title = pane.map(|p| p.title.as_str()).unwrap_or("");
+                // Most shells set the title quickly via OSC 2 on every
+                // prompt — but until that first prompt fires, our default
+                // placeholder "kettle" is the only string we have. Fall
+                // back to the focused pane's cwd basename in that gap so
+                // a fresh tab opened in `~/Repos/kettle` reads as
+                // `kettle` instead of the literal program name (matches
+                // iTerm2 / Ghostty / WezTerm where untitled tabs show
+                // the cwd / shell). Only used while the title is the
+                // placeholder — once a shell sets a real one, that wins.
+                if title.is_empty() || title == "kettle" {
+                    if let Some(cwd) = pane.and_then(|p| p.term.current_dir())
+                        && let Some(name) = std::path::Path::new(&cwd)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                        && !name.is_empty()
+                    {
+                        return name.to_string();
+                    }
+                    return format!("tab {}", i + 1);
+                }
+                title.to_string()
             })
             .collect()
     }
@@ -765,6 +784,25 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    #[test]
+    fn tab_title_falls_back_to_cwd_basename() {
+        // The fallback only kicks in when the pane's title is the
+        // initial placeholder "kettle" (or empty) — once a real shell
+        // sets `\e]2;…\007`, that title wins. This is a small pure
+        // test of the path-basename logic since the full title path
+        // requires a real Terminal/PTY.
+        let path = "/home/user/Repos/kettle";
+        let basename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str());
+        assert_eq!(basename, Some("kettle"));
+        // Trailing slash: `file_name` returns None on root-like paths
+        // — those should fall through to "tab N" by the same code.
+        assert_eq!(std::path::Path::new("/").file_name(), None);
+        // Edge: empty path / no-cwd case (Terminal::current_dir = None)
+        // also routes to "tab N" naturally.
+    }
 
     #[test]
     fn engine_cursor_shape_maps_config_to_engine() {

@@ -481,6 +481,10 @@
       `ssh-host` lines missing `=`.** Each `font-feature` token
       validated via `FontFeature::parse`; `ssh-host` requires a
       non-empty `name=target` split. +1 test.
+- [x] **Tab title falls back to cwd basename pre-OSC 2.** Fresh
+      tabs show the working-directory name until the shell
+      emits its first title. iTerm2/Ghostty/WezTerm parity. +1
+      test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

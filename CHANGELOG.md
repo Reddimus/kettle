@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Tab title falls back to cwd basename before the first OSC 2.**
+  Fresh tabs showed the literal placeholder "kettle" until the
+  shell emitted `\e]2;…\007` on its first prompt. iTerm2 /
+  Ghostty / WezTerm bridge that gap by showing the cwd basename
+  or the running command — kettle now shows the cwd basename so
+  a tab opened in `~/Repos/kettle` reads as `kettle` (the
+  directory, useful) instead of `kettle` (the binary name,
+  redundant). Real shell-set titles still win the moment they
+  arrive. +1 test pinning the path-basename logic.
 - **`--check-config` now catches `font-feature` and `ssh-host`
   typos.** Both arms also had the silent-drop pattern:
   `font-feature = liga,!@#,calt` silently dropped the bad `!@#`
