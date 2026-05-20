@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/TESTING.md` and `docs/INSTALL.md` test counts and
+  coverage catch up to reality.** Massive drift: INSTALL.md
+  claimed `cargo test --workspace` runs **20 tests**; TESTING.md
+  enumerated ~33 tests across four crates. Actual workspace
+  total is **213 tests** across six crates (2/56/75/10/37/33
+  for kettle/kettle-config/kettle-core/kettle-render/kettle-ui/
+  kettle-vt). 80+ cycles of additions had landed without the
+  testing docs being refreshed. Rewrote TESTING.md with the
+  correct counts, broader category descriptions, and pointers
+  to the audit-cycle pattern that drives ongoing growth.
+  INSTALL.md's test-count claim corrected.
+
 ### Fixed
 - **`--screenshot foo.jpg` (or no extension) now fails up-front
   with a clear error.** `capture_png` writes via `image::save`,

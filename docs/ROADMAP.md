@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **TESTING.md + INSTALL.md test counts caught up to
+      213 (was 20 / 33).** 80+ cycles of additions had
+      drifted past the testing docs. Rewrote TESTING.md
+      with current counts (2/56/75/10/37/33 per crate),
+      broader category descriptions referencing the
+      audit-cycle pattern, and pointers to CHANGELOG.md
+      for per-cycle detail.
 - [x] **`--screenshot` pre-validates `.png` extension.**
       Sibling to the cycle-106/107 CLI hard-fails. Bad
       extensions used to surface as a cryptic crate-internal
