@@ -405,6 +405,10 @@
       printing to stdout: Broken pipe" because Rust's runtime
       ignores SIGPIPE by default. Now exits cleanly like every
       other CLI tool.
+- [x] **`--screenshot --cols`/`--rows` clamp** to `[20, 400]` and
+      `[8, 200]` so a typo like `--cols 100000` no longer panics
+      with the wgpu 8192-px texture-size validation error. The
+      "wrote" line reports the actual cell dimensions used.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

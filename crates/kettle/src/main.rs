@@ -173,8 +173,16 @@ fn main() -> anyhow::Result<()> {
             }
             _ => kettle_config::Config::default(),
         };
-        kettle_render::capture_png(&cfg, cli.cols.max(20), cli.rows.max(8), out)?;
-        println!("wrote {}", out.display());
+        // Clamp dimensions to a sane range — wgpu textures cap at 8192 px
+        // per side on most GPUs, so a typo like `--cols 100000` used to
+        // panic with `dimension X exceeds the limit of 8192` instead of
+        // producing a friendly error. Worst-case cell size ~20 px wide /
+        // ~40 px tall keeps 400×200 cells comfortably under the limit;
+        // every realistic screenshot fits.
+        let cols = cli.cols.clamp(20, 400);
+        let rows = cli.rows.clamp(8, 200);
+        kettle_render::capture_png(&cfg, cols, rows, out)?;
+        println!("wrote {} ({cols}×{rows} cells)", out.display());
         return Ok(());
     }
 

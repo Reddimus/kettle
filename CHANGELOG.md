@@ -7,6 +7,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--screenshot --cols`/`--rows` clamp instead of crashing.**
+  Passing a large value (`--cols 100000`) tried to allocate a
+  texture exceeding wgpu's per-side limit (8192 px on most GPUs)
+  and panicked with `Dimension X value … exceeds the limit of
+  8192`. Now clamped to `[20, 400]` cols and `[8, 200]` rows —
+  every realistic screenshot fits comfortably, and `--cols 100000`
+  produces a 400×200 PNG with a friendly `wrote PATH (400×200
+  cells)` instead of a backtrace.
 - **`kettle --list-themes | head` no longer panics on broken
   pipe.** Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup;
   when the reader of a pipeline closes its end early, the next
