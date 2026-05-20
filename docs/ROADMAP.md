@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`detect_malformed_values` also strips BOM.** Cycle
+      156 sibling to cycle 155 — the diagnostic path does
+      its own scan and was still surfacing
+      `missing `=` separator: "\u{feff}font-family"` with the
+      invisible BOM mangled into the user-facing message.
+      +1 test.
 - [x] **Config parser strips leading UTF-8 BOM.** Notepad-
       saved config files prepended 0xEF 0xBB 0xBF to byte 0,
       making the first key parse as `\u{feff}theme` and

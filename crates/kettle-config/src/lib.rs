@@ -388,6 +388,13 @@ impl Config {
     /// one line here, not a touch on every parse arm.
     pub fn detect_malformed_values(text: &str) -> Vec<String> {
         let mut bad = Vec::new();
+        // Strip the leading UTF-8 BOM (cycle 155 fixed it in
+        // `parse::parse`; this function does its own raw scan so it
+        // needs the same strip independently — otherwise a
+        // BOM-prefixed config that's missing `=` on the first key
+        // would surface `missing `=` separator: "\u{feff}theme"`
+        // with the invisible BOM mangling the diagnostic).
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         // Tokenizer drops every non-`#`/non-empty line that lacks an `=`
         // (parse.rs:21). A typo like `font-family Jetbrains Mono` (missing
         // `=`) therefore disappears with no user-visible warning — same
@@ -1501,6 +1508,28 @@ mod config_tests {
         // Cleanup; ignore failures (race-safe).
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn detect_malformed_values_strips_bom_before_scanning() {
+        // Cycle 156 (sibling to cycle 155): a BOM-prefixed config
+        // with a missing-`=` typo on the first key used to surface
+        // the diagnostic with the BOM character mangled in (looks
+        // like an unintended invisible-char in the user-facing
+        // output). Now `detect_malformed_values` also strips the
+        // leading BOM, mirroring parse::parse.
+        let bad = Config::detect_malformed_values("\u{feff}font-family\n");
+        assert_eq!(bad.len(), 1);
+        // The flagged line should NOT contain the BOM character.
+        assert!(
+            !bad[0].contains('\u{feff}'),
+            "diagnostic should be BOM-free: {bad:?}"
+        );
+        assert!(bad[0].contains("font-family"));
+        // A clean BOM-prefixed config (with a valid first line) is
+        // not flagged at all.
+        let ok = Config::detect_malformed_values("\u{feff}font-family = Hack\n");
+        assert!(ok.is_empty(), "valid BOM-prefixed config: {ok:?}");
     }
 
     #[test]

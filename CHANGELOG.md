@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`detect_malformed_values` also strips a leading UTF-8 BOM.**
+  Sibling to cycle 155. The cycle-155 strip lived only in
+  `parse::parse`; `detect_malformed_values` does its own raw
+  text scan for missing-`=` lines (cycle 96) and would still
+  surface `missing `=` separator: "\u{feff}font-family"` on
+  a BOM-prefixed config with a typo on the first line —
+  invisible character mangled the diagnostic. Now the same
+  one-line `strip_prefix('\u{feff}')` is applied here too.
+  +1 test (`detect_malformed_values_strips_bom_before_scanning`)
+  covers the missing-= + BOM combination and confirms a
+  clean BOM-prefixed config isn't flagged.
+
+### Fixed
 - **Config parser strips a leading UTF-8 BOM.** Notepad and
   a few Windows editors save UTF-8 text files with a leading
   byte-order mark (`\u{feff}`, 0xEF 0xBB 0xBF). Without
