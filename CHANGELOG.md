@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Config parser strips a leading UTF-8 BOM.** Notepad and
+  a few Windows editors save UTF-8 text files with a leading
+  byte-order mark (`\u{feff}`, 0xEF 0xBB 0xBF). Without
+  stripping it, the first config line parsed as `\u{feff}theme
+  = …` and the BOM-prefixed key surfaced as an
+  `unknown key: ﻿theme` in `--check-config` — invisible
+  character making the diagnostic look bizarre, and the
+  user's theme setting silently didn't apply. The parser now
+  drops the BOM if it's at byte 0; a `\u{feff}` mid-file is
+  not a BOM and stays in the value. +1 test
+  (`strips_leading_utf8_bom`). Verified end-to-end against a
+  `printf '\xef\xbb\xbftheme = ...'` fixture: status now
+  reads `OK — no issues`.
+
+### Fixed
 - **Opening a modal closes any other modal first.** A user
   with the SSH launcher open who pressed `Ctrl+Shift+K` got
   both the SSH launcher AND the command palette rendered

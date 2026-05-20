@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Config parser strips leading UTF-8 BOM.** Notepad-
+      saved config files prepended 0xEF 0xBB 0xBF to byte 0,
+      making the first key parse as `\u{feff}theme` and
+      surface as an "unknown key" with an invisible character.
+      +1 test.
 - [x] **Modal open closes any other modal first.** A user
       hitting Ctrl+Shift+K with the SSH launcher already up
       saw both overlays render at once. New
