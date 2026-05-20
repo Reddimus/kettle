@@ -104,12 +104,9 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .or_else(kettle_config::Config::default_path);
         let (cfg, unknown, malformed) = match &path {
-            Some(p) if p.exists() => {
-                let text = std::fs::read_to_string(p)?;
-                let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
-                let malformed = kettle_config::Config::detect_malformed_values(&text);
-                (cfg, unknown, malformed)
-            }
+            // Share `load_from_with_diagnostics` with the reload path so the
+            // two diagnostic sources can't drift on which lints they run.
+            Some(p) if p.exists() => kettle_config::Config::load_from_with_diagnostics(p),
             _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
         match &path {

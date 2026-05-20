@@ -320,21 +320,41 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Config {
+        let (cfg, unknown, malformed) = Self::load_from_with_diagnostics(path);
+        if !unknown.is_empty() {
+            log::warn!(
+                "{}: unrecognized config keys: {}",
+                path.display(),
+                unknown.join(", ")
+            );
+        }
+        if !malformed.is_empty() {
+            log::warn!(
+                "{}: malformed values (ignored): {}",
+                path.display(),
+                malformed.join(", ")
+            );
+        }
+        cfg
+    }
+
+    /// Parse the config at `path` and also return the unknown-keys and
+    /// malformed-values diagnostics. `load_from` wraps this with a
+    /// `log::warn!` for each; callers that want to render the diagnostics
+    /// (e.g. a future in-window banner on reload, the existing
+    /// `--check-config` flow) can use this directly. Missing file or read
+    /// error → `(default(), [], [])`, same fallthrough as `load_from`,
+    /// since the user already gets the error logged by `load_from`.
+    pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 let (cfg, unknown) = Self::parse_collect(&text);
-                if !unknown.is_empty() {
-                    log::warn!(
-                        "{}: unrecognized config keys: {}",
-                        path.display(),
-                        unknown.join(", ")
-                    );
-                }
-                cfg
+                let malformed = Self::detect_malformed_values(&text);
+                (cfg, unknown, malformed)
             }
             Err(e) => {
                 log::warn!("could not read config {}: {e}", path.display());
-                Config::default()
+                (Config::default(), Vec::new(), Vec::new())
             }
         }
     }
@@ -1081,6 +1101,56 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn load_from_with_diagnostics_surfaces_both_unknown_and_malformed() {
+        // Cycle-99 contract: a reload via `Action::ReloadConfig` should
+        // give the user *some* signal that their typo wasn't applied.
+        // `load_from` used to only `log::warn!` on unknown keys; bad
+        // values silently dropped. The diagnostics variant returns both
+        // lists so chrome callers can render them (the public log path
+        // wraps it).
+        let dir = std::env::temp_dir().join(format!(
+            "kettle-load-from-diag-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("kettle.conf");
+        std::fs::write(
+            &path,
+            "font-size = wrong\n\
+             totally-not-a-key = whatever\n\
+             theme = TokyoNight Night\n\
+             font-family Jetbrains Mono\n",
+        )
+        .expect("write");
+        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&path);
+        // Cfg parsed cleanly past the typos (`theme` set, others defaulted).
+        assert_eq!(cfg.theme_name, "TokyoNight Night");
+        // Unknown keys: `totally-not-a-key`.
+        assert!(
+            unknown.iter().any(|k| k == "totally-not-a-key"),
+            "unknown: {unknown:?}"
+        );
+        // Malformed: bad `font-size` value AND the missing-= line.
+        assert!(
+            malformed.iter().any(|m| m.contains("font-size")),
+            "malformed: {malformed:?}"
+        );
+        assert!(
+            malformed
+                .iter()
+                .any(|m| m.contains("missing `=` separator")),
+            "malformed: {malformed:?}"
+        );
+        // Cleanup; ignore failures (race-safe).
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

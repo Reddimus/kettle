@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Config::load_from` warns on malformed values.**
+      `load_from` previously `log::warn!`-ed unknown keys but
+      silently dropped bad values. A user hitting reload after a
+      typo got no signal. New
+      `load_from_with_diagnostics(path) -> (Config, Vec<String>,
+      Vec<String>)` returns both lists; `load_from` wraps it with
+      `log::warn!` for each, and `--check-config` shares the same
+      helper so the two paths can't drift. +1 test.
 - [x] **`Action::ReloadConfig` applies `font-family` changes.**
       The reload handler updated `font-size` via the renderer
       setter but left the cached `font_family` field stale —

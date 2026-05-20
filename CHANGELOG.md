@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Config::load_from` now warns on malformed values, not just
+  unknown keys.** The reload path (`Action::ReloadConfig`) called
+  `Config::load_from`, which `log::warn!`-ed unrecognized keys but
+  silently dropped bad values (`font-size = wrong`, missing `=`,
+  unknown enum, …). A user hitting the reload chord after editing
+  their config got no feedback when their typo didn't apply — they
+  could only catch it via `kettle --check-config`. New
+  `Config::load_from_with_diagnostics(path) -> (Config,
+  Vec<String>, Vec<String>)` returns both diagnostic lists so
+  callers can render them (future in-window banner, the existing
+  `--check-config` path). `load_from` wraps it and `log::warn!`s
+  each list with the file path. `--check-config` now uses the
+  same helper, so the two diagnostic sources can't drift on which
+  lints they run. +1 test
+  (`load_from_with_diagnostics_surfaces_both_unknown_and_malformed`).
 - **`Action::ReloadConfig` now applies `font-family` changes.** The
   reload handler picked up the new `font-size` (via the renderer's
   `set_font_size`) but left the renderer's cached `font_family`
