@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`scrollback` clamped at INFINITE_SCROLLBACK (10 M
+      lines); over-cap flagged.** Sibling to cycle 132 but
+      this one was a memory footgun: `scrollback =
+      100000000` would have reserved ~250 GB of history
+      rows on first PTY spawn. Cycle 133 clamps + adds the
+      diagnostic. The three documented forms (`infinite`,
+      `unlimited`, `0`) still resolve to the same cap.
+      +1 test.
 - [x] **Other 4 clamped numerics warn out-of-range +
       `background-opacity` clamps at parse.** Sibling to
       cycle 131. `background-opacity` had no clamp and could

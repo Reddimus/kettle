@@ -417,11 +417,15 @@ impl Config {
                 }
                 "minimum-contrast" => v.parse::<f32>().is_ok_and(|n| (0.0..=21.0).contains(&n)),
                 // Special: scrollback accepts unlimited/infinite/0 as
-                // "no cap" plus any non-negative integer.
+                // "no cap" plus any non-negative integer up to
+                // `INFINITE_SCROLLBACK` (10 M lines). Values above
+                // would have allocated >100 GB of history rows
+                // (cycle 133 clamps them at parse, but flag the
+                // diagnostic too).
                 "scrollback" => {
                     v.eq_ignore_ascii_case("infinite")
                         || v.eq_ignore_ascii_case("unlimited")
-                        || v.parse::<usize>().is_ok()
+                        || v.parse::<usize>().is_ok_and(|n| n <= INFINITE_SCROLLBACK)
                 }
                 // Same shape as the float-range checks above:
                 // parse_collect clamps to [50, 5000] (cycle X), so
@@ -640,7 +644,15 @@ impl Config {
                     if v == "infinite" || v == "unlimited" || v == "0" {
                         cfg.scrollback = INFINITE_SCROLLBACK;
                     } else if let Ok(n) = v.parse::<usize>() {
-                        cfg.scrollback = n;
+                        // Clamp at `INFINITE_SCROLLBACK` (cycle 133): a
+                        // user with `scrollback = 100000000` would have
+                        // allocated ~250 GB of history rows on the
+                        // first PTY. The docstring on the constant
+                        // calls 10 M lines "practical stand-in for
+                        // infinite"; any higher value is asking for an
+                        // OOM. detect_malformed_values surfaces it as
+                        // a diagnostic so the user sees the clamp.
+                        cfg.scrollback = n.min(INFINITE_SCROLLBACK);
                     }
                 }
                 "window-padding-x" => {
@@ -1575,6 +1587,41 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn scrollback_clamps_at_infinite_and_flags_above() {
+        // Cycle 133: a user with `scrollback = 100000000` (100 M
+        // lines) used to land that value into cfg verbatim, which
+        // alacritty_terminal would honor by reserving rows for an
+        // ~250 GB history buffer on the first PTY spawn. Clamp at
+        // `INFINITE_SCROLLBACK` (10 M, the documented "practical
+        // stand-in for infinite") and flag the over-cap as a
+        // --check-config diagnostic.
+        let c = Config::parse_text(&format!("scrollback = {}", INFINITE_SCROLLBACK + 1));
+        assert_eq!(c.scrollback, INFINITE_SCROLLBACK, "clamped at cap");
+        let c = Config::parse_text("scrollback = 100000000");
+        assert_eq!(
+            c.scrollback, INFINITE_SCROLLBACK,
+            "200x the cap → still clamped"
+        );
+        let c = Config::parse_text("scrollback = 10000");
+        assert_eq!(c.scrollback, 10000, "in-range value untouched");
+
+        // Diagnostic: above-cap surfaces as malformed.
+        let bad =
+            Config::detect_malformed_values(&format!("scrollback = {}", INFINITE_SCROLLBACK + 1));
+        assert_eq!(bad.len(), 1, "above-cap flagged: {bad:?}");
+        assert!(bad[0].contains("scrollback"));
+
+        // Documented escape hatches still work and don't flag.
+        let ok = Config::detect_malformed_values(
+            "scrollback = infinite\n\
+             scrollback = unlimited\n\
+             scrollback = 0\n\
+             scrollback = 10000\n",
+        );
+        assert!(ok.is_empty(), "documented forms still pass: {ok:?}");
     }
 
     #[test]

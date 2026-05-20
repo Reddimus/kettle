@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`scrollback = N` clamped at `INFINITE_SCROLLBACK` (10 M
+  lines), out-of-range flagged.** A user typo'd or
+  curious-pasted `scrollback = 100000000` (100 M) used to
+  flow that value verbatim into `cfg.scrollback`, which
+  alacritty_terminal honored by reserving rows for ~250 GB
+  of history on the first PTY spawn. The docstring on
+  `INFINITE_SCROLLBACK` calls 10 M "practical stand-in for
+  infinite"; anything higher is asking for an OOM. Now
+  clamped at parse to `INFINITE_SCROLLBACK`, and
+  `detect_malformed_values` flags above-cap values so the
+  user sees the silent cap in `--check-config`. Cycle-132
+  pattern, but on a field whose mistake was a memory
+  footgun rather than a visual artifact. +1 test
+  (`scrollback_clamps_at_infinite_and_flags_above`)
+  covers 10M+1, 100M, in-range untouched, the three
+  documented escape hatches (`infinite`/`unlimited`/`0`),
+  and the cap-above diagnostic.
+
+### Fixed
 - **`--check-config` flags the other four clamped numerics
   + `background-opacity` clamps at parse.** Cycle 131
   surfaced `font-size`'s runtime-clamp / docs mismatch. The
