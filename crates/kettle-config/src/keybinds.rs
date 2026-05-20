@@ -73,13 +73,26 @@ impl Trigger {
     }
 }
 
+/// User-facing label for one `Action`. Most variants use Rust's `Debug`
+/// derive (`Copy`, `NewTab`, `SplitRight`, …) — short enough and already
+/// matches the binding-table heading style. The exception is parametric
+/// variants like `GotoTab(0)` whose Debug form leaks the 0-based internal
+/// index; we render the 1-based human form so `kettle --list-keybinds`
+/// reads "Goto tab 1" instead of "GotoTab(0)".
+pub fn action_label(a: &Action) -> String {
+    match a {
+        Action::GotoTab(i) => format!("Goto tab {}", i + 1),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Human-readable lines for the default keymap, sorted by trigger label —
 /// powers `kettle --list-keybinds` so the binding set is discoverable
 /// without reading the source.
 pub fn describe_defaults() -> Vec<String> {
     let mut lines: Vec<(String, String)> = defaults()
         .iter()
-        .map(|(t, a)| (t.label(), format!("{a:?}")))
+        .map(|(t, a)| (t.label(), action_label(a)))
         .collect();
     lines.sort();
     lines
@@ -434,6 +447,20 @@ mod tests {
         // Garbage values → None so unknown-key reporting still kicks in.
         assert!(Action::from_name("goto_tab:abc").is_none());
         assert!(Action::from_name("goto_tab:").is_none());
+    }
+
+    #[test]
+    fn action_label_renders_goto_tab_with_one_based_index() {
+        // `--list-keybinds` reads these labels; Debug-derived
+        // `GotoTab(0)` leaks the 0-based internal index — a user looking
+        // at the listing would think Alt+1 → tab 0. Use the 1-based
+        // human form. Other variants use the Debug derive verbatim so
+        // the existing labels (Copy, NewTab, SplitRight, …) don't
+        // change.
+        assert_eq!(action_label(&Action::GotoTab(0)), "Goto tab 1");
+        assert_eq!(action_label(&Action::GotoTab(8)), "Goto tab 9");
+        assert_eq!(action_label(&Action::Copy), "Copy");
+        assert_eq!(action_label(&Action::SplitRight), "SplitRight");
     }
 
     #[test]

@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--list-keybinds` shows `Goto tab N` (1-based) instead of
+  `GotoTab(0)`.** The action label was rendered via Rust's
+  `Debug` derive — fine for non-parametric variants (`Copy`,
+  `NewTab`, `SplitRight`, …) but leaked the 0-based internal
+  index for `Action::GotoTab(0..=8)`. Users reading the listing
+  saw `Alt+1 → GotoTab(0)` and reasonably wondered whether tabs
+  were 0- or 1-indexed. New `action_label` helper renders the
+  1-based human form for `GotoTab` and falls back to Debug for
+  everything else (no churn on the other action labels). +1 test.
 - **`--check-config` echoes window padding, opacity, and split
   colors.** The cycle-59 expansion of `--check-config` grouped
   many config gates but omitted `padding-x/y`,
