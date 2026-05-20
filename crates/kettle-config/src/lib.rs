@@ -353,6 +353,23 @@ impl Config {
     /// one line here, not a touch on every parse arm.
     pub fn detect_malformed_values(text: &str) -> Vec<String> {
         let mut bad = Vec::new();
+        // Tokenizer drops every non-`#`/non-empty line that lacks an `=`
+        // (parse.rs:21). A typo like `font-family Jetbrains Mono` (missing
+        // `=`) therefore disappears with no user-visible warning — same
+        // shape as the value-typo bugs `detect_malformed_values` already
+        // catches, but caught before parsing rather than after. Surface
+        // the offending line verbatim so the user can see exactly which
+        // one is wrong. Comment lines (`#`) and blanks are skipped using
+        // the same rules `parse::parse` applies internally.
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !line.contains('=') {
+                bad.push(format!("missing `=` separator: {line:?}"));
+            }
+        }
         for e in parse::parse(text) {
             let v = &e.value;
             let ok = match e.key.as_str() {
@@ -1060,6 +1077,38 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_flags_lines_missing_equals() {
+        // parse.rs:21 silently `continue`s on any non-comment, non-empty
+        // line without `=`. A user typo like `font-family Jetbrains Mono`
+        // (forgot the `=`) used to disappear with no warning at all —
+        // their font config was effectively a no-op and `--check-config`
+        // happily printed "status: OK — no issues". Surface it here.
+        let bad = Config::detect_malformed_values(
+            "font-family\n\
+             font-size 13\n\
+             theme = TokyoNight Night\n\
+             scrollback 5000\n",
+        );
+        // Three offenders: the two `=`-less lines plus the standalone
+        // `font-family` (also no `=`). The `theme =` line is fine.
+        assert_eq!(bad.len(), 3, "three missing-= lines: {bad:?}");
+        assert!(bad.iter().all(|b| b.contains("missing `=` separator")));
+        assert!(bad.iter().any(|b| b.contains("font-family")));
+        assert!(bad.iter().any(|b| b.contains("font-size 13")));
+        assert!(bad.iter().any(|b| b.contains("scrollback 5000")));
+        // Comments and blanks are not flagged.
+        let ok = Config::detect_malformed_values(
+            "# this is a comment line\n\
+             \n\
+             font-family = JetBrainsMono\n",
+        );
+        assert!(
+            ok.is_empty(),
+            "comments and blanks are not malformed: {ok:?}"
+        );
     }
 
     #[test]

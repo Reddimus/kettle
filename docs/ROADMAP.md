@@ -506,6 +506,15 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--check-config` flags config lines missing `=`.** The
+      line-oriented tokenizer silently `continue`s on any non-comment,
+      non-empty line lacking `=`, so `font-family Jetbrains Mono`
+      (forgot the equals) or a left-over `[section]` header dropped
+      with no warning. `detect_malformed_values` now scans the raw
+      text and emits `missing \`=\` separator: "<line>"` for each
+      offender. Same shape as the cycle-70/84/85/86/87/88 silent-
+      fallback cascade, caught before parsing rather than after.
+      +1 test.
 - [x] **`kettle -e PROG` seeds the tab title from PROG basename.**
       Cycle 93 fixed SSH; cycles 89/90 backfilled cwd-basename
       for shells. The gap that remained: any *other* explicit

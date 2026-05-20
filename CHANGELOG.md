@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--check-config` flags config lines missing the `=` separator.**
+  The line-oriented tokenizer (`parse.rs:21`) silently `continue`s on
+  every non-comment, non-empty line that doesn't contain `=`. A typo
+  like `font-family Jetbrains Mono` (forgot the equals), a left-over
+  TOML-style `[section]` header from a config copied off another
+  terminal, or a stray identifier on its own line all just disappeared
+  with no warning — and `--check-config` happily reported
+  `status: OK — no issues`. `detect_malformed_values` now scans the
+  raw text (using the same comment / blank exclusion rules `parse::
+  parse` applies internally) and emits `missing \`=\` separator: "<line>"`
+  for each offender, so the user sees exactly which lines were
+  ignored. Same shape as the cycle-70/84/85/86/87/88 silent-fallback
+  cascade, but caught *before* parsing rather than after. +1 test
+  (`detect_malformed_values_flags_lines_missing_equals`).
 - **Explicit `kettle -e PROG` seeds the tab title from PROG.** Cycle 93
   surfaced `ssh <target>` for SSH panes but every *other* program
   launched with `-e` still showed the generic "kettle" placeholder
