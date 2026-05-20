@@ -506,6 +506,10 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Workspace `repository` URL fixed
+      (`kevim/kettle` → `Reddimus/kettle`).** Stale metadata
+      in `Cargo.toml`; affects future crates.io / cargo
+      install / scrape paths.
 - [x] **Session-restore theme check agrees with by_name
       case-handling.** `Theme::list().contains(&name)` is
       case-sensitive; `Theme::by_name` is case-insensitive.

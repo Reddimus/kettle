@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Workspace `repository` URL points at the actual repo.**
+  `Cargo.toml`'s `[workspace.package].repository` said
+  `https://github.com/kevim/kettle` — but the actual repo
+  has been `https://github.com/Reddimus/kettle` from the
+  start. Stale metadata that affects: any future
+  `cargo install kettle`, crates.io listings if published,
+  any tooling that scrapes the Cargo.toml for an upstream
+  URL. Other docs (INSTALL.md's `git clone …`) already
+  had the correct URL.
+
+### Fixed
 - **Session restore agrees with `Theme::by_name` on case.**
   The session-restore branch checked `Theme::list().contains
   (&name)` (case-sensitive verbatim string match) before
