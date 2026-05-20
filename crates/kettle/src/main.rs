@@ -13,7 +13,9 @@ struct Cli {
     #[arg(long)]
     list_themes: bool,
 
-    /// Print the default keymap (trigger → action) and exit.
+    /// Print the keymap (trigger → action) and exit. Honors `--config FILE`
+    /// to show the *effective* keymap after overrides + unbinds (cycle 103);
+    /// without it, shows the built-in defaults.
     #[arg(long)]
     list_keybinds: bool,
 
@@ -45,8 +47,12 @@ struct Cli {
     #[arg(long, default_value_t = 28)]
     rows: u32,
 
-    /// Use this config file instead of the default path
-    /// (`--config FILE`); also honored by `--check-config`/`--screenshot`.
+    /// Use this config file instead of the default path. Honored by every
+    /// introspection command (`--check-config`, `--list-keybinds`,
+    /// `--list-ssh-hosts`, `--screenshot`, `--config-path`) as well as the
+    /// windowed run. A non-existent path is a hard error (cycle 106) — the
+    /// out-of-the-box default-path fallback only kicks in when this flag
+    /// is omitted entirely.
     #[arg(long = "config", value_name = "FILE")]
     config: Option<std::path::PathBuf>,
 

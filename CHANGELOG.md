@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **`kettle --help` text updated for cycle-103/105/106
+  behavior changes.** `--list-keybinds` help previously said
+  "Print the default keymap" — but cycle 103 made it show
+  the *effective* keymap (defaults + overrides + unbinds)
+  when a `--config FILE` is active. `--config` help still
+  named only `--check-config` and `--screenshot` as
+  consumers — cycle 103/105 added `--list-keybinds` and
+  `--list-ssh-hosts` to that set, and cycle 106 made the
+  flag hard-fail on a non-existent path. Both help strings
+  now match runtime behavior; the cycle numbers stay in the
+  help text as breadcrumbs for anyone tracing a behavior
+  back to its source. No code change beyond the doc-comments
+  read by `clap` to generate `--help`.
 - **README keybind table gained 9 user-facing default chords.**
   The table previously surfaced only the basics (split / tab /
   copy-paste / search / focus / fullscreen / resize / scroll /

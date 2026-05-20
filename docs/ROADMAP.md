@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--help` text catches up to cycles 103/105/106.**
+      `--list-keybinds` help said "default keymap" but it
+      now shows the effective map (cycle 103). `--config`
+      help didn't mention `--list-keybinds` /
+      `--list-ssh-hosts` consumers (cycles 103/105) nor the
+      hard-fail on missing path (cycle 106). Both updated.
 - [x] **README keybind table surfaces 9 hidden defaults +
       docs-drift guard.** SSH launcher, command palette,
       quick-select hints, split-auto, new window, pane zoom,
