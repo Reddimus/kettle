@@ -2257,8 +2257,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 self.window_focused = f;
-                self.blink_on = true;
-                self.last_blink = std::time::Instant::now();
+                // Cycle 171: route through the shared helper so all
+                // user-driven blink-reset paths share one implementation
+                // (cycles 134-141 + 144 + 150 audit). The
+                // CursorBlinkingChange handler still inlines the body
+                // because it runs inside `self.mux.panes.values_mut()`
+                // and can't borrow `self` again — that one's documented.
+                self.reset_blink_phase();
                 // Focus-event reporting (DEC private mode ?1004): apps that
                 // enabled it expect CSI I on focus-in, CSI O on focus-out.
                 if self
@@ -2279,9 +2284,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                // Keep the cursor solid while actively typing.
-                self.blink_on = true;
-                self.last_blink = std::time::Instant::now();
+                // Keep the cursor solid while actively typing (cycle 144).
+                // Routes through the shared helper so the eight
+                // user-driven blink-reset paths (Reset / focus changes /
+                // modal close / typing / tab close / window focus /
+                // DEC ?12 toggle) stay in lock-step. Cycle 171.
+                self.reset_blink_phase();
                 // Hide the OS mouse cursor (configurable; default on, like
                 // every modern terminal). Re-shown on the next CursorMoved.
                 self.hide_mouse_cursor();

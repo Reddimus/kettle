@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **Two more blink-reset sites route through `reset_blink_phase()`.**
+  The cycles 134-141 + 144 + 150 audit landed a shared
+  `reset_blink_phase()` helper, but two callers still inlined the
+  same two field writes (`blink_on = true; last_blink = now()`):
+  `WindowEvent::Focused` and `WindowEvent::KeyboardInput`. A future
+  change to the reset semantics (e.g., also clearing a `blink_pause`
+  field if one's added) would need to touch every call site —
+  routing through the helper keeps all eight user-driven blink-reset
+  paths (Reset, focus changes, modal close, typing, tab close,
+  window focus, DEC ?12 toggle, mouse focus) in lock-step. The one
+  inline that remains is `CursorBlinkingChange`, which runs inside
+  `self.mux.panes.values_mut()` and can't borrow `self` again —
+  that one's documented in place. No behavior change; 238 tests
+  still pass.
+
 ### Fixed
 - **`kettle --list-keybinds` renders `Ctrl+Plus` / `Ctrl+Minus` /
   `Ctrl+Equal` for the punctuation keys, not the literal-`+`
