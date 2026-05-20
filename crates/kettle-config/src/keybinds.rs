@@ -104,9 +104,24 @@ pub fn describe(bindings: &Bindings) -> Vec<String> {
         .map(|(t, a)| (t.label(), action_label(a)))
         .collect();
     lines.sort();
+    // Column width = longest trigger label, with a floor of 16 so the
+    // common shorter-default case still has breathing room. Without
+    // this, `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
+    // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) overflowed the
+    // hard-coded 16-char padding, so their action column landed one
+    // or three columns to the right of every other row in
+    // `--list-keybinds` — visually jarring even though every row
+    // had a trigger+action pair. Same shape as `format_ssh_hosts`
+    // in cycle 105.
+    let width = lines
+        .iter()
+        .map(|(t, _)| t.len())
+        .max()
+        .unwrap_or(0)
+        .max(16);
     lines
         .into_iter()
-        .map(|(t, a)| format!("{t:<16}  {a}"))
+        .map(|(t, a)| format!("{t:<width$}  {a}"))
         .collect()
 }
 
@@ -889,6 +904,66 @@ mod tests {
         assert_eq!(lines, sorted, "describe must return sorted lines");
         // And `describe_defaults` is still just `describe(&defaults())`.
         assert_eq!(describe_defaults(), describe(&defaults()));
+    }
+
+    #[test]
+    fn describe_column_width_grows_to_fit_longest_trigger() {
+        // Cycle 165: `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
+        // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) used to overflow
+        // the hard-coded 16-char padding, so their action column landed
+        // one or three columns to the right of every other row — the
+        // alignment that's supposed to make `--list-keybinds` scannable
+        // was the one thing visibly wrong.
+        //
+        // Locating the column from output bytes is tricky because a
+        // short trigger like `Ctrl+C` (6 chars) gets padded with the
+        // remainder as spaces, so the first `  ` (two consecutive
+        // spaces) in that line lands *inside* the padding, not at the
+        // separator. So check the format contract directly: padded
+        // trigger of `width` chars + 2-char separator + action label.
+        // Then for every row, byte `longest` is either inside-padding
+        // (a space) or the separator's first space, byte `longest+1`
+        // is the separator's second space, and byte `longest+2` is
+        // the first action char (never a space).
+        let lines = describe(&defaults());
+        // Default keymap really has `Ctrl+Shift+PageDown` (19 chars).
+        let long_row = lines
+            .iter()
+            .find(|l| l.starts_with("Ctrl+Shift+PageDown "))
+            .expect("default has Ctrl+Shift+PageDown");
+        let longest = 19usize;
+        assert_eq!(
+            &long_row[longest..longest + 2],
+            "  ",
+            "two-space separator should follow the unpadded longest trigger: {long_row:?}"
+        );
+        for l in &lines {
+            // Every row's separator's second space sits at the same byte.
+            assert_eq!(
+                &l[longest + 1..longest + 2],
+                " ",
+                "row's column {} should be the separator's second space: {l:?}",
+                longest + 1,
+            );
+            // And every row's action label starts at byte longest+2
+            // with no leading space — that's the alignment contract.
+            assert_ne!(
+                &l[longest + 2..longest + 3],
+                " ",
+                "row's action column should start at byte {} (no leading space): {l:?}",
+                longest + 2,
+            );
+        }
+        // Floor of 16 keeps the short-default case readable. A map with
+        // only `Ctrl+C` (6 chars) should still pad to 16, so the action
+        // lands at byte 18.
+        let short = describe(
+            &[(Trigger::new(Mods::CTRL, Key::Char('c')), Action::Copy)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(&short[0][16..18], "  ", "short trigger padded to 16");
+        assert_eq!(&short[0][18..19], "C", "action 'Copy' at byte 18");
     }
 
     #[test]

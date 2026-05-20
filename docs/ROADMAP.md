@@ -964,6 +964,12 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`--list-keybinds` columns line up for ALL rows.** `describe()`
+      hard-coded the trigger column at 16 chars; `Ctrl+Shift+PageDown`
+      (19) and `Ctrl+Shift+PageUp` (17) overflowed it. Now
+      `width = max(16, longest)` — same shape as
+      `format_ssh_hosts` (cycle 105). +1 test pinning the
+      alignment contract.
 - [x] **`--config DIR` is now a hard error.** Cycle 106 caught
       `--config /nonexistent` but `--config ~/.config/kettle`
       (where the user dropped the trailing `/config` filename)

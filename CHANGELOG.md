@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`kettle --list-keybinds` columns line up again — even for the
+  three default rows whose triggers exceed 16 chars.** `describe()`
+  hard-coded the trigger column at 16 chars, so `Ctrl+Shift+PageDown`
+  (19 chars; move-tab-right) and `Ctrl+Shift+PageUp` (17 chars;
+  move-tab-left) overflowed the padding and their action column
+  landed one or three bytes to the right of every other row.
+  Visually jarring on the one CLI command whose purpose is making
+  the keymap scannable. Fix: column width = max(16, longest
+  trigger label) — same shape as `format_ssh_hosts` (cycle 105).
+  Test pins the alignment contract: byte `longest+1` is the
+  separator's second space and byte `longest+2` is the first
+  action char on every row. +1 test (229 total).
+
 - **`--config DIR` is now a hard error instead of a silent
   fallback-to-defaults.** Cycle 106 made `--config` fail when the
   path didn't exist. The matching "exists but isn't a regular file"
