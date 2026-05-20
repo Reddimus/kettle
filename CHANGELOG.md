@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-20
+
+Patch release: ships the macOS `.icns` + Windows `.ico` packaging
+that landed on `main` an hour after `v1.0.0` was tagged. The
+`v1.0.0` Linux artifact already has the icon set; this release
+brings macOS and Windows to parity. No code changes to the runtime
+binary on Linux.
+
 ### Added
 - **macOS `.app` icon (`kettle.icns`) + Windows `.exe` icon (`kettle.ico`).**
   Cycle 222 (v1.0.0) shipped a Linux SVG + PNG icon set and an
