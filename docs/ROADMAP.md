@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Shadow-collision audit guards `defaults()`.** New
+      `defaults_audit() -> (Bindings, Vec<Trigger>)` records
+      every bind call; new test asserts `map.len() ==
+      triggers.len()` and panics with the duplicate set if
+      not. Catches the class of bug cycle 115 fixed
+      one-shot, so a future re-introduction fails CI with a
+      named-offender message rather than going unnoticed.
 - [x] **Cycle-110 keybind collision fixed.** Cycle 110's
       `Ctrl+Shift+Up/Down → ScrollLineUp/Down` was silently
       shadowing the older `Ctrl+Shift+Arrows → Resize<dir>`

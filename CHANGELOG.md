@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Tests
+- **Shadow-collision audit added to `defaults()`.** Cycle 115
+  found one keybind collision (the cycle-110-introduced
+  `Ctrl+Shift+Up/Down` landing on top of the
+  `Ctrl+Shift+Arrows` Resize quartet). The class of bug is easy
+  to reintroduce: `bind()` is `HashMap::insert()` which
+  silently overwrites a duplicate trigger, so a CI run that
+  passes `cargo test` can still ship an inconsistent keymap.
+  New `defaults_audit() -> (Bindings, Vec<Trigger>)` returns
+  both the final map AND the ordered list of every trigger
+  the builder bound. `defaults()` becomes `defaults_audit().0`.
+  Test `defaults_has_no_shadow_collisions` asserts
+  `triggers.len() == map.len()` — and if it fires, builds a
+  duplicate set so the panic message names exactly which
+  trigger(s) shadowed (and by how many extra bind calls).
+  Verifies cycle 115's fix was complete and locks the
+  invariant going forward.
+
 ### Fixed
 - **Cycle-110 keybind collision dropped:** the `Ctrl+Shift+Arrows
   → Resize<dir>` quartet was bound at line 412–415 of

@@ -383,6 +383,18 @@ pub type Bindings = HashMap<Trigger, Action>;
 
 /// Terminator-compatible defaults (see plan / terminatorlib/config.py).
 pub fn defaults() -> Bindings {
+    defaults_audit().0
+}
+
+/// `defaults()` plus the *ordered* list of every trigger the builder
+/// called `bind()` on (including duplicates). The bindings map already
+/// has cardinality `<= bind_calls.len()` by HashMap semantics; the
+/// test `defaults_has_no_shadow_collisions` asserts equality so a
+/// future binding that silently shadows an earlier one (the cycle-110
+/// bug — Ctrl+Shift+Up/Down landed on top of the Resize quartet) fails
+/// CI instead of going unnoticed. Pure, allocates one extra Vec; not
+/// on the hot path.
+pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     use Action::*;
     use Key::*;
     let c = Mods::CTRL;
@@ -391,8 +403,11 @@ pub fn defaults() -> Bindings {
     let su = Mods::SUPER;
     let sus = Mods::SUPER | Mods::SHIFT;
     let mut m = Bindings::new();
+    let mut triggers: Vec<Trigger> = Vec::new();
     let mut bind = |mods: Mods, k: Key, act: Action| {
-        m.insert(Trigger::new(mods, k), act);
+        let t = Trigger::new(mods, k);
+        triggers.push(t);
+        m.insert(t, act);
     };
     // Terminator parity: Ctrl+Shift+O = split horizontally (top/bottom),
     // Ctrl+Shift+E = split vertically (left/right).
@@ -472,7 +487,7 @@ pub fn defaults() -> Bindings {
     for n in 1u8..=9 {
         bind(a, Char((b'0' + n) as char), GotoTab(n - 1));
     }
-    m
+    (m, triggers)
 }
 
 /// Apply a `keybind = trigger=action` line on top of an existing map.
@@ -522,6 +537,42 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn defaults_has_no_shadow_collisions() {
+        // Cycle-116 systemic guard. Cycle 115 caught a single shadow
+        // collision (Ctrl+Shift+Up/Down both bound to Resize *and*
+        // ScrollLine — second one silently wins). The class of bug is
+        // easy to reintroduce because `bind()` is `HashMap::insert()`
+        // which doesn't warn on duplicates. `defaults_audit()` returns
+        // both the final map AND the ordered list of every trigger
+        // the builder bound; map.len() < triggers.len() iff some
+        // trigger appears twice. Pin equality so any future
+        // duplicate-bind shows up here, with a useful error naming
+        // the offender(s).
+        let (m, triggers) = defaults_audit();
+        if m.len() != triggers.len() {
+            // Build the duplicate set so the failure message tells
+            // the next developer exactly which trigger shadowed.
+            use std::collections::HashMap;
+            let mut seen: HashMap<Trigger, usize> = HashMap::new();
+            for t in &triggers {
+                *seen.entry(*t).or_insert(0) += 1;
+            }
+            let dups: Vec<String> = seen
+                .into_iter()
+                .filter(|(_, n)| *n > 1)
+                .map(|(t, n)| format!("{} (×{n})", t.label()))
+                .collect();
+            panic!(
+                "shadow collision in defaults(): {} bind() calls but \
+                 only {} unique triggers — duplicates: [{}]",
+                triggers.len(),
+                m.len(),
+                dups.join(", ")
+            );
+        }
     }
 
     #[test]
