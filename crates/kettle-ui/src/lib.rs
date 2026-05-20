@@ -1,5 +1,24 @@
-//! kettle UI: the winit application, the tab/pane multiplexer, keyboard input
-//! encoding, and the search overlay.
+//! kettle UI: the winit event loop, tab/pane multiplexer, input encoding, and
+//! every interactive overlay kettle ships.
+//!
+//! Modules (private; see source for details):
+//! - `app` — the winit `App` impl + `WindowEvent` dispatch (focus / mouse /
+//!   keyboard / drag-and-drop / clipboard / resize). Owns the renderer
+//!   handle, blink-phase state, modal-overlay state machine, broadcast-input
+//!   indicator wiring, and the live-reload notify watcher.
+//! - `input` — keyboard-to-PTY byte encoding (xterm modifier table, kitty
+//!   keyboard protocol, F-keys, named-key triggers, bracketed-paste payload
+//!   construction, OSC 52 clamp).
+//! - `mux` — tab/split tree, pane focus, broadcast input
+//!   (`broadcast_write` / `broadcast_paste` / `broadcast_scroll_to_bottom`),
+//!   session snapshot/restore wiring, SSH-tab spawning.
+//! - `session` — atomic save + corruption-backup of the tab/split tree to
+//!   `<config-dir>/session.json`.
+//!
+//! Overlays owned by `app::App`: scrollback search (Ctrl+Shift+F), SSH
+//! launcher (Ctrl+Shift+S), command palette (Ctrl+Shift+K), quick-select
+//! hints (Ctrl+Shift+H). Modal state is coordinated through
+//! `close_all_modals()` / `any_modal_open()` so they don't stack.
 
 mod app;
 mod input;

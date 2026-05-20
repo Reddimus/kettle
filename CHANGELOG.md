@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **`kettle-ui` crate-level doc lists what's actually in the crate.**
+  Original doc (one-liner from early development) mentioned only
+  "winit application, tab/pane multiplexer, keyboard input
+  encoding, and the search overlay." Cycles since then added SSH
+  launcher (Ctrl+Shift+S), command palette (Ctrl+Shift+K), hint
+  mode (Ctrl+Shift+H), session restore, drag-and-drop, broadcast
+  input indicators — all undocumented at the crate doc level. A
+  new contributor reading `cargo doc -p kettle-ui` saw a stale
+  one-liner and had to grep the source to figure out the actual
+  surface. Now: per-module breakdown of `app`/`input`/`mux`/
+  `session` + a list of modal overlays + the helpers that
+  coordinate them. No code change.
+
 - **`theme_filter::is_bundled_theme_filename` doc-comment lists all
   6 skip categories.** The original doc (cycle 167) listed 4
   patterns; cycles 186/187/190 expanded the implementation
