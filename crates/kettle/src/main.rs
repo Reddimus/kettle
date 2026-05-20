@@ -236,10 +236,21 @@ fn main() -> anyhow::Result<()> {
         // think their config loaded. Now: probe `read_to_string`
         // directly and turn a read failure into a malformed entry
         // so it lands in the issues list with a non-zero exit code.
+        // Cycle 197 (cycle 196 follow-up): drive parse_collect /
+        // detect_malformed_values directly from the text we already
+        // read, rather than calling `load_from_with_diagnostics`
+        // which reads the file a SECOND time internally. Cycle 196's
+        // first take did the read twice (once for the error probe,
+        // once inside load_from_with_diagnostics). Harmless but
+        // wasteful; now the read happens once.
         let mut read_error: Option<String> = None;
         let (cfg, unknown, mut malformed) = match &path {
             Some(p) if p.exists() => match std::fs::read_to_string(p) {
-                Ok(_) => kettle_config::Config::load_from_with_diagnostics(p),
+                Ok(text) => {
+                    let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
+                    let malformed = kettle_config::Config::detect_malformed_values(&text);
+                    (cfg, unknown, malformed)
+                }
                 Err(e) => {
                     read_error = Some(format!(
                         "could not read {}: {e} (using defaults)",

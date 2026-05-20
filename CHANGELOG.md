@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Performance
+- **`--check-config` reads the config file once, not twice.**
+  Cycle-196 follow-up. The cycle-196 fix probed `read_to_string`
+  to detect read errors, then on success called
+  `load_from_with_diagnostics` which read the file *again*
+  internally. Harmless but wasteful (especially on slow disks
+  / network mounts / large configs). Now: feed the already-
+  read text straight into `parse_collect` and
+  `detect_malformed_values` — both are public and take `&str`
+  — so the disk read happens exactly once. Same observable
+  behavior; just one syscall less. 243 workspace tests pass.
+
 ### Fixed
 - **`kettle --check-config` exits non-zero when the config file
   is unreadable (perm-denied / I/O error), instead of silently
