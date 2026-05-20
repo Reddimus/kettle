@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle` logs its build identity at startup (info level).** A
+  user grep'ing their stderr for warnings to file a bug report
+  previously had no way to know which build the warnings came
+  from. The version+SHA is now logged on first start:
+  ```
+  [2026-05-20T17:16:54Z INFO kettle] kettle 0.1.0 (a2ff10b2f36f) starting
+  ```
+  Visible only when the user bumps logging (`RUST_LOG=info kettle`
+  or `RUST_LOG=kettle=info`); below the `warn` default so it
+  doesn't clutter normal stderr output. Reuses the cycle-192
+  `KETTLE_VERSION` constant — same shape as
+  `cargo --check-config` and `--version`.
+
 ### Documentation
 - **`docs/UX-COMPARISON.md` drag-and-drop entry gains a citation
   paragraph.** Cycle 200 added the matrix row but didn't add the

@@ -100,6 +100,14 @@ fn reset_sigpipe() {}
 fn main() -> anyhow::Result<()> {
     reset_sigpipe();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Cycle 204: log the build identity at info level on startup. A user
+    // grep'ing their stderr for warnings to file a bug report can paste
+    // the surrounding lines — the version line lands once near the top,
+    // disambiguating which kettle build emitted the warning. `info` level
+    // is below the `warn` default filter, so the line only appears when
+    // the user has bumped logging (`RUST_LOG=info kettle …`); on the
+    // default filter it stays out of the way.
+    log::info!("kettle {KETTLE_VERSION} starting");
     let cli = Cli::parse();
 
     // Explicit `--config PATH` must point at a regular file. Every
