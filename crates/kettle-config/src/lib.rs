@@ -1286,7 +1286,23 @@ mod config_tests {
             let parent = file_abs.parent().expect("doc has a parent dir");
             let mut i = 0usize;
             let mut checked = 0usize;
+            // Skip content inside inline-code backtick spans
+            // (CHANGELOG.md has `[label](path.md)` strings as textual
+            // examples; a real markdown parser renders those as code,
+            // not as a link). Cycle 232 caught this in CI on the first
+            // commit of the link guard. Track a simple `in_code` state
+            // that flips on each `` ` ``.
+            let mut in_code = false;
             while i + 2 < bytes.len() {
+                if bytes[i] == b'`' {
+                    in_code = !in_code;
+                    i += 1;
+                    continue;
+                }
+                if in_code {
+                    i += 1;
+                    continue;
+                }
                 // Match `[…](…)` *but not* `![…](…)` — that's the
                 // cycle-223/224 image guard's territory. Skip when
                 // the byte before `[` is `!`.
