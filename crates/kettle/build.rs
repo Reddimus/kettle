@@ -2,13 +2,24 @@
 //! include it. Other Rust CLIs that ship with this affordance (cargo,
 //! rustc, ripgrep, fd) use the SHA to disambiguate bug-report builds —
 //! without it, "kettle 0.1.0" on every nightly cargo install looks
-//! identical to the last release. Cycle 192.
+//! identical to the last release.
 //!
-//! Outputs `KETTLE_GIT_SHA` as either:
-//! - `" (<sha12>)"` — when in a git checkout, ready to concat onto the
-//!   version string with one `concat!()` at the call site.
+//! Outputs `KETTLE_GIT_SHA` as one of three forms:
+//! - `" (<sha12>)"` — clean tip of a git checkout. Ready to concat onto
+//!   the version string with one `concat!()` at the call site.
+//! - `" (<sha12>+dirty)"` — same commit but with uncommitted working-tree
+//!   changes. Mirrors `git describe --dirty` convention so dev-iter
+//!   builds are distinguishable from the matching clean commit in bug
+//!   reports.
 //! - `""` — source-tarball / vendored / no-git case. `concat!` of an
 //!   empty string is a no-op, so the call site doesn't need a cfg.
+//!
+//! Cycle history: 192 introduced the basic SHA capture; 195 added the
+//! `+dirty` marker and dropped cycle-192's `rerun-if-changed`
+//! restrictions (which prevented source edits from refreshing the
+//! marker). Now the script runs on every cargo build — ~20ms of git
+//! subprocess time, well under build-time noise, and worth it for the
+//! `+dirty` correctness.
 
 use std::env;
 use std::path::PathBuf;

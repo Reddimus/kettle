@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **`build.rs` module-level doc updated to reflect the cycle-195
+  `+dirty` marker and rerun-if-changed removal.** The cycle-192
+  module doc said "Outputs `KETTLE_GIT_SHA` as one of two forms"
+  (clean SHA or empty). Cycle 195 added the `+dirty` third form
+  but didn't update the doc; cycle 195's note was at the
+  `cargo:rerun-if-changed` decision site (mid-function), not at
+  the top where a contributor first reads. The module doc now
+  enumerates all three output forms and cites both cycles. No
+  code change; the contract was already implemented in 195.
+
 ### Added
 - **`kettle` logs its build identity at startup (info level).** A
   user grep'ing their stderr for warnings to file a bug report
