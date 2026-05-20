@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--check-config` echoes `font-feature` count + per-
+      style font-family overrides.** Symmetric with the
+      existing `ssh: N host(s) configured` line: opt-in keys
+      print only when actually set. Surfaces ligatures-toggle
+      state too.
 - [x] **`Action::CloseWindow` finally closes the window
       (was an alias for `CloseTab`).** Both variants existed
       but the handler arm folded them together to

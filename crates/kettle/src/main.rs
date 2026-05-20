@@ -266,6 +266,35 @@ fn main() -> anyhow::Result<()> {
         if !cfg.ssh_hosts.is_empty() {
             println!("ssh:     {} host(s) configured", cfg.ssh_hosts.len());
         }
+        // Repeatable / opt-in keys: only echo when actually set so the
+        // default-config case stays terse, but show the count when the
+        // user has tuned them — otherwise `--check-config` silently
+        // dropped `font-feature` / per-style font families / palette
+        // overrides from its summary even when the user had taken the
+        // time to configure them. Symmetric with the `ssh:` line above.
+        if !cfg.font_features.is_empty() {
+            println!(
+                "font-features: {} configured (ligatures={})",
+                cfg.font_features.len(),
+                cfg.font_ligatures
+            );
+        }
+        let styled_families = [
+            ("bold", cfg.font_family_bold.as_deref()),
+            ("italic", cfg.font_family_italic.as_deref()),
+            ("bold-italic", cfg.font_family_bold_italic.as_deref()),
+        ];
+        let styles_set: Vec<&str> = styled_families
+            .iter()
+            .filter(|(_, v)| v.is_some())
+            .map(|(k, _)| *k)
+            .collect();
+        if !styles_set.is_empty() {
+            println!(
+                "font-styles: per-style overrides for [{}]",
+                styles_set.join(", ")
+            );
+        }
         let issues = unknown.len() + malformed.len();
         if issues == 0 {
             println!("status:  OK — no issues");

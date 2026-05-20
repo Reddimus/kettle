@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **`--check-config` echoes `font-feature` count and per-style
+  font-family overrides.** Previously the summary surfaced
+  `ssh: N host(s) configured` for SSH but silently dropped the
+  other opt-in repeatable/optional keys — a user who had set
+  `font-feature = liga` / `font-feature = cv01=2` / etc. saw
+  nothing about them, same for the `font-family-{bold,italic,
+  bold-italic}` overrides. Now both groups echo when actually
+  set (default-config case stays terse). Output:
+  - `font-features: <N> configured (ligatures=<bool>)`
+  - `font-styles: per-style overrides for [bold, italic, ...]`
+  Verified end-to-end against a config with both keys set
+  (3 features, 2 styled families) and a `/dev/null` config
+  (nothing printed for these lines).
+
 ### Fixed
 - **`Action::CloseWindow` actually closes the window now (was
   an alias for `CloseTab`).** Both action variants exist in the
