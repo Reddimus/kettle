@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`home_dir_fallback` caller now also gates on `is_dir`.**
+  Cycles 162/180 made the helper probe HOME → USERPROFILE →
+  APPDATA and filter empty values. But the caller fed whatever
+  path the helper returned to `cmd.cwd` without checking it was
+  actually a directory. A misconfigured `HOME=/etc/passwd`
+  (exotic but possible — a script that set HOME to the wrong
+  thing, or an env var pointing at a regular file) would have
+  the OS spawn fail with "not a directory". Now: if the
+  resolved home path isn't a directory, treat it the same as
+  "no home" — leave `cmd.cwd` untouched and let `portable_pty`
+  inherit kettle's launch directory (the same recovery as the
+  no-env-var-set case). One-line `&& home.is_dir()` guard at
+  the caller; helper stays pure. No new test (fs predicates
+  aren't unit-testable without infrastructure the rest of the
+  caller's tests don't stand up; correctness-by-construction
+  via the helper's existing coverage + the new guard).
+
 ### Added
 - **Focused-pane border tints yellow when broadcast is on.**
   Cycle-178 follow-up: the tab-bar accent flipped to yellow on

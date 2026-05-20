@@ -164,7 +164,18 @@ impl Terminal {
                 // as cycle 159's macOS universal2 fix — Linux+macOS
                 // worked, Windows didn't, the env var probe order is
                 // the difference.
-                if let Some(home) = home_dir_fallback(|k| std::env::var_os(k)) {
+                // Cycle 185: also gate the fallback on `is_dir`. The env
+                // var could be set to something that exists but isn't a
+                // directory (an exotic `HOME=/etc/passwd` misconfig, or
+                // a path that's a regular file / symlink to a file) —
+                // `cmd.cwd` would then hand the OS spawn an invalid
+                // target. Treating that the same as "no home" lets
+                // `portable_pty` inherit kettle's launch directory
+                // (the same recovery as cycles 162/180 when no env
+                // var was set or it was empty).
+                if let Some(home) = home_dir_fallback(|k| std::env::var_os(k))
+                    && home.is_dir()
+                {
                     cmd.cwd(home);
                 }
             }
