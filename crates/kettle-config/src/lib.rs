@@ -1168,239 +1168,197 @@ mod config_tests {
         }
     }
 
-    #[test]
-    fn user_facing_doc_images_exist() {
-        // Cycle 223 added an image drift guard for the README only.
-        // Cycle 224 extends it to every `docs/*.md` user-facing doc
-        // — UX-COMPARISON.md already references two images
-        // (kettle-showcase.png + refs/xterm.png), with the same
-        // forgotten-commit / rename / broken-image-on-github regression
-        // risk the README guard exists to prevent.
-        //
-        // Relative-path resolution: `![…](path)` in a markdown doc
-        // resolves against the DOC's directory, not the repo root.
-        // README's hero is `docs/images/kettle-hero.png` (relative to
-        // the repo root); UX-COMPARISON.md's hero is `images/...`
-        // (relative to docs/). Both have to work.
-        //
-        // Implementation: walk byte offsets so absolute positions
-        // stay stable. The earlier cycle-223 draft updated a moving
-        // `search: &str` and then computed offsets against the
-        // parent — the math was wrong and the guard silently passed
-        // regardless. Test for this with a sed-substitute-and-
-        // verify-failure run if the parser is touched again.
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest.join("../..");
+    // ────────────────────────────────────────────────────────────
+    // Cycle 235: consolidated drift guards for user-facing markdown.
+    //
+    // Cycles 223/224 (image guard) and 232/233 (link guard) had
+    // near-identical byte-walking scanners that differed only in
+    // which kind of `[…](path)` they matched. Cycle 233 added
+    // backtick-awareness to the link scanner; cycle 234 propagated
+    // the same fix to the image scanner. With both behaviorally
+    // identical except for the `!` prefix, consolidating into one
+    // shared callback-driven walker is a clean refactor.
+    //
+    // `walk_md_refs` does the byte walking and calls `visit` for
+    // every well-formed `[…](path)` reference (image-prefixed `!`
+    // marked via `kind`). Each test filters and asserts on its own
+    // kind so the failure messages stay specific to the guard
+    // that was tripped.
+    //
+    // Backtick-awareness: we flip an `in_code` flag on every `` ` ``
+    // and skip the link-parsing branch while inside (a real markdown
+    // renderer treats `\`[label](path)\`` as inline code, not a
+    // link — CHANGELOG.md has these as textual examples).
+    // ────────────────────────────────────────────────────────────
 
-        // Helper: scan one markdown file, return number of image
-        // embeds verified. Panics on a broken ref with a clear msg.
-        fn scan(file_abs: &std::path::Path, file_rel: &str) -> usize {
-            let text = std::fs::read_to_string(file_abs)
-                .unwrap_or_else(|e| panic!("missing {file_rel}: {e}"));
-            let bytes = text.as_bytes();
-            let parent = file_abs.parent().expect("doc has a parent dir");
-            let mut i = 0usize;
-            let mut checked = 0usize;
-            // Cycle 234: backtick-aware (same fix as cycle 233 applied
-            // to the cycle-232 link guard). Currently this guard's
-            // scope (README + docs/*.md) doesn't include any docs
-            // with `![…](…)` strings inside backticks, but CHANGELOG.md
-            // does have them as textual examples and a future cycle
-            // extending this scanner's scope would hit the same trap
-            // cycle 232 hit. Add the same `in_code` state guard
-            // proactively so the two scanners stay consistent.
-            let mut in_code = false;
-            while i + 2 < bytes.len() {
-                if bytes[i] == b'`' {
-                    in_code = !in_code;
-                    i += 1;
-                    continue;
-                }
-                if in_code {
-                    i += 1;
-                    continue;
-                }
-                if bytes[i] == b'!' && bytes[i + 1] == b'[' {
-                    let alt_close = match text[i + 2..].find(']') {
-                        Some(j) => i + 2 + j,
-                        None => break,
-                    };
-                    if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
-                        i = alt_close + 1;
-                        continue;
-                    }
-                    let path_start = alt_close + 2;
-                    let path_end = match text[path_start..].find(')') {
-                        Some(j) => path_start + j,
-                        None => break,
-                    };
-                    let raw = &text[path_start..path_end];
-                    let path = raw.split_whitespace().next().unwrap_or(raw);
-                    if !path.starts_with("http://") && !path.starts_with("https://") {
-                        // Resolve against the doc's own directory.
-                        let abs = parent.join(path);
-                        assert!(
-                            abs.exists(),
-                            "{file_rel} references image `{path}` but `{}` \
-                             does not exist (cycle 223/224 drift guard)",
-                            abs.display()
-                        );
-                        checked += 1;
-                    }
-                    i = path_end + 1;
-                } else {
-                    i += 1;
-                }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum MdRefKind {
+        /// `![alt](path)` — image embed.
+        Image,
+        /// `[label](path)` — text link.
+        Link,
+    }
+
+    /// Walk a markdown document and call `visit` for every well-formed
+    /// `[…](path)` reference (or `![…](path)` image embed). Caller
+    /// gets the raw path string (with any trailing title / anchor
+    /// fragment still attached); peels off the title / anchor on
+    /// their side so this stays a pure scanner.
+    fn walk_md_refs(text: &str, mut visit: impl FnMut(MdRefKind, &str)) {
+        let bytes = text.as_bytes();
+        let mut i = 0usize;
+        let mut in_code = false;
+        while i + 2 < bytes.len() {
+            if bytes[i] == b'`' {
+                in_code = !in_code;
+                i += 1;
+                continue;
             }
-            checked
+            if in_code {
+                i += 1;
+                continue;
+            }
+            if bytes[i] != b'[' {
+                i += 1;
+                continue;
+            }
+            // Image vs. text-link: `![` vs. `[`.
+            let kind = if i > 0 && bytes[i - 1] == b'!' {
+                MdRefKind::Image
+            } else {
+                MdRefKind::Link
+            };
+            let alt_close = match text[i + 1..].find(']') {
+                Some(j) => i + 1 + j,
+                None => break,
+            };
+            if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
+                i = alt_close + 1;
+                continue;
+            }
+            let path_start = alt_close + 2;
+            let path_end = match text[path_start..].find(')') {
+                Some(j) => path_start + j,
+                None => break,
+            };
+            let raw = &text[path_start..path_end];
+            // Strip the optional ` "title"` after the path.
+            let path = raw.split_whitespace().next().unwrap_or(raw);
+            visit(kind, path);
+            i = path_end + 1;
         }
+    }
 
-        // README first — cycle 223's contract: at least one image.
-        let readme_checks = scan(&repo_root.join("README.md"), "README.md");
-        assert!(
-            readme_checks >= 1,
-            "expected ≥ 1 image embed in README; found {readme_checks} \
-             — parser likely regressed"
-        );
-
-        // Every other docs/*.md — no per-file floor (some docs
-        // legitimately have no images), but parser bugs that match
-        // ZERO across ALL docs would be caught by README's floor.
+    /// Return every `.md` file under the repo that should pass the
+    /// drift guards: README + every `docs/*.md` + top-level
+    /// `CHANGELOG.md` and `CONTRIBUTING.md`. Used by both guards so
+    /// they stay in scope-sync.
+    fn user_facing_md_files(repo_root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+        let mut out: Vec<(std::path::PathBuf, String)> = Vec::new();
+        out.push((repo_root.join("README.md"), "README.md".to_string()));
         let docs_dir = repo_root.join("docs");
         if docs_dir.is_dir() {
-            for entry in std::fs::read_dir(&docs_dir).expect("read docs/") {
-                let entry = entry.expect("dirent");
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
+            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&docs_dir)
+                .expect("read docs/")
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+                .collect();
+            entries.sort();
+            for path in entries {
                 let rel = format!("docs/{}", path.file_name().unwrap().to_string_lossy());
-                scan(&path, &rel);
+                out.push((path, rel));
             }
         }
+        for top in ["CHANGELOG.md", "CONTRIBUTING.md"] {
+            let p = repo_root.join(top);
+            if p.exists() {
+                out.push((p, top.to_string()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn user_facing_doc_images_exist() {
+        // See `walk_md_refs` for the rationale. Cycle 223 introduced
+        // the README guard; 224 extended to docs/*.md; 234 added
+        // backtick-awareness; 235 consolidated with the link guard.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+        let mut readme_image_count = 0usize;
+        for (file_abs, file_rel) in user_facing_md_files(&repo_root) {
+            let text = std::fs::read_to_string(&file_abs)
+                .unwrap_or_else(|e| panic!("missing {file_rel}: {e}"));
+            let parent = file_abs.parent().expect("doc has a parent dir");
+            walk_md_refs(&text, |kind, path| {
+                if kind != MdRefKind::Image
+                    || path.starts_with("http://")
+                    || path.starts_with("https://")
+                {
+                    return;
+                }
+                let abs = parent.join(path);
+                assert!(
+                    abs.exists(),
+                    "{file_rel} references image `{path}` but `{}` does \
+                     not exist (cycle 223/224 drift guard)",
+                    abs.display()
+                );
+                if file_rel == "README.md" {
+                    readme_image_count += 1;
+                }
+            });
+        }
+        // Cycle 223's contract: README has at least one image embed.
+        assert!(
+            readme_image_count >= 1,
+            "expected ≥ 1 image embed in README; found {readme_image_count} \
+             — walker likely regressed"
+        );
     }
 
     #[test]
     fn user_facing_doc_md_cross_links_resolve() {
-        // Cycle 232: companion to cycle 223/224's image drift guard.
-        // README cross-links into `docs/*.md` (CONFIG, INSTALL,
-        // ROADMAP, SHELL-INTEGRATION, …); `docs/ARCHITECTURE.md`
-        // cross-links to sibling docs (`TESTING.md` etc.) and so on.
-        // A rename / removal silently breaks navigation on
-        // github.com/Reddimus/kettle with no CI signal — same shape
-        // as the image regression risk but for textual links.
-        //
-        // We only check **relative `.md`** links. External URLs
-        // (`http(s)://…`) are skipped so the test doesn't depend on
-        // network reachability; anchor-only fragments (`(#section)`)
-        // and non-.md attachments fall through.
+        // See `walk_md_refs`. Cycle 232 introduced this; 233 made it
+        // backtick-aware; 235 consolidated with the image guard.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
-
-        fn scan(file_abs: &std::path::Path, file_rel: &str) -> usize {
-            let text = std::fs::read_to_string(file_abs)
+        let mut readme_link_count = 0usize;
+        for (file_abs, file_rel) in user_facing_md_files(&repo_root) {
+            let text = std::fs::read_to_string(&file_abs)
                 .unwrap_or_else(|e| panic!("missing {file_rel}: {e}"));
-            let bytes = text.as_bytes();
             let parent = file_abs.parent().expect("doc has a parent dir");
-            let mut i = 0usize;
-            let mut checked = 0usize;
-            // Skip content inside inline-code backtick spans
-            // (CHANGELOG.md has `[label](path.md)` strings as textual
-            // examples; a real markdown parser renders those as code,
-            // not as a link). Cycle 232 caught this in CI on the first
-            // commit of the link guard. Track a simple `in_code` state
-            // that flips on each `` ` ``.
-            let mut in_code = false;
-            while i + 2 < bytes.len() {
-                if bytes[i] == b'`' {
-                    in_code = !in_code;
-                    i += 1;
-                    continue;
+            walk_md_refs(&text, |kind, path| {
+                if kind != MdRefKind::Link {
+                    return;
                 }
-                if in_code {
-                    i += 1;
-                    continue;
+                let no_frag = path.split('#').next().unwrap_or(path);
+                if no_frag.is_empty()
+                    || no_frag.starts_with("http://")
+                    || no_frag.starts_with("https://")
+                    || no_frag.starts_with('#')
+                    || !no_frag.ends_with(".md")
+                {
+                    return;
                 }
-                // Match `[…](…)` *but not* `![…](…)` — that's the
-                // cycle-223/224 image guard's territory. Skip when
-                // the byte before `[` is `!`.
-                if bytes[i] == b'[' && (i == 0 || bytes[i - 1] != b'!') {
-                    let alt_close = match text[i + 1..].find(']') {
-                        Some(j) => i + 1 + j,
-                        None => break,
-                    };
-                    if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
-                        i = alt_close + 1;
-                        continue;
-                    }
-                    let path_start = alt_close + 2;
-                    let path_end = match text[path_start..].find(')') {
-                        Some(j) => path_start + j,
-                        None => break,
-                    };
-                    let raw = &text[path_start..path_end];
-                    let path = raw.split_whitespace().next().unwrap_or(raw);
-                    // Strip any `#anchor` fragment from the path.
-                    let path_no_frag = path.split('#').next().unwrap_or(path);
-                    // Only check relative .md links — external URLs
-                    // and non-markdown attachments fall through.
-                    if !path_no_frag.is_empty()
-                        && !path_no_frag.starts_with("http://")
-                        && !path_no_frag.starts_with("https://")
-                        && !path_no_frag.starts_with('#')
-                        && path_no_frag.ends_with(".md")
-                    {
-                        let abs = parent.join(path_no_frag);
-                        assert!(
-                            abs.exists(),
-                            "{file_rel} links to `{path}` but `{}` does \
-                             not exist (cycle 232 drift guard)",
-                            abs.display()
-                        );
-                        checked += 1;
-                    }
-                    i = path_end + 1;
-                } else {
-                    i += 1;
+                let abs = parent.join(no_frag);
+                assert!(
+                    abs.exists(),
+                    "{file_rel} links to `{path}` but `{}` does not exist \
+                     (cycle 232 drift guard)",
+                    abs.display()
+                );
+                if file_rel == "README.md" {
+                    readme_link_count += 1;
                 }
-            }
-            checked
+            });
         }
-
-        // README first — `^docs/(SHELL-INTEGRATION|INSTALL|ROADMAP|
-        // CONFIG|ARCHITECTURE|RESEARCH|UX-COMPARISON|TESTING)\.md`
-        // are all referenced. Floor at 3 to keep the parser honest;
-        // a regression to "matches nothing" silently passes a
-        // README that legitimately has zero links, but a parser
-        // bug that matches nothing always triggers this.
-        let readme_checks = scan(&repo_root.join("README.md"), "README.md");
+        // Cycle 232's contract: README has ≥ 3 .md cross-links.
         assert!(
-            readme_checks >= 3,
-            "expected ≥ 3 .md cross-links in README; found {readme_checks} \
-             — parser likely regressed"
+            readme_link_count >= 3,
+            "expected ≥ 3 .md cross-links in README; found {readme_link_count} \
+             — walker likely regressed"
         );
-
-        // Every docs/*.md — no per-file floor.
-        let docs_dir = repo_root.join("docs");
-        if docs_dir.is_dir() {
-            for entry in std::fs::read_dir(&docs_dir).expect("read docs/") {
-                let entry = entry.expect("dirent");
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                let rel = format!("docs/{}", path.file_name().unwrap().to_string_lossy());
-                scan(&path, &rel);
-            }
-        }
-
-        // Top-level CHANGELOG.md / CONTRIBUTING.md too — same risk.
-        for top in ["CHANGELOG.md", "CONTRIBUTING.md", "NOTICE"] {
-            let p = repo_root.join(top);
-            if p.exists() && top.ends_with(".md") {
-                scan(&p, top);
-            }
-        }
     }
 
     #[test]
