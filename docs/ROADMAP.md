@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Renderer::new` clamps `cfg.font_size`.** Cycle 73's
+      [5.0, 72.0] bound only fired through `set_font_size`
+      (runtime); startup took `cfg.font_size` raw. Extreme
+      configs (`font-size = 200`) booted oversize cells and
+      could hit the wgpu 8192px texture limit. New pure
+      `clamp_font_size(f32) -> f32` shared by both setters.
+      Verified end-to-end: `font-size = 500` config renders.
 - [x] **Palette gained 5 missing actions + a drift guard.**
       `ScrollLine{Up,Down}` (cycle 110), `ScrollPage{Up,Down}`,
       `HintMode`, and `MoveTab{Left,Right}` had keybinds but

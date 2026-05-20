@@ -220,7 +220,17 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let font_size = cfg.font_size;
+        // Clamp `cfg.font_size` here (same range as `set_font_size`'s
+        // runtime path: [5.0, 72.0]). Without this, a user config of
+        // `font-size = 200` boots the renderer with 200pt cells and
+        // hits the wgpu 8192px-per-side texture limit (or floods the
+        // window with one giant glyph). 5.0 is below "tiny but
+        // legible"; 72.0 is "billboard". The runtime setter already
+        // had this clamp (cycle 73); `Renderer::new` silently didn't,
+        // so the bound was only enforced after a Ctrl+0 ResetFontSize
+        // round-trip — same "downstream cache stale at startup" shape
+        // as cycle 98's font-family fix.
+        let font_size = clamp_font_size(cfg.font_size);
         let metrics = Metrics::new(font_size, font_size * 1.25);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -270,7 +280,7 @@ impl Renderer {
     }
 
     pub fn set_font_size(&mut self, size: f32) {
-        self.font_size = size.clamp(5.0, 72.0);
+        self.font_size = clamp_font_size(size);
         self.metrics = Metrics::new(self.font_size, self.font_size * 1.25);
         self.remeasure_cell();
     }
@@ -1127,6 +1137,24 @@ fn font_features(cfg: &Config) -> FontFeatures {
 /// when something was cut. CJK characters and emoji are wide (2 cells
 /// each), so a char-count truncation overflows the tab segment / title
 /// when these are present; this honors the cell width that the renderer
+/// Sanitize a font size against the renderer's safe range. 5.0 is the
+/// floor below which cosmic-text's metrics become numerically unstable
+/// (sub-pixel cell dims, antialiasing falls apart); 72.0 is the ceiling
+/// above which a typical 1080p window's worth of cells exceeds the wgpu
+/// 8192-px-per-side texture limit. Shared by `Renderer::new` and
+/// `set_font_size` so the startup path and the runtime path can't
+/// drift on which sizes they accept. Pure so the bounds are unit-tested
+/// without standing up wgpu.
+pub fn clamp_font_size(size: f32) -> f32 {
+    // `clamp` on f32 panics on NaN; treat that as "use default" by
+    // routing it to the floor rather than letting it propagate to
+    // cosmic-text where it would silently produce zero-sized cells.
+    if size.is_nan() {
+        return 5.0;
+    }
+    size.clamp(5.0, 72.0)
+}
+
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a
 /// column for it.
 fn truncate(s: &str, n: usize) -> String {
@@ -1663,6 +1691,32 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod clamp_font_size_tests {
+    use super::clamp_font_size;
+
+    #[test]
+    fn clamp_font_size_bounds_match_set_font_size() {
+        // Floor + ceiling pinned: 5.0 and 72.0. Below cycle 73 only
+        // set_font_size enforced these; Renderer::new took
+        // cfg.font_size raw, so a `font-size = 200` config booted with
+        // 200pt cells (texture-limit risk) until a Ctrl+0 reload
+        // happened to flow it through set_font_size.
+        assert_eq!(clamp_font_size(13.0), 13.0, "in-range passes through");
+        assert_eq!(clamp_font_size(72.0), 72.0, "at-ceiling stays");
+        assert_eq!(clamp_font_size(5.0), 5.0, "at-floor stays");
+        assert_eq!(clamp_font_size(200.0), 72.0, "above ceiling clamps");
+        assert_eq!(clamp_font_size(3.0), 5.0, "below floor clamps");
+        // Negative is a parse-corrupted value; clamp to floor not panic.
+        assert_eq!(clamp_font_size(-1.0), 5.0);
+        // NaN routes to floor (f32::clamp panics on NaN; sanitize first).
+        assert_eq!(clamp_font_size(f32::NAN), 5.0);
+        // Infinities round to the bounds.
+        assert_eq!(clamp_font_size(f32::INFINITY), 72.0);
+        assert_eq!(clamp_font_size(f32::NEG_INFINITY), 5.0);
     }
 }
 

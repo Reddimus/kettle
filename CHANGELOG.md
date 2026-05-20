@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`Renderer::new` now clamps `cfg.font_size` to the same
+  range `set_font_size` uses.** Cycle 73 added a `[5.0, 72.0]`
+  clamp inside `set_font_size` (the runtime Ctrl+= / Ctrl+- /
+  Ctrl+0 path), but `Renderer::new` still took `cfg.font_size`
+  raw — so a user with `font-size = 200` in their config
+  booted with 200pt cells, potentially hitting the wgpu 8192px-
+  per-side texture limit and panicking GPU init. The bound was
+  silently enforced only after a Ctrl+0 round-trip flowed
+  through `set_font_size`. Same "downstream cache stale at
+  startup" shape as cycle 98's font-family fix.
+  - New pure helper `clamp_font_size(f32) -> f32` (sanitizes
+    NaN to floor; clamps to `[5.0, 72.0]`; both setters now use
+    it so the startup and runtime paths can't drift on which
+    sizes they accept).
+  - +1 test (`clamp_font_size_bounds_match_set_font_size`)
+    covering in-range, at-bounds, above/below, negative, NaN,
+    and ±infinity. Verified end-to-end: a `font-size = 500`
+    config that would have hit the GPU texture limit now
+    renders cleanly at the clamped 72pt.
+
 ### Added
 - **Command palette gained Quick-select hints, Move tab
   left/right, and the four scroll-line / scroll-page entries.**
