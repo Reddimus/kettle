@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`CONTRIBUTING.md` documents the audit-cycle pattern.**
+  After 150+ cycles the project has a distinctive workflow
+  (find a bounded silent-fallback bug → extract a pure
+  helper → wire it in → pin the contract with a test → land
+  behind the full gate) that's hard to reverse-engineer
+  from the CHANGELOG alone. New top-level file walks through
+  the cycle shape, lists project layout, gives a real
+  recent example (cycle 151's notify-filter fix), and points
+  newcomers at `_ => {}` arms / the ROADMAP "Next" list as
+  starting points. README's documentation section links to
+  it.
+
 ### Build
 - **macOS release builds are now actually universal (`x86_64` +
   `aarch64`).** The release workflow's artifact has been named

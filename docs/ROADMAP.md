@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`CONTRIBUTING.md` added.** Documents the audit-
+      cycle pattern that has driven 150+ commits so a new
+      contributor can land their first change with the same
+      shape — bounded bug → pure helper → wire → pin →
+      gate → docs → commit. Real-example walkthrough of
+      cycle 151. Linked from README's documentation
+      section.
 - [x] **macOS release build is actually universal.**
       Artifact has been named `kettle-macos-universal.zip`
       since project genesis but contained a single-arch

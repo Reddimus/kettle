@@ -125,6 +125,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the audit-cycle pattern + how to land your first change
 
 ## License
 
