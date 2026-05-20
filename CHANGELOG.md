@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`NOTICE` credits kitty, Terminator, and Ghostty as
+  design-source attributions.** Pre-cycle, NOTICE listed only the
+  projects whose CODE kettle uses (Alacritty / vte, WezTerm
+  portable-pty, cosmic-text/glyphon, Contour Sixel reference) + the
+  bundled assets (font + theme set). Three more projects shape
+  kettle's design without sharing code:
+  - **kitty** (GPL-3.0) — graphics protocol specification; kettle's
+    Rust implementation is original but follows kitty's design.
+  - **Terminator** (GPL-3.0) — splits/tabs/broadcast UX +
+    default keybinds; the `Ctrl+Shift+O/E/T` convention,
+    `broadcast_all` semantics, group-input scoping all originate
+    here.
+  - **Ghostty** (MIT) — config syntax + key names + `unfocused-
+    split-opacity = 0.7` default; a user's Ghostty config drops
+    into kettle unchanged.
+  Each entry notes "specification/convention consulted, no GPL
+  code copied" so the licensing story stays clean — kettle is MIT
+  but cites GPL-3.0 *designs* (which is a fair-use / norm-of-
+  attribution pattern, not a license-derivation one). No code
+  change.
+
 ### Internal
 - **`kettle-render` and `kettle-vt` crate-level docs updated to
   match what's actually in those crates.** Cycles 207/208/209
