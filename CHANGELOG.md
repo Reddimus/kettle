@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **SSH tab title seeded from the target.** Fresh SSH tabs
+  (Ctrl+Shift+S launcher, restored sessions with an `ssh` argv)
+  showed the literal `kettle` placeholder until the *remote*
+  shell sent its first OSC 2 — distinguishing six SSH tabs at
+  the same host was impossible during connection setup. The
+  cycle-89 cwd-basename fallback didn't help (SSH panes have no
+  local cwd to fall back to). New pure helper `initial_pane_title
+  (argv)` inspects `argv[0] == "ssh"` and renders `ssh <target>`
+  (first positional argument, skipping flags) at pane spawn time;
+  the existing OSC 2 handler overwrites it the moment the remote
+  shell sets a real title. Applies to both fresh launches and
+  session restore since both flow through `spawn_pane`. +1 test
+  covering ssh / non-ssh argvs and edge cases (`ssh -V`, etc).
 - **`--list-keybinds` shows `Goto tab N` (1-based) instead of
   `GotoTab(0)`.** The action label was rendered via Rust's
   `Debug` derive — fine for non-parametric variants (`Copy`,

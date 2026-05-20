@@ -8,6 +8,29 @@ use crossbeam_channel::{Receiver, Sender};
 use kettle_config::{Config, CursorStyle};
 use kettle_core::{CursorShape, TermEvent, Terminal, Waker};
 
+/// Initial pane title seeded from the launching argv before the program's
+/// first OSC 2. Plain shells use the placeholder "kettle" — cycle 89's
+/// cwd-basename fallback fills in for those once OSC 7 arrives. SSH panes
+/// have no local cwd, so we surface the target inline (`ssh me@box`) so a
+/// tab full of them is distinguishable while connections are
+/// establishing. Pure so the argv → title decision is unit-tested.
+fn initial_pane_title(argv: &[String]) -> String {
+    if argv.first().map(String::as_str) == Some("ssh") {
+        let host = argv
+            .iter()
+            .skip(1)
+            .find(|a| !a.starts_with('-'))
+            .cloned()
+            .unwrap_or_default();
+        return if host.is_empty() {
+            "ssh".into()
+        } else {
+            format!("ssh {host}")
+        };
+    }
+    "kettle".into()
+}
+
 /// Map the kettle config cursor style to the engine's seed shape. `Bar` and
 /// `Beam` are the same thing under different names (vertical thin stroke);
 /// the engine has more variants (`HollowBlock`, `Hidden`) that only ever
@@ -272,12 +295,13 @@ impl Mux {
         )?;
         let id = self.next_id;
         self.next_id += 1;
+        let initial_title = initial_pane_title(argv);
         self.panes.insert(
             id,
             Pane {
                 term,
                 rx,
-                title: "kettle".into(),
+                title: initial_title,
                 closed: false,
                 last_history: None,
             },
@@ -447,6 +471,10 @@ impl Mux {
         target: &str,
     ) -> Result<()> {
         let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
+        // `spawn_pane` sees argv[0] == "ssh" and seeds the pane title to
+        // `ssh <target>` so the tab is distinguishable from a regular
+        // shell tab while the connection is establishing. The OSC 2
+        // handler overwrites this when the remote shell sets a title.
         let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
@@ -802,6 +830,24 @@ mod node_tests {
         assert_eq!(std::path::Path::new("/").file_name(), None);
         // Edge: empty path / no-cwd case (Terminal::current_dir = None)
         // also routes to "tab N" naturally.
+    }
+
+    #[test]
+    fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
+        // Plain shell (or empty argv) → "kettle" placeholder; cycle-89
+        // cwd-basename fallback fills it in once OSC 7 arrives.
+        assert_eq!(initial_pane_title(&[]), "kettle");
+        assert_eq!(initial_pane_title(&["bash".into()]), "kettle");
+        assert_eq!(initial_pane_title(&["zsh".into(), "-i".into()]), "kettle");
+        // SSH: surface the target so the tab is identifiable while
+        // connecting. `-t`/`-A`/etc are skipped to find the host.
+        assert_eq!(
+            initial_pane_title(&["ssh".into(), "-t".into(), "me@example.com".into()]),
+            "ssh me@example.com"
+        );
+        assert_eq!(initial_pane_title(&["ssh".into(), "box".into()]), "ssh box");
+        // `ssh` with no positional arg → just "ssh" (rare but defined).
+        assert_eq!(initial_pane_title(&["ssh".into(), "-V".into()]), "ssh");
     }
 
     #[test]
