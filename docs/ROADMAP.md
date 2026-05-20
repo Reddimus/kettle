@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::Reset` resets cursor blink phase too.**
+      Cycle-111 swept modals/selection but missed
+      `blink_on`/`last_blink`. Hit Reset on the off-half of
+      the blink and the cursor stayed missing for up to one
+      interval. Now `blink_on = true; last_blink = now()`
+      alongside the existing sweep. Mirrors the
+      CursorBlinkingChange handler.
 - [x] **`scrollback` clamped at INFINITE_SCROLLBACK (10 M
       lines); over-cap flagged.** Sibling to cycle 132 but
       this one was a memory footgun: `scrollback =

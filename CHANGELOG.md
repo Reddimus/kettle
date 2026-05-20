@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Action::Reset` also resets the cursor blink phase.**
+  Cycle 111 swept the modal overlays + selection so the
+  chord meant "fresh start" — but it left the `blink_on`
+  flag and `last_blink` timestamp untouched. Hitting Reset
+  right as `blink_on` was false left the user staring at a
+  *missing* cursor for up to one blink-interval (530 ms
+  default) — confusing precisely because Reset is the chord
+  users hit to recover from a visually-jammed terminal.
+  Now sweeps `blink_on = true; last_blink = Instant::now()`
+  alongside the cycle-111 modal/selection clears. Mirrors
+  the same fix already applied to `TermEvent::CursorBlinking
+  Change` so DEC mode 12 toggles also land the cursor
+  visible-first.
+
+### Fixed
 - **`scrollback = N` clamped at `INFINITE_SCROLLBACK` (10 M
   lines), out-of-range flagged.** A user typo'd or
   curious-pasted `scrollback = 100000000` (100 M) used to

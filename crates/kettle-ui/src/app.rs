@@ -1349,6 +1349,14 @@ impl App {
                 self.palette_input = None;
                 self.hint_state = None;
                 self.ssh_input = None;
+                // Cycle 134: also reset the blink phase so the cursor
+                // is immediately visible. Without this, hitting Reset
+                // right as `blink_on` was false left the user staring
+                // at a missing cursor for up to one blink interval —
+                // confusing, because Reset is the chord users hit to
+                // recover from a visually-jammed terminal.
+                self.blink_on = true;
+                self.last_blink = std::time::Instant::now();
             }
             Action::ScrollPageUp
             | Action::ScrollPageDown
