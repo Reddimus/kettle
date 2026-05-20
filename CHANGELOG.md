@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **Markdown cross-link drift guard for every user-facing doc.**
+  Cycle 223/224's image guard catches `![…](path)` regressions;
+  cycle 232 adds the same shape for text links — `[label](path.md)`
+  to relative `.md` files. README alone cross-links to 8+ docs
+  (`CONFIG`, `INSTALL`, `ROADMAP`, `SHELL-INTEGRATION`,
+  `ARCHITECTURE`, `RESEARCH`, `UX-COMPARISON`, `TESTING`,
+  `CONTRIBUTING`, `CHANGELOG`); a rename / deletion silently broke
+  GitHub-rendered navigation with no CI signal. The guard:
+  (1) walks byte offsets like the image guard;
+  (2) matches `[…](path)` but excludes `![…](path)` (image
+      guard's territory) by checking the byte before `[` isn't `!`;
+  (3) skips external (`http(s)://`) and anchor-only (`#section`)
+      links; only checks relative `.md` paths;
+  (4) resolves each path against the *doc's own directory*
+      (README's `docs/CONFIG.md` and docs/ARCHITECTURE.md's
+      `TESTING.md` both have to work);
+  (5) floors the README parser at ≥ 3 cross-links so a regression
+      to "matches nothing" can't silently pass.
+
 ### Changed
 - **`install.sh` final message points at the two bootstrap
   one-liners.** Post-install the user already knows where the

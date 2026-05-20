@@ -1263,6 +1263,113 @@ mod config_tests {
     }
 
     #[test]
+    fn user_facing_doc_md_cross_links_resolve() {
+        // Cycle 232: companion to cycle 223/224's image drift guard.
+        // README cross-links into `docs/*.md` (CONFIG, INSTALL,
+        // ROADMAP, SHELL-INTEGRATION, …); `docs/ARCHITECTURE.md`
+        // cross-links to sibling docs (`TESTING.md` etc.) and so on.
+        // A rename / removal silently breaks navigation on
+        // github.com/Reddimus/kettle with no CI signal — same shape
+        // as the image regression risk but for textual links.
+        //
+        // We only check **relative `.md`** links. External URLs
+        // (`http(s)://…`) are skipped so the test doesn't depend on
+        // network reachability; anchor-only fragments (`(#section)`)
+        // and non-.md attachments fall through.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+
+        fn scan(file_abs: &std::path::Path, file_rel: &str) -> usize {
+            let text = std::fs::read_to_string(file_abs)
+                .unwrap_or_else(|e| panic!("missing {file_rel}: {e}"));
+            let bytes = text.as_bytes();
+            let parent = file_abs.parent().expect("doc has a parent dir");
+            let mut i = 0usize;
+            let mut checked = 0usize;
+            while i + 2 < bytes.len() {
+                // Match `[…](…)` *but not* `![…](…)` — that's the
+                // cycle-223/224 image guard's territory. Skip when
+                // the byte before `[` is `!`.
+                if bytes[i] == b'[' && (i == 0 || bytes[i - 1] != b'!') {
+                    let alt_close = match text[i + 1..].find(']') {
+                        Some(j) => i + 1 + j,
+                        None => break,
+                    };
+                    if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
+                        i = alt_close + 1;
+                        continue;
+                    }
+                    let path_start = alt_close + 2;
+                    let path_end = match text[path_start..].find(')') {
+                        Some(j) => path_start + j,
+                        None => break,
+                    };
+                    let raw = &text[path_start..path_end];
+                    let path = raw.split_whitespace().next().unwrap_or(raw);
+                    // Strip any `#anchor` fragment from the path.
+                    let path_no_frag = path.split('#').next().unwrap_or(path);
+                    // Only check relative .md links — external URLs
+                    // and non-markdown attachments fall through.
+                    if !path_no_frag.is_empty()
+                        && !path_no_frag.starts_with("http://")
+                        && !path_no_frag.starts_with("https://")
+                        && !path_no_frag.starts_with('#')
+                        && path_no_frag.ends_with(".md")
+                    {
+                        let abs = parent.join(path_no_frag);
+                        assert!(
+                            abs.exists(),
+                            "{file_rel} links to `{path}` but `{}` does \
+                             not exist (cycle 232 drift guard)",
+                            abs.display()
+                        );
+                        checked += 1;
+                    }
+                    i = path_end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            checked
+        }
+
+        // README first — `^docs/(SHELL-INTEGRATION|INSTALL|ROADMAP|
+        // CONFIG|ARCHITECTURE|RESEARCH|UX-COMPARISON|TESTING)\.md`
+        // are all referenced. Floor at 3 to keep the parser honest;
+        // a regression to "matches nothing" silently passes a
+        // README that legitimately has zero links, but a parser
+        // bug that matches nothing always triggers this.
+        let readme_checks = scan(&repo_root.join("README.md"), "README.md");
+        assert!(
+            readme_checks >= 3,
+            "expected ≥ 3 .md cross-links in README; found {readme_checks} \
+             — parser likely regressed"
+        );
+
+        // Every docs/*.md — no per-file floor.
+        let docs_dir = repo_root.join("docs");
+        if docs_dir.is_dir() {
+            for entry in std::fs::read_dir(&docs_dir).expect("read docs/") {
+                let entry = entry.expect("dirent");
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let rel = format!("docs/{}", path.file_name().unwrap().to_string_lossy());
+                scan(&path, &rel);
+            }
+        }
+
+        // Top-level CHANGELOG.md / CONTRIBUTING.md too — same risk.
+        for top in ["CHANGELOG.md", "CONTRIBUTING.md", "NOTICE"] {
+            let p = repo_root.join(top);
+            if p.exists() && top.ends_with(".md") {
+                scan(&p, top);
+            }
+        }
+    }
+
+    #[test]
     fn workspace_metadata_policy() {
         // Cycle 226 (extends cycles 213/218/225): the workspace
         // pins one source of truth for every `[package]` field
