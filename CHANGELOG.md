@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **MSRV declared at Rust 1.88.** The workspace already uses
+  let-chains (`if X && let Y = ... && Z`) in kettle-vt,
+  kettle-config, kettle-render and the kettle binary. Let-chains
+  stabilized in 1.88, but `rust-version` was never set — a user
+  on 1.85-1.87 (which support edition 2024 but predate let-chain
+  stabilization) hit cryptic `expected expression, found keyword
+  'let'` syntax errors instead of cargo's clean "package requires
+  rustc 1.88" message at the resolver level. Now declared in
+  `workspace.package.rust-version` and each crate opts in with
+  `rust-version.workspace = true`. `rustup update stable` always
+  satisfies it; this is a floor, not a ceiling. INSTALL.md notes
+  the MSRV inline so contributors on stale toolchains see it
+  before they try to build.
+
 ### Internal
 - **Image drift guard now covers every `docs/*.md`, not just README.**
   Cycle 223's `readme_referenced_images_exist` only scanned the
