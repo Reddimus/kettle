@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--working-directory /typo` hard-fails (exit 1).**
+      Sibling to cycle 106. Engine silently used `$HOME` when
+      the directory didn't exist; CLI now distinguishes
+      "no such file or directory" vs "not a directory" so the
+      user sees which kind of typo it was.
 - [x] **`--config /typo.conf` hard-fails (exit 1).** Every
       downstream branch silently dropped to `Config::default()`
       when the explicit `--config` path didn't exist. Hard-fail

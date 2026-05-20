@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--working-directory /typo` hard-fails instead of silently
+  spawning in `$HOME`.** Cycle-107 sibling to cycle 106's
+  `--config /typo` fix. The engine's PTY spawn (`Terminal::new`)
+  uses `Some(d) if is_dir => cmd.cwd(d)` and falls back to
+  `$HOME` otherwise — so `kettle -d ~/projets` (with a typo)
+  silently started the shell in the user's home with no warning
+  and no obvious cue that the explicit cwd was discarded. Now
+  hard-fail at the top of `main` *before* the engine runs, with
+  one of two errors so the fix is one keystroke away:
+  - `--working-directory <path>: no such file or directory`
+  - `--working-directory <path>: not a directory`
+  (the latter for the case where the user accidentally pointed
+  at a file instead of a directory). Both exit 1. Verified
+  end-to-end: missing dir, regular file, existing dir all route
+  correctly.
 - **`--config /typo.conf` hard-fails instead of silently using
   defaults.** Every downstream branch (windowed run, `--screenshot`,
   every `--list-*` introspection, the `--check-config` fall-through)

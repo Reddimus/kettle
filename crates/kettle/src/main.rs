@@ -97,6 +97,30 @@ fn main() -> anyhow::Result<()> {
     {
         return Err(anyhow::anyhow!("--config {}: no such file", p.display()));
     }
+    // Same shape for `--working-directory DIR` (cycle 107). The engine
+    // silently falls back to `$HOME` when the directory doesn't exist
+    // (see `kettle_core::term::Terminal::new`: `Some(d) if is_dir =>
+    // cmd.cwd(d)`, else HOME), so a typo'd `-d ~/projets` spawned the
+    // shell in the user's home with no warning and no obvious cue that
+    // the requested cwd was ignored. Hard-fail at the CLI surface
+    // before the engine even runs; report whether the path is missing
+    // (typo) or exists-but-isn't-a-directory (named a file by
+    // mistake) so the user's fix is one keystroke away.
+    if let Some(p) = &cli.working_directory {
+        let kind = if !p.exists() {
+            Some("no such file or directory")
+        } else if !p.is_dir() {
+            Some("not a directory")
+        } else {
+            None
+        };
+        if let Some(reason) = kind {
+            return Err(anyhow::anyhow!(
+                "--working-directory {}: {reason}",
+                p.display()
+            ));
+        }
+    }
 
     if cli.list_themes {
         for name in kettle_config::Theme::list() {
