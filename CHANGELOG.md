@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`font-size` clamps at parse-time, not just at render-time.**
+  Cycle 118 added `clamp_font_size` in `Renderer::new` /
+  `set_font_size`; cycle 131 surfaced out-of-range as a
+  `--check-config` diagnostic. But `cfg.font_size` still held
+  the raw value — so `--check-config`'s `font: ... 500pt`
+  print echoed the user's input *not* what the renderer would
+  use. Now `parse_collect` also clamps to [5.0, 72.0] so the
+  stored value matches reality. Cycle 132 already did this
+  for the other clamped numerics; cycle 139 closes the
+  symmetry. End-to-end: `font-size = 500` now reads as
+  `font: ... 72pt` in `--check-config` (with the diagnostic
+  still flagging the over-cap value).
+
+### Fixed
 - **Bool config keys accept the standard true/false aliases
   + flag unrecognized values.** All five bool fields used:
   `cfg.X = e.value != "false"`. Result: every non-literal-

@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`font-size` clamps at parse-time too.** Cycle 118
+      clamped at renderer-time; cycle 131 added the
+      diagnostic; this cycle clamps at parse so
+      `cfg.font_size` and the renderer agree. `font: ...
+      500pt` in `--check-config` now reads as `font: ...
+      72pt` (with the malformed-value diagnostic still firing).
 - [x] **Bool config keys accept `yes`/`no`/`off`/`on`/`0`/
       `1`/`enabled`/`disabled` + flag typos.** All five
       bool fields used `e.value != "false"` so any non-

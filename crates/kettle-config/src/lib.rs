@@ -608,8 +608,16 @@ impl Config {
                     }
                 }
                 "font-size" => {
-                    if let Ok(v) = e.value.parse() {
-                        cfg.font_size = v;
+                    // Clamp at parse so `cfg.font_size` matches what the
+                    // renderer will actually use (the cycle-118
+                    // `clamp_font_size` is downstream). Without this,
+                    // `--check-config` echoed e.g. `font: ... 500pt`
+                    // while the runtime rendered at 72pt — confusing
+                    // diagnostics. Cycle-131 surfaces out-of-range as
+                    // a warning; cycle 139 makes the stored value
+                    // match reality too. Parse-fail keeps the default.
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.font_size = v.clamp(5.0, 72.0);
                     }
                 }
                 "theme" => {
