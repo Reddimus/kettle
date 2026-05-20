@@ -907,6 +907,35 @@ impl Renderer {
                     1.0,
                 ));
             }
+            // SGR 4 underline / SGR 9 strikeout: both engine-tracked but
+            // ignored before this cycle. The engine `sgr_underline_dim_
+            // strike` conformance test asserted the flags reach the cell;
+            // this is the render side that turns them into pixels. Use
+            // `fg` so the line color follows the text (or the dim/
+            // selection override above, whichever resolved). Curly under-
+            // line (`Flags::UNDERCURL`, `\e[4:3m` for spell-check) draws
+            // as a plain underline for now — a real wave needs a shader
+            // tweak we'll do separately.
+            if flags.intersects(Flags::UNDERLINE | Flags::UNDERCURL) {
+                quads.push(rect(
+                    ox + col as f32 * cw,
+                    oy + row as f32 * ch + ch - 2.0,
+                    cw,
+                    1.0,
+                    fg,
+                    1.0,
+                ));
+            }
+            if flags.contains(Flags::STRIKEOUT) {
+                quads.push(rect(
+                    ox + col as f32 * cw,
+                    oy + row as f32 * ch + ch * 0.5,
+                    cw,
+                    1.0,
+                    fg,
+                    1.0,
+                ));
+            }
             let dc = if hidden { ' ' } else { cell.c };
             match &mut cur {
                 Some((t, f, cb, ci)) if *f == fg && *cb == bold && *ci == italic => t.push(dc),

@@ -438,6 +438,12 @@
       but the renderer ignored it; new `color::dim(fg, bg)` blends
       halfway toward bg (50 % intensity). Applied before
       min-contrast lift. +1 test.
+- [x] **SGR 4 underline + SGR 9 strikeout rendered.** Engine
+      tracked `Flags::UNDERLINE`, `Flags::UNDERCURL`,
+      `Flags::STRIKEOUT` but renderer never drew them. 1-px line
+      at `cell_bottom-2` for underline, `cell_mid` for strikeout.
+      Curly variant draws plain underline for now; real wave
+      needs a shader tweak (deferred).
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

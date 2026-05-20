@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **SGR 4 underline + SGR 9 strikeout are rendered.** The engine
+  tracked `Flags::UNDERLINE`, `Flags::UNDERCURL` (the `4:3` curly
+  variant), and `Flags::STRIKEOUT` correctly — the conformance
+  test `sgr_underline_dim_strike` pinned each bit reaching the
+  cell since cycle ~14 — but the renderer never turned them into
+  pixels. vim's `:set list`, neovim's spell-check, `diff` output,
+  `git diff --color-words` deletions, man pages — none of these
+  visual cues survived to the screen. New 1-px-tall quads at
+  `cell_bottom - 2` for underline (and curly, drawn as a plain
+  line for now — a real wave wants a shader tweak) and at
+  `cell_mid` for strikeout, both using `fg` so the line color
+  follows the text (or the dim / selection override above).
 - **SGR 2 dim/faint is rendered.** The engine tracked
   `Flags::DIM` correctly (parsed by vte from `\e[2m`), and there's
   even a `sgr_underline_dim_strike` conformance test confirming the
