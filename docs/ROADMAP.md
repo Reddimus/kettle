@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Modal open closes any other modal first.** A user
+      hitting Ctrl+Shift+K with the SSH launcher already up
+      saw both overlays render at once. New
+      `close_all_modals()` helper extracted from cycle 111's
+      Reset sweep; the four modal-open actions
+      (StartSearch / OpenSsh / CommandPalette / HintMode)
+      call it before setting their own state.
 - [x] **Workspace `repository` URL fixed
       (`kevim/kettle` → `Reddimus/kettle`).** Stale metadata
       in `Cargo.toml`; affects future crates.io / cargo

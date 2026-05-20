@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Opening a modal closes any other modal first.** A user
+  with the SSH launcher open who pressed `Ctrl+Shift+K` got
+  both the SSH launcher AND the command palette rendered
+  on top of each other, with the palette capturing keys
+  (because the input dispatch checks hint → palette → ssh
+  → search, first-open-wins). Visually confusing — the
+  user couldn't tell which modal would receive their next
+  keystroke without trying. Now `StartSearch`, `OpenSsh`,
+  `CommandPalette`, and `HintMode` all call a new
+  `close_all_modals()` helper before opening their own
+  state. Extracted from cycle 111's `Action::Reset` sweep
+  so both share one implementation.
+
+### Fixed
 - **Workspace `repository` URL points at the actual repo.**
   `Cargo.toml`'s `[workspace.package].repository` said
   `https://github.com/kevim/kettle` — but the actual repo

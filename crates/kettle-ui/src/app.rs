@@ -1239,6 +1239,20 @@ impl App {
         }
     }
 
+    /// Close every modal overlay (search bar, command palette, hint
+    /// mode, SSH launcher). Cycle 111's Reset path inlined the same
+    /// four-line clear; cycle 154 extracts it so the modal-opening
+    /// actions can call it first to avoid stacking two visible
+    /// modals at once (palette opened while ssh launcher was up
+    /// would render both, with palette capturing keys; visually
+    /// confusing).
+    fn close_all_modals(&mut self) {
+        self.mux.search.open = false;
+        self.palette_input = None;
+        self.hint_state = None;
+        self.ssh_input = None;
+    }
+
     /// Force the next redraw to render the cursor visible. Shared by:
     /// - the focus-change path (`note_focus_change`)
     /// - `Action::Reset` (cycle 134) so a "fresh start" cursor is visible
@@ -1361,6 +1375,13 @@ impl App {
                 }
             }
             Action::StartSearch => {
+                // Cycle 154: close any other modal first so we don't
+                // stack two visible overlays. (Opening only sets one
+                // of the four state fields; the others would stay
+                // None already on the happy path, but defending in
+                // depth here lets a future "open X without closing"
+                // bug stay sane.)
+                self.close_all_modals();
                 self.mux.search.open = true;
                 self.mux.search.query.clear();
                 self.mux.search.matches.clear();
@@ -1400,10 +1421,9 @@ impl App {
                     p.term.write(b"\x1bc");
                 }
                 self.clear_selection_on_input();
-                self.mux.search.open = false;
-                self.palette_input = None;
-                self.hint_state = None;
-                self.ssh_input = None;
+                // Cycle 111's modal sweep, extracted to a helper in
+                // cycle 154 so the modal-opening actions can reuse it.
+                self.close_all_modals();
                 // Cycle 134: also reset the blink phase so the cursor
                 // is immediately visible. Without this, hitting Reset
                 // right as `blink_on` was false left the user staring
@@ -1461,14 +1481,17 @@ impl App {
                 }
             }
             Action::OpenSsh => {
+                self.close_all_modals();
                 self.ssh_input = Some(String::new());
             }
             Action::CommandPalette => {
+                self.close_all_modals();
                 self.palette_input = Some((String::new(), 0));
             }
             Action::HintMode => {
                 let targets = self.collect_hints();
                 if !targets.is_empty() {
+                    self.close_all_modals();
                     self.hint_state = Some((targets, String::new()));
                 }
             }
