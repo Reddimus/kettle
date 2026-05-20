@@ -20,6 +20,20 @@ Most shells need a one-line hook. If you already use **Starship**, kitty's
 shell integration, or iTerm2's, those emit OSC 133 and kettle picks them up
 automatically — nothing else to do.
 
+### One-liner (recommended)
+
+kettle ships the snippets embedded in the binary — install with one command:
+
+```sh
+kettle --shell-integration bash >> ~/.bashrc
+kettle --shell-integration zsh  >> ~/.zshrc
+kettle --shell-integration fish >> ~/.config/fish/config.fish
+```
+
+The same snippets live at `shell-integration/kettle.{bash,zsh,fish}` in the
+source tree (also shipped in the Linux release tarball). The verbatim bodies
+follow below in case you want to read or tweak them first.
+
 ### bash — add to `~/.bashrc`
 
 ```bash

@@ -155,4 +155,21 @@ jobs:
           test "$(wc -l < /tmp/k.cfg)" -gt 50
           cargo run -q -p kettle -- --config /tmp/k.cfg --check-config \
             | grep -E '^status: +OK'
+          # Cycle 229: --shell-integration <bash|zsh|fish> emits the
+          # embedded shell-integration/kettle.{bash,zsh,fish} snippet.
+          # Verify each shell's snippet emits something non-trivial
+          # (a regression to an empty include_str! would silently
+          # produce no output). The `OSC 133` substring is the
+          # invariant in every snippet's header — if a maintainer
+          # rewrites the script without that comment, this fails
+          # and they have to touch this smoke step on purpose.
+          for sh in bash zsh fish; do
+            cargo run -q -p kettle -- --shell-integration "$sh" > "/tmp/k.${sh}"
+            grep -q "OSC 133" "/tmp/k.${sh}"
+            test "$(wc -l < /tmp/k.${sh})" -gt 8
+          done
+          # Unknown shell exits non-zero with a clear error.
+          if cargo run -q -p kettle -- --shell-integration tcsh 2>/dev/null; then
+            echo "expected --shell-integration tcsh to error"; exit 1
+          fi
         shell: bash

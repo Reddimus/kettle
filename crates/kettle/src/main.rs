@@ -57,6 +57,21 @@ struct Cli {
     #[arg(long)]
     print_default_config: bool,
 
+    /// Print the OSC 133 shell-integration snippet for SHELL (one of
+    /// `bash`, `zsh`, `fish`) and exit. Append to your shell rc file
+    /// to enable `Ctrl+Up` / `Ctrl+Down` jump-to-prompt:
+    ///
+    ///   kettle --shell-integration bash >> ~/.bashrc
+    ///   kettle --shell-integration zsh  >> ~/.zshrc
+    ///   kettle --shell-integration fish >> ~/.config/fish/config.fish
+    ///
+    /// Snippets live at `shell-integration/kettle.{bash,zsh,fish}` in
+    /// the source tree and are embedded at build time so the binary
+    /// always emits the version that shipped with it (`cargo install
+    /// kettle` users included).
+    #[arg(long, value_name = "SHELL")]
+    shell_integration: Option<String>,
+
     /// Render a representative frame offscreen to a PNG and exit (no window).
     #[arg(long, value_name = "PATH")]
     screenshot: Option<std::path::PathBuf>,
@@ -185,6 +200,27 @@ fn main() -> anyhow::Result<()> {
         // `cargo install kettle` users get the correct content
         // even if the source tree is gone.
         print!("{}", include_str!("../../../docs/kettle.example.config"));
+        return Ok(());
+    }
+    if let Some(shell) = cli.shell_integration.as_deref() {
+        // Cycle 229: same shape as `--print-default-config`, but for
+        // the OSC 133 shell-integration snippet. Embedded at build
+        // time so `cargo install kettle` users (no source tree
+        // accessible) get the right snippet, and so the binary's
+        // output can never drift from the in-tree source of truth
+        // under `shell-integration/`.
+        let snippet = match shell {
+            "bash" => include_str!("../../../shell-integration/kettle.bash"),
+            "zsh" => include_str!("../../../shell-integration/kettle.zsh"),
+            "fish" => include_str!("../../../shell-integration/kettle.fish"),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "--shell-integration {other:?}: unknown shell \
+                     (supported: bash, zsh, fish)"
+                ));
+            }
+        };
+        print!("{snippet}");
         return Ok(());
     }
     if cli.list_ssh_hosts {
@@ -604,6 +640,41 @@ mod tests {
         // Cleanup so a re-run of the suite starts fresh.
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn shell_integration_snippets_match_in_tree_files() {
+        // Cycle 229: `kettle --shell-integration <shell>` emits one
+        // of the embedded `shell-integration/kettle.{bash,zsh,fish}`
+        // files. The contract: the embedded content must equal the
+        // in-tree file byte-for-byte (so docs/SHELL-INTEGRATION.md
+        // and `--shell-integration` never diverge) and each snippet
+        // must include the OSC 133 prefix (catches an accidental
+        // truncated include_str! at build time).
+        for (shell, embedded) in [
+            (
+                "bash",
+                include_str!("../../../shell-integration/kettle.bash"),
+            ),
+            ("zsh", include_str!("../../../shell-integration/kettle.zsh")),
+            (
+                "fish",
+                include_str!("../../../shell-integration/kettle.fish"),
+            ),
+        ] {
+            assert!(
+                embedded.contains("OSC 133")
+                    && (embedded.contains("\\033]133") || embedded.contains("\\e]133")),
+                "{shell}: embedded snippet missing OSC 133 marker — \
+                 the file's body probably regressed"
+            );
+            assert!(
+                embedded.lines().count() >= 10,
+                "{shell}: snippet has only {} lines — likely empty \
+                 include_str!",
+                embedded.lines().count()
+            );
+        }
     }
 
     #[test]

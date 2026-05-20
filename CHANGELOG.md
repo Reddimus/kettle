@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle --shell-integration <bash|zsh|fish>` — one-command
+  install of the OSC 133 shell snippet.** Cycle 227 added the
+  config bootstrap one-liner; the OSC 133 shell-integration story
+  still required the user to manually copy a snippet out of
+  `docs/SHELL-INTEGRATION.md` into their rc file. Now:
+  ```sh
+  kettle --shell-integration bash >> ~/.bashrc
+  kettle --shell-integration zsh  >> ~/.zshrc
+  kettle --shell-integration fish >> ~/.config/fish/config.fish
+  ```
+  Snippets live at `shell-integration/kettle.{bash,zsh,fish}` in
+  the source tree (Linux release tarball includes them too) and
+  are embedded into the binary via `include_str!`. New test
+  `shell_integration_snippets_match_in_tree_files` pins each
+  snippet to a minimum size + OSC 133 substring so an accidental
+  empty include is caught at build time. CI smoke runs all three
+  shells + asserts an unknown shell exits non-zero with a clear
+  error. SHELL-INTEGRATION.md now leads with the one-liner and
+  keeps the inline snippets below as reference.
+
 ## [1.1.0] — 2026-05-20
 
 First minor release after `v1.0.0` / `v1.0.1`. Theme is **first-
