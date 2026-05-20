@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **Per-crate `Cargo.toml`s now inherit version / edition / license /
+  repository / authors / description from `[workspace.package]`.**
+  The workspace `Cargo.toml` had `[workspace.package]` defined with
+  `license = "MIT"`, `repository = "https://github.com/Reddimus/kettle"`,
+  `authors`, `description`, but **none** of the 6 crate manifests
+  used `.workspace = true` to inherit. Each crate just had
+  `version = "0.1.0"` and `edition = "2024"` (the workspace.package
+  said `edition = "2021"` — mismatch). Cargo would warn about
+  missing `license` on `cargo publish`, and a future bump to (say)
+  `version = "0.2.0"` would have to be edited in 7 places. Now
+  each crate inherits all 6 fields; the workspace.package is the
+  single source of truth. Workspace.package edition bumped from
+  "2021" to "2024" to match the crates' actual declarations.
+  243 workspace tests still pass; `cargo build --workspace` clean.
+
 ### Documentation
 - **README's License line reflects the cycle-211 NOTICE structure.**
   Pre-cycle the line said "Bundled assets and adapted code are

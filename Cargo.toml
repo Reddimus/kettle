@@ -11,7 +11,10 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+# Cycle 213: edition was "2021" but every crate's Cargo.toml declared
+# "2024" individually. Bumped here to match reality and let crates
+# inherit via `edition.workspace = true`.
+edition = "2024"
 license = "MIT"
 repository = "https://github.com/Reddimus/kettle"
 authors = ["kettle contributors"]
