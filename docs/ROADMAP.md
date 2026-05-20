@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--list-ssh-hosts` prints configured ssh-host entries.**
+      Companion to `--check-config` (only the count) and the
+      Ctrl+Shift+S launcher (in-window). Two-column table
+      aligned to longest name (floor 4), sorted; empty configs
+      print an explicit fallback line. Formatting in pure
+      `format_ssh_hosts(&[...]) -> Vec<String>` so the table
+      layout is unit-testable. +1 test.
 - [x] **`--list-actions` enumerates valid `keybind` action
       names.** Onboarding inverse of `--list-keybinds`: shows
       what `trigger=…` values parse, sorted, with the

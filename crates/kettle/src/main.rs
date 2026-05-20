@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long)]
     list_actions: bool,
 
+    /// Print configured `ssh-host = name=target` entries (Ctrl+Shift+S launcher) and exit.
+    #[arg(long)]
+    list_ssh_hosts: bool,
+
     /// Print the resolved config path and exit.
     #[arg(long)]
     config_path: bool,
@@ -82,6 +86,26 @@ fn main() -> anyhow::Result<()> {
     if cli.list_themes {
         for name in kettle_config::Theme::list() {
             println!("{name}");
+        }
+        return Ok(());
+    }
+    if cli.list_ssh_hosts {
+        // Companion to --check-config (which reports a count) and the
+        // Ctrl+Shift+S launcher (which lists them in-window): users
+        // configuring a bunch of hosts wanted to verify the parse
+        // *from the CLI* without launching kettle. Same `--config FILE`
+        // override convention as the rest of the introspection
+        // commands; falls back to the default config path.
+        let cfg = match cli
+            .config
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        {
+            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
+            _ => kettle_config::Config::default(),
+        };
+        for line in format_ssh_hosts(&cfg.ssh_hosts) {
+            println!("{line}");
         }
         return Ok(());
     }
@@ -249,10 +273,63 @@ fn main() -> anyhow::Result<()> {
     })
 }
 
+/// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
+/// by name, two columns aligned to the longest name (floor 4 so single-
+/// character names don't collapse the column), padded with two spaces.
+/// Empty input yields a single "(no ssh-host entries configured)" line so
+/// the user sees their config is empty rather than no output at all.
+/// Pure so the formatting is unit-testable without the CLI.
+fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
+    if hosts.is_empty() {
+        return vec!["(no ssh-host entries configured)".into()];
+    }
+    let width = hosts.iter().map(|(n, _)| n.len()).max().unwrap_or(0).max(4);
+    let mut rows: Vec<(&str, &str)> = hosts
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+    rows.sort_unstable();
+    rows.into_iter()
+        .map(|(name, target)| format!("{name:<width$}  {target}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, format_ssh_hosts};
     use clap::Parser;
+
+    #[test]
+    fn format_ssh_hosts_sorts_and_aligns_columns() {
+        // Empty case: explicit message rather than an empty Vec (so the
+        // CLI prints something the user can see, not silence).
+        assert_eq!(
+            format_ssh_hosts(&[]),
+            vec!["(no ssh-host entries configured)".to_string()]
+        );
+        // Three rows, intentionally out of order, with varying name lengths.
+        let hosts = vec![
+            ("box".to_string(), "me@box.example.com".to_string()),
+            ("a".to_string(), "u@h".to_string()),
+            ("work-vpn".to_string(), "admin@10.0.0.5".to_string()),
+        ];
+        let out = format_ssh_hosts(&hosts);
+        // Sorted alphabetically by name.
+        assert_eq!(
+            out,
+            vec![
+                "a         u@h".to_string(),
+                "box       me@box.example.com".to_string(),
+                "work-vpn  admin@10.0.0.5".to_string(),
+            ]
+        );
+        // Column width = longest name (`work-vpn` = 8) — minimum 4 for
+        // short-name configs. Use a tiny single-row case to pin the floor.
+        let tiny = vec![("a".to_string(), "u@h".to_string())];
+        let out = format_ssh_hosts(&tiny);
+        // Floor: 4 chars + two-space separator = "a   " + "  " + "u@h".
+        assert_eq!(out, vec!["a     u@h".to_string()]);
+    }
 
     #[test]
     fn cli_exec_and_working_directory_parse() {

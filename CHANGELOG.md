@@ -7,6 +7,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Added
+- **`kettle --list-ssh-hosts` prints the configured `ssh-host`
+  entries.** Companion to `--check-config` (which reported only a
+  count) and the in-window Ctrl+Shift+S launcher (which shows them
+  but requires opening kettle): users with many `ssh-host =
+  name=user@host` lines wanted to verify the parse from the CLI
+  without launching. Two-column table aligned to the longest name
+  (floor 4 chars so single-character names don't collapse the
+  column), sorted alphabetically; empty configs print `(no
+  ssh-host entries configured)` so silence isn't ambiguous. Same
+  `--config FILE` override convention as the rest of the
+  introspection commands; falls back to the default config path.
+  Formatting extracted to pure `format_ssh_hosts(&[(String,
+  String)]) -> Vec<String>` so the table layout is unit-tested
+  (`format_ssh_hosts_sorts_and_aligns_columns`) — sort order,
+  alignment width, two-space separator, and the empty-input
+  fallback all pinned.
 - **`kettle --list-actions` enumerates every valid `keybind` action
   name.** The onboarding gap inverse of `--list-keybinds`: that one
   shows what's currently bound; this one shows what `keybind =
