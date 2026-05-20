@@ -1,6 +1,37 @@
 //! kettle configuration: Ghostty-compatible `key = value` config, the bundled
-//! Ghostty theme set (TokyoNight Night default), the embedded Nerd Font, and
-//! Terminator-compatible keybindings.
+//! Ghostty theme set (TokyoNight Night default), the embedded Nerd Font,
+//! Terminator-compatible keybindings, and the fuzzy matcher / command-palette
+//! infrastructure the SSH launcher (Ctrl+Shift+S) and command palette
+//! (Ctrl+Shift+K) reuse.
+//!
+//! Modules (all `pub` except `theme_filter`):
+//! - [`parse`] — Ghostty-syntax tokenizer: one `key = value` per line,
+//!   first `=` splits, full-line `#` comments only, BOM-strip, empty-
+//!   value-resets semantics. The single source of truth for *what* a
+//!   config file is.
+//! - [`color`] — `Rgb` + parser accepting `#rrggbb` / `#rgb` / `0xRRGGBB`
+//!   / X11 color names.
+//! - [`theme`] — bundled-theme set baked in at build time via the
+//!   `theme_filter` skip list; `Theme::by_name` for case-insensitive
+//!   lookup, `Theme::find_name` for canonical-form rewriting,
+//!   `Theme::cycle` for runtime forward/back navigation.
+//! - [`keybinds`] — `Action` enum, `Trigger` (modifiers + key), parser
+//!   (accepts `win`/`meta`/`logo` / `cmd` / `super` Super-key aliases
+//!   and rejects typo'd modifiers), default Terminator-compatible
+//!   bindings, `apply_keybind` for user overrides, `describe` for
+//!   `--list-keybinds`.
+//! - [`palette`] — command-palette registry: friendly label + Action
+//!   pairs the UI fuzzy-ranks via [`fuzzy`].
+//! - [`fuzzy`] — dependency-free subsequence-with-bonuses ranker;
+//!   `score(pattern, candidate)` + `best(pattern, items, key)`. Used by
+//!   palette and SSH launcher.
+//! - [`font`] — embedded JetBrains Mono Nerd Font (`FAMILY` + `all()`
+//!   font-face bytes for `cosmic-text` loading).
+//! - [`template`] — `{title}` / `{cwd}` / `{tab}` placeholder substitution
+//!   for `window-title-format` / `tab-format`.
+//! - `theme_filter` (private) — filter for what counts as a real theme
+//!   file under `assets/themes/`; shared between this crate and
+//!   `build.rs` via `include!`.
 
 pub mod color;
 pub mod font;

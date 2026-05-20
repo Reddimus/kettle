@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **`kettle-config` crate-level doc lists every public module.**
+  Cycles 207/208 siblings. Original kettle-config one-liner mentioned
+  "Ghostty-compatible config, bundled Ghostty theme set, embedded
+  Nerd Font, Terminator-compatible keybindings" but missed `color`,
+  `font`, `fuzzy`, `palette`, `parse`, `template`, and the private
+  `theme_filter` module. Now per-module breakdown with intra-doc
+  links + cited usage (which UI overlay reuses each helper). Zero
+  doc warnings. Closes the crate-level-doc sweep across `kettle-ui`,
+  `kettle-core`, and `kettle-config` (3 of 5 workspace crates).
+
 - **`kettle-core` crate-level doc lists every public module.**
   Cycle-207 sibling for the next crate over. The original kettle-core
   doc said "PTY management, the `alacritty_terminal` grid/VT engine
