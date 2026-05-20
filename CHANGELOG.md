@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 10 (set default foreground) now reaches the per-pane
+  text-area default color.** Companion to the OSC 11 chrome fix
+  in cycle 65: a program issuing `OSC 10 ; rgb:RR/GG/BB ST` was
+  populating `Colors[256]` and `color::resolve` honored it per-cell
+  for fg, but glyphon's per-`TextArea` `default_color` was hard-
+  wired to `theme.foreground` — the fallback when a span lacks an
+  explicit `Attrs::color` (whitespace / IME composition / chrome
+  strings rendered through the buffer). Now per-pane: each
+  pane's `TextArea` reads its own `term_colors[256]` override; tab
+  bar text and other chrome below keep `theme.foreground`. Same
+  precedence as the OSC 10 *query* path.
 - **OSC 11 (set default background) now reaches the chrome.**
   The cycle-56 fix paired OSC 12 (cursor color) set with the render
   path; OSC 11 had the same gap but on a larger surface — the

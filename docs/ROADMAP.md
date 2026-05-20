@@ -391,6 +391,10 @@
       active tab-bar segment, and per-cell default-bg check all
       now read from `term_colors[257]` instead of hard-wiring
       `theme.background`.
+- [x] **OSC 10 default-fg override reaches per-pane text default.**
+      Glyphon `TextArea.default_color` (fallback for spans without
+      explicit color) now reads from `term_colors[256]` per pane.
+      Chrome (tab bar text) keeps `theme.foreground`.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

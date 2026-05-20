@@ -634,10 +634,21 @@ impl Renderer {
                 height: self.config.height,
             },
         );
+        // Theme foreground — used by tab bar text and other chrome below
+        // (where there's no specific pane to take an OSC 10 override from).
         let fg = theme.foreground;
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
+            // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
+            // fallback when a span lacks an explicit color. Almost every
+            // cell does carry an explicit color via `Attrs::color`, but
+            // whitespace / IME composition / chrome strings ride the
+            // default. Matches the OSC 11 chrome path landed in cycle 65 —
+            // engine override (Colors[256]) wins, theme is fallback.
+            let pane_fg = pv.term.colors()[256]
+                .map(|c| Rgb::new(c.r, c.g, c.b))
+                .unwrap_or(theme.foreground);
             areas.push(TextArea {
                 buffer: &self.pane_buffers[i],
                 left: rx + pad_x,
@@ -649,7 +660,7 @@ impl Renderer {
                     right: (rx + rw) as i32,
                     bottom: (ry + rh) as i32,
                 },
-                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                default_color: GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b),
                 custom_glyphs: &[],
             });
         }
