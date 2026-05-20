@@ -7,6 +7,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Corrupted `session.json` is backed up + a warning logged
+  instead of silently discarding state.** A read error
+  (no file on first launch, `HOME` changed) is the expected
+  silent path. A JSON parse error is a real signal — kettle
+  was killed mid-write, the disk filled up, the file got
+  hand-edited badly — and used to silently drop the user's
+  tabs/splits/focus state on the next launch with no
+  diagnostic and no way to recover. Now: emit
+  `log::warn!("session file <path> is corrupted (<err>);
+  backed up to <path>.broken.<unix-seconds>")` and `rename`
+  the broken file out of the way so the next launch starts
+  fresh AND the user keeps a forensic artifact. If the
+  rename fails (locked directory, permission issue) the warn
+  still lands and the next save overwrites — the user's
+  state is gone either way but at least they know. Logic
+  factored into `pub(crate) fn load_from_path(p: &Path) ->
+  Option<Session>` so the rename-on-corruption contract is
+  testable without standing up the full app. +3 tests
+  (missing file silent, corrupted file renamed+None, happy-
+  path no-rename round-trip).
 - **`--working-directory /typo` hard-fails instead of silently
   spawning in `$HOME`.** Cycle-107 sibling to cycle 106's
   `--config /typo` fix. The engine's PTY spawn (`Terminal::new`)

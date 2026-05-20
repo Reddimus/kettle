@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Corrupted `session.json` is backed up, not silently
+      discarded.** A parse error now logs a warning AND
+      renames the file to `session.json.broken.<unix-secs>`
+      so the user has a forensic artifact and the next save
+      doesn't overwrite it. Logic in pure
+      `load_from_path(&Path) -> Option<Session>`; +3 tests
+      (missing-silent, corrupted-renamed, happy-path-untouched).
 - [x] **`--working-directory /typo` hard-fails (exit 1).**
       Sibling to cycle 106. Engine silently used `$HOME` when
       the directory didn't exist; CLI now distinguishes
