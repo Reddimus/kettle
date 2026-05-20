@@ -41,6 +41,29 @@ impl Dimensions for TermSize {
 
 pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 
+/// Best-effort "user home" directory for a freshly spawned shell whose
+/// recorded cwd is missing or no longer on disk. Probes the platform-
+/// conventional env vars in order:
+/// - `HOME` — always set on Linux / macOS
+/// - `USERPROFILE` — the Windows-native home (`C:\Users\Bob`)
+/// - `APPDATA` — Windows last-ditch fallback (`...\AppData\Roaming`)
+///
+/// Returns `None` only on a stripped-down environment where none are
+/// set; callers leave `CommandBuilder::cwd` unset in that case, which
+/// makes `portable_pty` inherit kettle's launch directory.
+///
+/// `lookup` is passed in so the env-probe order is unit-testable
+/// without touching the process env (which would race with parallel
+/// tests). Production code calls with `|k| std::env::var_os(k)`.
+pub(crate) fn home_dir_fallback(
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    lookup("HOME")
+        .or_else(|| lookup("USERPROFILE"))
+        .or_else(|| lookup("APPDATA"))
+        .map(std::path::PathBuf::from)
+}
+
 pub struct Terminal {
     pub term: SharedTerm,
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -116,7 +139,21 @@ impl Terminal {
         match cwd {
             Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
             _ => {
-                if let Some(home) = std::env::var_os("HOME") {
+                // Recorded cwd is missing or no longer on disk (e.g.,
+                // user moved the repo between sessions, or the `-d` arg
+                // pointed at a since-deleted path). Fall back to the OS
+                // home directory. The previous version only checked
+                // `HOME`, which is unset on Windows by default — so
+                // Windows users with a stale recorded cwd silently
+                // ended up in whatever directory they happened to
+                // launch kettle from. `home_dir_fallback` probes
+                // `HOME` then `USERPROFILE` then `APPDATA`, in that
+                // order, so all three platforms (Linux/macOS/Windows)
+                // converge on the same "user-home" intent. Same shape
+                // as cycle 159's macOS universal2 fix — Linux+macOS
+                // worked, Windows didn't, the env var probe order is
+                // the difference.
+                if let Some(home) = home_dir_fallback(|k| std::env::var_os(k)) {
                     cmd.cwd(home);
                 }
             }
@@ -730,6 +767,50 @@ fn place_image(
 /// uses (alacritty_terminal + vte) over a battery of escape sequences and
 /// asserts the resulting grid/cursor/mode. This is the automatable,
 /// regression-proof core of a `vttest` sweep.
+#[cfg(test)]
+mod home_dir_tests {
+    use super::home_dir_fallback;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| OsString::from(*v))
+        }
+    }
+
+    #[test]
+    fn prefers_home_then_userprofile_then_appdata() {
+        // All three set (rare — a WSL user with both env worlds bleeding
+        // through) → HOME wins. This is the Linux / macOS branch.
+        assert_eq!(
+            home_dir_fallback(from(&[
+                ("HOME", "/h"),
+                ("USERPROFILE", r"C:\u"),
+                ("APPDATA", r"C:\a"),
+            ])),
+            Some(PathBuf::from("/h")),
+        );
+        // No HOME → USERPROFILE. This is the *Windows* branch — exactly
+        // the gap the previous `var_os("HOME")`-only fallback missed.
+        assert_eq!(
+            home_dir_fallback(from(&[("USERPROFILE", r"C:\u"), ("APPDATA", r"C:\a"),])),
+            Some(PathBuf::from(r"C:\u")),
+        );
+        // Only APPDATA set (very stripped Windows session) → APPDATA.
+        assert_eq!(
+            home_dir_fallback(from(&[("APPDATA", r"C:\a")])),
+            Some(PathBuf::from(r"C:\a")),
+        );
+        // Nothing set (minimal Linux container without HOME) → None;
+        // caller leaves cmd.cwd() untouched.
+        assert_eq!(home_dir_fallback(from(&[])), None);
+    }
+}
+
 #[cfg(test)]
 mod conformance {
     use super::*;

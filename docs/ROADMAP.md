@@ -964,6 +964,15 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Stale-cwd fallback works on Windows.** Recorded session
+      cwd no longer on disk → fall back to OS home. The previous
+      `var_os("HOME")`-only probe missed Windows (`HOME` unset by
+      default there), so Windows users silently ended up in
+      kettle's launch directory. `home_dir_fallback(lookup)`
+      probes `HOME` → `USERPROFILE` → `APPDATA`; `lookup` is a
+      closure so the order is unit-testable without mutating env.
+      Same shape as cycle 159's macOS universal2 fix — Linux+macOS
+      worked, Windows didn't. +1 test.
 - [x] **OS cursor matches every other GUI: arrow over chrome, I-beam
       only over text.** `sync_cursor_icon` showed the text I-beam
       everywhere the URL-hover Pointer didn't override it, including

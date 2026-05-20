@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Stale-cwd fallback now works on Windows too (and on stripped-down
+  Linux containers).** When a saved session's recorded pane cwd no
+  longer exists on disk — user moved the repo between launches, or
+  the `-d` arg pointed at a since-deleted directory — kettle falls
+  back to the OS home directory before letting `portable_pty` spawn
+  the shell. The previous code only consulted `HOME`, which is unset
+  on Windows by default: stale-cwd Windows users silently ended up
+  in whatever directory they happened to launch kettle from
+  (typically `C:\` from a Start-menu shortcut). Now
+  `home_dir_fallback(lookup)` probes `HOME` → `USERPROFILE` →
+  `APPDATA` in order, so all three platforms (Linux, macOS, Windows)
+  converge on the same "user-home" intent. Same shape as
+  cycle 159's macOS universal2 fix — Linux+macOS worked, Windows
+  didn't, the env var probe order was the difference. The helper
+  takes a `lookup` closure so its order can be unit-tested without
+  mutating the real process env (which would race with the rest of
+  the suite). Test: pinned truth table across HOME-set, USERPROFILE-
+  only, APPDATA-only, and empty-env. +1 test (226 total).
+
 - **OS mouse cursor is now the standard arrow over the tab bar and
   modal overlays (not the text I-beam).** `sync_cursor_icon` only
   considered two states — `Pointer` while a Ctrl-held URL was under
