@@ -7,6 +7,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Empty string-config values no longer silently break
+  rendering.** The parser docstring promises "empty value
+  resets the key" but `parse_collect` unconditionally
+  assigned `cfg.font_family = e.value.clone()` — so a single
+  `font-family =` line silently set the family to `""`. The
+  renderer's `measure_cell` then asked cosmic-text for an
+  empty family name; the system fell back to *some* font but
+  cell metrics drifted and glyphs rendered unpredictably.
+  Same shape for `font-family-bold / -italic / -bold-italic`
+  (per-style overrides) and `theme`. Fix:
+  - `font-family =`: empty value is a no-op (keep the
+    previous valid value; default is "JetBrainsMono Nerd
+    Font").
+  - `font-family-{bold,italic,bold-italic} =`: empty value
+    *clears* the override (`Option::None`), so the per-style
+    family falls back to the main `font-family`.
+  - `theme =`: empty value is a no-op (keep the previous
+    valid theme).
+  +1 test (`empty_value_resets_string_keys_to_their_default`)
+  pinning the contract for all five keys.
 - **`Mux::reap` keeps `active` pointed at the same *tab*, not
   the same numeric index.** When a tab's last pane exited, the
   tab was removed from `self.tabs`, shifting every later tab

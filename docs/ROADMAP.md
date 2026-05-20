@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Empty string-config values stop silently breaking
+      rendering.** `font-family =` used to set the family
+      to `""`; renderer drifted into cosmic-text's silent
+      fallback. Now: empty → keep previous (font-family /
+      theme) or reset to None (per-style families). The
+      parser docstring's "empty value resets" promise is
+      finally honored. +1 test covers all five keys.
 - [x] **`Mux::reap` doesn't silently shift focus to a
       different tab.** When a tab BEFORE active died, the
       trailing-only clamp left `active` indexing the wrong

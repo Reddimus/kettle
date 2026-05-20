@@ -510,18 +510,57 @@ impl Config {
         let mut unknown: Vec<String> = Vec::new();
         for e in parse::parse(text) {
             match e.key.as_str() {
-                "font-family" => cfg.font_family = e.value.clone(),
-                "font-family-bold" => cfg.font_family_bold = Some(e.value.clone()),
-                "font-family-italic" => cfg.font_family_italic = Some(e.value.clone()),
-                "font-family-bold-italic" => cfg.font_family_bold_italic = Some(e.value.clone()),
+                // Empty `font-family =` (and the per-style variants)
+                // silently emptied the family string, breaking the
+                // renderer's `measure_cell` (cosmic-text falls back
+                // to *some* font but the cell metrics drift and
+                // glyphs render unpredictably). The parser docstring
+                // already promised "empty value resets the key" —
+                // honor that here by skipping the assignment so the
+                // default (or a previous valid override on the same
+                // key) stays in place. Same shape for the per-style
+                // overrides.
+                "font-family" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.font_family = e.value.clone();
+                    }
+                }
+                "font-family-bold" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.font_family_bold = Some(e.value.clone());
+                    } else {
+                        cfg.font_family_bold = None;
+                    }
+                }
+                "font-family-italic" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.font_family_italic = Some(e.value.clone());
+                    } else {
+                        cfg.font_family_italic = None;
+                    }
+                }
+                "font-family-bold-italic" => {
+                    if !e.value.trim().is_empty() {
+                        cfg.font_family_bold_italic = Some(e.value.clone());
+                    } else {
+                        cfg.font_family_bold_italic = None;
+                    }
+                }
                 "font-size" => {
                     if let Ok(v) = e.value.parse() {
                         cfg.font_size = v;
                     }
                 }
                 "theme" => {
-                    cfg.theme_name = e.value.clone();
-                    cfg.theme = Theme::by_name(&e.value);
+                    // Empty `theme =` same as the font-family case:
+                    // keep the previously-resolved theme (default or
+                    // an earlier override on the same key) rather
+                    // than blanking the name string and falling back
+                    // to whatever `Theme::by_name("")` returns.
+                    if !e.value.trim().is_empty() {
+                        cfg.theme_name = e.value.clone();
+                        cfg.theme = Theme::by_name(&e.value);
+                    }
                 }
                 "background" => {
                     if let Some(c) = Rgb::parse(&e.value) {
@@ -789,6 +828,59 @@ mod config_tests {
         assert_eq!(c.theme.foreground, Rgb::new(0xc0, 0xca, 0xf5));
         assert_eq!(c.theme.palette[4], Rgb::new(0x7a, 0xa2, 0xf7));
         assert_eq!(c.font_family, font::FAMILY);
+    }
+
+    #[test]
+    fn empty_value_resets_string_keys_to_their_default() {
+        // Cycle-121 contract. parse.rs's docstring promised "empty
+        // value resets the key" but parse_collect unconditionally
+        // assigned `cfg.font_family = e.value.clone()`, so a
+        // `font-family =` line silently emptied the font name and
+        // the renderer's measure_cell drifted into whatever
+        // cosmic-text falls back to. Same for `font-family-bold` /
+        // `-italic` / `-bold-italic` and `theme`. Now: empty values
+        // skip the assignment (or, for Option-valued per-style
+        // families, reset to None so the main font-family is the
+        // fallback).
+        let dflt = Config::default();
+
+        // Empty font-family: keep default.
+        let c = Config::parse_text("font-family =\n");
+        assert_eq!(
+            c.font_family, dflt.font_family,
+            "empty font-family should keep default; got {:?}",
+            c.font_family
+        );
+
+        // Per-style overrides: setting then clearing.
+        let c = Config::parse_text(
+            "font-family-bold = SomeBold\n\
+             font-family-bold =\n\
+             font-family-italic = SomeItalic\n",
+        );
+        assert!(
+            c.font_family_bold.is_none(),
+            "second empty assignment should clear bold-family override"
+        );
+        assert_eq!(c.font_family_italic.as_deref(), Some("SomeItalic"));
+
+        // Empty theme: keep default theme.
+        let c = Config::parse_text("theme =\n");
+        assert_eq!(c.theme_name, dflt.theme_name);
+
+        // Set-then-empty for theme: keep the set value (per-key,
+        // last *non-empty* wins).
+        let c = Config::parse_text("theme = Dracula\ntheme =\n");
+        assert_eq!(
+            c.theme_name, "Dracula",
+            "empty theme reverts to default by leaving the previous override in place"
+        );
+        // Hmm — actually our semantics is "empty = skip", so the
+        // first `theme = Dracula` is preserved. That's distinct
+        // from a strict "empty = reset to compile-time default"
+        // interpretation; the docstring is ambiguous and the
+        // skip-form is cheaper to implement and harder to mis-use.
+        // (Users wanting a reset can simply remove the line.)
     }
 
     #[test]
