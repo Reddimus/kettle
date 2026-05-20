@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now catches `font-feature` and `ssh-host`
+  typos.** Both arms also had the silent-drop pattern:
+  `font-feature = liga,!@#,calt` silently dropped the bad `!@#`
+  token leaving the user with a partial feature set; `ssh-host =
+  no-equals-sign` silently dropped the entire entry, so the
+  Ctrl+Shift+S launcher had no `name` to bind. Now flagged:
+  every `font-feature` token has to parse via the documented
+  syntax (`liga` / `+calt` / `cv01=2` / `zero on`) and every
+  `ssh-host` line needs a non-empty `name=target` form. +1 test.
 - **`--check-config` now catches unknown enum values.** Every
   enum-typed config arm (`cursor-style`, `bell`, `osc52` /
   `clipboard`, `tab-bar`, `tab-bar-position`, `scrollbar`) has an

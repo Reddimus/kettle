@@ -435,6 +435,19 @@ impl Config {
                 "tab-bar" => matches!(v.as_str(), "off" | "none" | "false" | "auto" | "always"),
                 "tab-bar-position" => matches!(v.as_str(), "top" | "bottom"),
                 "scrollbar" => matches!(v.as_str(), "never" | "off" | "false" | "auto" | "always"),
+                // `font-feature` is comma-separated; every token must
+                // parse via the documented `FontFeature::parse` shape
+                // (`liga`, `+calt`, `cv01=2`, etc.). One bad token in
+                // the list is enough to flag — that token's silently
+                // dropped while the rest apply, leaving the user with
+                // a half-applied feature set.
+                "font-feature" => v.split(',').all(|tok| FontFeature::parse(tok).is_some()),
+                // `ssh-host = name=user@host` — requires the `=`
+                // separator; without it the entry is silently dropped
+                // (no `name` to bind via the Ctrl+Shift+S launcher).
+                "ssh-host" => v
+                    .split_once('=')
+                    .is_some_and(|(n, t)| !n.trim().is_empty() && !t.trim().is_empty()),
                 // `palette = N=#hex` — both halves have to parse.
                 "palette" => v.split_once('=').is_some_and(|(i, h)| {
                     i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
@@ -1047,6 +1060,46 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_bad_font_feature_and_ssh_host() {
+        // `font-feature` silently drops bad tokens (the parser returns
+        // None and the apply loop just skips). A comma-list with one
+        // bad entry leaves the user with a partly-applied set and no
+        // warning. Now flagged.
+        let bad = Config::detect_malformed_values(
+            "font-feature = liga,!@#,calt\n\
+             font-feature = no-such-tag-too-long\n\
+             ssh-host = box-with-no-equals\n\
+             ssh-host = =empty-name\n\
+             ssh-host = empty-target=\n",
+        );
+        assert_eq!(
+            bad.len(),
+            5,
+            "all five bad lines should be flagged: {bad:?}"
+        );
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("font-feature") && b.contains("!@#"))
+        );
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("ssh-host") && b.contains("no-equals"))
+        );
+        // Valid `font-feature` syntaxes (plain, +/-, on/off, =N) and
+        // `ssh-host` lines pass cleanly.
+        let ok = Config::detect_malformed_values(
+            "font-feature = liga\n\
+             font-feature = -calt\n\
+             font-feature = +ss01\n\
+             font-feature = cv01=2\n\
+             font-feature = zero on,ss05 3\n\
+             ssh-host = box=me@example.com\n\
+             ssh-host = gpu=root@10.0.0.2\n",
+        );
+        assert!(ok.is_empty(), "all valid: {ok:?}");
     }
 
     #[test]

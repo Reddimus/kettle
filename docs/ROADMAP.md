@@ -477,6 +477,10 @@
       `cursor-style`/`bell`/`osc52`/`tab-bar`/`tab-bar-position`/
       `scrollbar` all had `_ => Default` fallthrough — typos
       flagged as malformed-value now. +1 test (7 bad + ~25 good).
+- [x] **`--check-config` catches `font-feature` token typos and
+      `ssh-host` lines missing `=`.** Each `font-feature` token
+      validated via `FontFeature::parse`; `ssh-host` requires a
+      non-empty `name=target` split. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
