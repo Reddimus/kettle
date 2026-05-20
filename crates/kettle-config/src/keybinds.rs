@@ -303,9 +303,20 @@ pub fn defaults() -> Bindings {
     bind(cs, Char('c'), Copy);
     bind(cs, Char('v'), Paste);
     bind(cs, Char('f'), StartSearch);
+    // Font-size zoom: every variant of "Ctrl + the plus/minus area" maps
+    // to the same action. The `+` glyph on a US layout *is* `Shift+=` —
+    // winit reports the chord as `mods = Ctrl+Shift, key = '+'`, which
+    // wouldn't match a bare `Ctrl+Plus` binding. Cover all four sensible
+    // combinations so muscle memory works regardless of layout / whether
+    // the user thinks of it as `Ctrl++`, `Ctrl+=`, or `Ctrl+Shift+=`.
     bind(c, Char('+'), IncreaseFontSize);
     bind(c, Char('='), IncreaseFontSize);
+    bind(cs, Char('+'), IncreaseFontSize);
+    bind(cs, Char('='), IncreaseFontSize);
     bind(c, Char('-'), DecreaseFontSize);
+    // `Ctrl+_` (== `Ctrl+Shift+-` on US) — same logic as Ctrl+Plus above.
+    bind(cs, Char('-'), DecreaseFontSize);
+    bind(cs, Char('_'), DecreaseFontSize);
     bind(c, Char('0'), ResetFontSize);
     bind(cs, Char('x'), ToggleZoom);
     bind(cs, Char('r'), Reset);
@@ -354,6 +365,34 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn font_size_binds_cover_us_layout_shift_variants() {
+        // On a US keyboard the "Ctrl+Plus" chord is actually
+        // `Ctrl+Shift+=` (Shift held because `+` lives on `=`). winit
+        // reports it as `mods = Ctrl+Shift, key = '+'` — without a
+        // Ctrl+Shift+Plus binding the chord did nothing. Same family
+        // for Ctrl+Shift+= and Ctrl+Shift+- (== Ctrl+_).
+        let d = defaults();
+        let c = Mods::CTRL;
+        let cs = Mods::CTRL | Mods::SHIFT;
+        for (mods, k, expected) in [
+            (c, '+', Action::IncreaseFontSize),
+            (c, '=', Action::IncreaseFontSize),
+            (cs, '+', Action::IncreaseFontSize),
+            (cs, '=', Action::IncreaseFontSize),
+            (c, '-', Action::DecreaseFontSize),
+            (cs, '-', Action::DecreaseFontSize),
+            (cs, '_', Action::DecreaseFontSize),
+        ] {
+            let t = Trigger::new(mods, Key::Char(k));
+            assert_eq!(
+                d.get(&t),
+                Some(&expected),
+                "{t:?} should map to {expected:?}"
+            );
+        }
     }
 
     #[test]

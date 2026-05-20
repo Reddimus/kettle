@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`Ctrl+Plus` font-zoom muscle memory works on US layouts.** On
+  a US keyboard the `+` glyph lives on `Shift+=` — pressing what a
+  user thinks of as "Ctrl+Plus" actually sends `mods=Ctrl+Shift,
+  key='+'` to winit. The existing `bind(Ctrl, Char('+'))` binding
+  needed bare Ctrl and didn't match. The user got zero feedback;
+  font size just stayed put unless they typed `Ctrl+=` instead.
+  Fixed by adding the obvious Ctrl+Shift variants of the
+  zoom-in / zoom-out chords:
+  - Ctrl+Plus, Ctrl+= (already)
+  - **Ctrl+Shift+Plus, Ctrl+Shift+= (new)**
+  - Ctrl+- (already)
+  - **Ctrl+Shift+-, Ctrl+Shift+_ (new — `_` is the shifted `-`)**
+  +1 test covering the whole 7-variant matrix.
 - **Shift bypasses mouse tracking** (xterm / Alacritty / kitty /
   Ghostty convention). When a TUI like htop, tmux, vim, or fzf
   enables mouse mode (`CSI ?1000h`/`?1002h`/etc.), every click and
