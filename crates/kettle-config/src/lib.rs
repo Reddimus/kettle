@@ -722,6 +722,66 @@ mod config_tests {
     use super::*;
 
     #[test]
+    fn example_config_in_docs_uncommented_parses_with_zero_diagnostics() {
+        // Cycle-100: docs/kettle.example.config used to document 9 of the
+        // ~35 settable keys. After the expansion it documents every key
+        // the parser knows about; this test catches docs drift by
+        // strip-commenting every `# key = value` line in the example and
+        // running it through the same diagnostic pipeline `kettle
+        // --check-config` uses. If a new key lands but the example
+        // doesn't add it, or if a typo creeps in, this test fails.
+        //
+        // Strategy: take each line, drop a leading `# ` if present, keep
+        // anything that looks like a `key = value`, drop everything else
+        // (section headers, pure prose). Then parse_collect + detect_
+        // malformed_values both come back empty.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/kettle.example.config");
+        let text = std::fs::read_to_string(&path).expect("example config exists");
+        let activated: String = text
+            .lines()
+            .filter_map(|raw| {
+                let l = raw.trim_start();
+                let stripped = l.strip_prefix("# ").or_else(|| l.strip_prefix("#"))?;
+                // After uncommenting, only keep lines that look like real
+                // `key = value` rows (drop section headers like `─── Fonts ───`).
+                let s = stripped.trim();
+                if s.is_empty() {
+                    return None;
+                }
+                // A real config line has lowercase-alnum-dash key, `=`, value.
+                let eq = s.find('=')?;
+                let key = s[..eq].trim();
+                if key.is_empty()
+                    || !key
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return None;
+                }
+                Some(s.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Sanity: we extracted *something*. If this hits zero, the regex
+        // logic broke and the rest of the test would pass vacuously.
+        assert!(
+            activated.lines().count() >= 20,
+            "expected the example to document at least 20 keys; got\n{activated}"
+        );
+        let (_cfg, unknown) = Config::parse_collect(&activated);
+        let malformed = Config::detect_malformed_values(&activated);
+        assert!(
+            unknown.is_empty(),
+            "example config has unknown keys (docs drift): {unknown:?}"
+        );
+        assert!(
+            malformed.is_empty(),
+            "example config has malformed values (docs drift): {malformed:?}"
+        );
+    }
+
+    #[test]
     fn default_is_tokyonight_night() {
         let c = Config::default();
         assert_eq!(c.theme_name, "TokyoNight Night");

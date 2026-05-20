@@ -506,6 +506,17 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`docs/kettle.example.config` covers every key (was 9 of
+      ~35).** Major onboarding gap — copying the example never
+      surfaced `font-feature` / `tab-bar` / `scrollbar` /
+      `osc52` / `ssh-host` / `palette = N=#hex` / the unbind
+      sentinels / etc. Now grouped by section with the valid
+      value ranges and enum variants per key, plus a header
+      callout that `#` is full-line-only (no inline trailing
+      comments). New drift test (cycle-100 contract) strips
+      comments and runs the activated keys through both
+      `parse_collect` and `detect_malformed_values`; any new
+      key forgotten or any example typo fails the test.
 - [x] **`Config::load_from` warns on malformed values.**
       `load_from` previously `log::warn!`-ed unknown keys but
       silently dropped bad values. A user hitting reload after a

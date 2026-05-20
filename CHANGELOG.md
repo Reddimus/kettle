@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/kettle.example.config` documents every key kettle
+  understands (was 9 of ~35).** New onboarding users copying the
+  example into their own config never saw `font-feature`,
+  `tab-bar`, `tab-bar-position`, `tab-format`,
+  `window-title-format`, `scrollbar`, `cursor-color`,
+  `cursor-blink-interval`, `bell`, `osc52`, `unfocused-split-
+  opacity`, `focused-split-color`, `split-divider-color`,
+  `mouse-hide-while-typing`, `word-delimiters`, `copy-on-select`,
+  `scroll-on-keystroke`, `scroll-on-output`, `scroll-multiplier`,
+  `minimum-contrast`, `selection-foreground`,
+  `selection-background`, `command`/`shell`, `ssh-host`, the per-
+  style `font-family-{bold,italic,bold-italic}` keys, the unbind
+  sentinels, or the `palette = N=#hex` syntax. All now grouped
+  under section headers with comments naming the valid value
+  range / enum variants for each. Header callout reminds users
+  that `#` is a *full-line* comment marker only — inline `#` in
+  a value (e.g. a hex color) is part of the value, NOT a
+  trailing comment. New test
+  (`example_config_in_docs_uncommented_parses_with_zero_diagnostics`)
+  strip-comments the file and runs the activated keys through
+  `parse_collect` + `detect_malformed_values`; both must come
+  back empty. Catches docs drift: any future key added without
+  an example, or any example typo, fails this test.
+
 ### Fixed
 - **`Config::load_from` now warns on malformed values, not just
   unknown keys.** The reload path (`Action::ReloadConfig`) called
