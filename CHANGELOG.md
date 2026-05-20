@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Keybind modifier parsing recognizes `win`/`windows`/`meta`/`logo`
+  as Super aliases, and *rejects* typo'd modifier names outright.**
+  Before cycle 163, `parse_trigger` only knew `super`/`cmd`/`command`
+  for the Super key — a user copying `keybind = win+t=new_tab` from
+  their Windows config (or `meta+x` from a Linux config) silently
+  saw the `win`/`meta` token fall to the `parse_key(other)` catchall,
+  which returned None, then the parser kept iterating, so `key`
+  ultimately landed on the *plain key* token (`t`/`x`). Result: every
+  press of `t` in the terminal opened a new tab. Any typo'd modifier
+  (`cttrl+t`, `supre+t`) had the same shape. Fix: extend the Super
+  alias set (super / cmd / command / win / windows / meta / logo —
+  the names every OS/WM/Qt ecosystem uses for the same key), AND
+  make `parse_trigger` strict so a non-modifier in any but the
+  last `+`-separated slot returns None. `--check-config` already
+  gates triggers via `parse_trigger.is_some()`, so the rejected
+  line now surfaces as a malformed-value diagnostic instead of
+  becoming a "secret" plain-key binding stomping on normal typing.
+  Test: pinned all seven Super aliases + multi-modifier chord +
+  three typo rejections (`cttrl`, `contorl`, `supre`) + bare-`f5`
+  regression. +1 test, docs/CONFIG.md updated.
+
 - **Stale-cwd fallback now works on Windows too (and on stripped-down
   Linux containers).** When a saved session's recorded pane cwd no
   longer exists on disk — user moved the repo between launches, or

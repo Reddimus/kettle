@@ -373,14 +373,53 @@ fn parse_key(s: &str) -> Option<Key> {
 /// Parse a Ghostty trigger such as `ctrl+shift+o`.
 pub fn parse_trigger(s: &str) -> Option<Trigger> {
     let mut mods = Mods::empty();
-    let mut key = None;
-    for part in s.split('+') {
-        match part.trim().to_ascii_lowercase().as_str() {
-            "shift" => mods |= Mods::SHIFT,
-            "ctrl" | "control" => mods |= Mods::CTRL,
-            "alt" | "opt" | "option" => mods |= Mods::ALT,
-            "super" | "cmd" | "command" => mods |= Mods::SUPER,
-            other => key = parse_key(other),
+    let mut key: Option<Key> = None;
+    let parts: Vec<&str> = s.split('+').collect();
+    let last_idx = parts.len().checked_sub(1)?;
+    for (i, part) in parts.iter().enumerate() {
+        let lower = part.trim().to_ascii_lowercase();
+        // Modifier aliases. The Super-key family is over-covered on
+        // purpose: it has different names on every OS / WM / config
+        // ecosystem (`super` X11, `cmd`/`command` macOS, `win`/
+        // `windows` PC keyboards, `meta` historical X11 / Emacs,
+        // `logo` Qt's spelling), and a user copying a chord from
+        // their old config shouldn't have to relearn the name kettle
+        // happens to call it.
+        let added_mod = match lower.as_str() {
+            "shift" => {
+                mods |= Mods::SHIFT;
+                true
+            }
+            "ctrl" | "control" => {
+                mods |= Mods::CTRL;
+                true
+            }
+            "alt" | "opt" | "option" => {
+                mods |= Mods::ALT;
+                true
+            }
+            "super" | "cmd" | "command" | "win" | "windows" | "meta" | "logo" => {
+                mods |= Mods::SUPER;
+                true
+            }
+            _ => false,
+        };
+        if !added_mod {
+            // Strict-mode rejection: a non-modifier in any but the
+            // last `+`-separated slot is a typo. The pre-cycle
+            // implementation `parse_key(other)`'d every non-modifier
+            // and overwrote `key` each loop iteration, so a typo'd
+            // modifier (`cttrl+t`, or `win+t` before cycle 163 added
+            // the alias) silently degraded to "plain key with no
+            // modifiers" — `keybind = win+t = new_tab` rebound plain
+            // `t` to new_tab and the user got new tabs while typing
+            // normally. Now the typo returns None and `--check-config`
+            // (which already gates triggers via `parse_trigger.is_some()`
+            // in `detect_malformed_values`) surfaces the bad line.
+            if i != last_idx {
+                return None;
+            }
+            key = parse_key(&lower);
         }
     }
     Some(Trigger::new(mods, key?))
@@ -544,6 +583,53 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn parse_trigger_accepts_super_aliases_and_rejects_typos() {
+        // The Super key has different names in different worlds —
+        // `super` (X11), `cmd`/`command` (macOS), `win`/`windows`
+        // (Windows), `meta` (historical X11 / Emacs), `logo` (Qt).
+        // All map to the same Mods::SUPER bit. Before cycle 163,
+        // only `super`/`cmd`/`command` were recognized; anything
+        // else fell to `parse_key(other)` and silently degraded
+        // the chord to a plain-key binding.
+        let s_t = Trigger::new(Mods::SUPER, Key::Char('t'));
+        assert_eq!(parse_trigger("super+t"), Some(s_t));
+        assert_eq!(parse_trigger("cmd+t"), Some(s_t));
+        assert_eq!(parse_trigger("command+t"), Some(s_t));
+        assert_eq!(parse_trigger("win+t"), Some(s_t));
+        assert_eq!(parse_trigger("windows+t"), Some(s_t));
+        assert_eq!(parse_trigger("meta+t"), Some(s_t));
+        assert_eq!(parse_trigger("logo+t"), Some(s_t));
+        // Case-insensitive (`Ctrl` / `WIN` / `Cmd`).
+        assert_eq!(parse_trigger("WIN+T"), Some(s_t));
+        // Multi-modifier still works (regression).
+        assert_eq!(
+            parse_trigger("ctrl+shift+c"),
+            Some(Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('c'))),
+        );
+        // Modifiers can appear in any order before the key.
+        assert_eq!(
+            parse_trigger("win+ctrl+t"),
+            Some(Trigger::new(Mods::SUPER | Mods::CTRL, Key::Char('t'))),
+        );
+        // Strict rejection: a typo'd modifier name in a non-final
+        // position used to silently degrade to plain `t` (the key
+        // slot got overwritten by the typo's `parse_key` attempt,
+        // then by the real key). Now the parse fails outright so
+        // `--check-config` flags the line as malformed instead of
+        // letting a "secret" plain-key binding stomp on normal
+        // typing.
+        assert_eq!(parse_trigger("cttrl+t"), None);
+        assert_eq!(parse_trigger("contorl+t"), None);
+        assert_eq!(parse_trigger("supre+t"), None);
+        // Bare key (no modifiers) still parses — keybinds like `f5`
+        // are legitimate.
+        assert_eq!(
+            parse_trigger("f5"),
+            Some(Trigger::new(Mods::empty(), Key::F(5))),
+        );
     }
 
     #[test]

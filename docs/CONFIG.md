@@ -62,9 +62,21 @@ any unrecognized keys). The file is **watched and reloaded live**.
 
 ## Keybind grammar
 
-`trigger` = `+`-joined modifiers (`ctrl`, `shift`, `alt`, `super`) and one key
-(`a`..`z`, `f1`..`f12`, `up`/`down`/`left`/`right`, `page_up`/`page_down`,
-`home`/`end`, `enter`, `tab`, `plus`/`minus`/`equal`).
+`trigger` = `+`-joined modifiers and one key. Recognized modifier names:
+
+- `shift`
+- `ctrl` / `control`
+- `alt` / `opt` / `option`
+- `super` / `cmd` / `command` / `win` / `windows` / `meta` / `logo` —
+  all aliases for the same Super-key bit, so a chord copied from a
+  macOS / Windows / Linux config works without renaming.
+
+Keys: `a`..`z`, `f1`..`f12`, `up`/`down`/`left`/`right`,
+`page_up`/`page_down`, `home`/`end`, `enter`, `tab`, `plus`/`minus`/`equal`.
+
+A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
+flagged by `kettle --check-config` — it no longer silently degrades
+into a bare-key binding (cycle 163).
 
 `action` is one of: `copy`, `paste`, `new_tab`, `close_tab`, `next_tab`,
 `previous_tab`, `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based,

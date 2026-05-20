@@ -964,6 +964,19 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Keybind modifier parsing: Super-key aliases + strict
+      rejection of typos.** `parse_trigger` only knew
+      `super`/`cmd`/`command`; users copying `win+t` /
+      `meta+x` / `logo+t` from another config silently saw the
+      unknown modifier degrade into a plain-key binding
+      (`t`/`x`/`t`) — every press of that key triggered the
+      bound action. Same shape for any typo'd modifier
+      (`cttrl+t`, `supre+t`). Fix: add `win`/`windows`/`meta`/
+      `logo` to the Super alias set and reject any non-modifier
+      in non-final position so `--check-config` surfaces the
+      bad line (it already gates via `parse_trigger.is_some()`).
+      +1 test pinning all seven Super aliases + multi-modifier
+      chord + three typo rejections.
 - [x] **Stale-cwd fallback works on Windows.** Recorded session
       cwd no longer on disk → fall back to OS home. The previous
       `var_os("HOME")`-only probe missed Windows (`HOME` unset by
