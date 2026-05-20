@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`palette = N=#hex` with N ≥ 16 is flagged + docs
+      scoped to reality.** Example config advertised
+      0..=255; runtime only wrote 0..=15; the 16+ overrides
+      silently no-op'd. `--check-config` now flags the typo;
+      example text notes the OSC 4 escape-hatch for runtime
+      256-color overrides. Full static-config support for
+      16..255 deferred (would touch Theme + renderer
+      resolve). +1 test.
 - [x] **`Action::NewWindow` inherits `--config FILE`.** A
       user with `kettle --config /custom.conf` who opened a
       new window via Ctrl+Shift+I got a child loading the

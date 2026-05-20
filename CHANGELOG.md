@@ -7,6 +7,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--check-config` flags `palette = N=#hex` with N ≥ 16.**
+  The example config (cycle 100) advertised `palette = N=#hex`
+  as supporting N in 0..=255, but the runtime apply path only
+  writes `theme.palette[0..16]` — overrides for the xterm
+  256-color extension (16..255) silently no-op'd. A user
+  writing `palette = 200=#ff0000` (intending the bright-red
+  cube slot) saw no effect and no warning. Two surfaces fixed:
+  - `detect_malformed_values` (`--check-config`) flags any
+    `palette = N=…` with N ≥ 16 so the user sees the typo.
+  - The example config text reflects the real limit, with a
+    note that runtime OSC 4 from a program can still override
+    the 16..255 slots (just not the static config).
+  Adding full runtime support for 16..255 would mean a Theme
+  / renderer-resolve refactor; deferred. +1 test
+  (`detect_malformed_values_flags_palette_index_out_of_range`).
+
+### Fixed
 - **`Action::NewWindow` now inherits `--config FILE`.** A user
   who launched kettle with `kettle --config /custom.conf` and
   then hit `Ctrl+Shift+I` (or invoked `New window` from the

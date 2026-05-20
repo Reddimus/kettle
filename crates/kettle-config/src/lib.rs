@@ -490,8 +490,21 @@ impl Config {
                     .split_once('=')
                     .is_some_and(|(n, t)| !n.trim().is_empty() && !t.trim().is_empty()),
                 // `palette = N=#hex` — both halves have to parse.
+                // `palette = N=#hex`: both halves must parse, AND N
+                // must fit the implementation's 0..=15 range. Cycle
+                // 124: indices 16..=255 are documented as belonging
+                // to the xterm 256-color extension but the runtime
+                // apply path only writes `theme.palette[0..16]`. A
+                // user writing `palette = 200=#ff0000` (expecting
+                // their override to land on the bright-red 256-color
+                // cube slot) silently saw no effect; this surfaces
+                // the limit so they at least know the override was
+                // ignored. The fix is one-sided (docs+diagnostic);
+                // adding runtime support for 16..255 means a much
+                // bigger Theme/renderer refactor.
                 "palette" => v.split_once('=').is_some_and(|(i, h)| {
-                    i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
+                    i.trim().parse::<usize>().is_ok_and(|n| n < 16)
+                        && Rgb::parse(h.trim()).is_some()
                 }),
                 _ => true,
             };
@@ -1537,6 +1550,32 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn detect_malformed_values_flags_palette_index_out_of_range() {
+        // Cycle 124: documented as 0..=255 but the runtime apply path
+        // only writes the 0..=15 ANSI palette. Flag 16+ so the user's
+        // typo doesn't silently no-op (the diagnostic is on the same
+        // surface as cycle 88's `ssh-host = name=` half-empty flag).
+        let bad = Config::detect_malformed_values(
+            "palette = 200=#ff0000\n\
+             palette = 16=#abcdef\n\
+             palette = 999=#cafe00\n",
+        );
+        assert_eq!(bad.len(), 3, "all three should be flagged: {bad:?}");
+        assert!(bad.iter().all(|b| b.contains("palette")));
+        // The 0..=15 range still parses cleanly.
+        let ok = Config::detect_malformed_values(
+            "palette = 0=#000000\n\
+             palette = 4=#7aa2f7\n\
+             palette = 15=#ffffff\n",
+        );
+        assert!(ok.is_empty(), "all in-range: {ok:?}");
+        // Verify the runtime apply still works for the in-range case
+        // (regression guard for the same field).
+        let c = Config::parse_text("palette = 4=#ff0000");
+        assert_eq!(c.theme.palette[4], Rgb::new(0xff, 0x00, 0x00));
     }
 
     #[test]
