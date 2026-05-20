@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **Workspace-metadata contract is now one comprehensive test.**
+  Cycle 218's `library_crates_have_per_crate_descriptions` was a
+  narrow guard on just the description override. Cycle 225's
+  `rust-version` inheritance added a new field to the
+  workspace.package shape with no guard. Cycle 226 replaces the
+  narrow test with `workspace_metadata_policy`, which pins:
+  (1) `workspace.package` declares every shared field
+  (`version` / `edition` / `rust-version` / `license` /
+  `repository` / `authors` / `description`); (2) every crate
+  inherits each of those via `.workspace = true`; (3) library
+  crates override `description` with their per-crate `"kettle: …"`
+  blurb; (4) the binary inherits `description.workspace = true`.
+  Catches "tidying" cycles that revert one piece of the
+  inheritance shape — version drift, MSRV drift, license drift,
+  binary-blurb leak onto a library — all in one check.
+
 ### Changed
 - **MSRV declared at Rust 1.88.** The workspace already uses
   let-chains (`if X && let Y = ... && Z`) in kettle-vt,
