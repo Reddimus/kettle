@@ -1137,6 +1137,18 @@ fn font_features(cfg: &Config) -> FontFeatures {
 /// when something was cut. CJK characters and emoji are wide (2 cells
 /// each), so a char-count truncation overflows the tab segment / title
 /// when these are present; this honors the cell width that the renderer
+/// Cap a cell count so `requested * cell_px + chrome_px <= 8192` —
+/// the wgpu per-side texture limit. Returns at least 1 so a degenerate
+/// clamp (huge font + huge padding) doesn't produce a zero-cell PNG.
+/// Pure so the arithmetic is unit-tested without standing up wgpu.
+pub fn cap_axis_cells(requested: u32, cell_px: f32, chrome_px: f32) -> u32 {
+    const MAX_TEXTURE_PX: f32 = 8192.0;
+    let cell = cell_px.max(1.0); // never divide by zero
+    let safe_body = (MAX_TEXTURE_PX - chrome_px).max(cell);
+    let cap = (safe_body / cell).floor() as u32;
+    requested.min(cap).max(1)
+}
+
 /// Sanitize a font size against the renderer's safe range. 5.0 is the
 /// floor below which cosmic-text's metrics become numerically unstable
 /// (sub-pixel cell dims, antialiasing falls apart); 72.0 is the ceiling
@@ -1239,7 +1251,17 @@ fn gc(c: Rgb) -> GColor {
 /// per-tab `✕`, trailing `+`), with a themed shell session on the left and a
 /// monitor-style readout on the right. Content is synthetic; the rendering
 /// pipeline is identical to the live one.
-pub fn capture_png(cfg: &Config, cols: u32, rows: u32, out: &std::path::Path) -> Result<()> {
+/// Render a screenshot PNG; returns the **actual** (cols, rows) used after
+/// the cycle-119 texture-limit cap so the CLI can report what was rendered
+/// rather than what was requested (which can differ when the user asks for
+/// more cells than the wgpu 8192-px-per-side limit allows at the active
+/// font size).
+pub fn capture_png(
+    cfg: &Config,
+    cols: u32,
+    rows: u32,
+    out: &std::path::Path,
+) -> Result<(u32, u32)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -1273,12 +1295,31 @@ pub fn capture_png(cfg: &Config, cols: u32, rows: u32, out: &std::path::Path) ->
 
         let theme = &cfg.theme;
         let fam = cfg.font_family.clone();
-        let metrics = Metrics::new(cfg.font_size, cfg.font_size * 1.25);
+        // Same clamp Renderer::new (cycle 118) and set_font_size apply.
+        // capture_png builds its OWN device + texture chain rather than
+        // going through Renderer::new, so the bound has to be repeated
+        // here — without it, a `font-size = 500` config + `--screenshot
+        // --cols 200` config still walks past the wgpu 8192-px-per-side
+        // texture limit and the PNG generator errors out.
+        let font_size = clamp_font_size(cfg.font_size);
+        let metrics = Metrics::new(font_size, font_size * 1.25);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let (cw, ch) = measure_cell(&mut font_system, &mut measure, &fam, metrics);
 
         let pad = cfg.padding_x.max(8.0);
         let tab_h = ch + 12.0;
+        // wgpu's max-texture-per-side is 8192 on every backend / GPU
+        // class we care about. The CLI already clamps `--cols ≤ 400` /
+        // `--rows ≤ 200` (cycle 69), but at a 72pt clamped font size the
+        // cell can be ~35×90px — so 200 cols × 90px = 18000px wide
+        // exceeds the limit even without an enormous font config. Cap
+        // each side dynamically against the actual cell size so the
+        // user never sees a panic about texture dims for any cli /
+        // config combination. `cap_axis_cells` is pure (max-px ÷ cell-
+        // px minus chrome) so the same arithmetic is unit-tested. Floor
+        // at 1 so a degenerate clamp doesn't yield zero-cell PNGs.
+        let cols = cap_axis_cells(cols, cw, pad * 2.0);
+        let rows = cap_axis_cells(rows, ch, pad * 2.0 + tab_h);
         let body_w = cols as f32 * cw;
         let body_h = rows as f32 * ch;
         let w = (pad * 2.0 + body_w).ceil() as u32;
@@ -1589,7 +1630,7 @@ pub fn capture_png(cfg: &Config, cols: u32, rows: u32, out: &std::path::Path) ->
         }
         img.save(out)
             .map_err(|e| anyhow!("write {}: {e}", out.display()))?;
-        Ok(())
+        Ok((cols, rows))
     })
 }
 
@@ -1691,6 +1732,33 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_axis_cells_tests {
+    use super::cap_axis_cells;
+
+    #[test]
+    fn cap_axis_cells_respects_8192_texture_limit() {
+        // Small cells × small request: no-op (request passes through).
+        assert_eq!(cap_axis_cells(80, 8.0, 16.0), 80);
+        // 72pt-ish cell (~90px tall): 200 rows × 90 = 18000 > 8192.
+        // Cap: (8192 - chrome) / 90 ≈ 90 rows.
+        let c = cap_axis_cells(200, 90.0, 0.0);
+        assert!(c <= 91, "200×90px should cap near 91 rows, got {c}");
+        assert!(c >= 80, "but shouldn't collapse below ~80, got {c}");
+        // Chrome (window padding + tab bar) shrinks the body budget.
+        let c2 = cap_axis_cells(200, 90.0, 200.0);
+        assert!(c2 < c, "more chrome means fewer body cells: {c2} < {c}");
+        // Floor at 1: even with absurd inputs that would yield 0 or
+        // negative, the result is at least 1 (so a degenerate
+        // screenshot is a tiny image, not a panic).
+        assert_eq!(cap_axis_cells(50, 1e6, 0.0), 1);
+        assert_eq!(cap_axis_cells(50, 50.0, 1e6), 1);
+        // Zero / NaN-cell-px clamped via the .max(1.0) inside; doesn't
+        // divide by zero.
+        assert_eq!(cap_axis_cells(1, 0.0, 0.0), 1);
     }
 }
 

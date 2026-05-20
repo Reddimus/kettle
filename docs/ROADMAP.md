@@ -506,6 +506,15 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--screenshot` dynamically caps cells to fit the
+      wgpu 8192-per-side texture limit.** Cycle 69's static
+      `[20, 400]×[8, 200]` clamps were safe at small fonts but
+      busted at 72pt cells (~90px tall × 200 rows = 18000px).
+      New pure `cap_axis_cells(req, cell, chrome) -> u32`
+      caps each axis runtime-aware; `capture_png` returns the
+      actual rendered (cols, rows) so the CLI message says
+      `capped from N×M for GPU texture limit at current font
+      size` instead of lying. +1 test.
 - [x] **`Renderer::new` clamps `cfg.font_size`.** Cycle 73's
       [5.0, 72.0] bound only fired through `set_font_size`
       (runtime); startup took `cfg.font_size` raw. Extreme

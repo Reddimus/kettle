@@ -7,6 +7,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--screenshot` caps cells to fit the wgpu 8192-per-side
+  texture limit at any font size.** Cycle 69 added static
+  `--cols ≤ 400 / --rows ≤ 200` clamps, but at a clamped 72pt
+  font the cell is ~35×90px — so `--cols 200 --rows 100`
+  computed an 18000×9000-pixel texture (above the 8192 limit)
+  and aborted at GPU init with `dimension exceeds the limit of
+  8192`. Cycle 119: `capture_png` now dynamically caps each
+  axis against the actual cell pixel size via the new pure
+  helper `cap_axis_cells(requested, cell_px, chrome_px) ->
+  u32` (max-texture-px minus chrome, divided by cell-px,
+  floored at 1). Plus it now returns the *actual* (cols,
+  rows) used so the CLI's `wrote …` line tells the user when
+  their request was capped (`wrote /tmp/k.png (189×89 cells
+  — capped from 200×100 for GPU texture limit at current
+  font size)`) instead of lying. Also: `capture_png` was the
+  *other* unclamped `cfg.font_size` reader (cycle 118 only
+  caught `Renderer::new`); that's clamped now too.
+  +1 test (`cap_axis_cells_respects_8192_texture_limit`)
+  covering happy-path passthrough, axis-specific caps,
+  chrome shrinking the budget, and the 1-cell floor.
+
+### Fixed
 - **`Renderer::new` now clamps `cfg.font_size` to the same
   range `set_font_size` uses.** Cycle 73 added a `[5.0, 72.0]`
   clamp inside `set_font_size` (the runtime Ctrl+= / Ctrl+- /

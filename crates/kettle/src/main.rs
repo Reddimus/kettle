@@ -335,8 +335,21 @@ fn main() -> anyhow::Result<()> {
         // every realistic screenshot fits.
         let cols = cli.cols.clamp(20, 400);
         let rows = cli.rows.clamp(8, 200);
-        kettle_render::capture_png(&cfg, cols, rows, out)?;
-        println!("wrote {} ({cols}×{rows} cells)", out.display());
+        // `capture_png` may shrink (cols, rows) further to fit the GPU
+        // texture limit at the active font size; show what was actually
+        // rendered, with a hint when it differs from the request so the
+        // user notices their cli args didn't fully apply.
+        let (actual_cols, actual_rows) = kettle_render::capture_png(&cfg, cols, rows, out)?;
+        if actual_cols == cols && actual_rows == rows {
+            println!("wrote {} ({cols}×{rows} cells)", out.display());
+        } else {
+            println!(
+                "wrote {} ({actual_cols}×{actual_rows} cells — \
+                 capped from {cols}×{rows} for GPU texture limit at \
+                 current font size)",
+                out.display()
+            );
+        }
         return Ok(());
     }
 
