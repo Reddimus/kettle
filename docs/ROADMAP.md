@@ -454,6 +454,9 @@
       draws two stacked lines; the others draw single lines (wave
       / dotted / dashed visual styles deferred to a shader pass).
       +1 conformance test.
+- [x] **Session restore brings back the focused pane.** `STab`
+      records `focus: usize` (DFS-order index, `#[serde(default)]`
+      for back-compat). +2 tests.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

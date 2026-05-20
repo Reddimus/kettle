@@ -79,6 +79,46 @@ impl Node {
         }
     }
 
+    /// DFS-order index of the leaf with id `target`, or `None` if not
+    /// present. Used by session save to record which leaf is focused
+    /// without depending on the per-pane numeric id (which is reallocated
+    /// across restores). Walk order is the same `first → second` child
+    /// order that `nth_leaf` uses, so the round trip is symmetric.
+    fn leaf_index_of(&self, target: u64) -> Option<usize> {
+        fn walk(n: &Node, target: u64, idx: &mut usize) -> Option<usize> {
+            match n {
+                Node::Leaf(id) => {
+                    let here = *idx;
+                    *idx += 1;
+                    if *id == target { Some(here) } else { None }
+                }
+                Node::Split { a, b, .. } => walk(a, target, idx).or_else(|| walk(b, target, idx)),
+            }
+        }
+        let mut idx = 0;
+        walk(self, target, &mut idx)
+    }
+
+    /// Leaf id at DFS-order position `n`, or the first leaf if `n` is past
+    /// the end (graceful fallback so a session pointing to a no-longer-
+    /// existent pane still produces a focused tab).
+    fn nth_leaf(&self, n: usize) -> u64 {
+        fn walk(node: &Node, n: usize, idx: &mut usize) -> Option<u64> {
+            match node {
+                Node::Leaf(id) => {
+                    if *idx == n {
+                        return Some(*id);
+                    }
+                    *idx += 1;
+                    None
+                }
+                Node::Split { a, b, .. } => walk(a, n, idx).or_else(|| walk(b, n, idx)),
+            }
+        }
+        let mut idx = 0;
+        walk(self, n, &mut idx).unwrap_or_else(|| self.first_leaf())
+    }
+
     /// Replace the leaf `id` with a split of itself and `new_id`.
     fn split_leaf(&mut self, id: u64, new_id: u64, dir: Dir) -> bool {
         match self {
@@ -272,6 +312,13 @@ impl Mux {
                 .iter()
                 .map(|t| STab {
                     root: self.snap(&t.root),
+                    // DFS-order index of the focused leaf so restore can
+                    // recreate the focus on the new tree (pane ids are
+                    // reallocated across restores, so the id itself isn't
+                    // portable). `0` means "first leaf" — same as the
+                    // pre-cycle behavior, which is what missing-field
+                    // restores fall back to via #[serde(default)].
+                    focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
                 })
                 .collect(),
             active: self.active,
@@ -333,7 +380,11 @@ impl Mux {
     ) -> bool {
         for st in &s.tabs {
             if let Ok(root) = self.build_node(&st.root, cfg, cw, ch, mk) {
-                let focus = root.first_leaf();
+                // Restore the focused leaf at its DFS index (saved by
+                // `snapshot`). `nth_leaf` falls back to the first leaf
+                // if the index is past the end, which keeps trimmed-
+                // tree sessions sane.
+                let focus = root.nth_leaf(st.focus);
                 self.tabs.push(Tab {
                     root,
                     focus,

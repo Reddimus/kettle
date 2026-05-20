@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Session restore brings back the focused pane in each tab.**
+  `STab` was only saving the split tree (`root`) — restore used
+  `first_leaf()` to pick a focus, so every reopened tab landed on
+  the leftmost pane regardless of which one the user had focused
+  at save time. Now records `STab.focus: usize` as a DFS-order
+  index of the focused leaf (pane ids are reallocated across
+  restores, so the id itself isn't portable). `#[serde(default)]`
+  means pre-cycle session files still load (defaults to `0` =
+  first leaf, the previous behavior). +1 round-trip test, +1
+  legacy-file test confirming back-compat.
 - **All five underline style flags reach the renderer.** Cycle 79
   drew a single line for `Flags::UNDERLINE | UNDERCURL`. The
   engine actually tracks five style bits: UNDERLINE (`\e[4m`),

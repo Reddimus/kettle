@@ -25,6 +25,12 @@ pub enum SNode {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct STab {
     pub root: SNode,
+    /// Focused pane's DFS-order index within `root`'s leaves (0 = first
+    /// leaf). `#[serde(default)]` means old session files without this
+    /// field still load — they restore to the first leaf, the pre-cycle
+    /// behavior. Saved by `Mux::snapshot`, consumed by `Mux::restore`.
+    #[serde(default)]
+    pub focus: usize,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -86,6 +92,7 @@ mod tests {
                         cmd: vec!["ssh".into(), "-t".into(), "me@host".into()],
                     }),
                 },
+                focus: 1, // second leaf focused — round-trip should keep it
             }],
             active: 0,
             theme: Some("Dracula".into()),
@@ -111,5 +118,41 @@ mod tests {
         assert_eq!(s.tabs.len(), 1);
         // `theme` is also #[serde(default)] → None on pre-theme files.
         assert_eq!(s.theme, None);
+        // `focus` likewise — pre-cycle sessions restore to first leaf.
+        assert_eq!(s.tabs[0].focus, 0);
+    }
+
+    #[test]
+    fn session_round_trips_focused_pane_index() {
+        // Cycle 82: the session now records which leaf was focused so
+        // restore brings the user back to the same pane within each tab.
+        // Confirm the round-trip and that the default lands on first leaf
+        // (preserving the pre-cycle behavior for older sessions).
+        let s = Session {
+            tabs: vec![STab {
+                root: SNode::Split {
+                    vertical: true,
+                    ratio: 0.6,
+                    a: Box::new(SNode::Leaf {
+                        cwd: None,
+                        cmd: vec![],
+                    }),
+                    b: Box::new(SNode::Leaf {
+                        cwd: None,
+                        cmd: vec![],
+                    }),
+                },
+                focus: 1,
+            }],
+            active: 0,
+            theme: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tabs[0].focus, 1, "focus index round-trips");
+        // Old session without focus field defaults to 0.
+        let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}}],"active":0}"#;
+        let l: Session = serde_json::from_str(legacy).unwrap();
+        assert_eq!(l.tabs[0].focus, 0);
     }
 }
