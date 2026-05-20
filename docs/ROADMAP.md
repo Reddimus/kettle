@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Mux::split` exits zoom (was hiding the other half).**
+      Splitting a zoomed pane used to leave zoom on while
+      focusing the new pane — so `layout()`'s collapse made
+      the just-split-from half silently vanish. tmux/WezTerm
+      both exit zoom on split because "show me both" is the
+      intent. Extracted `insert_split(&mut Tab, new_id,
+      dir)` helper; +1 test.
 - [x] **TESTING.md + INSTALL.md test counts caught up to
       213 (was 20 / 33).** 80+ cycles of additions had
       drifted past the testing docs. Rewrote TESTING.md

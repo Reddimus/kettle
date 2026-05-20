@@ -568,10 +568,7 @@ impl Mux {
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
-            let focus = tab.focus;
-            if tab.root.split_leaf(focus, new_id, dir) {
-                tab.focus = new_id;
-            }
+            insert_split(tab, new_id, dir);
         }
         Ok(())
     }
@@ -896,6 +893,25 @@ impl Mux {
                 title.to_string()
             })
             .collect()
+    }
+}
+
+/// Apply the *post-spawn* tree mutation for a split: graft the new pane id
+/// next to the currently-focused leaf in direction `dir`, move focus to
+/// the new pane, and **exit zoom** if it was on.
+///
+/// Cycle 130: splitting while zoomed used to leave the tab zoomed AND
+/// focused on the new pane, so the user only saw the new pane — the
+/// half they just split from disappeared from view (still alive, just
+/// hidden by `Mux::layout`'s zoom-collapse). Every modern terminal
+/// treats `split` as "show me both" — tmux's `display-panes` UX
+/// after `split-window`, WezTerm's `SplitHorizontal/Vertical`. Pure so
+/// the contract is unit-testable without a real spawn.
+fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) {
+    let focus = tab.focus;
+    if tab.root.split_leaf(focus, new_id, dir) {
+        tab.focus = new_id;
+        tab.zoomed = false;
     }
 }
 
@@ -1242,6 +1258,37 @@ mod node_tests {
         assert!(m.tabs.is_empty(), "all tabs gone");
         assert!(m.panes.is_empty(), "all panes gone");
         assert_eq!(m.active, 0, "active reset to 0");
+    }
+
+    #[test]
+    fn insert_split_exits_zoom_and_focuses_new_pane() {
+        // Cycle-130 contract. With a single-leaf tab zoomed (one pane
+        // visible), splitting should produce a 2-leaf tab, focus the
+        // new pane, and exit zoom so the user sees both halves —
+        // matching tmux / WezTerm. Pre-cycle, zoom stayed on and the
+        // old half silently hid.
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            zoomed: true, // already zoomed before the split
+        };
+        super::insert_split(&mut tab, 2, Dir::Horizontal);
+        assert_eq!(tab.focus, 2, "focus moves to the new pane");
+        assert!(!tab.zoomed, "zoom is exited so both halves render");
+        // Tree now contains both leaves.
+        let mut rects = Vec::new();
+        tab.root.layout((0.0, 0.0, 100.0, 50.0), &mut rects);
+        assert_eq!(rects.len(), 2, "split produced two leaves");
+
+        // Unzoomed → unzoomed (no-op on the zoom flag).
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            zoomed: false,
+        };
+        super::insert_split(&mut tab, 2, Dir::Vertical);
+        assert!(!tab.zoomed);
+        assert_eq!(tab.focus, 2);
     }
 
     #[test]

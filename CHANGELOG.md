@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`Mux::split` while zoomed exits zoom so the user sees both
+  halves.** The old `split` set `tab.focus = new_id` but left
+  `tab.zoomed = true`, so `Mux::layout`'s zoom-collapse only
+  returned the new leaf — the half the user had just split
+  from *vanished from the screen* (still alive, just hidden)
+  with no UX cue that the split happened. Every modern
+  terminal exits zoom on split because "show me both" is the
+  intent of the action (tmux's `display-panes` UX after
+  `split-window`, WezTerm's `SplitHorizontal/Vertical`).
+  Extracted the post-spawn tree mutation into a pure
+  `insert_split(&mut Tab, new_id, dir)` helper so the
+  contract is unit-testable without a real PTY spawn. +1
+  test (`insert_split_exits_zoom_and_focuses_new_pane`)
+  covering zoomed-before-split (zoom exits, both leaves
+  render) and unzoomed-before-split (no-op on the flag,
+  focus still moves).
+
 ### Documentation
 - **`docs/TESTING.md` and `docs/INSTALL.md` test counts and
   coverage catch up to reality.** Massive drift: INSTALL.md
