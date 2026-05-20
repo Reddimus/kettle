@@ -272,6 +272,28 @@ impl Renderer {
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = size.clamp(5.0, 72.0);
         self.metrics = Metrics::new(self.font_size, self.font_size * 1.25);
+        self.remeasure_cell();
+    }
+
+    /// Update the primary font family and re-measure the cell. Called by
+    /// `reload_config` so a `font-family = …` change in the user's config
+    /// actually takes effect at runtime — without this, the renderer kept
+    /// the family it was constructed with forever and only the `font-size`
+    /// part of a reload was visible (silent partial-apply, same family as
+    /// the cycle-44+ "reload doesn't re-flow downstream caches" gap).
+    pub fn set_font_family(&mut self, family: String) {
+        if self.font_family == family {
+            return;
+        }
+        self.font_family = family;
+        self.remeasure_cell();
+    }
+
+    /// Re-derive `cell_w`/`cell_h` from the current `font_family` + `metrics`
+    /// using the same measurer the constructor used. Extracted so font-size
+    /// and font-family updates share one implementation; otherwise the two
+    /// setters would drift on which fields they touch.
+    fn remeasure_cell(&mut self) {
         let family = self.font_family.clone();
         let m = self.metrics;
         let mut measure = TextBuffer::new(&mut self.font_system, m);

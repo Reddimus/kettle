@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`Action::ReloadConfig` now applies `font-family` changes.** The
+  reload handler picked up the new `font-size` (via the renderer's
+  `set_font_size`) but left the renderer's cached `font_family`
+  field at whatever was passed to `Renderer::new` at startup. A
+  user editing `font-family = ...` in their config and hitting the
+  reload chord saw the new size flow through immediately while the
+  glyphs kept rendering in the *old* family — only a restart
+  picked it up. Same shape as the cycle-44+ "reload swaps `self.cfg`
+  but downstream caches are stale" cluster. New `Renderer::
+  set_font_family(String)` setter (idempotent guard skips
+  re-measure on no-op reloads, so steady-state reloads stay free);
+  a sibling private `remeasure_cell()` factored out so the family
+  and size setters share one re-measure path and can't drift on
+  which fields they touch. `reload_config` calls
+  `set_font_family` before `set_font_size` so the cell measurer
+  sees the new family when size is re-applied (stale family for
+  one frame is a real artifact otherwise). Tested via the
+  headless `--screenshot` smoke that builds a full wgpu Renderer
+  through the `capture_png` path; pure-helper unit tests aren't
+  feasible without standing up wgpu, which the GPU selftest
+  already does.
+
 ### Added
 - **`keybind = TRIGGER = unbind` removes a default binding.**
   `apply_keybind` only ever *inserted* into the map; the closed

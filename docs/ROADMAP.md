@@ -506,6 +506,17 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::ReloadConfig` applies `font-family` changes.**
+      The reload handler updated `font-size` via the renderer
+      setter but left the cached `font_family` field stale —
+      glyphs kept rendering in the *old* family until restart.
+      Same "reload swaps `self.cfg` but downstream caches are
+      stale" shape as the cycle-44+ cluster. New `Renderer::
+      set_font_family` setter + factored `remeasure_cell` so the
+      family and size setters share one re-measure path.
+      Idempotent guard keeps steady-state reloads free. Covered
+      by `--screenshot` smoke; unit-testable without wgpu isn't
+      feasible.
 - [x] **`keybind = TRIGGER=unbind` removes a default.** The
       `apply_keybind` parser only ever inserted; users had no way
       to remove kettle's default Copy on `Ctrl+Shift+C` for shells

@@ -1409,6 +1409,12 @@ impl App {
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
         if let Some(r) = self.renderer.as_mut() {
+            // Order matters slightly: family first so the cell measurer
+            // sees the new family when size changes (the size setter
+            // re-measures internally; a stale family would yield wrong
+            // cell dims for one frame). Both are no-ops when unchanged,
+            // so steady-state reloads (same family / same size) are free.
+            r.set_font_family(new.font_family.clone());
             r.set_font_size(new.font_size);
         }
         self.cfg = new;
