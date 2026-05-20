@@ -6,7 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-### Added
+## [1.1.0] — 2026-05-20
+
+First minor release after `v1.0.0` / `v1.0.1`. Theme is **first-
+launch onboarding** + **cross-platform desktop integration parity**:
+a newcomer on Ubuntu, macOS, or Windows 11 should now be able to
+go from "I just downloaded kettle" to "I'm typing in a terminal
+with my icon in the launcher and my config in the right place" in
+two commands. Plus durable manifest/CI policy guards for the
+contracts that landed in this cycle batch.
+
+### Added (since 1.0.1)
 - **`kettle --check-config` emits a bootstrap hint when no config
   exists.** When the resolved config path doesn't exist on disk
   (the common newcomer state), the output now includes:
