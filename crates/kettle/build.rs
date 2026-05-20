@@ -18,22 +18,21 @@ fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let repo_root = PathBuf::from(&manifest).join("../..");
 
-    // Tell cargo to re-run this script when the git HEAD moves. `.git/HEAD`
-    // changes on branch switch; the *content* of `.git/refs/heads/<branch>`
-    // changes on every commit, so watch both. If the working copy isn't a
-    // git checkout, the rerun-if-changed lines simply don't match anything.
-    let head_path = repo_root.join(".git/HEAD");
-    println!("cargo:rerun-if-changed={}", head_path.display());
-    if let Ok(head) = std::fs::read_to_string(&head_path)
-        && let Some(rest) = head.trim().strip_prefix("ref: ")
-    {
-        let ref_path = repo_root.join(".git").join(rest);
-        println!("cargo:rerun-if-changed={}", ref_path.display());
-    }
+    // Cycle 195 note: we intentionally *don't* call
+    // `cargo:rerun-if-changed=…` here. Restricting the rerun set to
+    // `.git/HEAD` + the symbolic-ref file (the cycle-192 design) made
+    // the script rerun on commit / branch switch — but NOT on a
+    // source-file edit, which is exactly when the `+dirty` marker
+    // needs to refresh. The two `git` invocations below are ~10ms
+    // total; running the build script on every cargo build is well
+    // under the noise floor of any real build. The cost-benefit
+    // pivots once `+dirty` matters more than ~10ms per build, and it
+    // does for bug reports against dev-iter builds with uncommitted
+    // changes.
 
+    let repo_arg = repo_root.to_str().unwrap_or(".");
     let sha = Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap_or(".")])
-        .args(["rev-parse", "--short=12", "HEAD"])
+        .args(["-C", repo_arg, "rev-parse", "--short=12", "HEAD"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -41,7 +40,24 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // Cycle 195: tag the SHA with `+dirty` if the working tree has
+    // uncommitted changes. Without this, a dev build with edits to
+    // `src/main.rs` reports the same SHA as the clean tip — bug
+    // reports against custom builds are indistinguishable from
+    // bug reports against the matching upstream commit. `git status
+    // --porcelain` produces empty output on a clean tree, non-empty
+    // on any modification (tracked or untracked). Mirrors the
+    // `git describe --dirty` convention.
+    let dirty = Command::new("git")
+        .args(["-C", repo_arg, "status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
     match sha {
+        Some(sha) if dirty => println!("cargo:rustc-env=KETTLE_GIT_SHA= ({sha}+dirty)"),
         Some(sha) => println!("cargo:rustc-env=KETTLE_GIT_SHA= ({sha})"),
         None => println!("cargo:rustc-env=KETTLE_GIT_SHA="),
     }

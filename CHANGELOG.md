@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Added
+- **`--version` SHA tags with `+dirty` when the working tree has
+  uncommitted changes.** Cycle 192 captured the git SHA; cycle
+  195 distinguishes a clean build at a commit from a dev-iter
+  build with edits on top of that commit. Pre-fix, a developer
+  with edits to `src/main.rs` reported the same SHA as the clean
+  tip — bug reports against custom builds were indistinguishable
+  from reports against the matching upstream commit. New output
+  shapes:
+  - `kettle 0.1.0 (a2ff10b2f36f)` — clean tip.
+  - `kettle 0.1.0 (a2ff10b2f36f+dirty)` — same commit but with
+    uncommitted edits. Mirrors `git describe --dirty`
+    convention.
+  Build script also dropped the cycle-192 `rerun-if-changed`
+  restrictions — source-file edits need to refresh the dirty
+  marker, and the two `git` invocations are ~10ms total which
+  is well under build-time noise. The cost-benefit pivots
+  toward "always rerun" once `+dirty` matters for bug reports.
+
 - **`kettle --check-config` leads with the build version + SHA.**
   Cycle-192 follow-up. The version+SHA shipped in `--version` is
   the canonical "what build are you running" answer; a user
