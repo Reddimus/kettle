@@ -964,6 +964,12 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Drag-and-drop routes through bracketed paste.**
+      Cycle-175 follow-up. Vim/fzf/mc with bracketed paste
+      enabled used to interpret each char of the dropped path
+      as a normal-mode command. Now wrapped in
+      `\e[200~ … \e[201~` per-pane, matching the clipboard
+      paste handler's behavior.
 - [x] **`Config::default_path` treats empty env vars as unset.**
       Cycle-180 sibling for the config-path probe.
       `XDG_CONFIG_HOME=""` → relative `kettle/config` reading

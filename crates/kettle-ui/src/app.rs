@@ -2313,15 +2313,34 @@ impl ApplicationHandler<UserEvent> for App {
                 // user would have to add a space between the previous
                 // token and the path.
                 //
-                // Honors broadcast (cycle 173/174): when group input
-                // is on, the path goes to every pane in the active
-                // tab, same scoping as keystrokes and clipboard paste.
-                let mut bytes = shell_quote_path(&path).into_bytes();
-                bytes.push(b' ');
+                // Cycle 182: route through `paste_payload` so a vim /
+                // neovim / fzf / mc that has bracketed paste enabled
+                // sees the path wrapped in `\e[200~ … \e[201~` and
+                // treats it as a paste block (no per-char command
+                // interpretation). Without this, dropping a file onto
+                // vim caused each char of the path to act as a normal-
+                // mode command — chaotic. Clipboard paste already
+                // routes through the same helper; this brings drag-
+                // drop into line. Honors broadcast (cycle 173/174):
+                // when group input is on, the path goes to every pane
+                // in the active tab — and each pane gets the *per-
+                // pane* BRACKETED_PASTE wrap (cycle 174 invariant),
+                // so a broadcast set containing one shell + one vim
+                // doesn't break either of them.
+                let text = format!("{} ", shell_quote_path(&path));
                 if self.mux.broadcast {
-                    self.mux.broadcast_write(&bytes);
-                } else if let Some(p) = self.mux.focused() {
-                    p.term.write(&bytes);
+                    self.mux.broadcast_paste(&text);
+                } else {
+                    // Read the focused pane's BRACKETED_PASTE state first
+                    // — `focused_mode` and `mux.focused` both want &mut
+                    // self, so they have to run sequentially (not nested).
+                    let bracketed = self
+                        .focused_mode()
+                        .contains(kettle_core::TermMode::BRACKETED_PASTE);
+                    let bytes = input::paste_payload(&text, bracketed);
+                    if let Some(p) = self.mux.focused() {
+                        p.term.write(&bytes);
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();

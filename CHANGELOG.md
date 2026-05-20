@@ -7,6 +7,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Drag-and-drop routes through bracketed paste like clipboard
+  paste does.** Cycle-175 follow-up. The drop handler wrote the
+  shell-quoted path bytes raw, even when the focused pane had
+  `BRACKETED_PASTE` mode enabled (vim/neovim/fzf/mc default in
+  modern setups). With brackets disabled the user got the path
+  cleanly; with brackets enabled, the path bytes were *not*
+  wrapped in `\e[200~ … \e[201~`, so vim treated each char as a
+  normal-mode command — `'` opened a register selection, `:`
+  entered command mode, the path digits hopped lines, etc. Now
+  uses the same `input::paste_payload(text, bracketed)` helper
+  that clipboard paste uses, with per-pane wrap when broadcast
+  is on (cycle-174 invariant — a broadcast set containing one
+  shell + one vim doesn't break either of them). Same chrome-
+  wiring shape as cycles 173/174 — no new test, fix is correct-
+  by-construction once it routes through the shared helper.
+
 - **`XDG_CONFIG_HOME=""` no longer makes `default_path` return a
   *relative* path.** Cycle-180 sibling: same empty-env-var
   filter shape, applied to `Config::default_path`. Pre-cycle,
