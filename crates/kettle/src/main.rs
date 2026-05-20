@@ -234,6 +234,12 @@ fn main() -> anyhow::Result<()> {
             Some(p) if p.exists() => kettle_config::Config::load_from_with_diagnostics(p),
             _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
+        // Cycle 194: lead with the kettle build version + git SHA, so a
+        // user pasting `--check-config` output into a bug report doesn't
+        // also need to run `--version` separately. Matches the
+        // diagnostic-first-line convention `cargo --version`-style tools
+        // use in their support flags.
+        println!("kettle:  {KETTLE_VERSION}");
         match &path {
             Some(p) if p.exists() => println!("config:  {}", p.display()),
             Some(p) => println!("config:  {} (not found — using defaults)", p.display()),

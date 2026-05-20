@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle --check-config` leads with the build version + SHA.**
+  Cycle-192 follow-up. The version+SHA shipped in `--version` is
+  the canonical "what build are you running" answer; a user
+  pasting `--check-config` output into a bug report previously
+  had to also run `--version` and quote it separately. The first
+  line of `--check-config` is now `kettle:  0.1.0 (sha12)` —
+  one paste covers both the build identity and the resolved
+  config. Same convention `cargo --version`-style tools use for
+  diagnostic flags. Output:
+  ```
+  kettle:  0.1.0 (a2ff10b2f36f)
+  config:  ~/.config/kettle/config
+  theme:   TokyoNight Night
+  …
+  ```
+
 ### Documentation
 - **`docs/UX-COMPARISON.md` matrix now has a broadcast/group-input
   row.** The 173/174/178/184 trilogy made broadcast a real
