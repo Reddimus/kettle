@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Action::NewWindow` now inherits `--config FILE`.** A user
+  who launched kettle with `kettle --config /custom.conf` and
+  then hit `Ctrl+Shift+I` (or invoked `New window` from the
+  command palette) got a child process loading the *default*
+  config path. Their theme / font / keybinds appeared in the
+  original window but the new window looked like a vanilla
+  kettle launch — confusing and easy to mistake for a settings-
+  reset. The spawn now passes `--config <self.config_path>` to
+  the child when the parent had one, so the new window starts
+  with the same settings. No behavior change when no
+  `--config` was passed; falls back to the cycle-67 "new tab"
+  path if `current_exe()` is unresolvable.
+
+### Fixed
 - **`command =` clears the override; `ssh-host =` with empty
   halves is dropped at parse time.** Cycle-121 sibling. Two
   more empty-value bugs uncovered by extending the same

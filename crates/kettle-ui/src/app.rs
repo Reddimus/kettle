@@ -1219,11 +1219,21 @@ impl App {
                 // a new tab if the current executable isn't resolvable,
                 // which keeps the keybind useful on weird platforms (snap,
                 // appimage with custom argv0) instead of silently failing.
+                //
+                // Inherit `--config FILE` (cycle 123). Without this the
+                // child loaded the *default* config path even though
+                // the parent was launched with `kettle --config
+                // /custom.conf` — the user's theme/font/keybinds
+                // appeared in their original window but not in any
+                // child window opened via Ctrl+Shift+I.
                 let spawned = std::env::current_exe()
                     .ok()
                     .and_then(|exe| {
-                        std::process::Command::new(exe)
-                            .stdin(std::process::Stdio::null())
+                        let mut cmd = std::process::Command::new(exe);
+                        if let Some(cfg_path) = &self.config_path {
+                            cmd.arg("--config").arg(cfg_path);
+                        }
+                        cmd.stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .spawn()

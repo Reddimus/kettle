@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::NewWindow` inherits `--config FILE`.** A
+      user with `kettle --config /custom.conf` who opened a
+      new window via Ctrl+Shift+I got a child loading the
+      default config — their theme/font/keybinds vanished
+      from the new window with no warning. The spawn now
+      passes `--config self.config_path` to the child.
 - [x] **`command =` clears, `ssh-host = empty=...` is
       dropped.** Sibling to cycle 121. Empty `command` used
       to leave `Some("")` and break `shell_argv`; now
