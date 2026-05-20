@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **OSC 104 (no-param) + OSC 110/111/112 reset
+      conformance pins.** Set-side conformance was tested
+      across cycles 47/56/65/66; the matching reset-side path
+      (OSC 110/111/112 = reset default fg/bg/cursor; OSC 104
+      with no params = reset *all* 256 palette indices) was
+      exercised via alacritty/vte but not pinned in kettle, so
+      a future upstream regression could silently break it.
+      +2 tests cover both branches.
 - [x] **`docs/kettle.example.config` covers every key (was 9 of
       ~35).** Major onboarding gap — copying the example never
       surfaced `font-feature` / `tab-bar` / `scrollbar` /

@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Tests
+- **Pin OSC 104 (no-param) and OSC 110/111/112 reset conformance.**
+  Cycle 47 pinned OSC 104;N (single-index reset). Cycle 56/65/66
+  pinned OSC 10/11/12 SET → renderer round-trips. The reset
+  siblings — OSC 110 / 111 / 112 (reset default fg / bg / cursor)
+  and OSC 104 with no parameters (reset *all* 256 palette
+  indices) — were exercised through vte+alacritty but not pinned
+  in kettle. A future upstream regression silently disconnecting
+  any of those paths would slip through CI. Two new conformance
+  tests:
+    + `osc_110_111_112_reset_default_fg_bg_cursor_slots` — set
+      each of `Colors[256..=258]` via OSC 10/11/12, confirm the
+      matching `OSC 11X` clears the slot.
+    + `osc_104_no_params_resets_all_256_palette_slots` —
+      populate slots 1/2/200 via OSC 4, send `\e]104\a`, assert
+      every index in `0..256` is back to None (the "reset
+      palette to defaults" trick that theme-changers like
+      `zsh-colorize` emit on exit).
+
 ### Documentation
 - **`docs/kettle.example.config` documents every key kettle
   understands (was 9 of ~35).** New onboarding users copying the

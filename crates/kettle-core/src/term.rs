@@ -1324,6 +1324,81 @@ mod conformance {
     }
 
     #[test]
+    fn osc_104_no_params_resets_all_256_palette_slots() {
+        // OSC 104 with no parameters (just `\e]104\a` or `\e]104;\a`)
+        // resets *every* palette index (0..256), not just one. xterm
+        // documents this: "OSC 104 ; c → reset color number c (default
+        // restore palette)." Tools like `colorls`/`zsh-colorize`'s
+        // theme-changers emit it to undo their session-wide palette
+        // overrides on exit. The kettle conformance test from cycle 47
+        // covered only the indexed form (`\e]104;1\a`); pin the
+        // no-arg-resets-all branch too so it can't quietly regress
+        // (e.g. if alacritty/vte upstream change the dispatch table).
+        let (mut t, mut p, _rx) = harness_rx(8, 2);
+        // Populate three slots so we have something to confirm reset against.
+        feed(&mut t, &mut p, b"\x1b]4;1;rgb:11/22/33\x07");
+        feed(&mut t, &mut p, b"\x1b]4;2;rgb:44/55/66\x07");
+        feed(&mut t, &mut p, b"\x1b]4;200;rgb:77/88/99\x07");
+        assert!(t.colors()[1].is_some(), "slot 1 should be set");
+        assert!(t.colors()[2].is_some(), "slot 2 should be set");
+        assert!(t.colors()[200].is_some(), "slot 200 should be set");
+        // OSC 104 with no parameters → reset all 256 palette indices.
+        feed(&mut t, &mut p, b"\x1b]104\x07");
+        for idx in 0..256 {
+            assert!(
+                t.colors()[idx].is_none(),
+                "slot {idx} should be cleared after OSC 104 (no params)"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_110_111_112_reset_default_fg_bg_cursor_slots() {
+        // OSC 110 / 111 / 112 are the reset siblings of OSC 10/11/12 (set
+        // default fg/bg/cursor). They tell the engine to throw away any
+        // override the user-program set so the renderer falls back to the
+        // theme's defaults. Kettle's render path reads `t.colors()[256..=258]`
+        // each frame; if the engine didn't honor these resets, a program
+        // that did `\e]10;rgb:11/22/33\a` then `\e]110\a` to undo would
+        // leave the (red) override in place — a real bug class that
+        // matches the cycle-56/65/66 "set went through but reset was
+        // silently dropped" shape (cycles fixed the set path; this test
+        // pins the reset path so it can't regress in the other
+        // direction). Same loop covers all three indices in one
+        // declarative table.
+        for (idx, set, reset) in &[
+            (
+                256usize,
+                &b"\x1b]10;rgb:11/22/33\x07"[..],
+                &b"\x1b]110\x07"[..],
+            ),
+            (
+                257usize,
+                &b"\x1b]11;rgb:44/55/66\x07"[..],
+                &b"\x1b]111\x07"[..],
+            ),
+            (
+                258usize,
+                &b"\x1b]12;rgb:77/88/99\x07"[..],
+                &b"\x1b]112\x07"[..],
+            ),
+        ] {
+            let (mut t, mut p, _rx) = harness_rx(8, 2);
+            assert!(t.colors()[*idx].is_none(), "slot {idx} clean pre-set");
+            feed(&mut t, &mut p, set);
+            assert!(
+                t.colors()[*idx].is_some(),
+                "slot {idx} should be populated after OSC set"
+            );
+            feed(&mut t, &mut p, reset);
+            assert!(
+                t.colors()[*idx].is_none(),
+                "slot {idx} should be cleared after the OSC reset sibling"
+            );
+        }
+    }
+
+    #[test]
     fn osc_color_set_query_reset_round_trip_through_engine() {
         // Round-trip companion to the OSC query test: confirm OSC 4 set +
         // OSC 104 reset actually move the engine's `Colors` slot (so our
