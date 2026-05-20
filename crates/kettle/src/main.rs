@@ -299,7 +299,17 @@ fn main() -> anyhow::Result<()> {
         println!("kettle:  {KETTLE_VERSION}");
         match &path {
             Some(p) if p.exists() => println!("config:  {}", p.display()),
-            Some(p) => println!("config:  {} (not found — using defaults)", p.display()),
+            Some(p) => {
+                println!("config:  {} (not found — using defaults)", p.display());
+                // Cycle 228: when no config exists at the resolved
+                // default path, point the user at the bootstrap
+                // one-liner. Without this, a newcomer who ran
+                // `--check-config` and saw "using defaults" had to
+                // know on their own that `--print-default-config`
+                // (cycle 227) is the way to create one. The hint
+                // names the actual resolved path so copy-paste works.
+                println!("hint:    kettle --print-default-config > {}", p.display());
+            }
             None => println!("config:  (no path resolvable — using defaults)"),
         }
         println!("theme:   {}", cfg.theme_name);

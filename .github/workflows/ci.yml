@@ -113,6 +113,15 @@ jobs:
           # back to defaults and reports "status: OK". Just verify
           # it exits 0 and includes the kettle: build-identity line.
           cargo run -q -p kettle -- --check-config | grep -E '^kettle:  [0-9]'
+          # Cycle 228: when no config file exists at the resolved
+          # default path (which is exactly the state on a fresh CI
+          # runner), --check-config now emits a `hint:` line pointing
+          # at the cycle-227 bootstrap one-liner. Verify the hint
+          # appears so a future regression that drops the hint
+          # (or breaks the path interpolation) is caught here, not
+          # by a confused first-time user.
+          cargo run -q -p kettle -- --check-config \
+            | grep -E '^hint: +kettle --print-default-config > '
           cargo run -q -p kettle -- --config-path
           # `--list-themes` should always be 500+ entries (the bundled
           # iTerm2-Color-Schemes ghostty set). A regression in

@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Added
+- **`kettle --check-config` emits a bootstrap hint when no config
+  exists.** When the resolved config path doesn't exist on disk
+  (the common newcomer state), the output now includes:
+  ```
+  config:  /home/you/.config/kettle/config (not found — using defaults)
+  hint:    kettle --print-default-config > /home/you/.config/kettle/config
+  ```
+  The hint interpolates the **actual** resolved path so the user
+  can copy-paste verbatim. Suppressed when the config does exist
+  (no nag for users who already set one up). CI smoke verifies
+  the hint appears via `grep -E '^hint: +kettle --print-default-config > '`
+  so a future regression that drops the hint is caught here, not
+  by a confused first-time user.
+
 - **`kettle --print-default-config` — one-command first-launch
   bootstrap.** The documented example config lives at
   `docs/kettle.example.config` (~140 commented lines) and a
