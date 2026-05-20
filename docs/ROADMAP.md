@@ -964,6 +964,12 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`home_dir_fallback` treats empty env vars as unset.**
+      Cycle-162 follow-up. `HOME=""` (stripped CI container,
+      misconfigured `unset HOME` parent) returned an empty
+      PathBuf that flowed through to `cmd.cwd("")` — invalid
+      empty path to the OS spawn. Filter empty values; probe
+      continues to USERPROFILE / APPDATA. +1 test.
 - [x] **Visual indicator when broadcast mode is on.** Active tab's
       left-edge accent flips to theme yellow (palette[3]) when
       broadcast is enabled — closes the loop on cycles 173/174.

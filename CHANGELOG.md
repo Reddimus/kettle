@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`HOME=""` (empty env var) is treated as unset in
+  `home_dir_fallback`.** Cycle-162 follow-up. The cycle-162 fix
+  introduced `home_dir_fallback` to probe HOME → USERPROFILE →
+  APPDATA when the recorded session cwd no longer exists, so
+  Windows users (whose `HOME` is unset) finally landed in their
+  user profile instead of kettle's launch directory. But the
+  probe used `var_os(k)` which returns `Some(OsString::new())`
+  for an *empty* value (`HOME=""`) — a real shape in stripped-
+  down CI containers, after a misconfigured `unset HOME` /
+  `export HOME=` in a parent shell, or in custom Docker entry-
+  points. The empty value flowed through to
+  `CommandBuilder::cwd("")` which then handed the OS spawn an
+  invalid empty path. Fix: filter empty values as if unset, so
+  the probe continues to the next variable in the fallback
+  chain. Test pins every level: HOME empty → USERPROFILE, both
+  empty → APPDATA, all three empty → None (cmd.cwd left
+  untouched). +1 test (242 total).
+
 ### Documentation
 - **Hardcoded test-count claims removed from user-facing docs.**
   Cycle 172 caught `docs/TESTING.md`'s "213 tests as of cycle 128"

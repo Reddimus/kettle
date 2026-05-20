@@ -48,9 +48,19 @@ pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 /// - `USERPROFILE` — the Windows-native home (`C:\Users\Bob`)
 /// - `APPDATA` — Windows last-ditch fallback (`...\AppData\Roaming`)
 ///
-/// Returns `None` only on a stripped-down environment where none are
-/// set; callers leave `CommandBuilder::cwd` unset in that case, which
-/// makes `portable_pty` inherit kettle's launch directory.
+/// An *empty* env var (e.g., `HOME=""` — possible in stripped-down CI
+/// containers or after a misconfigured shell `unset HOME` / `export
+/// HOME=`) is treated as unset and the probe continues to the next
+/// variable. Pre-cycle-180, `var_os("HOME")` would return
+/// `Some(OsString::new())` and this function returned `PathBuf::from("")`
+/// — `CommandBuilder::cwd("")` then fed an invalid empty path to the
+/// OS spawn call (which on Unix means "no cwd" but the intent here is
+/// to actively *pick* a home, so the silent fall-through was wrong).
+///
+/// Returns `None` only on a stripped-down environment where none of
+/// the three are set to a non-empty value; callers leave
+/// `CommandBuilder::cwd` unset in that case, which makes `portable_pty`
+/// inherit kettle's launch directory.
 ///
 /// `lookup` is passed in so the env-probe order is unit-testable
 /// without touching the process env (which would race with parallel
@@ -58,9 +68,10 @@ pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 pub(crate) fn home_dir_fallback(
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Option<std::path::PathBuf> {
-    lookup("HOME")
-        .or_else(|| lookup("USERPROFILE"))
-        .or_else(|| lookup("APPDATA"))
+    let pick = |k: &str| lookup(k).filter(|v| !v.is_empty());
+    pick("HOME")
+        .or_else(|| pick("USERPROFILE"))
+        .or_else(|| pick("APPDATA"))
         .map(std::path::PathBuf::from)
 }
 
@@ -808,6 +819,38 @@ mod home_dir_tests {
         // Nothing set (minimal Linux container without HOME) → None;
         // caller leaves cmd.cwd() untouched.
         assert_eq!(home_dir_fallback(from(&[])), None);
+    }
+
+    #[test]
+    fn empty_env_var_value_falls_through_to_next() {
+        // Cycle 180: `HOME=""` (a deliberately empty env var — happens
+        // in stripped-down CI containers and after a misconfigured
+        // `unset HOME` / `export HOME=` in a parent shell) used to
+        // return `Some(PathBuf::from(""))`. CommandBuilder::cwd("")
+        // then fed an invalid empty path to the OS spawn. Now empty
+        // values are filtered as if unset, so the probe continues to
+        // the next variable. Pinned at every level of the chain.
+        //
+        // HOME empty, USERPROFILE valid → USERPROFILE wins.
+        assert_eq!(
+            home_dir_fallback(from(&[("HOME", ""), ("USERPROFILE", r"C:\u")])),
+            Some(PathBuf::from(r"C:\u")),
+        );
+        // HOME empty, USERPROFILE empty, APPDATA valid → APPDATA wins.
+        assert_eq!(
+            home_dir_fallback(from(&[
+                ("HOME", ""),
+                ("USERPROFILE", ""),
+                ("APPDATA", r"C:\a"),
+            ])),
+            Some(PathBuf::from(r"C:\a")),
+        );
+        // All three empty → None. Caller leaves cmd.cwd() untouched
+        // rather than handing an empty path to the OS spawn.
+        assert_eq!(
+            home_dir_fallback(from(&[("HOME", ""), ("USERPROFILE", ""), ("APPDATA", ""),])),
+            None,
+        );
     }
 }
 
