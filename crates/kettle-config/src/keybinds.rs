@@ -263,7 +263,14 @@ pub fn action_names() -> Vec<&'static str> {
 impl Action {
     pub(crate) fn from_name(s: &str) -> Option<Action> {
         use Action::*;
-        Some(match s {
+        // Cycle 147: lowercase before matching so `keybind =
+        // ctrl+shift+c = Copy` resolves the same as `... = copy`.
+        // Pre-fix the capitalized spelling silently dropped (cycle
+        // 88's malformed-value check flagged it, but the runtime
+        // still didn't bind anything). Same shape as cycle 146's
+        // enum-key case-insensitivity.
+        let lowered = s.trim().to_ascii_lowercase();
+        Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
             "paste_from_clipboard" | "paste" => Paste,
             "new_tab" => NewTab,
@@ -537,6 +544,32 @@ mod tests {
         assert_eq!(t.label(), "Ctrl+Shift+E");
         assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+    }
+
+    #[test]
+    fn action_from_name_is_case_insensitive() {
+        // Cycle 147: same pattern as cycle 146's enum-key case-
+        // insensitivity. A user writing `keybind = ctrl+shift+c =
+        // Copy` (capitalized) used to silently drop the binding —
+        // `from_name` returned None on the unrecognized case
+        // variant, and apply_keybind's silent-skip path swallowed
+        // it. Now lowercased before matching.
+        use Action::*;
+        assert_eq!(Action::from_name("Copy"), Some(Copy));
+        assert_eq!(Action::from_name("COPY"), Some(Copy));
+        assert_eq!(Action::from_name("copy"), Some(Copy));
+        // Multi-word names with underscores too.
+        assert_eq!(
+            Action::from_name("INCREASE_FONT_SIZE"),
+            Some(IncreaseFontSize)
+        );
+        assert_eq!(Action::from_name("Goto_Split:Up"), Some(FocusUp));
+        // Parametric form still works with case variants.
+        assert!(matches!(Action::from_name("GOTO_TAB:1"), Some(GotoTab(0))));
+        // Surrounding whitespace also trimmed.
+        assert_eq!(Action::from_name("  paste  "), Some(Paste));
+        // Real typos still return None.
+        assert!(Action::from_name("Cpy").is_none());
     }
 
     #[test]

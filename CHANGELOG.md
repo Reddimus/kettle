@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Action::from_name` is now case-insensitive.** Same pattern
+  as cycle 146's enum-key fix, applied to keybind action names.
+  A user writing `keybind = ctrl+shift+c = Copy` (capitalized)
+  used to silently drop the binding — `from_name` returned
+  None on the unrecognized case variant, and `apply_keybind`'s
+  silent-skip path swallowed it. `--check-config` flagged it
+  via cycle 85, but the runtime didn't bind anything. Now
+  lowercased (and whitespace-trimmed) before matching, so
+  `Copy` / `COPY` / `copy` / `  paste  ` all resolve. The
+  parametric `GOTO_TAB:1` form also works. +1 test
+  (`action_from_name_is_case_insensitive`).
+
+### Fixed
 - **Enum config keys are now case-insensitive.** Cycle 138
   made the bool keys case-insensitive via `parse_bool`.
   The six enum keys (`bell`, `osc52`/`clipboard`, `tab-bar`,

@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::from_name` is case-insensitive +
+      trimmed.** Same pattern as cycle 146 on the keybind
+      action surface. `keybind = ctrl+shift+c = Copy`
+      finally resolves to Copy; pre-fix it silently
+      dropped (diagnostic flagged it but runtime
+      ignored). +1 test.
 - [x] **Enum config keys are case-insensitive.** Cycle 138
       made bools case-insensitive; cycle 146 finishes the
       job for the six enum keys (`bell`, `osc52`,
