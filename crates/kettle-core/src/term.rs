@@ -1190,6 +1190,45 @@ mod conformance {
     }
 
     #[test]
+    fn sgr_58_sets_per_cell_underline_color() {
+        // Neovim spell-check / git diff / lsp diagnostics emit per-cell
+        // underline color via SGR 58. The engine stores it on the cell;
+        // the renderer reads it (cycle 80) so the squiggle color follows
+        // the request instead of using the text fg. Confirms truecolor
+        // form `\e[58;2;r;g;bm` reaches `cell.underline_color()`.
+        use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb as AnsiRgb};
+        let (mut t, mut p) = harness(8, 2);
+        // Underline on + red underline color, then write a glyph.
+        feed(&mut t, &mut p, b"\x1b[4m\x1b[58;2;200;30;30mX");
+        let grid = t.grid();
+        let cell = &grid[Point::new(Line(0), Column(0))];
+        assert_eq!(cell.c, 'X');
+        assert!(
+            cell.flags.contains(Flags::UNDERLINE),
+            "SGR 4 must set UNDERLINE"
+        );
+        assert_eq!(
+            cell.underline_color(),
+            Some(AnsiColor::Spec(AnsiRgb {
+                r: 200,
+                g: 30,
+                b: 30
+            })),
+            "SGR 58 must store the per-cell underline color"
+        );
+        // SGR 59 resets to default (None), leaving UNDERLINE intact.
+        feed(&mut t, &mut p, b"\x1b[59mY");
+        let cell2 = &t.grid()[Point::new(Line(0), Column(1))];
+        assert_eq!(cell2.c, 'Y');
+        assert!(cell2.flags.contains(Flags::UNDERLINE));
+        assert_eq!(
+            cell2.underline_color(),
+            None,
+            "SGR 59 must clear the per-cell underline color"
+        );
+    }
+
+    #[test]
     fn osc4_multi_index_query_emits_one_request_per_index() {
         // vte's OSC 4 handler chunks the params in pairs (`;idx;val`), so
         // a single `OSC 4 ; 1 ; ? ; 7 ; ?` should ask for *two* colors in

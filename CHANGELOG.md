@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **SGR 58 per-cell underline color is now respected.** The
+  cycle-79 underline render used the cell's `fg` for the line
+  color — fine for plain `\e[4m` but wrong for neovim spell-check,
+  git diff, and LSP diagnostics, which emit `\e[58;2;r;g;b m` to
+  draw a *separate* (typically red) squiggle while keeping the
+  text in its normal palette color. Renderer now reads
+  `cell.underline_color()` and uses it for the underline quad,
+  falling back to `fg` when unset. +1 conformance test pinning
+  the engine contract: SGR 58 stores the spec, SGR 59 clears it,
+  UNDERLINE flag survives.
 - **SGR 4 underline + SGR 9 strikeout are rendered.** The engine
   tracked `Flags::UNDERLINE`, `Flags::UNDERCURL` (the `4:3` curly
   variant), and `Flags::STRIKEOUT` correctly — the conformance

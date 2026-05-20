@@ -444,6 +444,10 @@
       at `cell_bottom-2` for underline, `cell_mid` for strikeout.
       Curly variant draws plain underline for now; real wave
       needs a shader tweak (deferred).
+- [x] **SGR 58 per-cell underline color respected.** Renderer
+      reads `cell.underline_color()` for the underline quad; vim
+      spell-check / LSP diagnostics now draw their red squiggles
+      under otherwise-normal text. +1 conformance test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

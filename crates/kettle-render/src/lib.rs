@@ -908,21 +908,26 @@ impl Renderer {
                 ));
             }
             // SGR 4 underline / SGR 9 strikeout: both engine-tracked but
-            // ignored before this cycle. The engine `sgr_underline_dim_
+            // ignored before cycle 79. The engine `sgr_underline_dim_
             // strike` conformance test asserted the flags reach the cell;
-            // this is the render side that turns them into pixels. Use
-            // `fg` so the line color follows the text (or the dim/
-            // selection override above, whichever resolved). Curly under-
-            // line (`Flags::UNDERCURL`, `\e[4:3m` for spell-check) draws
-            // as a plain underline for now — a real wave needs a shader
-            // tweak we'll do separately.
+            // these are the render quads that turn them into pixels.
+            //
+            // Underline color: SGR 58 (`\e[58;2;r;g;bm` / `[58;5;Nm`) sets
+            // a per-cell `underline_color`, used by neovim spell-check to
+            // draw red squiggles on otherwise-normal text. Resolve it via
+            // the same path as fg/bg; fall back to `fg` when unset so
+            // every existing usage keeps working.
             if flags.intersects(Flags::UNDERLINE | Flags::UNDERCURL) {
+                let line_color = cell
+                    .underline_color()
+                    .map(|c| color::resolve(c, theme, term_colors))
+                    .unwrap_or(fg);
                 quads.push(rect(
                     ox + col as f32 * cw,
                     oy + row as f32 * ch + ch - 2.0,
                     cw,
                     1.0,
-                    fg,
+                    line_color,
                     1.0,
                 ));
             }
