@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`command =` clears the override; `ssh-host =` with empty
+  halves is dropped at parse time.** Cycle-121 sibling. Two
+  more empty-value bugs uncovered by extending the same
+  audit:
+  - `command = /usr/bin/fish` followed by `command =` (the
+    user trying to revert) used to leave `cfg.shell =
+    Some("")`. `shell_argv` then handed `vec![""]` to
+    `Terminal::new`, producing an unspawnable empty program
+    name. Now: empty value clears the override to `None`,
+    so the engine falls back to `$SHELL` as intended.
+  - `ssh-host = name=` or `ssh-host = =target` (one half
+    empty) used to push `("name", "")` / `("", "target")`
+    into `cfg.ssh_hosts`. `--check-config` flagged these as
+    malformed (cycle 88) but the *runtime* list still
+    contained them — the SSH launcher then showed an empty
+    row or tried to connect to "". Now filtered at parse
+    time so the diagnostic and the runtime state agree.
+  Extended the cycle-121 test with both cases.
 - **Empty string-config values no longer silently break
   rendering.** The parser docstring promises "empty value
   resets the key" but `parse_collect` unconditionally

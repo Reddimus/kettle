@@ -734,11 +734,32 @@ impl Config {
                         }
                     }
                 }
-                "command" | "shell" => cfg.shell = Some(e.value.clone()),
+                "command" | "shell" => {
+                    // Empty `command =` is "reset to default" (same
+                    // shape as cycle 121's font-family fix). Without
+                    // this, `Some("")` slips through to `shell_argv`
+                    // which would spawn an empty program name and
+                    // either fail with an unclear error or — worse —
+                    // leave the user with no shell at all.
+                    cfg.shell = if e.value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(e.value.clone())
+                    };
+                }
                 "ssh-host" => {
+                    // Filter empty name / target halves at parse time
+                    // so they don't sneak into the runtime list and
+                    // surface as an empty launcher row or a connection
+                    // to "". `--check-config` already FLAGS these
+                    // (detect_malformed_values, cycle 88), but the
+                    // bad entries were still being pushed — the
+                    // diagnostic and the runtime state disagreed.
                     if let Some((name, target)) = e.value.split_once('=') {
-                        cfg.ssh_hosts
-                            .push((name.trim().to_string(), target.trim().to_string()));
+                        let (n, t) = (name.trim(), target.trim());
+                        if !n.is_empty() && !t.is_empty() {
+                            cfg.ssh_hosts.push((n.to_string(), t.to_string()));
+                        }
                     }
                 }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
@@ -881,6 +902,36 @@ mod config_tests {
         // interpretation; the docstring is ambiguous and the
         // skip-form is cheaper to implement and harder to mis-use.
         // (Users wanting a reset can simply remove the line.)
+
+        // Cycle 122 additions:
+        // `command =` (empty) clears the override to None so the
+        // engine falls back to the user's $SHELL — previously
+        // Some("") slipped through to shell_argv and produced an
+        // unspawnable empty argv.
+        let c = Config::parse_text("command = /usr/bin/fish\ncommand =\n");
+        assert!(
+            c.shell.is_none(),
+            "empty command should clear override; got {:?}",
+            c.shell
+        );
+
+        // ssh-host with an empty name or empty target is silently
+        // dropped (matches detect_malformed_values — cycle 88 — which
+        // flagged these for --check-config but the runtime list
+        // still contained them).
+        let c = Config::parse_text(
+            "ssh-host = good=me@host\n\
+             ssh-host = =onlytarget\n\
+             ssh-host = onlyname=\n\
+             ssh-host = bothbad=\n",
+        );
+        assert_eq!(
+            c.ssh_hosts.len(),
+            1,
+            "only the well-formed ssh-host entry should survive; got {:?}",
+            c.ssh_hosts
+        );
+        assert_eq!(c.ssh_hosts[0].0, "good");
     }
 
     #[test]

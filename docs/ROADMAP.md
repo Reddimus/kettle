@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`command =` clears, `ssh-host = empty=...` is
+      dropped.** Sibling to cycle 121. Empty `command` used
+      to leave `Some("")` and break `shell_argv`; now
+      clears to None and falls back to `$SHELL`. Half-empty
+      `ssh-host = name=` / `= target` entries that
+      `--check-config` already flagged (cycle 88) are now
+      also rejected at parse time so the runtime list and
+      the diagnostic agree.
 - [x] **Empty string-config values stop silently breaking
       rendering.** `font-family =` used to set the family
       to `""`; renderer drifted into cosmic-text's silent
