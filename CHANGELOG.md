@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OSC 11 (set default background) now reaches the chrome.**
+  The cycle-56 fix paired OSC 12 (cursor color) set with the render
+  path; OSC 11 had the same gap but on a larger surface — the
+  engine parsed it and populated `Colors[257]`, `color::resolve`
+  honored the override for individual cells, but three other places
+  hard-wired `theme.background`: the surface clear-color (window
+  padding / pane gaps), the active tab-bar segment, and the
+  per-cell "is this the default bg, skip the quad?" check. A
+  program flipping the bg to red would paint the cells red and
+  leave the padding theme-blue — the chrome wouldn't follow. Now
+  computed once per `render_frame` from the focused pane's
+  `term_colors[257]` and threaded through all three places. Same
+  precedence as the OSC 11 *query* path (cycle 44).
 - **`Alt+1..9` jumps to tab 1..9** (kitty / Terminator / iTerm2 /
   Ghostty parity). The `Action::GotoTab(u8)` handler has existed
   since the early cycles, but `Action::from_name` had no parser

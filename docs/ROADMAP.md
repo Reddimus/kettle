@@ -386,6 +386,11 @@
       was orphaned — no `goto_tab:N` parser and no default keybind.
       Now bound by default + `keybind = alt+5=goto_tab:5` parses
       (1-based; 0 rejected to surface the ambiguity). +2 tests.
+- [x] **OSC 11 default-bg override reaches the chrome.** Mirror
+      of the OSC 12 cursor-color fix in cycle 56 — surface clear,
+      active tab-bar segment, and per-cell default-bg check all
+      now read from `term_colors[257]` instead of hard-wiring
+      `theme.background`.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

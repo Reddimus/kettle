@@ -287,6 +287,19 @@ impl Renderer {
         overlay: &Overlay,
     ) -> Result<()> {
         let theme = &cfg.theme;
+        // OSC 11 (set default background) override from the focused pane.
+        // The engine stores it in `Colors[257]`; the renderer needs it for
+        // the surface clear-color (chrome regions: window padding, gaps
+        // between panes, tab-bar background) so a program-driven bg flip
+        // reaches the *whole* window rather than just cells with explicit
+        // `Named(Background)`. Same precedence the OSC 11 query path
+        // returns (cycle 44) — override wins, theme is fallback.
+        let default_bg = panes
+            .iter()
+            .find(|p| p.focused)
+            .and_then(|p| p.term.colors()[257])
+            .map(|c| Rgb::new(c.r, c.g, c.b))
+            .unwrap_or(theme.background);
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
         let cw = self.cell_w;
@@ -315,7 +328,7 @@ impl Renderer {
             for s in &tabbar.segments {
                 let (x, _, w, _) = s.rect;
                 if s.active {
-                    quads.push(rect(x, by, w, tabbar.height, theme.background, 1.0));
+                    quads.push(rect(x, by, w, tabbar.height, default_bg, 1.0));
                     // Active accent bar on the left edge.
                     quads.push(rect(x, by, 2.0, tabbar.height, theme.palette[4], 1.0));
                 }
@@ -749,7 +762,7 @@ impl Renderer {
                 label: Some("kettle-encoder"),
             });
         {
-            let bg = theme.background;
+            let bg = default_bg;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -806,7 +819,12 @@ impl Renderer {
         let content = term.renderable_content();
         let term_colors = content.colors;
         let cols = term.grid().columns();
-        let default_bg = theme.background;
+        // Match the surface clear-color so a cell whose bg resolves to the
+        // active default (OSC 11 override or theme bg) doesn't paint a
+        // redundant quad over the already-correct backdrop.
+        let default_bg = term_colors[257]
+            .map(|c| Rgb::new(c.r, c.g, c.b))
+            .unwrap_or(theme.background);
 
         let mut spans: Vec<(String, Rgb, bool, bool)> = Vec::new();
         let mut span_line_breaks: Vec<usize> = Vec::new();
