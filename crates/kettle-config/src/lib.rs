@@ -1169,78 +1169,97 @@ mod config_tests {
     }
 
     #[test]
-    fn readme_referenced_images_exist() {
-        // Cycle 223: the README now embeds `docs/images/kettle-hero.png`
-        // as its hero image. If a contributor renames or moves that
-        // file (or simply forgets to commit it), the README on
-        // github.com/Reddimus/kettle renders a broken-image icon on the
-        // very first paragraph — the first thing a visitor sees.
+    fn user_facing_doc_images_exist() {
+        // Cycle 223 added an image drift guard for the README only.
+        // Cycle 224 extends it to every `docs/*.md` user-facing doc
+        // — UX-COMPARISON.md already references two images
+        // (kettle-showcase.png + refs/xterm.png), with the same
+        // forgotten-commit / rename / broken-image-on-github regression
+        // risk the README guard exists to prevent.
         //
-        // Drift-guard the contract: scan README for every relative
-        // image ref `![…](path)`, then assert each path exists.
-        // External (`http(s)://`) refs are skipped so we don't make
-        // CI depend on network reachability.
+        // Relative-path resolution: `![…](path)` in a markdown doc
+        // resolves against the DOC's directory, not the repo root.
+        // README's hero is `docs/images/kettle-hero.png` (relative to
+        // the repo root); UX-COMPARISON.md's hero is `images/...`
+        // (relative to docs/). Both have to work.
         //
-        // Implementation: walk byte offsets so absolute positions stay
-        // stable. The earlier draft updated a moving `search: &str`
-        // and then computed offsets against the parent — the math
-        // was wrong and the guard silently passed regardless. Test
-        // for this with a sed-substitute-and-verify-failure run if
-        // the parser is touched again.
+        // Implementation: walk byte offsets so absolute positions
+        // stay stable. The earlier cycle-223 draft updated a moving
+        // `search: &str` and then computed offsets against the
+        // parent — the math was wrong and the guard silently passed
+        // regardless. Test for this with a sed-substitute-and-
+        // verify-failure run if the parser is touched again.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
-        let readme = std::fs::read_to_string(repo_root.join("README.md"))
-            .expect("README.md must exist at the repo root");
-        let bytes = readme.as_bytes();
-        let mut i = 0usize;
-        let mut checked = 0usize;
-        while i + 2 < bytes.len() {
-            // Find next `![` (image markdown). `image_alt` then runs
-            // until the next `]` and the path starts at `](`.
-            if bytes[i] == b'!' && bytes[i + 1] == b'[' {
-                // Find the closing `]` of the alt text.
-                let alt_close = match readme[i + 2..].find(']') {
-                    Some(j) => i + 2 + j,
-                    None => break,
-                };
-                // Path starts immediately after `](` — require that.
-                if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
-                    i = alt_close + 1;
-                    continue;
+
+        // Helper: scan one markdown file, return number of image
+        // embeds verified. Panics on a broken ref with a clear msg.
+        fn scan(file_abs: &std::path::Path, file_rel: &str) -> usize {
+            let text = std::fs::read_to_string(file_abs)
+                .unwrap_or_else(|e| panic!("missing {file_rel}: {e}"));
+            let bytes = text.as_bytes();
+            let parent = file_abs.parent().expect("doc has a parent dir");
+            let mut i = 0usize;
+            let mut checked = 0usize;
+            while i + 2 < bytes.len() {
+                if bytes[i] == b'!' && bytes[i + 1] == b'[' {
+                    let alt_close = match text[i + 2..].find(']') {
+                        Some(j) => i + 2 + j,
+                        None => break,
+                    };
+                    if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
+                        i = alt_close + 1;
+                        continue;
+                    }
+                    let path_start = alt_close + 2;
+                    let path_end = match text[path_start..].find(')') {
+                        Some(j) => path_start + j,
+                        None => break,
+                    };
+                    let raw = &text[path_start..path_end];
+                    let path = raw.split_whitespace().next().unwrap_or(raw);
+                    if !path.starts_with("http://") && !path.starts_with("https://") {
+                        // Resolve against the doc's own directory.
+                        let abs = parent.join(path);
+                        assert!(
+                            abs.exists(),
+                            "{file_rel} references image `{path}` but `{}` \
+                             does not exist (cycle 223/224 drift guard)",
+                            abs.display()
+                        );
+                        checked += 1;
+                    }
+                    i = path_end + 1;
+                } else {
+                    i += 1;
                 }
-                let path_start = alt_close + 2;
-                let path_end = match readme[path_start..].find(')') {
-                    Some(j) => path_start + j,
-                    None => break,
-                };
-                let raw = &readme[path_start..path_end];
-                // Strip an optional ` "title"` after the path.
-                let path = raw.split_whitespace().next().unwrap_or(raw);
-                // Skip external URLs (we don't want CI to depend on
-                // network reachability).
-                if !path.starts_with("http://") && !path.starts_with("https://") {
-                    let abs = repo_root.join(path);
-                    assert!(
-                        abs.exists(),
-                        "README references image `{path}` but `{}` \
-                         does not exist (cycle 223 drift guard)",
-                        abs.display()
-                    );
-                    checked += 1;
-                }
-                i = path_end + 1;
-            } else {
-                i += 1;
             }
+            checked
         }
-        // Sanity floor: the README has at least one image (the hero)
-        // since cycle 223. If the parser regresses to "finds zero
-        // images" (which would silently pass), this catches it.
+
+        // README first — cycle 223's contract: at least one image.
+        let readme_checks = scan(&repo_root.join("README.md"), "README.md");
         assert!(
-            checked >= 1,
-            "expected ≥ 1 image embed in README; found {checked} \
+            readme_checks >= 1,
+            "expected ≥ 1 image embed in README; found {readme_checks} \
              — parser likely regressed"
         );
+
+        // Every other docs/*.md — no per-file floor (some docs
+        // legitimately have no images), but parser bugs that match
+        // ZERO across ALL docs would be caught by README's floor.
+        let docs_dir = repo_root.join("docs");
+        if docs_dir.is_dir() {
+            for entry in std::fs::read_dir(&docs_dir).expect("read docs/") {
+                let entry = entry.expect("dirent");
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let rel = format!("docs/{}", path.file_name().unwrap().to_string_lossy());
+                scan(&path, &rel);
+            }
+        }
     }
 
     #[test]
