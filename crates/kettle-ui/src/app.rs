@@ -1310,9 +1310,26 @@ impl App {
                 }
             }
             Action::Reset => {
+                // RIS (`ESC c`) full-resets the engine: clears the grid,
+                // restores DEC modes to defaults, drops the alt-screen
+                // back. The PTY child then sees a fresh prompt next
+                // time it draws. But kettle owns several pieces of UI
+                // state OUTSIDE the engine — selection, scrollback
+                // display-offset, and the modal overlays (search,
+                // command palette, hint mode, SSH launcher) — and
+                // those used to survive a "reset" chord, leaving a
+                // half-cleared screen with stale highlight or an open
+                // modal floating over a freshly-reset terminal.
+                // Sweep them too so the chord really does mean
+                // "fresh start". Matches Alacritty's `Reset` action.
                 if let Some(p) = self.mux.focused() {
                     p.term.write(b"\x1bc");
                 }
+                self.clear_selection_on_input();
+                self.mux.search.open = false;
+                self.palette_input = None;
+                self.hint_state = None;
+                self.ssh_input = None;
             }
             Action::ScrollPageUp
             | Action::ScrollPageDown

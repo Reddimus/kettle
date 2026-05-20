@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::Reset` sweeps kettle's local UI state too.**
+      RIS (`ESC c`) reset the engine but selection, search,
+      command palette, hint mode, and SSH launcher all
+      survived — leaving stale chrome over a fresh grid. Now
+      cleared as part of the action.
 - [x] **`scroll_line_up` / `scroll_line_down` actions
       (Ctrl+Shift+Up/Down).** Filled the gap between full-screen
       `Shift+PageUp/Down` and extreme `Shift+Home/End` —

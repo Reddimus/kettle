@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`Action::Reset` (Ctrl+Shift+R) now also sweeps kettle's local
+  UI state.** Sending RIS (`ESC c`) to the engine reset the grid /
+  DEC modes / alt-screen, but kettle owns several pieces of state
+  *outside* the engine that survived the chord: the selection
+  highlight, any open modal overlay (search bar, command palette,
+  hint mode, SSH launcher). A user hitting Reset to recover from a
+  visually-jammed terminal got a half-cleared result — fresh grid
+  underneath, stale modal floating over it, or a leftover
+  highlight on cells that just changed. Now sweeps all four after
+  the RIS write: `clear_selection_on_input`, `mux.search.open =
+  false`, `palette_input = None`, `hint_state = None`,
+  `ssh_input = None`. Matches Alacritty's `Reset` action.
+
 ### Added
 - **`scroll_line_up` / `scroll_line_down` actions bound to
   `Ctrl+Shift+Up` / `Ctrl+Shift+Down`.** Alacritty, kitty, and
