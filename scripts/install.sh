@@ -139,5 +139,13 @@ in once so the desktop database refresh takes effect.
 Make sure ${BIN_DIR} is on your PATH:
     export PATH="${BIN_DIR}:\$PATH"
 
+Two optional one-liners to finish setting things up:
+
+    # Bootstrap a fully commented starter config:
+    kettle --print-default-config > ~/.config/kettle/config
+
+    # Enable OSC 133 jump-to-prompt (Ctrl+Up / Ctrl+Down in kettle):
+    kettle --shell-integration bash >> ~/.bashrc      # or zsh / fish
+
 To uninstall: ./scripts/install.sh --uninstall
 MSG

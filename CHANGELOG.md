@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **`install.sh` final message points at the two bootstrap
+  one-liners.** Post-install the user already knows where the
+  binary landed and how to launch from the Super key. The
+  message now also surfaces `kettle --print-default-config`
+  (cycle 227) and `kettle --shell-integration bash` (cycle 229)
+  as the two optional one-liners that finish setup. Both already
+  worked; the install script just didn't advertise them.
+
 ### CI
 - **Release tarballs now also ship `shell-integration/` alongside
   the binary.** Cycle 229 embedded the snippets into the binary
