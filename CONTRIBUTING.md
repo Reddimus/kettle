@@ -29,7 +29,13 @@ Each cycle has the same shape:
    workspace runs ~225 tests at any given point and grows ~1/cycle.
 5. **Run the gate locally.**
    ```sh
-   cargo fmt --all
+   cargo fmt --all              # rewrite in place
+   cargo fmt --all --check      # then assert no further drift — local
+                                # rustfmt may be older than CI's, and the
+                                # *check* form is what CI runs. Cycle 167
+                                # shipped fmt-clean locally and failed CI;
+                                # adding the --check step makes the local
+                                # gate match the CI gate exactly.
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
