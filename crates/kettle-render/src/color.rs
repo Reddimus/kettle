@@ -193,6 +193,15 @@ fn blend(fg: Rgb, target: Rgb, t: f64) -> Rgb {
     )
 }
 
+/// SGR 2 (`dim` / faint) attribute: blend `fg` halfway toward `bg`. xterm /
+/// alacritty / iTerm2 all render dim as roughly 50 % intensity — close
+/// enough that programs (fish prompt themers, `less` status lines, mc) can
+/// rely on the visible-but-attenuated look. Pure so the SGR test suite can
+/// pin the math without a GPU.
+pub fn dim(fg: Rgb, bg: Rgb) -> Rgb {
+    blend(fg, bg, 0.5)
+}
+
 /// Return `fg` adjusted toward the higher-contrast endpoint (white or
 /// black, relative to `bg`) until the WCAG contrast ratio reaches
 /// `min_ratio`. `min_ratio <= 1.0` is a no-op. Pure — binary-searches
@@ -299,6 +308,27 @@ mod tests {
             resolve_query(257, &theme, &colors),
             Some(Rgb::new(0xab, 0xcd, 0xef))
         );
+    }
+
+    #[test]
+    fn dim_blends_halfway_toward_bg() {
+        // Pure white fg on pure black bg, dim → mid-gray.
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        let mid = dim(w, k);
+        assert!(
+            mid.r >= 126 && mid.r <= 129,
+            "dim(white, black).r ~= 128, got {}",
+            mid.r
+        );
+        // Symmetric channels.
+        assert_eq!(mid.r, mid.g);
+        assert_eq!(mid.g, mid.b);
+        // Dim onto the same color is a no-op (fg == bg → fg stays).
+        assert_eq!(dim(k, k), k);
+        // Dim a color onto itself: also unchanged.
+        let red = Rgb::new(200, 50, 50);
+        assert_eq!(dim(red, red), red);
     }
 
     #[test]

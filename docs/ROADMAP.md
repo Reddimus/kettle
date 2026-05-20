@@ -434,6 +434,10 @@
 - [x] **OS cursor → pointing hand over Ctrl-clickable URLs.**
       Browser/iTerm2/Ghostty affordance; re-syncs on cursor move
       *and* modifier change. Deduped via `last_cursor_icon`.
+- [x] **SGR 2 dim/faint rendered.** Engine tracked `Flags::DIM`
+      but the renderer ignored it; new `color::dim(fg, bg)` blends
+      halfway toward bg (50 % intensity). Applied before
+      min-contrast lift. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **SGR 2 dim/faint is rendered.** The engine tracked
+  `Flags::DIM` correctly (parsed by vte from `\e[2m`), and there's
+  even a `sgr_underline_dim_strike` conformance test confirming the
+  bit reaches the cell — but the renderer was ignoring it.
+  Programs emitting dim text (fish prompt themers, `less` status
+  lines, mc panel headers) rendered at full intensity. New pure
+  `kettle_render::color::dim(fg, bg)` blends the fg halfway toward
+  the cell bg (50 % intensity, the xterm/alacritty/iTerm2
+  convention). Applied *before* the minimum-contrast lift so the
+  lift can claw back legibility on themes where dim drops below
+  WCAG. +1 helper test.
 - **OS cursor turns into a pointing hand over Ctrl-clickable
   URLs.** Browser / iTerm2 / Ghostty convention: the mouse cursor
   morphs from text-I-beam to `CursorIcon::Pointer` while the user

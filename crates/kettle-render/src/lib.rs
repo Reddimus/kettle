@@ -25,7 +25,9 @@ use kettle_config::{Config, Rgb, ScrollbarMode};
 use kettle_core::EventProxy;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub use color::{reply_for_query, reply_for_text_area_size, resolve, resolve_query};
+pub use color::{
+    dim as dim_color, reply_for_query, reply_for_text_area_size, resolve, resolve_query,
+};
 use quad::{QuadInstance, QuadPipeline};
 
 /// A search match in a pane's viewport (grid coords, pre-scrolled).
@@ -876,6 +878,15 @@ impl Renderer {
             // would render as inverse-fg on selection-bg, often invisible.
             if selection_range.is_some_and(|r| r.contains(point)) {
                 fg = theme.selection_foreground;
+            }
+            // SGR 2 dim/faint — blend the foreground halfway toward the
+            // background. Renderer was ignoring `Flags::DIM` so `\e[2m`
+            // looked the same as normal weight; fish prompt themers,
+            // `less` status lines, mc all use it. Applied *before* the
+            // minimum-contrast lift so the lift can claw back legibility
+            // when a theme's dim level becomes unreadable.
+            if flags.contains(Flags::DIM) {
+                fg = color::dim(fg, bg);
             }
             // Lift fg toward the higher-contrast extreme if the theme/SGR
             // combo falls below the configured WCAG ratio (off by default).
