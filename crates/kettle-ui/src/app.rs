@@ -1977,10 +1977,18 @@ impl ApplicationHandler<UserEvent> for App {
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
+                            // Cycle 144: closing a tab (middle-click or
+                            // ✕) can shift focus to a different tab
+                            // (cycle 120's `reap_tabs` bookkeeping).
+                            // Treat it like any other focus-changing
+                            // action so the cursor on the now-active
+                            // tab lands visible immediately.
+                            let pre = self.focus_key();
                             if self.mux.close_tab_at(seg.idx) {
                                 event_loop.exit();
                                 return;
                             }
+                            self.note_focus_change(pre);
                         } else {
                             let pre = self.focus_key();
                             self.mux.active = seg.idx;

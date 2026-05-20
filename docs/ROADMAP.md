@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Tab-close clicks (middle / ✕) reset blink phase.**
+      Last user-driven focus path missing the cycle 134-141
+      pattern. `close_tab_at` shifts focus to a neighbor;
+      the now-active pane's cursor lands visible
+      immediately.
 - [x] **`docs/CONFIG.md` documents bool aliases / numeric
       clamps / `beam` alias.** Added a "Type notes"
       preamble listing the cycle-138 bool aliases and the

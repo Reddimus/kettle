@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **Closing a tab via middle-click or ✕ also resets blink
+  on the now-active tab.** Cycle 120's `reap_tabs` fix
+  keeps `mux.active` pointing at the same tab the user was
+  on when an *unfocused* tab closes; when the *focused*
+  tab closes, focus naturally falls on a neighbor (matching
+  every modern terminal). Either way the cursor lands on a
+  potentially-different pane, and pre-cycle-144 that
+  pane's cursor could be invisible for up to one
+  `blink_interval` depending on the blink-timer phase.
+  The tab-bar middle-click and ✕-click paths now snapshot
+  `focus_key()` before the close and call
+  `note_focus_change(pre)` after — same shape as cycles
+  135/136's keyboard-and-pane-click paths. The last
+  user-driven focus path that hadn't picked up the
+  cycle-134→141 blink-reset pattern.
+
 ### Documentation
 - **`docs/CONFIG.md` documents bool aliases, numeric clamps,
   and the `beam` cursor-style alias.** The bool-row entries
