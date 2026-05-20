@@ -7,6 +7,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--check-config` flags the other four clamped numerics
+  + `background-opacity` clamps at parse.** Cycle 131
+  surfaced `font-size`'s runtime-clamp / docs mismatch. The
+  same pattern lived in four siblings:
+  - `background-opacity` — no runtime clamp at all (raw value
+    flowed to `wgpu::Color { a: ... }`, where alpha < 0 / > 1
+    is undefined on some backends). **Now clamped at parse**
+    to `[0.0, 1.0]` so the runtime stays safe even if the
+    user ignores the warning. + diagnostic for out-of-range.
+  - `unfocused-split-opacity` — clamped to `[0.1, 1.0]` at
+    parse; diagnostic added.
+  - `scroll-multiplier` / `mouse-scroll-multiplier` — clamped
+    to `[0.1, 50.0]` at parse; diagnostic added.
+  - `minimum-contrast` — clamped to `[0.0, 21.0]` at parse;
+    diagnostic added.
+  - `cursor-blink-interval` — clamped to `[50, 5000]` at
+    parse; diagnostic added.
+  +1 test (`detect_malformed_values_flags_clamped_numerics_out_of_range`)
+  covers 9 out-of-range entries (all flagged), 14 in-range +
+  boundary entries (none flagged), and the new
+  `background-opacity` runtime-clamp behavior for the
+  user-ignores-the-warning path.
+
+### Fixed
 - **`--check-config` flags `font-size` outside `[5.0, 72.0]`.**
   Cycle 118 added a runtime clamp at the renderer; a user
   config of `font-size = 500` silently rendered at the

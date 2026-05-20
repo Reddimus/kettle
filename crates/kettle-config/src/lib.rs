@@ -393,27 +393,29 @@ impl Config {
         for e in parse::parse(text) {
             let v = &e.value;
             let ok = match e.key.as_str() {
-                // Floats: clamped or otherwise, the parse itself has to
-                // succeed.
-                "padding-x"
-                | "window-padding-x"
-                | "padding-y"
-                | "window-padding-y"
-                | "background-opacity"
-                | "unfocused-split-opacity"
-                | "scroll-multiplier"
-                | "mouse-scroll-multiplier"
-                | "minimum-contrast" => v.parse::<f32>().is_ok(),
-                // `font-size`: parses AND lands inside [5.0, 72.0], the
-                // clamp range cycle 118 added to `Renderer::new` /
-                // `set_font_size`. A user with `font-size = 500` got a
-                // silent clamp to 72 at runtime; `--check-config` used
-                // to echo "500pt" verbatim, hiding the discrepancy.
-                // Cycle 131 surfaces the out-of-range case as a
-                // diagnostic (same shape as cycle 124's `palette =
-                // N >= 16`). The runtime still clamps cleanly — the
-                // diagnostic just stops the silent-mismatch.
+                // Padding: parse-only (no fixed runtime clamp). Big
+                // pads just shrink the rendered body area — the
+                // cycle-119 `cap_axis_cells` keeps screenshots safe.
+                "padding-x" | "window-padding-x" | "padding-y" | "window-padding-y" => {
+                    v.parse::<f32>().is_ok()
+                }
+                // Numerics with a *runtime clamp* — parse AND land
+                // inside the clamp range, otherwise the user's
+                // `--check-config` value disagreed with what the
+                // runtime actually used. Cycle 131 caught this for
+                // `font-size`; cycle 132 extends to every other
+                // clamped numeric so the diagnostic surface is
+                // consistent. The runtime still clamps cleanly —
+                // the warning just stops the silent mismatch.
                 "font-size" => v.parse::<f32>().is_ok_and(|n| (5.0..=72.0).contains(&n)),
+                "background-opacity" => v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n)),
+                "unfocused-split-opacity" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.1..=1.0).contains(&n))
+                }
+                "scroll-multiplier" | "mouse-scroll-multiplier" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.1..=50.0).contains(&n))
+                }
+                "minimum-contrast" => v.parse::<f32>().is_ok_and(|n| (0.0..=21.0).contains(&n)),
                 // Special: scrollback accepts unlimited/infinite/0 as
                 // "no cap" plus any non-negative integer.
                 "scrollback" => {
@@ -421,7 +423,12 @@ impl Config {
                         || v.eq_ignore_ascii_case("unlimited")
                         || v.parse::<usize>().is_ok()
                 }
-                "cursor-blink-interval" => v.parse::<u64>().is_ok(),
+                // Same shape as the float-range checks above:
+                // parse_collect clamps to [50, 5000] (cycle X), so
+                // `cursor-blink-interval = 99999` silently becomes
+                // 5000 — surface it now so the user's diagnostic
+                // matches their runtime.
+                "cursor-blink-interval" => v.parse::<u64>().is_ok_and(|n| (50..=5000).contains(&n)),
                 // Color keys: `Rgb::parse` accepts `#RRGGBB`, `rgb:RR/GG/BB`,
                 // X11 names ("red"), etc. Bad values otherwise silently
                 // keep the default — same trap as the numeric keys.
@@ -647,8 +654,17 @@ impl Config {
                     }
                 }
                 "background-opacity" => {
-                    if let Ok(v) = e.value.parse() {
-                        cfg.background_opacity = v;
+                    // Clamp at parse so out-of-range values can't reach
+                    // wgpu's `Color { a: ... }` (alpha < 0 or > 1
+                    // produces undefined visual artifacts on some
+                    // backends). detect_malformed_values warns the
+                    // user but we still want the runtime safe even if
+                    // they ignore the warning. Matches the
+                    // already-clamped siblings (`unfocused-split-
+                    // opacity`, `scroll-multiplier`, `minimum-contrast`,
+                    // `cursor-blink-interval`).
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.background_opacity = v.clamp(0.0, 1.0);
                     }
                 }
                 "cursor-style" => {
@@ -1559,6 +1575,60 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn detect_malformed_values_flags_clamped_numerics_out_of_range() {
+        // Cycle 132. Same shape as cycle 131's `font-size` fix,
+        // extended to the other clamped numeric fields:
+        //
+        //   background-opacity        [0.0, 1.0]
+        //   unfocused-split-opacity   [0.1, 1.0]
+        //   scroll-multiplier         [0.1, 50.0]
+        //   minimum-contrast          [0.0, 21.0]
+        //   cursor-blink-interval     [50,  5000]
+        //
+        // All clamp silently at parse or render time, so the
+        // user's --check-config echo disagreed with the runtime
+        // for out-of-range values. Surface as diagnostics.
+        let bad = Config::detect_malformed_values(
+            "background-opacity = 2.0\n\
+             background-opacity = -0.5\n\
+             unfocused-split-opacity = 0.05\n\
+             scroll-multiplier = 0.01\n\
+             scroll-multiplier = 999\n\
+             minimum-contrast = 50\n\
+             minimum-contrast = -1\n\
+             cursor-blink-interval = 10\n\
+             cursor-blink-interval = 99999\n",
+        );
+        assert_eq!(bad.len(), 9, "all nine should flag: {bad:?}");
+
+        // In-range / boundary values pass cleanly.
+        let ok = Config::detect_malformed_values(
+            "background-opacity = 0.0\n\
+             background-opacity = 1.0\n\
+             background-opacity = 0.8\n\
+             unfocused-split-opacity = 0.1\n\
+             unfocused-split-opacity = 1.0\n\
+             scroll-multiplier = 0.1\n\
+             scroll-multiplier = 50\n\
+             scroll-multiplier = 2.5\n\
+             minimum-contrast = 0\n\
+             minimum-contrast = 21\n\
+             minimum-contrast = 4.5\n\
+             cursor-blink-interval = 50\n\
+             cursor-blink-interval = 5000\n\
+             cursor-blink-interval = 530\n",
+        );
+        assert!(ok.is_empty(), "all in-range pass: {ok:?}");
+
+        // Runtime clamp on background-opacity (cycle 132 added) —
+        // even with the warning ignored, wgpu sees a safe alpha.
+        let c = Config::parse_text("background-opacity = 2.5");
+        assert_eq!(c.background_opacity, 1.0);
+        let c = Config::parse_text("background-opacity = -0.5");
+        assert_eq!(c.background_opacity, 0.0);
     }
 
     #[test]

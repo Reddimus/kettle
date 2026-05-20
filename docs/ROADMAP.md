@@ -506,6 +506,15 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Other 4 clamped numerics warn out-of-range +
+      `background-opacity` clamps at parse.** Sibling to
+      cycle 131. `background-opacity` had no clamp and could
+      reach wgpu with undefined alpha; clamped to [0, 1] now.
+      The four already-clamped fields (`unfocused-split-
+      opacity`, `scroll-multiplier`, `minimum-contrast`,
+      `cursor-blink-interval`) gain `--check-config`
+      diagnostics so the user sees the silent clamp. +1
+      test covering 9 out-of-range + 14 in-range/boundary.
 - [x] **`--check-config` flags `font-size` outside [5, 72].**
       Cycle 118 added a runtime clamp; --check-config still
       echoed `font: 500pt` verbatim with no mention of the
