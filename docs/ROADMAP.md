@@ -431,6 +431,9 @@
       parsed but ignored at render time. Selected cells now get
       `theme.selection_foreground` (applied after INVERSE so the
       highlight always reads).
+- [x] **OS cursor → pointing hand over Ctrl-clickable URLs.**
+      Browser/iTerm2/Ghostty affordance; re-syncs on cursor move
+      *and* modifier change. Deduped via `last_cursor_icon`.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

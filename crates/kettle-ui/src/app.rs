@@ -13,7 +13,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Fullscreen, UserAttentionType, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen, UserAttentionType, Window, WindowId};
 
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
@@ -168,6 +168,11 @@ pub struct App {
     /// True while the OS mouse cursor is hidden because the user is typing
     /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
     mouse_hidden: bool,
+    /// Last `CursorIcon` we pushed to the window — used to dedupe so we
+    /// don't issue a `set_cursor` syscall on every CursorMoved event.
+    /// `None` until the first call, which guarantees the initial state
+    /// gets pushed exactly once.
+    last_cursor_icon: Option<CursorIcon>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -231,6 +236,7 @@ impl App {
             hint_state: None,
             window_focused: true,
             mouse_hidden: false,
+            last_cursor_icon: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -299,6 +305,33 @@ impl App {
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
         cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
+    }
+
+    /// Set the OS mouse-cursor icon, deduped against the last value pushed
+    /// to the window. Called on CursorMoved (position changes the
+    /// hit-test) and on ModifiersChanged (the modifier state gates the
+    /// click-to-open affordance).
+    fn sync_cursor_icon(&mut self) {
+        // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
+        // a "pointing hand" while the user holds the same modifier that
+        // would open a URL on click (Ctrl on Linux/Windows, Cmd on
+        // macOS — winit's `super_key` maps Cmd) and the pointer sits on
+        // a clickable link. Otherwise show the standard text-I-beam, the
+        // affordance every modern terminal uses for "this surface accepts
+        // mouse selection."
+        let want_pointer =
+            (self.mods.control_key() || self.mods.super_key()) && self.link_at_cursor().is_some();
+        let want = if want_pointer {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Text
+        };
+        if self.last_cursor_icon != Some(want)
+            && let Some(w) = &self.window
+        {
+            w.set_cursor(want);
+            self.last_cursor_icon = Some(want);
+        }
     }
 
     /// Clear the focused pane's selection (called when the user types —
@@ -1723,13 +1756,22 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                // Modifier change can flip the URL hover affordance from
+                // text-I-beam to pointing-hand without the mouse moving
+                // (Ctrl held = "this click would open"). Re-sync the
+                // cursor icon so the affordance updates the moment Ctrl
+                // is pressed/released over a link.
+                self.sync_cursor_icon();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 // Any real mouse movement undoes the hide-while-typing
                 // state. Sub-pixel movements that winit *might* coalesce
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor();
+                self.sync_cursor_icon();
                 if let Some(btn) = self.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
                     if self.send_mouse(btn, true, true) {
