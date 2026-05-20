@@ -92,6 +92,22 @@ impl Theme {
         Theme::default()
     }
 
+    /// Companion to `by_name`: return the *canonical* bundled name
+    /// (with the original casing the theme file ships under) for a
+    /// case-insensitive user-typed name, or `None` if no bundled theme
+    /// matches. Used by `Config::parse_collect` to keep `cfg.theme_name`
+    /// in sync with `cfg.theme` — pre-cycle-176, a user typing
+    /// `theme = TokyoNitght Night` (typo) had `cfg.theme_name` stored
+    /// verbatim ("TokyoNitght Night") while `cfg.theme` silently fell
+    /// back to the default, so `--check-config` showed a name the
+    /// runtime wasn't actually using. Pure.
+    pub fn find_name(name: &str) -> Option<&'static str> {
+        let want = name.trim().to_ascii_lowercase();
+        BUNDLED_THEMES
+            .iter()
+            .find_map(|(n, _)| (n.to_ascii_lowercase() == want).then_some(*n))
+    }
+
     pub fn list() -> Vec<&'static str> {
         BUNDLED_THEMES.iter().map(|(n, _)| *n).collect()
     }

@@ -964,6 +964,15 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`--check-config` prints the actual theme name in use.**
+      Pre-fix, a typo'd `theme = TokyoNitght Night` had
+      `cfg.theme_name` store the typo verbatim while `cfg.theme`
+      silently fell back to the default — diagnostic disagreed
+      with runtime. Same shape as cycle 139 (font-size clamp).
+      New `Theme::find_name` returns canonical casing on match,
+      caller leaves `theme_name` at the default on miss. Bonus:
+      `theme = tokyonight night` (lowercase) now normalizes to
+      canonical "TokyoNight Night" in --check-config. +1 test.
 - [x] **Drag-and-drop files insert shell-quoted paths.**
       Standard modern-terminal affordance — drop a file, the
       shell-quoted path lands at the cursor with a trailing space.

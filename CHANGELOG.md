@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`kettle --check-config` now prints the *actual* theme name in
+  use, not the user's typo.** Pre-cycle, `parse_collect` did:
+  ```rust
+  cfg.theme_name = e.value.clone();      // typo stored verbatim
+  cfg.theme = Theme::by_name(&e.value);  // silent fallback to default
+  ```
+  So a user writing `theme = TokyoNitght Night` (typo) had
+  `--check-config` print `theme: TokyoNitght Night` while the
+  runtime palette was actually TokyoNight Night's defaults. Same
+  docs/runtime mismatch shape as cycle 139 (font-size clamp).
+  Now: store the *canonical* bundled name (with original casing)
+  when the lookup matches; leave `theme_name` at the prior
+  default when it misses. Bonus: `theme = tokyonight night`
+  (all-lowercase) now produces `theme_name = "TokyoNight Night"`
+  (canonical casing) — was lowercase before. The malformed-value
+  diagnostic still flags the typo separately so the user sees
+  their mistake. New `Theme::find_name` companion to `by_name`.
+  Test: `theme_name_matches_the_actually_loaded_palette` pins
+  case-insensitive→canonical, typo→default-name, and the
+  diagnostic-still-flags assertion. +1 test (241 total).
+
 ### Added
 - **Drag-and-drop files.** Dropping a file onto the kettle window
   inserts its shell-quoted path at the cursor of the focused pane

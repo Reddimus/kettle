@@ -679,9 +679,26 @@ impl Config {
                     // an earlier override on the same key) rather
                     // than blanking the name string and falling back
                     // to whatever `Theme::by_name("")` returns.
+                    //
+                    // Unknown name (typo, copy-paste from another
+                    // terminal's theme set, etc.): `Theme::by_name`
+                    // silently falls back to TokyoNight Night. The
+                    // cycle-176 fix keeps `cfg.theme_name` in sync
+                    // with that fallback — store the *canonical*
+                    // bundled name (with original casing) when found,
+                    // and leave the previous value (the default
+                    // "TokyoNight Night" on first hit) untouched when
+                    // the lookup misses. Otherwise `--check-config`
+                    // would echo `theme: TokyoNitght Night` while the
+                    // runtime used a different palette — same shape
+                    // as cycle 139 (font-size clamp matches runtime).
+                    // The malformed-value diagnostic still flags the
+                    // typo so the user sees their mistake.
                     if !e.value.trim().is_empty() {
-                        cfg.theme_name = e.value.clone();
                         cfg.theme = Theme::by_name(&e.value);
+                        if let Some(canonical) = Theme::find_name(&e.value) {
+                            cfg.theme_name = canonical.to_string();
+                        }
                     }
                 }
                 "background" => {
@@ -1073,6 +1090,44 @@ mod config_tests {
         assert_eq!(c.theme.foreground, Rgb::new(0xc0, 0xca, 0xf5));
         assert_eq!(c.theme.palette[4], Rgb::new(0x7a, 0xa2, 0xf7));
         assert_eq!(c.font_family, font::FAMILY);
+    }
+
+    #[test]
+    fn theme_name_matches_the_actually_loaded_palette() {
+        // Cycle 176: pre-fix, `parse_collect` did
+        //   cfg.theme_name = e.value.clone();      // typo preserved
+        //   cfg.theme = Theme::by_name(&e.value);  // silent fallback
+        // so a typo'd theme name had `--check-config` print
+        // `theme: TokyoNitght Night` while the runtime used
+        // TokyoNight Night's palette. Same docs/runtime mismatch shape
+        // as cycle 139 (font-size). Now: store the canonical bundled
+        // name (with original casing) when the lookup matches; leave
+        // `theme_name` at the prior default when it misses.
+        //
+        // Case-insensitive input → canonical-casing output.
+        let c = Config::parse_text("theme = tokyonight night\n");
+        assert_eq!(c.theme_name, "TokyoNight Night");
+        assert_eq!(c.theme.background, Rgb::new(0x1a, 0x1b, 0x26));
+        // Different real theme — verify by_name + name agree.
+        let c = Config::parse_text("theme = Dracula\n");
+        assert_eq!(c.theme_name, "Dracula");
+        // Case-insensitive match returns canonical casing.
+        let c = Config::parse_text("theme = dracula\n");
+        assert_eq!(c.theme_name, "Dracula", "case-insensitive → canonical case");
+        // Typo: name doesn't match any bundled theme. cfg.theme falls
+        // back to TokyoNight Night (Theme::default()); cfg.theme_name
+        // ALSO stays at "TokyoNight Night" so the diagnostic agrees
+        // with the runtime palette. The malformed-value warning still
+        // surfaces the typo separately so the user notices.
+        let c = Config::parse_text("theme = TokyoNitght Night\n");
+        assert_eq!(c.theme_name, "TokyoNight Night");
+        assert_eq!(c.theme.background, Rgb::new(0x1a, 0x1b, 0x26));
+        // And the diagnostic still flags it.
+        let malformed = Config::detect_malformed_values("theme = TokyoNitght Night\n");
+        assert!(
+            malformed.iter().any(|m| m.contains("TokyoNitght")),
+            "typo'd theme should surface as malformed: {malformed:?}"
+        );
     }
 
     #[test]
