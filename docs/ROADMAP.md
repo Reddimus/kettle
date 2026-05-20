@@ -448,6 +448,12 @@
       reads `cell.underline_color()` for the underline quad; vim
       spell-check / LSP diagnostics now draw their red squiggles
       under otherwise-normal text. +1 conformance test.
+- [x] **All five underline-style flags drawn.** UNDERLINE,
+      DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE,
+      DASHED_UNDERLINE — keyed on `Flags::ALL_UNDERLINES`. Double
+      draws two stacked lines; the others draw single lines (wave
+      / dotted / dashed visual styles deferred to a shader pass).
+      +1 conformance test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

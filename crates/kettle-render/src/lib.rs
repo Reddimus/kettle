@@ -907,29 +907,35 @@ impl Renderer {
                     1.0,
                 ));
             }
-            // SGR 4 underline / SGR 9 strikeout: both engine-tracked but
-            // ignored before cycle 79. The engine `sgr_underline_dim_
-            // strike` conformance test asserted the flags reach the cell;
-            // these are the render quads that turn them into pixels.
+            // SGR 4 underline family / SGR 9 strikeout — both engine-
+            // tracked since cycle ~14 (`sgr_underline_dim_strike` test),
+            // rendered from cycle 79 onward.
             //
             // Underline color: SGR 58 (`\e[58;2;r;g;bm` / `[58;5;Nm`) sets
             // a per-cell `underline_color`, used by neovim spell-check to
             // draw red squiggles on otherwise-normal text. Resolve it via
             // the same path as fg/bg; fall back to `fg` when unset so
             // every existing usage keeps working.
-            if flags.intersects(Flags::UNDERLINE | Flags::UNDERCURL) {
+            //
+            // Underline style: alacritty exposes five style bits —
+            // UNDERLINE, DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE,
+            // DASHED_UNDERLINE — all reached via `Flags::ALL_UNDERLINES`.
+            // Today: plain / curl / dotted / dashed all draw as a single
+            // 1-px line at the cell bottom; DOUBLE_UNDERLINE draws two
+            // stacked lines (the visually-distinct case). Wave / dotted
+            // / dashed visual styles want a shader path and are deferred
+            // — the presence/absence cue is what matters most.
+            if flags.intersects(Flags::ALL_UNDERLINES) {
                 let line_color = cell
                     .underline_color()
                     .map(|c| color::resolve(c, theme, term_colors))
                     .unwrap_or(fg);
-                quads.push(rect(
-                    ox + col as f32 * cw,
-                    oy + row as f32 * ch + ch - 2.0,
-                    cw,
-                    1.0,
-                    line_color,
-                    1.0,
-                ));
+                let x = ox + col as f32 * cw;
+                let y = oy + row as f32 * ch;
+                quads.push(rect(x, y + ch - 2.0, cw, 1.0, line_color, 1.0));
+                if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                    quads.push(rect(x, y + ch - 4.0, cw, 1.0, line_color, 1.0));
+                }
             }
             if flags.contains(Flags::STRIKEOUT) {
                 quads.push(rect(

@@ -1190,6 +1190,45 @@ mod conformance {
     }
 
     #[test]
+    fn sgr_underline_style_variants_set_distinct_flags() {
+        // Five style bits in the engine: `\e[4m` (single), `\e[21m` or
+        // `\e[4:2m` (double), `\e[4:3m` (curl), `\e[4:4m` (dotted),
+        // `\e[4:5m` (dashed). The renderer (cycle 81) reads these and
+        // draws differently per style — this pins each one reaching the
+        // engine's cell flags so a future engine bump can't silently
+        // drop a variant.
+        let (mut t, mut p) = harness(20, 2);
+        feed(
+            &mut t,
+            &mut p,
+            b"\x1b[4ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me",
+        );
+        let g = t.grid();
+        let f = |c: usize| g[Point::new(Line(0), Column(c))].flags;
+        assert!(f(0).contains(Flags::UNDERLINE), "[4m → UNDERLINE on `a`");
+        assert!(
+            f(1).contains(Flags::DOUBLE_UNDERLINE),
+            "[4:2m → DOUBLE_UNDERLINE on `b`"
+        );
+        assert!(f(2).contains(Flags::UNDERCURL), "[4:3m → UNDERCURL on `c`");
+        assert!(
+            f(3).contains(Flags::DOTTED_UNDERLINE),
+            "[4:4m → DOTTED_UNDERLINE on `d`"
+        );
+        assert!(
+            f(4).contains(Flags::DASHED_UNDERLINE),
+            "[4:5m → DASHED_UNDERLINE on `e`"
+        );
+        // Each variant is mutually-exclusive: setting DOUBLE clears the
+        // previous UNDERLINE bit (alacritty single-underline-flag model).
+        // Confirm by checking `b` doesn't still carry plain UNDERLINE.
+        assert!(
+            !f(1).contains(Flags::UNDERLINE),
+            "[4:2m must clear plain UNDERLINE"
+        );
+    }
+
+    #[test]
     fn sgr_58_sets_per_cell_underline_color() {
         // Neovim spell-check / git diff / lsp diagnostics emit per-cell
         // underline color via SGR 58. The engine stores it on the cell;

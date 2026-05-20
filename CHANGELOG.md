@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **All five underline style flags reach the renderer.** Cycle 79
+  drew a single line for `Flags::UNDERLINE | UNDERCURL`. The
+  engine actually tracks five style bits: UNDERLINE (`\e[4m`),
+  DOUBLE_UNDERLINE (`\e[21m` / `\e[4:2m`), UNDERCURL (`\e[4:3m`,
+  spell), DOTTED_UNDERLINE (`\e[4:4m`), DASHED_UNDERLINE
+  (`\e[4:5m`). The render check now keys on `Flags::ALL_UNDERLINES`
+  so every style draws *something*, and `DOUBLE_UNDERLINE` gets a
+  second stacked line so the visually-distinct double-underline
+  case looks different from plain. Wave/dotted/dashed visual
+  styles still draw as a single line — a shader path is deferred,
+  but the presence/absence cue is what matters most.
+  +1 conformance test confirming each of the five SGR sequences
+  reaches the correct engine flag.
 - **SGR 58 per-cell underline color is now respected.** The
   cycle-79 underline render used the cell's `fg` for the line
   color — fine for plain `\e[4m` but wrong for neovim spell-check,
