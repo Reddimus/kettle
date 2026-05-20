@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--check-config` skips empty values.** parse.rs
+      documents empty-as-reset semantics; runtime honors it
+      (cycle 121/122 + every enum/bool/numeric defaulting on
+      empty). But `detect_malformed_values` still flagged
+      `theme = ""` etc., disagreeing with the runtime. Now
+      one empty-skip gate covers every key. +1 test.
 - [x] **Tab-close-middle-click + `CloseWindow` save
       session.** Two exit paths skipped the save that other
       exit paths had. Next launch restored the stale

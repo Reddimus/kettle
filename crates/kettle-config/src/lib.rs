@@ -414,6 +414,17 @@ impl Config {
         }
         for e in parse::parse(text) {
             let v = &e.value;
+            // Cycle 158: empty values are documented (parse.rs) as
+            // "reset to default" semantics. Cycle 121/122 made the
+            // string-keyed paths honor that explicitly; the bool /
+            // enum / numeric arms all also fall through to defaults
+            // on empty. Skip the per-key validity check for empty
+            // values so the diagnostic doesn't disagree with the
+            // runtime ("malformed value: theme = \"\"" while the
+            // runtime quietly used the default → confusing).
+            if v.trim().is_empty() {
+                continue;
+            }
             let ok = match e.key.as_str() {
                 // Padding: parse-only (no fixed runtime clamp). Big
                 // pads just shrink the rendered body area — the
@@ -485,7 +496,8 @@ impl Config {
                 // theme name from another terminal's config sees that
                 // it's not in the bundled set (~512 themes including
                 // every Ghostty default). Case-insensitive match matches
-                // `Theme::by_name`'s resolution.
+                // `Theme::by_name`'s resolution. (Empty value is
+                // pre-filtered by cycle 158's global skip above.)
                 "theme" => {
                     let want = v.trim().to_ascii_lowercase();
                     Theme::list().iter().any(|n| n.to_ascii_lowercase() == want)
@@ -1508,6 +1520,40 @@ mod config_tests {
         // Cleanup; ignore failures (race-safe).
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn detect_malformed_values_skips_empty_values() {
+        // Cycle 158: empty values are documented as "reset to
+        // default" in parse.rs and are honored by parse_collect.
+        // The diagnostic used to disagree with the runtime —
+        // theme = "" surfaced as "malformed value: theme = \"\""
+        // while the runtime quietly defaulted. Same shape for
+        // any other key on the empty-value path. Skip the
+        // per-key validity check for empty values entirely so
+        // the two sources agree.
+        let ok = Config::detect_malformed_values(
+            "theme =\n\
+             font-family =\n\
+             cursor-style =\n\
+             cursor-style-blink =\n\
+             bell =\n\
+             scrollbar =\n\
+             font-size =\n\
+             background-opacity =\n",
+        );
+        assert!(ok.is_empty(), "empty values should never flag: {ok:?}");
+        // Whitespace-only also counts as empty.
+        let ok = Config::detect_malformed_values("theme =    \n");
+        assert!(
+            ok.is_empty(),
+            "whitespace-only value should not flag: {ok:?}"
+        );
+        // Real typos with non-empty values still flag (regression
+        // guard for cycle 86/87/etc — empty skip mustn't swallow
+        // typos).
+        let bad = Config::detect_malformed_values("theme = NoSuchTheme\n");
+        assert_eq!(bad.len(), 1, "unknown theme still flagged: {bad:?}");
     }
 
     #[test]

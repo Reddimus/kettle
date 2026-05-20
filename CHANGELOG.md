@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--check-config` no longer flags empty values as malformed.**
+  parse.rs documents the "empty value resets the key"
+  semantics; cycle 121/122 made the runtime honor it
+  explicitly for string keys, and the bool / enum / numeric
+  arms naturally fall through to defaults on empty. But
+  `detect_malformed_values` still tried to validate the
+  empty string against each per-key contract, surfacing
+  diagnostics like `malformed value: theme = ""` while the
+  runtime quietly used the default. Disagreement.
+  Now a single empty-value skip at the top of the per-key
+  match handles every key uniformly. Diagnostic surface
+  agrees with runtime — empty means "use default, no
+  warning needed." +1 test covers theme / font-family /
+  cursor-style / cursor-style-blink / bell / scrollbar /
+  font-size / background-opacity all on empty plus a real
+  typo regression guard.
+
+### Fixed
 - **Tab-close-via-middle-click and `Action::CloseWindow`
   save the session before exit.** Two exit paths were
   missing the save_session call that every other exit path
