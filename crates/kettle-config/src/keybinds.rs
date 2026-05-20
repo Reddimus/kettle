@@ -356,6 +356,12 @@ pub fn defaults() -> Bindings {
 }
 
 /// Apply a `keybind = trigger=action` line on top of an existing map.
+///
+/// The action text `unbind` (also `none`, or empty after the `=`) **removes**
+/// the trigger from the map rather than inserting — that's the only way for
+/// a user to remove a default like `Ctrl+Shift+C` they want their shell or
+/// another tool to receive instead. Matches Ghostty's `unbind` and WezTerm's
+/// `DisableDefaultAssignment` / Alacritty's empty-action behavior.
 pub fn apply_keybind(map: &mut Bindings, value: &str) {
     if value.is_empty() {
         return;
@@ -363,9 +369,27 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     let Some((trig, act)) = value.split_once('=') else {
         return;
     };
-    if let (Some(t), Some(a)) = (parse_trigger(trig), Action::from_name(act.trim())) {
+    let Some(t) = parse_trigger(trig) else {
+        return;
+    };
+    let act_trim = act.trim();
+    if is_unbind_token(act_trim) {
+        map.remove(&t);
+        return;
+    }
+    if let Some(a) = Action::from_name(act_trim) {
         map.insert(t, a);
     }
+}
+
+/// Recognize the unbind sentinels: empty, `unbind`, `none`, `null`, `false`.
+/// Pure so `detect_malformed_values` and `apply_keybind` agree on what's
+/// valid action text (a sentinel here means "remove", not "malformed").
+pub(crate) fn is_unbind_token(s: &str) -> bool {
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "" | "unbind" | "none" | "null" | "false"
+    )
 }
 
 #[cfg(test)]
@@ -427,6 +451,52 @@ mod tests {
         // user to bind manually if they want "last tab" semantics).
         let t0 = Trigger::new(Mods::ALT, Key::Char('0'));
         assert!(!d.contains_key(&t0), "Alt+0 should be free");
+    }
+
+    #[test]
+    fn apply_keybind_unbind_removes_default() {
+        // Default map ships with Ctrl+Shift+C → Copy. A user whose shell
+        // wants Ctrl+Shift+C for itself (e.g. some readline kits) had no
+        // way to remove it — `apply_keybind` only ever *inserted*. Now
+        // `keybind = ctrl+shift+c = unbind` removes it; aliases are
+        // `none` / `null` / `false` / empty (all map to "no action").
+        let mut m = defaults();
+        let trig = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('c'));
+        assert_eq!(m.get(&trig), Some(&Action::Copy), "ships bound by default");
+
+        apply_keybind(&mut m, "ctrl+shift+c=unbind");
+        assert!(!m.contains_key(&trig), "unbind removes the entry");
+
+        // Re-bind to confirm map state is still healthy after a removal.
+        apply_keybind(&mut m, "ctrl+shift+c=copy");
+        assert_eq!(m.get(&trig), Some(&Action::Copy));
+
+        // Every documented alias.
+        for tok in ["unbind", "none", "null", "false", ""] {
+            let mut mm = defaults();
+            apply_keybind(&mut mm, &format!("ctrl+shift+c={tok}"));
+            assert!(!mm.contains_key(&trig), "alias {tok:?} should also unbind");
+        }
+
+        // Unbind on an *unbound* trigger is a no-op (not an error).
+        let mut mm = defaults();
+        let unused = Trigger::new(Mods::CTRL | Mods::ALT, Key::Char('§'));
+        let before = mm.len();
+        apply_keybind(&mut mm, "ctrl+alt+§=unbind");
+        assert_eq!(mm.len(), before, "unbinding a free trigger is a no-op");
+        let _ = unused;
+    }
+
+    #[test]
+    fn is_unbind_token_recognizes_aliases() {
+        for tok in ["unbind", "Unbind", "UNBIND", "none", "null", "false", ""] {
+            assert!(is_unbind_token(tok), "{tok:?} should be unbind");
+        }
+        // Anything else is a real action name (or a typo `from_name`
+        // will reject — not unbind).
+        for tok in ["copy", "no_action", "disabled", "off", "x"] {
+            assert!(!is_unbind_token(tok), "{tok:?} should NOT be unbind");
+        }
     }
 
     #[test]

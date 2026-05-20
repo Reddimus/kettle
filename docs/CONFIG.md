@@ -69,4 +69,9 @@ N is the tab number — `goto_tab:1` is the first tab), `new_split:right`,
 `command_palette`, `hint_mode`, `next_theme`, `prev_theme`,
 `reload_config`.
 
+The action `unbind` (also `none`, `null`, `false`, or an empty string) removes
+the default binding for that trigger — useful when a default like
+`Ctrl+Shift+C` collides with a chord your shell or another tool wants.
+Example: `keybind = ctrl+shift+c=unbind`.
+
 See [`kettle.example.config`](kettle.example.config).

@@ -410,9 +410,13 @@ impl Config {
                 // parse (same predicate `apply_keybind` uses, just split
                 // so we know which half failed). A user typo on either
                 // side silently drops the binding without this guard.
+                // The action half also accepts the unbind sentinels
+                // (`unbind`, `none`, `null`, `false`, empty) — those
+                // mean "remove this default trigger", not "malformed".
                 "keybind" => v.split_once('=').is_some_and(|(t, a)| {
+                    let act = a.trim();
                     keybinds::parse_trigger(t.trim()).is_some()
-                        && Action::from_name(a.trim()).is_some()
+                        && (keybinds::is_unbind_token(act) || Action::from_name(act).is_some())
                 }),
                 // `theme = …` falls back to TokyoNight Night silently on
                 // an unknown name. Surface the typo so a user copying a
@@ -1246,13 +1250,18 @@ mod config_tests {
         );
         assert!(bad.iter().any(|b| b.contains("ctrl+shift+nope")));
         assert!(bad.iter().any(|b| b.contains("garbage_action")));
-        // Valid keybinds — including aliases and `goto_tab:N` parametric
-        // — pass cleanly.
+        // Valid keybinds — including aliases, `goto_tab:N` parametric,
+        // and the unbind sentinels (`unbind` / `none` / `null` /
+        // `false` / empty action means "remove this default") — pass
+        // cleanly.
         let ok = Config::detect_malformed_values(
             "keybind = ctrl+shift+c=copy\n\
              keybind = alt+5=goto_tab:5\n\
              keybind = f11=toggle_fullscreen\n\
-             keybind = ctrl+shift+o=split_horiz\n",
+             keybind = ctrl+shift+o=split_horiz\n\
+             keybind = ctrl+shift+c=unbind\n\
+             keybind = ctrl+shift+v=none\n\
+             keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
     }

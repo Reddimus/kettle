@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`keybind = TRIGGER=unbind` removes a default.** The
+      `apply_keybind` parser only ever inserted; users had no way
+      to remove kettle's default Copy on `Ctrl+Shift+C` for shells
+      that want the chord. Action half now accepts the unbind
+      sentinels (`unbind` / `none` / `null` / `false` / empty),
+      via pure helper `is_unbind_token(s)` so `--check-config`
+      treats them as valid rather than malformed. Matches
+      Ghostty's `unbind`. +2 tests.
 - [x] **`--check-config` flags config lines missing `=`.** The
       line-oriented tokenizer silently `continue`s on any non-comment,
       non-empty line lacking `=`, so `font-family Jetbrains Mono`

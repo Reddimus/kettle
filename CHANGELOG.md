@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`keybind = TRIGGER = unbind` removes a default binding.**
+  `apply_keybind` only ever *inserted* into the map; the closed
+  `Action` enum has no "no-op" variant, so a user whose shell wants
+  `Ctrl+Shift+C` for itself (some readline kits, certain TUI menus)
+  had no way to remove kettle's default Copy on that chord. Now
+  the action half accepts the sentinels `unbind` (Ghostty-style),
+  `none`, `null`, `false`, or an empty string after the `=`; any
+  of them calls `map.remove(&trigger)` instead of inserting. New
+  pure helper `keybinds::is_unbind_token(s)` so `apply_keybind` and
+  `detect_malformed_values` agree on what's a valid sentinel
+  (otherwise `--check-config` would flag `keybind = ctrl+shift+c=
+  unbind` as malformed). Aliases are case-insensitive
+  (`Unbind` / `UNBIND` work). Unbinding a free trigger is a no-op,
+  not an error. +2 tests
+  (`apply_keybind_unbind_removes_default`,
+  `is_unbind_token_recognizes_aliases`), plus the existing
+  `detect_malformed_values_catches_bad_keybind_lines` test grew
+  three positive assertions covering each sentinel.
+
 ### Fixed
 - **`--check-config` flags config lines missing the `=` separator.**
   The line-oriented tokenizer (`parse.rs:21`) silently `continue`s on
