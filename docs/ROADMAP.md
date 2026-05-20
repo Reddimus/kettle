@@ -964,6 +964,18 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Wikipedia-style URLs stay clickable.** Both `links.rs`
+      (OSC 8 + autodetect overlay) and `hints.rs` (Ctrl+Shift+H
+      quick-select) had private `trim_trailing` functions that
+      stripped every trailing `)` / `]` / `}` along with the prose
+      punctuation, breaking
+      `https://en.wikipedia.org/wiki/Foo_(bar)` into a 404. Shared
+      `kettle_core::url_trim::trim_trailing` now strips closing
+      brackets only when *unbalanced* in the candidate substring,
+      so `..._(bar)` keeps the `)` (1 open + 1 close = balanced)
+      and `https://rust-lang.org)` from a `(https://rust-lang.org).`
+      excerpt still loses it (0 opens + 1 close = unbalanced).
+      Byte-level so multi-byte IRI chars are untouched. +5 tests.
 - [x] **`--list-keybinds` columns line up for ALL rows.** `describe()`
       hard-coded the trigger column at 16 chars; `Ctrl+Shift+PageDown`
       (19) and `Ctrl+Shift+PageUp` (17) overflowed it. Now

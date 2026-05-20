@@ -53,9 +53,7 @@ fn res() -> &'static [(Kind, Regex)] {
     })
 }
 
-fn trim_trailing(s: &str) -> &str {
-    s.trim_end_matches(['.', ',', ')', ']', '}', '\'', '"', ';', ':'])
-}
+use crate::url_trim::trim_trailing;
 
 /// Detect hint targets across `rows` (one string per visible line). Earlier
 /// kinds win on overlap (a URL is not also matched as a path), and matches

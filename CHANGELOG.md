@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Autodetected Wikipedia / Apple-docs / MDN URLs that legitimately
+  end in `)` now stay clickable.** Both `links.rs` (the runtime
+  hyperlink overlay) and `hints.rs` (`Ctrl+Shift+H` quick-select)
+  had their own private `trim_trailing` that stripped *every*
+  trailing `)` / `]` / `}` along with the other prose punctuation.
+  A URL like `https://en.wikipedia.org/wiki/Foo_(bar)` was trimmed
+  to `https://en.wikipedia.org/wiki/Foo_(bar` — a different
+  (404) page. Same shape for any URL ending with a closing bracket
+  used for disambiguation.
+  Fix: shared `kettle_core::url_trim::trim_trailing` that
+  bracket-balance-aware-strips: a `)` / `]` / `}` is removed only
+  when the candidate substring has *more* closes than opens of the
+  matching pair. So `..._(bar)` keeps its bracket (1 open + 1
+  close = balanced), but `https://rust-lang.org)` from a
+  `(https://rust-lang.org).` excerpt loses it (0 opens + 1 close =
+  unbalanced) — both cases the user actually wants. Operates at
+  byte level so multi-byte chars in IRI-ish URLs are passed through
+  verbatim. +5 tests pinning sentence-punctuation, balanced-keep,
+  unbalanced-strip, multi-byte-untouched, and an empty-input
+  no-op (234 total).
+
 - **`kettle --list-keybinds` columns line up again — even for the
   three default rows whose triggers exceed 16 chars.** `describe()`
   hard-coded the trigger column at 16 chars, so `Ctrl+Shift+PageDown`

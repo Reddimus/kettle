@@ -8,6 +8,7 @@ pub mod links;
 pub mod scrollbar;
 pub mod search;
 pub mod term;
+pub mod url_trim;
 
 pub use alacritty_terminal::grid::{Dimensions, Scroll};
 pub use alacritty_terminal::index::{Column, Line, Point, Side};

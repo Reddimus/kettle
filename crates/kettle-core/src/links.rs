@@ -23,9 +23,7 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
 }
 
-fn trim_trailing(s: &str) -> &str {
-    s.trim_end_matches(['.', ',', ')', ']', '}', '\'', '"', ';', ':'])
-}
+use crate::url_trim::trim_trailing;
 
 /// All links visible in the current viewport. Explicit OSC 8 links take
 /// precedence over autodetected URLs on the same cells.
