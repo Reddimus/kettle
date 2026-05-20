@@ -133,4 +133,17 @@ jobs:
           # while still catching "I accidentally cleared `defaults()`".
           cargo run -q -p kettle -- --list-keybinds > keybinds.txt
           test "$(wc -l < keybinds.txt)" -gt 40
+          # `--print-default-config` is the one-command first-launch
+          # bootstrap (`kettle --print-default-config > ~/.config/
+          # kettle/config`). It emits the embedded
+          # `docs/kettle.example.config` (~140 lines). Floor at 50
+          # catches an accidental empty include_str! or a near-empty
+          # rewrite of the example file. Round-trip through
+          # `--check-config` confirms the parser accepts the output —
+          # if the example file ever introduces a malformed example
+          # value, this catches it before users hit it.
+          cargo run -q -p kettle -- --print-default-config > /tmp/k.cfg
+          test "$(wc -l < /tmp/k.cfg)" -gt 50
+          cargo run -q -p kettle -- --config /tmp/k.cfg --check-config \
+            | grep -E '^status: +OK'
         shell: bash

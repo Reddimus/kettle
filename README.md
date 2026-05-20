@@ -89,6 +89,7 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for prebuilt release tarballs,
 macOS `.app`, and Windows packaging.
 
 ```sh
+kettle --print-default-config > ~/.config/kettle/config   # bootstrap a commented starter config
 kettle --list-themes        # list every bundled theme (~512)
 kettle --list-keybinds      # print the *effective* keymap (defaults + your overrides + unbinds)
 kettle --list-actions       # list every action name accepted by `keybind = trigger=action`

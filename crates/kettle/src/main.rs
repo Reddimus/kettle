@@ -45,6 +45,18 @@ struct Cli {
     #[arg(long)]
     check_config: bool,
 
+    /// Print the documented example config (`docs/kettle.example.config`)
+    /// to stdout and exit. Pipe to your config path to bootstrap a fully
+    /// commented starter file:
+    ///
+    ///   kettle --print-default-config > ~/.config/kettle/config
+    ///
+    /// Everything in the file is commented out — uncomment what you want
+    /// to change. Re-read the file by either restarting kettle or
+    /// triggering the in-window reload chord.
+    #[arg(long)]
+    print_default_config: bool,
+
     /// Render a representative frame offscreen to a PNG and exit (no window).
     #[arg(long, value_name = "PATH")]
     screenshot: Option<std::path::PathBuf>,
@@ -161,6 +173,18 @@ fn main() -> anyhow::Result<()> {
         for name in kettle_config::Theme::list() {
             println!("{name}");
         }
+        return Ok(());
+    }
+    if cli.print_default_config {
+        // Cycle 227: `kettle --print-default-config > ~/.config/kettle/config`
+        // is the one-command bootstrap. The example file lives at
+        // `docs/kettle.example.config` (also linked from README and
+        // CONFIG.md); embedding it at build time means the binary
+        // always emits the version that shipped with it — no
+        // disk-read at runtime, no path-resolution surprises, and
+        // `cargo install kettle` users get the correct content
+        // even if the source tree is gone.
+        print!("{}", include_str!("../../../docs/kettle.example.config"));
         return Ok(());
     }
     if cli.list_ssh_hosts {
@@ -570,6 +594,35 @@ mod tests {
         // Cleanup so a re-run of the suite starts fresh.
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn print_default_config_round_trip() {
+        // Cycle 227: `kettle --print-default-config` emits the
+        // embedded `docs/kettle.example.config`. The first-launch
+        // bootstrap is:
+        //   kettle --print-default-config > ~/.config/kettle/config
+        // Pin the contract that:
+        //   1. The embedded content is non-trivial (≥ 50 lines) so
+        //      we catch an accidental empty include_str! at build
+        //      time rather than at "ship time".
+        //   2. It is a valid kettle config — Config::parse_collect
+        //      reports zero unknown-key / malformed-value
+        //      diagnostics. Everything in the example file is
+        //      commented out by convention (cycle 100 drift guard),
+        //      so the only requirement is the parser accepts it.
+        let embedded = include_str!("../../../docs/kettle.example.config");
+        assert!(
+            embedded.lines().count() >= 50,
+            "embedded example config has only {} lines — \
+             include_str! probably stale",
+            embedded.lines().count()
+        );
+        let (_, diags) = kettle_config::Config::parse_collect(embedded);
+        assert!(
+            diags.is_empty(),
+            "embedded example config emits diagnostics: {diags:?}"
+        );
     }
 
     #[test]

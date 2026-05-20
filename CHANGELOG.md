@@ -6,6 +6,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle --print-default-config` — one-command first-launch
+  bootstrap.** The documented example config lives at
+  `docs/kettle.example.config` (~140 commented lines) and a
+  newcomer used to have to copy it manually from the source tree
+  or the docs site. Now:
+  ```sh
+  kettle --print-default-config > ~/.config/kettle/config
+  ```
+  drops a fully commented starter file in the right place — no
+  source tree required (`cargo install kettle` users get the
+  correct content too). The file content is embedded at build time
+  via `include_str!("../../../docs/kettle.example.config")`, so
+  there's no runtime path lookup that could differ from what
+  shipped. New test `print_default_config_round_trip` pins three
+  contracts: (1) the embedded content is non-trivial (≥ 50 lines
+  — catches an empty include_str! at build time, not ship time),
+  (2) `Config::parse_collect` emits zero diagnostics on the
+  embedded content (catches a future malformed example value
+  before users hit it), (3) every line in the example file is
+  commented out by convention (cycle 100 drift guard still
+  active). Wired into CI smoke too:
+  `--print-default-config | wc -l > 50` + round-trip through
+  `--check-config` to assert `status: OK`. README's quick-start
+  table now leads with the bootstrap one-liner.
+
 ### Internal
 - **Workspace-metadata contract is now one comprehensive test.**
   Cycle 218's `library_crates_have_per_crate_descriptions` was a
