@@ -389,6 +389,14 @@ impl Config {
                 | "split-divider-color"
                 | "focused-split-color"
                 | "split-divider-color-focused" => Rgb::parse(v).is_some(),
+                // `keybind = <trigger>=<action>` — both halves have to
+                // parse (same predicate `apply_keybind` uses, just split
+                // so we know which half failed). A user typo on either
+                // side silently drops the binding without this guard.
+                "keybind" => v.split_once('=').is_some_and(|(t, a)| {
+                    keybinds::parse_trigger(t.trim()).is_some()
+                        && Action::from_name(a.trim()).is_some()
+                }),
                 // `palette = N=#hex` — both halves have to parse.
                 "palette" => v.split_once('=').is_some_and(|(i, h)| {
                     i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
@@ -1001,6 +1009,36 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_bad_keybind_lines() {
+        // `apply_keybind` silently drops on bad trigger or unknown
+        // action — a typo like `ctrl+shift+typo=copy` or
+        // `ctrl+shift+a=garbage_action` produced no binding and no
+        // warning. Now flagged in `--check-config` so the user sees
+        // which line was dropped.
+        let bad = Config::detect_malformed_values(
+            "keybind = ctrl+shift+nope=copy\n\
+             keybind = ctrl+shift+a=garbage_action\n\
+             keybind = no_separator_at_all\n",
+        );
+        assert_eq!(
+            bad.len(),
+            3,
+            "all three bad keybinds should be flagged: {bad:?}"
+        );
+        assert!(bad.iter().any(|b| b.contains("ctrl+shift+nope")));
+        assert!(bad.iter().any(|b| b.contains("garbage_action")));
+        // Valid keybinds — including aliases and `goto_tab:N` parametric
+        // — pass cleanly.
+        let ok = Config::detect_malformed_values(
+            "keybind = ctrl+shift+c=copy\n\
+             keybind = alt+5=goto_tab:5\n\
+             keybind = f11=toggle_fullscreen\n\
+             keybind = ctrl+shift+o=split_horiz\n",
+        );
+        assert!(ok.is_empty(), "all valid: {ok:?}");
     }
 
     #[test]

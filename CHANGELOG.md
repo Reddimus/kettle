@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now catches malformed `keybind = …` lines.**
+  `apply_keybind` silently dropped on a bad trigger (typo in
+  modifier or key name) or unknown action — a user with
+  `keybind = ctrl+shift+nope=copy` or `keybind = ctrl+a=garbage_
+  action` got zero feedback that their line never produced a
+  binding. Same trap as the cycle-70 / cycle-84 setup. Extended
+  `detect_malformed_values` to split each `keybind = ` value on
+  `=` and route both halves through `parse_trigger` /
+  `Action::from_name` (the same predicates the apply path uses),
+  so what `--check-config` accepts is what actually binds. +1
+  test (bad trigger + bad action + missing-separator counted;
+  valid aliases like `split_horiz` and parametric `goto_tab:5`
+  pass cleanly).
 - **`--check-config` now catches malformed color values.** The
   cycle-70 `detect_malformed_values` side scan covered numeric/
   duration keys but skipped colors — `background = #not-a-color`

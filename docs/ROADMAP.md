@@ -465,6 +465,9 @@
       `background`/`foreground`/`cursor-color`/selection/search/
       split-color/palette inputs (each routed through
       `Rgb::parse`, same path the apply arm uses). +1 test.
+- [x] **`--check-config` catches malformed `keybind = …` lines.**
+      Bad trigger or unknown action no longer silently drops the
+      binding without a warning. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

@@ -140,7 +140,7 @@ pub enum Action {
 }
 
 impl Action {
-    fn from_name(s: &str) -> Option<Action> {
+    pub(crate) fn from_name(s: &str) -> Option<Action> {
         use Action::*;
         Some(match s {
             "copy_to_clipboard" | "copy" => Copy,
