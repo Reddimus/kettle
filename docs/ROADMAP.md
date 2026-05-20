@@ -506,6 +506,16 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **README keybind table surfaces 9 hidden defaults +
+      docs-drift guard.** SSH launcher, command palette,
+      quick-select hints, split-auto, new window, pane zoom,
+      jump-prompt, move-tab, goto-tab-N were all bound but
+      unsurfaced in the keybind table. New test
+      `readme_documented_chords_are_actually_bound` pins
+      each promoted chord so a future rebind catches the
+      docs drift here, not after a user PR. +1 test, plus a
+      footer pointer to `kettle --list-keybinds` for the
+      effective map.
 - [x] **`palette = N=#hex` with N ≥ 16 is flagged + docs
       scoped to reality.** Example config advertised
       0..=255; runtime only wrote 0..=15; the 16+ overrides

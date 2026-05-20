@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **README keybind table gained 9 user-facing default chords.**
+  The table previously surfaced only the basics (split / tab /
+  copy-paste / search / focus / fullscreen / resize / scroll /
+  font / broadcast / reload / reset) and quietly omitted SSH
+  launcher (`Ctrl+Shift+S`), command palette (`Ctrl+Shift+K`),
+  quick-select hints (`Ctrl+Shift+H`), split-auto
+  (`Ctrl+Shift+A`), new window (`Ctrl+Shift+I`), pane zoom
+  (`Ctrl+Shift+X`), jump-prompt (`Ctrl+Up/Down`), move-tab
+  (`Ctrl+Shift+PgUp/Dn`), and goto-tab-N (`Alt+1..9`). All nine
+  surfaced now, with the three "hidden-gem" rows (SSH /
+  palette / hints) bolded to match the existing Search
+  highlight. Footer line directs power users to
+  `kettle --list-keybinds` (cycle 103) for the *effective*
+  keymap after their `--config FILE` is applied.
+- **+1 README-keybind regression guard.** New test
+  `readme_documented_chords_are_actually_bound` pins each of
+  the ten promoted chords (`Ctrl+Shift+S/K/H/A/I/X`, `Ctrl+
+  Up/Down`, `Ctrl+Shift+PgUp/Dn`) to the action the README
+  claims. If a future unbind / rebind drops one of these the
+  test fails and the README's docs-drift is caught at CI
+  time — same shape as cycles 100/104/117's drift guards but
+  on the README surface.
+
 ### Fixed
 - **`--check-config` flags `palette = N=#hex` with N ≥ 16.**
   The example config (cycle 100) advertised `palette = N=#hex`

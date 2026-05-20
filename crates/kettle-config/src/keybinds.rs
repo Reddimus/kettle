@@ -540,6 +540,43 @@ mod tests {
     }
 
     #[test]
+    fn readme_documented_chords_are_actually_bound() {
+        // Cycle 125 promoted 9 default bindings into the README
+        // keybind table (SSH launcher, command palette, hint mode,
+        // jump-prompt, move-tab, zoom-pane, new-window, split-auto,
+        // goto-tab). The README is documentation, not source-of-
+        // truth, but a user reading it deserves to find that chord
+        // doing what the row claims. Pin each one so a future
+        // unbind / rebind catches the docs-drift here.
+        use Action::*;
+        let d = defaults();
+        let c = Mods::CTRL;
+        let cs = Mods::CTRL | Mods::SHIFT;
+        let pairs: &[(Mods, Key, Action)] = &[
+            (cs, Key::Char('s'), OpenSsh),
+            (cs, Key::Char('k'), CommandPalette),
+            (cs, Key::Char('h'), HintMode),
+            (cs, Key::Char('a'), SplitAuto),
+            (cs, Key::Char('i'), NewWindow),
+            (cs, Key::Char('x'), ToggleZoom),
+            (c, Key::Up, JumpPrevPrompt),
+            (c, Key::Down, JumpNextPrompt),
+            (cs, Key::PageUp, MoveTabLeft),
+            (cs, Key::PageDown, MoveTabRight),
+        ];
+        for (mods, k, want) in pairs {
+            let trig = Trigger::new(*mods, *k);
+            assert_eq!(
+                d.get(&trig),
+                Some(want),
+                "README claims {} → {want:?}; bound to {:?} instead",
+                trig.label(),
+                d.get(&trig)
+            );
+        }
+    }
+
+    #[test]
     fn defaults_has_no_shadow_collisions() {
         // Cycle-116 systemic guard. Cycle 115 caught a single shadow
         // collision (Ctrl+Shift+Up/Down both bound to Resize *and*

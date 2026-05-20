@@ -81,13 +81,20 @@ kettle -e ssh -t host     # (-e consumes the rest of the args)
 |---|---|---|---|
 | Split top/bottom | `Ctrl+Shift+O` | New tab | `Ctrl+Shift+T` |
 | Split left/right | `Ctrl+Shift+E` | Close pane | `Ctrl+Shift+W` |
+| Split (auto-pick) | `Ctrl+Shift+A` | New window | `Ctrl+Shift+I` |
 | Focus next/prev pane | `Ctrl+Shift+N` / `P` | Close window | `Ctrl+Shift+Q` |
-| Next/prev tab | `Ctrl+PgDn` / `PgUp` | Copy / Paste | `Ctrl+Shift+C` / `V` |
-| **Search** | **`Ctrl+Shift+F`** | Fullscreen | `F11` |
-| Resize split | `Shift+Arrows` | Directional focus | `Alt+Arrows` |
-| Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Scroll to top/bottom | `Shift+Home/End` |
-| Font in/out/reset | `Ctrl + +` / `-` / `0` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
+| Next/prev tab | `Ctrl+PgDn` / `PgUp` | Move tab left/right | `Ctrl+Shift+PgUp` / `PgDn` |
+| Goto tab 1..9 | `Alt+1..9` | Zoom / unzoom pane | `Ctrl+Shift+X` |
+| Copy / Paste | `Ctrl+Shift+C` / `V` | **Search** | **`Ctrl+Shift+F`** |
+| **SSH launcher** | **`Ctrl+Shift+S`** | **Command palette** | **`Ctrl+Shift+K`** |
+| **Quick-select hints** | **`Ctrl+Shift+H`** | Fullscreen | `F11` |
+| Jump prev/next prompt | `Ctrl+Up` / `Down` | Resize split | `Shift+Arrows` |
+| Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Shift+Home` / `End` |
+| Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
+| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
+
+Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 
 ## Configuration
 
