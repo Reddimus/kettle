@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Session restore canonicalizes the theme name the same way parse
+  does.** Cycle-176 sibling. The session.json file holds whatever
+  theme name was current at save time. A session written by a
+  pre-176 kettle could hold a typo'd or all-lowercase name (e.g.,
+  the user wrote `theme = tokyonight night` in their config and
+  the pre-176 parser stored it verbatim, then save_session wrote
+  that lowercase form). On restore, the pre-cycle code re-stored
+  the lowercase name in `cfg.theme_name` while `Theme::by_name`
+  resolved the right palette case-insensitively — so the runtime
+  used TokyoNight Night's palette but `--check-config` (on the
+  next reload) would have echoed the lowercase form. Route the
+  restore through `Theme::find_name` (the cycle-176 helper) so
+  the same canonicalization the parse path uses applies to the
+  restore path too. No new test (existing `find_name` coverage
+  + the existing session-restore integration smoke). Same
+  cycle-shape as 173/174 — sibling chrome-wiring fix that extends
+  a prior cycle's invariant to one more code path.
+
 - **`kettle --check-config` now prints the *actual* theme name in
   use, not the user's typo.** Pre-cycle, `parse_collect` did:
   ```rust

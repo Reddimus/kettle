@@ -1962,12 +1962,19 @@ impl ApplicationHandler<UserEvent> for App {
                         // verbatim despite the theme existing. Match
                         // `by_name`'s semantics here so the check
                         // agrees with the apply.
-                        && kettle_config::Theme::list()
-                            .iter()
-                            .any(|n| n.eq_ignore_ascii_case(name))
+                        && let Some(canonical) = kettle_config::Theme::find_name(name)
                     {
-                        self.cfg.theme_name = name.to_string();
-                        self.cfg.theme = kettle_config::Theme::by_name(name);
+                        // Cycle 177 (companion to 176): store the
+                        // *canonical* name from the bundled set so
+                        // `--check-config` and runtime palette agree
+                        // after restore too. A session file written by
+                        // an older kettle (pre-176) might hold a typo'd
+                        // or all-lowercase theme name; using
+                        // `find_name`'s canonical return keeps the
+                        // restore in lock-step with parse_collect's
+                        // cycle-176 behavior.
+                        self.cfg.theme_name = canonical.to_string();
+                        self.cfg.theme = kettle_config::Theme::by_name(canonical);
                     }
                     let proxy = self.proxy.clone();
                     let mk = move || -> kettle_core::Waker {

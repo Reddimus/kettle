@@ -964,6 +964,10 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Session restore canonicalizes theme name same as parse.**
+      Cycle-176 sibling. Restore path used to re-store whatever
+      lowercase/typo'd name the session file held; now routes
+      through `Theme::find_name` so the invariant holds end-to-end.
 - [x] **`--check-config` prints the actual theme name in use.**
       Pre-fix, a typo'd `theme = TokyoNitght Night` had
       `cfg.theme_name` store the typo verbatim while `cfg.theme`
