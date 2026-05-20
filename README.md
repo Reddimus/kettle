@@ -4,6 +4,8 @@ A fast, cross-platform, GPU-accelerated terminal emulator written in Rust —
 combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 **Alacritty** and **WezTerm** into one tool.
 
+![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
+
 > **Status: v1.0 — ready for daily use** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer, macOS universal

@@ -1169,6 +1169,81 @@ mod config_tests {
     }
 
     #[test]
+    fn readme_referenced_images_exist() {
+        // Cycle 223: the README now embeds `docs/images/kettle-hero.png`
+        // as its hero image. If a contributor renames or moves that
+        // file (or simply forgets to commit it), the README on
+        // github.com/Reddimus/kettle renders a broken-image icon on the
+        // very first paragraph — the first thing a visitor sees.
+        //
+        // Drift-guard the contract: scan README for every relative
+        // image ref `![…](path)`, then assert each path exists.
+        // External (`http(s)://`) refs are skipped so we don't make
+        // CI depend on network reachability.
+        //
+        // Implementation: walk byte offsets so absolute positions stay
+        // stable. The earlier draft updated a moving `search: &str`
+        // and then computed offsets against the parent — the math
+        // was wrong and the guard silently passed regardless. Test
+        // for this with a sed-substitute-and-verify-failure run if
+        // the parser is touched again.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+        let readme = std::fs::read_to_string(repo_root.join("README.md"))
+            .expect("README.md must exist at the repo root");
+        let bytes = readme.as_bytes();
+        let mut i = 0usize;
+        let mut checked = 0usize;
+        while i + 2 < bytes.len() {
+            // Find next `![` (image markdown). `image_alt` then runs
+            // until the next `]` and the path starts at `](`.
+            if bytes[i] == b'!' && bytes[i + 1] == b'[' {
+                // Find the closing `]` of the alt text.
+                let alt_close = match readme[i + 2..].find(']') {
+                    Some(j) => i + 2 + j,
+                    None => break,
+                };
+                // Path starts immediately after `](` — require that.
+                if alt_close + 1 >= bytes.len() || bytes[alt_close + 1] != b'(' {
+                    i = alt_close + 1;
+                    continue;
+                }
+                let path_start = alt_close + 2;
+                let path_end = match readme[path_start..].find(')') {
+                    Some(j) => path_start + j,
+                    None => break,
+                };
+                let raw = &readme[path_start..path_end];
+                // Strip an optional ` "title"` after the path.
+                let path = raw.split_whitespace().next().unwrap_or(raw);
+                // Skip external URLs (we don't want CI to depend on
+                // network reachability).
+                if !path.starts_with("http://") && !path.starts_with("https://") {
+                    let abs = repo_root.join(path);
+                    assert!(
+                        abs.exists(),
+                        "README references image `{path}` but `{}` \
+                         does not exist (cycle 223 drift guard)",
+                        abs.display()
+                    );
+                    checked += 1;
+                }
+                i = path_end + 1;
+            } else {
+                i += 1;
+            }
+        }
+        // Sanity floor: the README has at least one image (the hero)
+        // since cycle 223. If the parser regresses to "finds zero
+        // images" (which would silently pass), this catches it.
+        assert!(
+            checked >= 1,
+            "expected ≥ 1 image embed in README; found {checked} \
+             — parser likely regressed"
+        );
+    }
+
+    #[test]
     fn library_crates_have_per_crate_descriptions() {
         // Cycle 213 moved every crate's `[package]` block onto
         // `workspace.package` inheritance for `version`/`edition`/
