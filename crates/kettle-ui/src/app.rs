@@ -816,6 +816,17 @@ impl App {
     /// Forward a mouse event to the app via the active tracking protocol.
     /// Returns `true` when it was consumed (so kettle skips local handling).
     fn send_mouse(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
+        // Shift held = "bypass mouse tracking, let kettle handle this
+        // locally" — the xterm convention every modern terminal honors.
+        // Without it, running htop/vim/tmux with mouse-mode locks out
+        // kettle's selection entirely: every click is consumed by the
+        // TUI and the user has to disable mouse mode to copy text.
+        // Returning `false` here makes the caller fall through to
+        // selection / scrollbar / extend logic exactly as if tracking
+        // were off.
+        if self.mods.shift_key() {
+            return false;
+        }
         let (track, sgr) = input::mouse_tracking(self.focused_mode());
         if track == input::MouseTracking::Off {
             return false;
@@ -1910,8 +1921,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Shift+wheel always scrolls the kettle scrollback even
+                // when a TUI has mouse-tracking on (xterm convention).
+                // Without this bypass, you can't scroll back through
+                // your tmux/htop session — the TUI swallows every wheel
+                // notch.
                 let (track, _) = input::mouse_tracking(self.focused_mode());
-                if track != input::MouseTracking::Off {
+                let track_active = track != input::MouseTracking::Off && !self.mods.shift_key();
+                if track_active {
                     let btn = if lines > 0 { 64 } else { 65 };
                     for _ in 0..lines.abs().min(8) {
                         self.send_mouse(btn, true, false);

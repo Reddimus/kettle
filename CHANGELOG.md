@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **Shift bypasses mouse tracking** (xterm / Alacritty / kitty /
+  Ghostty convention). When a TUI like htop, tmux, vim, or fzf
+  enables mouse mode (`CSI ?1000h`/`?1002h`/etc.), every click and
+  wheel notch was being forwarded to the program — kettle's
+  selection, scrollback, and shift-click-extend were completely
+  locked out. Now `Shift+click` does a local selection, `Shift+
+  drag` extends it, and `Shift+wheel` scrolls kettle's scrollback
+  even while the TUI thinks it owns the mouse. Implemented as a
+  single early-return in `send_mouse` (so press/release/drag all
+  bypass uniformly) plus a parallel guard in the wheel branch.
+  Nothing changes when Shift isn't held — mouse tracking still
+  works the way it always did.
 - **`--check-config` surfaces malformed numeric values.** Every
   numeric/duration config arm was guarded with `if let Ok(v) =
   e.value.parse() { … }` — clean code, but it silently fell back

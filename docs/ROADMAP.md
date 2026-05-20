@@ -413,6 +413,10 @@
       (font-size, padding, opacity, scroll-multiplier, contrast,
       scrollback, blink-interval). New
       `Config::detect_malformed_values` side scan. +1 test.
+- [x] **Shift bypasses mouse tracking** (xterm/Alacritty/kitty/
+      Ghostty convention). htop/tmux/vim mouse mode no longer
+      locks out local selection and scrollback — hold Shift to
+      claim the mouse for kettle.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
