@@ -53,7 +53,25 @@ struct Cli {
     exec: Vec<String>,
 }
 
+/// Restore SIGPIPE to its default behavior on Unix. Rust's runtime sets
+/// SIGPIPE to SIG_IGN at startup, which turns `println!` into a panic when
+/// the reader of a pipeline (e.g. `kettle --list-themes | head`) closes
+/// its end early. SIG_DFL makes the process exit silently on EPIPE —
+/// which is what every other CLI tool does, and what shells expect when
+/// chaining commands.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: `signal` is async-signal-safe and we're calling it before
+    // any threads spawn (very top of `main`), so there's no race window.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 fn main() -> anyhow::Result<()> {
+    reset_sigpipe();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
 

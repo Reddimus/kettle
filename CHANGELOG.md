@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`kettle --list-themes | head` no longer panics on broken
+  pipe.** Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup;
+  when the reader of a pipeline closes its end early, the next
+  `println!` returns `EPIPE` from `write` and the macro panics
+  with `failed printing to stdout`. Every shell pipelining
+  `--list-themes` (522 lines) or `--list-keybinds` (47 lines) into
+  `head`, `grep`, or `less -F` was hitting this panic — silent
+  unless you saw stderr, and `rc=0` because `head` itself exits 0.
+  Fixed by resetting `SIGPIPE` to `SIG_DFL` at the top of `main`
+  (Unix only; Windows has no `SIGPIPE`), so the process exits
+  cleanly on EPIPE the way every other CLI tool does. New
+  `libc = "0.2"` Unix-only dep (tiny, in the regular ecosystem).
 - **`Action::NewWindow` (Ctrl+Shift+I) opens an actual new OS
   window.** The handler was sharing an arm with `Action::NewTab` —
   the parsed keybind dispatched cleanly all the way to a new

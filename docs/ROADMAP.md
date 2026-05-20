@@ -400,6 +400,11 @@
       opened just a tab. Now `current_exe()` + detached `spawn`;
       falls back to a tab on platforms where the path doesn't
       resolve.
+- [x] **`SIGPIPE` restored to `SIG_DFL` at startup.**
+      `kettle --list-themes | head` was panicking with "failed
+      printing to stdout: Broken pipe" because Rust's runtime
+      ignores SIGPIPE by default. Now exits cleanly like every
+      other CLI tool.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
