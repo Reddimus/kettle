@@ -903,6 +903,16 @@ impl Mux {
             return;
         };
         let ids = tab.root.leaf_ids();
+        // Build the two possible payloads lazily — only when we hit the
+        // first pane that needs each variant. With a 4 MiB clipboard
+        // paste and 5 panes (or more, for shells-broadcast-on-CI
+        // patterns), the pre-cycle-191 code allocated 5 copies of the
+        // wrap (5 × 4 MiB = 20 MiB temporary). With caching, at most
+        // two copies regardless of pane count. `OnceCell`-style lazy
+        // via `Option`: skip even one allocation when the broadcast
+        // set is entirely one BRACKETED_PASTE state. Cycle 191.
+        let mut raw: Option<Vec<u8>> = None;
+        let mut wrapped: Option<Vec<u8>> = None;
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
                 let bracketed = p
@@ -912,8 +922,12 @@ impl Mux {
                     .ok()
                     .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
                     .unwrap_or(false);
-                let bytes = crate::input::paste_payload(text, bracketed);
-                p.term.write(&bytes);
+                let bytes: &[u8] = if bracketed {
+                    wrapped.get_or_insert_with(|| crate::input::paste_payload(text, true))
+                } else {
+                    raw.get_or_insert_with(|| crate::input::paste_payload(text, false))
+                };
+                p.term.write(bytes);
             }
         }
     }

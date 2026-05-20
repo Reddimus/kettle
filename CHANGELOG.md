@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Performance
+- **`broadcast_paste` caches the two possible payload variants.**
+  Cycle 174 introduced per-pane bracketed-paste wrapping inside
+  `Mux::broadcast_paste` (so panes in vim and panes at a shell
+  prompt both get a working paste). The per-pane wrap was
+  computed *inside the loop* though — for an N-pane broadcast set
+  with a 4 MiB clipboard payload, that's up to N × 4 MiB of
+  temporary allocation (8+ MiB at modest pane counts, scaling
+  with N). Now: lazy-cache the two possible payloads
+  (`bracketed=true` and `bracketed=false`) via
+  `Option::get_or_insert_with`. The wrap allocates at most once
+  per BRACKETED_PASTE state regardless of pane count. If every
+  pane in the broadcast set shares the same mode (typical), only
+  one wrap allocation total. Same observable behavior; just
+  doesn't allocate as much. No new test — the cycle-174
+  per-pane-wrap correctness is unchanged; only the allocation
+  count is. 243 workspace tests still pass.
+
 ### Fixed
 - **Theme filter rejects Microsoft Office lock files (`~$name`).**
   Cycle-167/186/187 follow-up. When Office opens a
