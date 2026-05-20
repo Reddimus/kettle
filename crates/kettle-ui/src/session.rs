@@ -58,17 +58,52 @@ impl Session {
         let Some(p) = Self::path() else {
             return;
         };
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(p, text);
+        if let Err(e) = save_to_path(self, &p) {
+            log::warn!("could not save session to {}: {e}", p.display());
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
+}
+
+/// Atomic save: serialize the session, write to a `.tmp` sibling, then
+/// `rename` over the destination. If kettle is killed mid-write the
+/// destination either survives intact (rename hasn't run yet) or holds
+/// the new contents (rename succeeded) — never a half-written file.
+/// That eliminates the upstream cause of cycle 108's corrupted-load
+/// symptom: a non-atomic `fs::write(p, text)` left the user's session
+/// in a corrupted state any time kettle hit an unclean shutdown
+/// mid-write (signal, panic, crash, power loss). Returns the first I/O
+/// error so the public `save` can surface it via `log::warn!` instead
+/// of silently dropping every failure.
+pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text = serde_json::to_string_pretty(s)
+        .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;
+    // PID + nanos so two kettle processes that happen to save the same
+    // session path within a clock tick don't collide on the temp file.
+    // (Worst case: two windows of the same user; harmless but easy to
+    // avoid.)
+    let tmp = p.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, text)?;
+    // `rename` is atomic on every supported filesystem (POSIX rename(2),
+    // Windows MoveFileEx with MOVEFILE_REPLACE_EXISTING — which is what
+    // Rust's std uses internally). If the rename fails we still leave
+    // the tmp file behind so the user has a forensic artifact; the
+    // caller's `log::warn!` will name the destination.
+    std::fs::rename(&tmp, p)?;
+    Ok(())
 }
 
 /// Read and parse a session file at `path`. A read error (no file, HOME
@@ -160,6 +195,74 @@ mod tests {
         for n in &backups {
             let _ = std::fs::remove_file(dir.join(n));
         }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_to_path_is_atomic_and_round_trips() {
+        // Cycle-109 contract: save writes through a `.tmp` sibling then
+        // renames into place. Asserts the rename happened (dest exists,
+        // tmp doesn't), and that the saved content round-trips through
+        // load_from_path back to an equivalent Session.
+        let dir = tmp_dir("save");
+        let path = dir.join("session.json");
+        let s = Session {
+            tabs: vec![STab {
+                root: SNode::Leaf {
+                    cwd: Some("/tmp".into()),
+                    cmd: vec!["bash".into()],
+                },
+                focus: 0,
+            }],
+            active: 0,
+            theme: Some("Dracula".into()),
+        };
+        save_to_path(&s, &path).expect("save");
+        assert!(path.exists(), "destination written");
+        // No leftover .tmp.* sibling (proves the rename succeeded, not
+        // a stray crash that left the tmp file behind).
+        let tmps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            tmps.is_empty(),
+            "tmp file should have been renamed away: {tmps:?}"
+        );
+        // Round-trip back through the load path.
+        let loaded = load_from_path(&path).expect("load");
+        assert_eq!(loaded.tabs.len(), 1);
+        assert_eq!(loaded.theme.as_deref(), Some("Dracula"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_to_path_overwrites_atomically() {
+        // The rename-into-place semantics must also replace an existing
+        // file, not error or leave the old contents. Save twice with
+        // different state; second one wins.
+        let dir = tmp_dir("save-overwrite");
+        let path = dir.join("session.json");
+        let s1 = Session::default();
+        save_to_path(&s1, &path).expect("first save");
+        let s2 = Session {
+            tabs: vec![STab {
+                root: SNode::Leaf {
+                    cwd: None,
+                    cmd: vec![],
+                },
+                focus: 0,
+            }],
+            active: 0,
+            theme: None,
+        };
+        save_to_path(&s2, &path).expect("second save");
+        let loaded = load_from_path(&path).expect("load");
+        assert_eq!(loaded.tabs.len(), 1, "second save should win");
+        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }
 

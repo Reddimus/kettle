@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Session::save` is now atomic and surfaces I/O errors.**
+  Cycle 108 fixed the *symptom* (corrupted session.json restored
+  silently). This fixes the *cause*: the old `save` did
+  `fs::write(p, text)` which is non-atomic — if kettle was
+  killed mid-write (signal, panic, crash, power loss) the file
+  ended up half-written. Now `save_to_path(&Session, &Path) ->
+  io::Result<()>` writes to a `.tmp.<pid>.<nanos>` sibling and
+  `rename`s it into place (atomic on every supported FS: POSIX
+  `rename(2)`, Windows `MoveFileEx` with `MOVEFILE_REPLACE_
+  EXISTING`). Mid-write death now leaves either the previous
+  state intact (rename hadn't run) or the new state (rename
+  succeeded) — never a half-written file. The pub `save`
+  wrapper logs `log::warn!("could not save session to <path>:
+  <err>")` on failure instead of silently swallowing every
+  filesystem error (disk full, permission denied, locked dir).
+  +2 tests: `save_to_path_is_atomic_and_round_trips` (asserts
+  no leftover `.tmp.*` sibling + round-trip through load), and
+  `save_to_path_overwrites_atomically` (rename replaces existing
+  contents cleanly).
 - **Corrupted `session.json` is backed up + a warning logged
   instead of silently discarding state.** A read error
   (no file on first launch, `HOME` changed) is the expected

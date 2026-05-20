@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Session::save` is atomic (write-temp-then-rename).**
+      Cycle 108 fixed the symptom of corrupted-session loads;
+      this fixes the cause. Old `fs::write` was non-atomic —
+      mid-write kettle death left a half-written file. New
+      `save_to_path(s, p) -> io::Result<()>` writes to a
+      `.tmp.<pid>.<nanos>` sibling, renames into place; pub
+      `save` logs `log::warn!` on any I/O error instead of
+      silently swallowing. +2 tests.
 - [x] **Corrupted `session.json` is backed up, not silently
       discarded.** A parse error now logs a warning AND
       renames the file to `session.json.broken.<unix-secs>`
