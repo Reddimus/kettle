@@ -7,6 +7,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Tab-close-via-middle-click and `Action::CloseWindow`
+  save the session before exit.** Two exit paths were
+  missing the save_session call that every other exit path
+  already had (Action::CloseTab on the last tab, Action::
+  ClosePane closing the final pane, WindowEvent::Close
+  Requested via the OS window-X button). Result: a user
+  middle-clicking their last tab or hitting `Ctrl+Shift+Q`
+  (CloseWindow) exited kettle without persisting the
+  now-empty session. On next launch, the *previous* multi-
+  tab state from before the close still sat in
+  session.json and silently restored — the user expected
+  a fresh start, got their old layout back. Both paths now
+  save before `event_loop.exit()`, matching the other
+  exit handlers.
+
+### Fixed
 - **`detect_malformed_values` also strips a leading UTF-8 BOM.**
   Sibling to cycle 155. The cycle-155 strip lived only in
   `parse::parse`; `detect_malformed_values` does its own raw

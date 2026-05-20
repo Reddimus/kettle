@@ -1340,6 +1340,11 @@ impl App {
                 // gave the user a confusingly-misnamed alias for
                 // `close_tab`. Now they're genuinely different.
                 self.mux.close_window();
+                // Cycle 157: save the (now-empty) session so next
+                // launch starts fresh. Otherwise the previous
+                // multi-tab state from before close_window stays
+                // in session.json and silently restores.
+                self.save_session();
                 event_loop.exit();
             }
             Action::NextTab => self.mux.next_tab(),
@@ -2034,6 +2039,14 @@ impl ApplicationHandler<UserEvent> for App {
                             // tab lands visible immediately.
                             let pre = self.focus_key();
                             if self.mux.close_tab_at(seg.idx) {
+                                // Cycle 157: save the (empty) session
+                                // before exit so next launch starts
+                                // fresh rather than restoring the
+                                // *previous* multi-tab state. Other
+                                // exit paths (Action::CloseTab on the
+                                // last tab, WindowEvent::CloseRequested)
+                                // already save; this one was missed.
+                                self.save_session();
                                 event_loop.exit();
                                 return;
                             }
