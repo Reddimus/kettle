@@ -7,6 +7,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Paste distributes to every pane in a broadcast group, not just
+  the focused pane.** Cycle 173 sibling. With broadcast on
+  (Ctrl+Shift+G group-input mode), keystrokes go to every pane in
+  the active tab — paste is also user input and should follow the
+  same scoping. Pre-cycle, Ctrl+Shift+V (or middle-click) wrote
+  only to the focused pane regardless of broadcast state, so a
+  user who'd just turned on broadcast to send the same command to
+  three SSH sessions saw it work for typing but silently single-
+  target for paste. New `Mux::broadcast_paste(text)` reads each
+  pane's `BRACKETED_PASTE` mode separately and wraps the bytes
+  per-pane (panes can disagree — e.g., one is in vim, one is at
+  a shell prompt — and wrapping the wrong way would either
+  inject literal `\e[200~`/`\e[201~` markers into the shell or
+  leave bytes vulnerable to the paste-injection attack inside
+  vim). Same active-tab scoping as `broadcast_write` and
+  `broadcast_scroll_to_bottom` (cycle-112 leaf_ids invariant).
+  Chrome-only, no new test (PTY-mode reads aren't unit-testable
+  without infrastructure the rest of the mux tests don't stand
+  up — same rationale as cycle 173 / 151).
+
+### Fixed
 - **`scroll-on-keystroke` (default `true`) now applies to every
   pane in a broadcast group, not just the focused pane.** The
   config flag says "snap the viewport back to the bottom on every

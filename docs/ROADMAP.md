@@ -964,6 +964,11 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Paste distributes to every pane in a broadcast group.**
+      Cycle 173 sibling. Paste IS input — same scoping as
+      `broadcast_write`. Per-pane `BRACKETED_PASTE` wrap so
+      panes with different modes (vim vs shell) each get the
+      right byte sequence. Chrome-only.
 - [x] **`scroll-on-keystroke` applies to broadcast groups too.**
       With broadcast on (Ctrl+Shift+G), typing wrote to every
       pane but skipped the scroll-to-bottom snap, so any

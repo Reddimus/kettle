@@ -885,6 +885,39 @@ impl Mux {
         }
     }
 
+    /// Distribute a clipboard paste to every pane in the active tab's
+    /// broadcast set. Cycle-174 companion to `broadcast_write` and
+    /// `broadcast_scroll_to_bottom`: with broadcast on (group-input
+    /// mode, Ctrl+Shift+G), keystrokes go to every pane, and paste is
+    /// also user input so it should follow the same scoping. Each pane
+    /// gets its own `BRACKETED_PASTE` wrap decision read from its own
+    /// `Term::mode()` — panes can disagree on whether the running
+    /// program enabled bracketed paste (e.g. one is in vim and one is
+    /// at a shell prompt), and wrapping the wrong way would either
+    /// inject literal `\e[200~`/`\e[201~` markers into the shell's
+    /// command line or leave bytes vulnerable to the bracketed-paste
+    /// auto-execute attack inside vim. Pure modulo the writes; the
+    /// per-pane wrap is the only logic here.
+    pub fn broadcast_paste(&mut self, text: &str) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let ids = tab.root.leaf_ids();
+        for id in ids {
+            if let Some(p) = self.panes.get_mut(&id) {
+                let bracketed = p
+                    .term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+                    .unwrap_or(false);
+                let bytes = crate::input::paste_payload(text, bracketed);
+                p.term.write(&bytes);
+            }
+        }
+    }
+
     pub fn tab_titles(&self) -> Vec<String> {
         self.tabs
             .iter()

@@ -611,6 +611,17 @@ impl App {
         // generic byte-clamper that preserves char boundaries — exactly
         // what we want for any paste channel.
         let text = clamp_osc52(&text, LOCAL_PASTE_MAX);
+        // Broadcast paste (cycle 174 sibling to cycle 173): with the
+        // group-input mode on (Ctrl+Shift+G), keystrokes go to every
+        // pane in the active tab — paste is also user input and
+        // should follow the same scoping. Each pane gets its own
+        // `BRACKETED_PASTE` decision (different panes may have
+        // different mode state), so the wrap is per-pane, not a
+        // single shared payload.
+        if self.mux.broadcast {
+            self.mux.broadcast_paste(text);
+            return;
+        }
         let bracketed = self
             .focused_mode()
             .contains(kettle_core::TermMode::BRACKETED_PASTE);
