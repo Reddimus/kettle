@@ -7,6 +7,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Bool config keys accept the standard true/false aliases
+  + flag unrecognized values.** All five bool fields used:
+  `cfg.X = e.value != "false"`. Result: every non-literal-
+  "false" value silently meant *true* — so `cursor-style-blink
+  = no` enabled the blink instead of disabling it; `copy-on-
+  select = 0` enabled copy; etc. A real footgun.
+  - New `pub(crate) fn parse_bool(s: &str) -> Option<bool>`
+    recognizes case-insensitive `true / yes / on / 1 /
+    enabled / enable / y` for truthy and `false / no / off /
+    0 / disabled / disable / n` for falsy.
+  - The five bool parsers (`cursor-style-blink`,
+    `copy-on-select`, `scroll-on-keystroke`,
+    `scroll-on-output`, `mouse-hide-while-typing`) route
+    through `parse_bool` — bad values keep the current state
+    instead of silently flipping to `true`.
+  - `detect_malformed_values` flags unrecognized values so the
+    typo surfaces in `--check-config`.
+  +1 test (`bool_keys_accept_yes_no_off_on_0_1_aliases`)
+  covers all 8 truthy + 7 falsy aliases × all 5 keys, plus
+  the typo→default-preserved + diagnostic-fires paths.
+
+### Fixed
 - **`Renderer::resize` clamps the surface to the device's
   max texture dimension.** Old `resize` only floor-clamped at 1
   (`surface.configure(0, …)` would panic). The ceiling went

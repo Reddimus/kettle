@@ -21,6 +21,21 @@ pub use theme::Theme;
 /// bounded while never realistically clipping history).
 pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 
+/// Parse the standard true/false aliases. Cycle 138 introduces this
+/// because every previous boolean config used `e.value != "false"`,
+/// which silently treats "no", "off", "0", and "disabled" as `true`.
+/// Case-insensitive; whitespace already trimmed by the line tokenizer.
+/// Returns `None` on an unrecognized value so callers keep the prior
+/// state (rather than silently flipping) and `detect_malformed_values`
+/// can surface the typo.
+pub(crate) fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" | "enabled" | "enable" | "y" => Some(true),
+        "false" | "no" | "off" | "0" | "disabled" | "disable" | "n" => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -493,6 +508,19 @@ impl Config {
                         | "true"
                         | "copy"
                 ),
+                // Boolean keys: accept the same alias set `parse_bool`
+                // recognizes (cycle 138). Pre-cycle, any non-"false"
+                // string silently meant "true", so typos like
+                // `cursor-style-blink = no` quietly enabled the blink.
+                // Surface unrecognized values now so the user sees
+                // their typo in --check-config.
+                "cursor-style-blink"
+                | "copy-on-select"
+                | "scroll-on-keystroke"
+                | "scroll-on-input"
+                | "scroll-on-output"
+                | "mouse-hide-while-typing"
+                | "mouse-hide" => parse_bool(v).is_some(),
                 "tab-bar" => matches!(v.as_str(), "off" | "none" | "false" | "auto" | "always"),
                 "tab-bar-position" => matches!(v.as_str(), "top" | "bottom"),
                 "scrollbar" => matches!(v.as_str(), "never" | "off" | "false" | "auto" | "always"),
@@ -686,7 +714,22 @@ impl Config {
                         _ => CursorStyle::Block,
                     }
                 }
-                "cursor-style-blink" => cfg.cursor_blink = e.value != "false",
+                // Cycle 138: every boolean config key used `e.value !=
+                // "false"`, which silently treated "no" / "off" / "0" /
+                // "disabled" as `true` (because they're not the literal
+                // string "false"). A user writing `cursor-style-blink =
+                // no` expecting to disable the blink got blink ON
+                // anyway. Route through the shared `parse_bool` helper
+                // so all five bool keys (`cursor-style-blink`,
+                // `copy-on-select`, `scroll-on-keystroke`,
+                // `scroll-on-output`, `mouse-hide-while-typing`) accept
+                // the standard true/false aliases. Bad values keep the
+                // current value (no silent flip).
+                "cursor-style-blink" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.cursor_blink = b;
+                    }
+                }
                 "bell" => {
                     cfg.bell = match e.value.as_str() {
                         "off" | "none" | "false" => BellMode::Off,
@@ -763,13 +806,25 @@ impl Config {
                         cfg.cursor_blink_interval = v.clamp(50, 5000);
                     }
                 }
-                "copy-on-select" => cfg.copy_on_select = e.value != "false",
-                "scroll-on-keystroke" | "scroll-on-input" => {
-                    cfg.scroll_on_keystroke = e.value != "false";
+                "copy-on-select" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.copy_on_select = b;
+                    }
                 }
-                "scroll-on-output" => cfg.scroll_on_output = e.value != "false",
+                "scroll-on-keystroke" | "scroll-on-input" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.scroll_on_keystroke = b;
+                    }
+                }
+                "scroll-on-output" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.scroll_on_output = b;
+                    }
+                }
                 "mouse-hide-while-typing" | "mouse-hide" => {
-                    cfg.mouse_hide_while_typing = e.value != "false";
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.mouse_hide_while_typing = b;
+                    }
                 }
                 "word-delimiters" | "selection-word-chars" | "semantic-escape-chars" => {
                     cfg.word_delimiters = e.value.clone();
@@ -1587,6 +1642,48 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn bool_keys_accept_yes_no_off_on_0_1_aliases() {
+        // Cycle 138. Pre-fix `cursor-style-blink = no` silently meant
+        // `true` because the parser compared against literal "false"
+        // and treated everything else as on. Same for every other
+        // bool key. Now every standard alias works on both sides.
+        let truthy = ["true", "TRUE", "yes", "YES", "on", "1", "enabled", "y"];
+        let falsy = ["false", "FALSE", "no", "off", "0", "disabled", "n"];
+        for v in truthy {
+            let c = Config::parse_text(&format!("cursor-style-blink = {v}"));
+            assert!(c.cursor_blink, "{v:?} should mean true; got false");
+        }
+        for v in falsy {
+            let c = Config::parse_text(&format!("cursor-style-blink = {v}"));
+            assert!(!c.cursor_blink, "{v:?} should mean false; got true");
+        }
+        // Unrecognized: silently keep the default (cursor_blink = true)
+        // instead of silently flipping to true on every garbage value
+        // (pre-cycle behavior).
+        let c = Config::parse_text("cursor-style-blink = wat");
+        assert!(c.cursor_blink, "default (true) preserved on unrecognized");
+        // And `--check-config` surfaces the typo:
+        let bad = Config::detect_malformed_values("cursor-style-blink = wat\n");
+        assert_eq!(bad.len(), 1);
+        assert!(bad[0].contains("cursor-style-blink"));
+
+        // Quick spot-check that all five bool keys route through
+        // parse_bool — set each to "off" and confirm.
+        let c = Config::parse_text(
+            "copy-on-select = off\n\
+             scroll-on-keystroke = off\n\
+             scroll-on-output = off\n\
+             mouse-hide-while-typing = off\n\
+             cursor-style-blink = off\n",
+        );
+        assert!(!c.copy_on_select);
+        assert!(!c.scroll_on_keystroke);
+        assert!(!c.scroll_on_output);
+        assert!(!c.mouse_hide_while_typing);
+        assert!(!c.cursor_blink);
     }
 
     #[test]

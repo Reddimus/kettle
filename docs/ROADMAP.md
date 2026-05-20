@@ -506,6 +506,14 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Bool config keys accept `yes`/`no`/`off`/`on`/`0`/
+      `1`/`enabled`/`disabled` + flag typos.** All five
+      bool fields used `e.value != "false"` so any non-
+      literal-"false" value silently meant `true` —
+      `cursor-style-blink = no` enabled the blink, etc.
+      New `parse_bool` helper; bad values keep current state
+      instead of flipping; `--check-config` flags typos.
+      +1 test.
 - [x] **`Renderer::resize` ceiling-clamps at the device's
       max texture dimension.** A window stretched past 8192
       px used to silently fail surface.configure and freeze.
