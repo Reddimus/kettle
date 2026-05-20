@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/SHELL-INTEGRATION.md` added to README's Documentation
+  list.** The doc has existed since the OSC-133 integration
+  landed and got the cycle-189 fish-hook fix, but the README
+  only linked it inline from the "Shell integration" feature
+  bullet. A user browsing the documentation list to figure out
+  what's available would miss it. Now listed alongside CONFIG
+  and CONTRIBUTING with a one-line description.
+
 ### Fixed
 - **`--config FILE` hard-fails at the CLI surface when the file is
   unreadable.** Cycles 106 / 164 caught the "no such file" and
