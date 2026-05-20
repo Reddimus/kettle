@@ -49,6 +49,15 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     if name.starts_with('#') {
         return false;
     }
+    // Microsoft Office lock-file prefix (cycle 190). When you open a
+    // `.docx`/`.xlsx`/`.pptx` from a network drive or shared folder,
+    // Office writes a sibling hidden-style file `~$filename` to mark
+    // the lock. Bundled themes never start with `~`. The `~`-suffix
+    // (vim backup) is already caught by the suffix branch below;
+    // this branch handles the *prefix* variant.
+    if name.starts_with('~') {
+        return false;
+    }
     // OS / desktop-environment metadata that doesn't start with a dot.
     // `Icon\r` is the macOS Finder "custom folder icon" file — the `\r`
     // (0x0D) at the end is part of the literal name. Not a duplicate of
@@ -103,6 +112,11 @@ mod tests {
         // dotfile so the cycle-167 branch missed them.
         assert!(!is_bundled_theme_filename("#TokyoNight Night#"));
         assert!(!is_bundled_theme_filename("#3024 Day#"));
+        // Cycle 190: Office lock files use `~$` prefix (`~$theme.docx`
+        // shape). Any `~`-prefix is also not a real theme name; the
+        // `~`-suffix vim backup is caught by the suffix branch.
+        assert!(!is_bundled_theme_filename("~$TokyoNight Night"));
+        assert!(!is_bundled_theme_filename("~TempTheme"));
 
         // Windows / Finder metadata that does NOT start with a dot.
         assert!(!is_bundled_theme_filename("Thumbs.db"));

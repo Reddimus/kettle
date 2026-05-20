@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **Theme filter rejects Microsoft Office lock files (`~$name`).**
+  Cycle-167/186/187 follow-up. When Office opens a
+  `.docx`/`.xlsx`/`.pptx` from a network drive or shared folder
+  (common pattern for theme contributors maintaining a shared
+  doc), it writes a hidden-style sibling `~$filename` lock file.
+  A maintainer with Office leaking lock files into
+  `assets/themes/` would have those slip through cycle 167's
+  filter (no leading dot, no `~` suffix, not a known OS metadata
+  name). Now: leading-`~` prefix is rejected too. Bundled themes
+  never start with `~`. Test gains 2 more asserts (`~$Theme`,
+  `~TempTheme`). Closes the theme-filter junk audit at four
+  cycles: 167 (initial) → 186 (case) → 187 (emacs `#name#`) →
+  190 (Office `~$name`).
+
 ### Documentation
 - **Fish shell-integration hook emits OSC 133 `D` (command finish
   + exit code).** The bash and zsh sample hooks in
