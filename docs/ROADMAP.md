@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Action::CloseWindow` finally closes the window
+      (was an alias for `CloseTab`).** Both variants existed
+      but the handler arm folded them together to
+      `close_tab()`. Now distinct: `CloseTab` is just-this-tab;
+      `CloseWindow` drops every tab + pane via new
+      `Mux::close_window()`. +1 test.
 - [x] **Broadcast scoped to the active tab (not every pane).**
       `Mux::broadcast_write` was iterating the entire panes
       map — typing one char with broadcast on echoed into other

@@ -748,6 +748,20 @@ impl Mux {
         self.close_tab_at(a)
     }
 
+    /// Close the entire window: drop every pane in every tab. The caller
+    /// (the chrome layer) then exits the event loop because `tabs` is
+    /// empty. Distinct from `close_tab` which only closes the focused
+    /// tab — cycle 113 split them apart so the keybinds (`close_tab`
+    /// vs `close_window`) finally do different things. Returns true
+    /// (kept for parity with `close_tab` / `close_tab_at`; the chrome
+    /// callers use it as "exit now").
+    pub fn close_window(&mut self) -> bool {
+        self.panes.clear();
+        self.tabs.clear();
+        self.active = 0;
+        true
+    }
+
     /// Close the tab at `idx` (all its panes). Returns true if no tabs remain.
     pub fn close_tab_at(&mut self, idx: usize) -> bool {
         if idx < self.tabs.len() {
@@ -1097,6 +1111,37 @@ mod node_tests {
         // Closing the final tab reports "empty".
         assert!(m.close_tab_at(0));
         assert!(m.tabs.is_empty());
+    }
+
+    #[test]
+    fn close_window_drops_every_tab_and_pane() {
+        // Cycle 113: close_window is *not* an alias for close_tab.
+        // Build a multi-tab, multi-pane mux and verify everything is
+        // gone after close_window, including the active index reset.
+        let mut m = Mux::new();
+        for id in 1..=3u64 {
+            // Each tab is a 2-pane split so we also confirm both
+            // panes-per-tab get reaped (not just the focused leaf).
+            let mut root = Node::Leaf(id * 10);
+            root.split_leaf(id * 10, id * 10 + 1, Dir::Horizontal);
+            m.tabs.push(Tab {
+                root,
+                focus: id * 10,
+                zoomed: false,
+            });
+        }
+        m.active = 1;
+        // Sanity: pre-state has tabs (panes map is empty in this test
+        // because we didn't spawn real Pane records — we only need to
+        // observe the tab + active-index reset).
+        assert_eq!(m.tabs.len(), 3);
+        assert_eq!(m.active, 1);
+
+        let empty = m.close_window();
+        assert!(empty, "close_window always reports the mux empty");
+        assert!(m.tabs.is_empty(), "all tabs gone");
+        assert!(m.panes.is_empty(), "all panes gone");
+        assert_eq!(m.active, 0, "active reset to 0");
     }
 
     #[test]

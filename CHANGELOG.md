@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Action::CloseWindow` actually closes the window now (was
+  an alias for `CloseTab`).** Both action variants exist in the
+  `Action` enum and are surfaced by `--list-actions`, but the
+  app handler folded them together:
+  `Action::CloseWindow | Action::CloseTab => self.mux.close_tab()`
+  which is just-the-focused-tab semantics. A user binding
+  `close_window` for "kill the whole app" got tab-close behavior
+  with no warning, and a multi-tab kettle window kept running.
+  Now they're distinct: `CloseTab` still does `close_tab()`;
+  `CloseWindow` calls a new `Mux::close_window()` that drops
+  every tab + pane and resets `active = 0`, then the chrome
+  exits the event loop. +1 test
+  (`close_window_drops_every_tab_and_pane`).
 - **`ToggleBroadcastAll` now scopes broadcast to the active tab,
   not every pane in every tab.** `broadcast_write` walked
   `self.panes.values_mut()` — the *whole* pane map, including

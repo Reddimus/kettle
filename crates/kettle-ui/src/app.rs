@@ -1249,10 +1249,19 @@ impl App {
                     event_loop.exit();
                 }
             }
-            Action::CloseWindow | Action::CloseTab => {
+            Action::CloseTab => {
                 if self.mux.close_tab() {
                     event_loop.exit();
                 }
+            }
+            Action::CloseWindow => {
+                // Distinct from `CloseTab`: drop *every* tab + pane in
+                // this window, not just the focused tab. Previously
+                // both actions did `close_tab()` so binding `close_window`
+                // gave the user a confusingly-misnamed alias for
+                // `close_tab`. Now they're genuinely different.
+                self.mux.close_window();
+                event_loop.exit();
             }
             Action::NextTab => self.mux.next_tab(),
             Action::PrevTab => self.mux.prev_tab(),
