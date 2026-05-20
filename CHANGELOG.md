@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`focused-split-color` row in CONFIG.md notes the broadcast-mode
+  override.** Cycle 184 changed the focused-pane border to theme
+  yellow when broadcast is on (the cycle-178 sibling indicator for
+  single-tab / `tab-bar = auto` layouts). A user who'd configured
+  `focused-split-color = #ff0000` and toggled broadcast on used to
+  see the color "ignored" with no documented explanation. The
+  CONFIG.md row now explains the temporary override — broadcast
+  off restores the configured color. README's Terminator-
+  multiplexing bullet gains a parenthetical for the indicator so
+  the visual cue is discoverable before the user toggles broadcast
+  blindly for the first time.
+
 ### Fixed
 - **Theme filter rejects emacs autosave files (`#name#`).**
   Cycle 167's filter caught dotfiles (`.DS_Store`, `.gitignore`,

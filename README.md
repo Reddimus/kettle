@@ -16,8 +16,9 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   vim/tmux/neovim/AstroNvim work out of the box (truecolor, undercurl,
   alt-screen, bracketed paste, mouse, kitty keyboard).
 - **Terminator-style multiplexing** — tabs (clickable tab bar), splits,
-  focus cycling, broadcast/group input — with Terminator's default
-  keybindings.
+  focus cycling, broadcast/group input (with a yellow active-tab and
+  focused-pane accent so you always know broadcast is on) — with
+  Terminator's default keybindings.
 - **Every Ghostty theme bundled** (~500, from iTerm2-Color-Schemes), default
   **TokyoNight Night**. Ghostty-compatible `key = value` config with live
   reload.
