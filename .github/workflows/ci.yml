@@ -45,6 +45,20 @@ jobs:
             echo "headless run OK (exit $rc)"'
       - name: CLI smoke (all OSes)
         run: |
+          # --version exercises the cycle-192/195 build.rs git-SHA
+          # capture. On a CI checkout (clean tip) we expect
+          # "kettle X.Y.Z (sha12)" — verify the format with grep so
+          # a regression that drops the SHA (e.g. build.rs git
+          # invocation silently failing) fails CI instead of going
+          # un-noticed.
+          cargo run -q -p kettle -- --version | tee /tmp/kettle-version.txt
+          grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' /tmp/kettle-version.txt
+          # --check-config exercises the cycle-194/196/197 lead-line
+          # version + read-once + i/o-error categorization. On a
+          # fresh CI runner there's no kettle config, so it falls
+          # back to defaults and reports "status: OK". Just verify
+          # it exits 0 and includes the kettle: build-identity line.
+          cargo run -q -p kettle -- --check-config | grep -E '^kettle:  [0-9]'
           cargo run -q -p kettle -- --config-path
           cargo run -q -p kettle -- --list-themes > themes.txt
           test "$(wc -l < themes.txt)" -gt 400

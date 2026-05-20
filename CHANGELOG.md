@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Internal
+- **CI's CLI-smoke step now exercises `--version` and `--check-config`.**
+  Pre-cycle, the smoke step ran `--config-path` and `--list-themes`
+  but not `--version` (which exercises the cycle-192/195 build.rs
+  git-SHA capture path) or `--check-config` (cycle 194/196/197/198
+  diagnostic path). A regression where the build.rs git invocation
+  silently failed and shipped `kettle 0.1.0` without the SHA — or
+  `--check-config` lost its cycle-194 `kettle:` lead-line — would
+  go unnoticed by CI. Added grep assertions for both:
+  ```bash
+  cargo run -q -p kettle -- --version | grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)'
+  cargo run -q -p kettle -- --check-config | grep -E '^kettle:  [0-9]'
+  ```
+  Regex allows the optional `+dirty` suffix so the assertion holds
+  on both clean-CI builds (no dirty marker) and local dev builds.
+
 ### Documentation
 - **`CONTRIBUTING.md` test-count claim reworded to range-stable.**
   Said "workspace runs ~225 tests" — stale by 18 (we're at 243).
