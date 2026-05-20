@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/UX-COMPARISON.md` matrix now has a broadcast/group-input
+  row.** The 173/174/178/184 trilogy made broadcast a real
+  user-facing feature with double visual indicators (tab accent +
+  pane border), but the comparison matrix didn't reflect it.
+  Added a row showing kettle ✅, Terminator ✅ (origin),
+  kitty ✅ (`multi-input.py`), WezTerm ✅, Ghostty ⛔, Alacritty ⛔.
+  Citations section also gains an entry explaining the
+  per-window-per-tab scoping (cycle-112 invariant), the
+  cycles-173/174 sibling methods, and the cycle-178/184
+  visual-indicator strategy.
+
 ### Added
 - **`kettle --version` includes the git SHA.** Pre-cycle, the
   output was just `kettle 0.1.0` (the Cargo.toml version). Every

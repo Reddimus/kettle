@@ -47,6 +47,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Unfocused-pane dimming | ✅ `unfocused-split-opacity` 0.7 | ✅ (origin) | 🟡 | 🟡 | ⛔ | — |
 | Pane zoom/maximize | ✅ `Ctrl+Shift+X` | ✅ | ✅ | ✅ `is_zoomed` | ✅ | — |
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
+| Broadcast / group input | ✅ `Super+G` (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Hollow when unfocused | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ (origin) |
 | Blink interval config | ✅ `cursor-blink-interval` ms | ✅ | ✅ | ✅ | ✅ | ✅ (origin, 750) |
@@ -83,6 +84,15 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
   `Ctrl+Shift+X`.
 - **Tab title eliding** — WezTerm `tab_max_width`; kettle reuses its own
   `truncate()` helper in `kettle-render/src/lib.rs`.
+- **Broadcast / group input** — Terminator `terminatorlib/terminator.py`
+  `broadcast_all` group action (origin of the "send keystrokes to every
+  pane in this tab" affordance); kitty `multi-input.py` extension. kettle's
+  variant: `Mux::broadcast_write` + `broadcast_paste` + `broadcast_scroll_to_bottom`
+  scope to the active tab's leaves only (per-window-per-tab, not every
+  pane in every tab — matches Terminator's intent). Visual indicator
+  uses theme `palette[3]` (yellow) on both the active tab segment's
+  accent and the focused-pane border, so the user can see broadcast is
+  on regardless of `tab-bar` mode.
 
 ## Tab-bar hit regions
 
