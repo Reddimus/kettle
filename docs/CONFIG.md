@@ -38,7 +38,8 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS window title template — placeholders `{title}` (active pane title), `{cwd}` (active pane cwd), `{tab}` (1-based tab index); `{{`/`}}` escape literal braces |
 | `tab-format` (`tab-title-format`) | string | `{n}: {title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). The trailing `✕` close button is appended by the renderer |
 | `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane scrollback scrollbar (`auto` = only while scrolled) |
-| `split-divider-color` | color | theme | Pane border/divider color |
+| `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
+| `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
 | `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
 | `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back (Alacritty `scrolling.history.scroll_on_input`) |

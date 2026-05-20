@@ -201,8 +201,13 @@ pub struct Config {
     /// `{n}` (1-based tab index), `{title}` (focused pane's title).
     pub tab_format: String,
     pub scrollbar: ScrollbarMode,
-    /// Explicit split-divider/border color (else theme palette).
+    /// Explicit split-divider/border color for *inactive* panes (else
+    /// theme `palette[8]`, the dim color).
     pub split_divider_color: Option<Rgb>,
+    /// Explicit border color for the *focused* pane (else theme
+    /// `palette[4]`, the blue accent). Lets users tune the
+    /// here-am-I indicator without re-themeing the whole palette.
+    pub focused_split_color: Option<Rgb>,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
     /// Auto-copy the selection to the clipboard on release.
@@ -267,6 +272,7 @@ impl Default for Config {
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
+            focused_split_color: None,
             cursor_blink_interval: 530,
             copy_on_select: true,
             scroll_on_keystroke: true,
@@ -539,6 +545,11 @@ impl Config {
                 "split-divider-color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
                         cfg.split_divider_color = Some(c);
+                    }
+                }
+                "focused-split-color" | "split-divider-color-focused" => {
+                    if let Some(c) = Rgb::parse(&e.value) {
+                        cfg.focused_split_color = Some(c);
                     }
                 }
                 "cursor-blink-interval" => {
@@ -898,6 +909,7 @@ mod config_tests {
         assert_eq!(d.cursor_blink_interval, 530);
         assert!(d.copy_on_select);
         assert!(d.split_divider_color.is_none());
+        assert!(d.focused_split_color.is_none());
         let c = Config::parse_text(
             "unfocused-split-opacity = 0.5\nscrollbar = always\n\
              split-divider-color = #ff8800\ncursor-blink-interval = 800\n\
@@ -906,6 +918,16 @@ mod config_tests {
         assert_eq!(c.unfocused_split_opacity, 0.5);
         assert_eq!(c.scrollbar, ScrollbarMode::Always);
         assert_eq!(c.split_divider_color, Some(Rgb::new(0xff, 0x88, 0x00)));
+        // `focused-split-color` (canonical) + `split-divider-color-focused`
+        // (alias) both populate the focused-pane border override.
+        assert_eq!(
+            Config::parse_text("focused-split-color = #00ff00").focused_split_color,
+            Some(Rgb::new(0x00, 0xff, 0x00))
+        );
+        assert_eq!(
+            Config::parse_text("split-divider-color-focused = #0088ff").focused_split_color,
+            Some(Rgb::new(0x00, 0x88, 0xff))
+        );
         assert_eq!(c.cursor_blink_interval, 800);
         assert!(!c.copy_on_select);
         // Clamping.

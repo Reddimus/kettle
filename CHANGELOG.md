@@ -7,6 +7,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`focused-split-color` config key.** The inactive pane border
+  color was already configurable via `split-divider-color`
+  (introduced cycles ago); the *focused* pane's border was
+  hard-wired to `theme.palette[4]`. Users with a theme whose
+  accent blue blends into nearby content had no way to tune the
+  "here am I" indicator without re-theming the whole palette.
+  New `focused-split-color` (alias `split-divider-color-focused`)
+  fills the gap; `None` keeps the theme-accent default. +1 test.
 - **Session restore brings back the focused pane in each tab.**
   `STab` was only saving the split tree (`root`) — restore used
   `first_leaf()` to pick a focus, so every reopened tab landed on

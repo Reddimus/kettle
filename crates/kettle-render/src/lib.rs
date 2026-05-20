@@ -352,9 +352,13 @@ impl Renderer {
         // Per-pane grid + dividers/border.
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
-            // Pane separators / focus border (configurable divider color).
+            // Pane separators / focus border. Both colors are config-
+            // overridable: `split-divider-color` for inactive panes
+            // (defaults to theme `palette[8]`, the dim color) and
+            // `focused-split-color` for the focused pane (defaults to
+            // theme `palette[4]`, the accent blue).
             let border = if pv.focused {
-                theme.palette[4]
+                cfg.focused_split_color.unwrap_or(theme.palette[4])
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
             };
