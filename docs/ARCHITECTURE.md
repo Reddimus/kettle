@@ -106,9 +106,11 @@ adding modern features it lacks.
 | PTY | `portable-pty` | Uniform Unix + Windows ConPTY. |
 | Config | Ghostty `key = value` | Ships the Ghostty theme set verbatim; familiar to users. |
 
-Correctness is guarded by 117 workspace tests — end-to-end VT-conformance
-driving this exact `vte`+`alacritty_terminal` path, plus pure-unit coverage
-of the kitty decoder/placeholder/animation/relative logic, the fuzzy matcher
-and command palette — see [TESTING.md](TESTING.md). Comparative analysis
-behind these choices (with citations) is in [RESEARCH.md](RESEARCH.md) and
-[UX-COMPARISON.md](UX-COMPARISON.md).
+Correctness is guarded by an extensive workspace test suite —
+end-to-end VT-conformance driving this exact `vte`+`alacritty_terminal`
+path, plus pure-unit coverage of the kitty decoder / placeholder /
+animation / relative logic, the fuzzy matcher and command palette.
+See [TESTING.md](TESTING.md) for the per-crate breakdown
+(run `cargo test --workspace` for today's count — it grows ~1/cycle).
+Comparative analysis behind these choices (with citations) is in
+[RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).

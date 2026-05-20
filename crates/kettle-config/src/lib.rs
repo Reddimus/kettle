@@ -1054,6 +1054,14 @@ mod config_tests {
         // to specific CHANGELOG entries, the same way they do in code
         // comments. CONTRIBUTING.md documents the cycle-N pattern
         // itself, so a literal reference there is part of the content.
+        //
+        // Cycle 179 also flags hardcoded `<N> workspace tests` /
+        // `<N> tests across` claims — these go stale every cycle
+        // (TESTING.md / ARCHITECTURE.md / INSTALL.md each had one
+        // that was off by 30-120 tests at the time of the audit).
+        // Range-stable phrasings ("230+ tests", "an extensive
+        // suite") don't drift; this guard fails the next time a
+        // contributor hardcodes a count.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
         for rel in ["README.md", "docs/CONFIG.md", "docs/INSTALL.md"] {
@@ -1077,6 +1085,31 @@ mod config_tests {
                         i,
                         &text[i..(i + 12).min(text.len())]
                     );
+                }
+            }
+            // Hardcoded test-count claims drift every cycle. Detect
+            // `<digit> workspace tests` and `<digit> tests across`
+            // — the "230+" / "an extensive suite" phrasings don't
+            // trigger because they don't have a digit immediately
+            // before the substring.
+            for stale in [" workspace tests", " tests across"] {
+                let stale_l = stale.to_ascii_lowercase();
+                let needle = stale_l.as_bytes();
+                for (i, w) in lower.as_bytes().windows(needle.len()).enumerate() {
+                    if w == needle && i > 0 && lower.as_bytes()[i - 1].is_ascii_digit() {
+                        // Walk back to find the start of the integer.
+                        let mut start = i;
+                        while start > 0 && lower.as_bytes()[start - 1].is_ascii_digit() {
+                            start -= 1;
+                        }
+                        panic!(
+                            "hardcoded test count in user-facing doc {} \
+                             (drifts every cycle — reword as `230+ tests` \
+                             or `an extensive suite`): `{}`",
+                            rel,
+                            &text[start..(i + stale.len()).min(text.len())],
+                        );
+                    }
                 }
             }
         }

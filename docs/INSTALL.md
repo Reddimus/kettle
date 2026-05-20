@@ -32,7 +32,7 @@ system packages.
 ## Verifying your build
 
 ```sh
-cargo test --workspace      # 213 tests incl. an offscreen GPU pipeline check
+cargo test --workspace      # 230+ tests incl. an offscreen GPU pipeline check
 cargo run -p kettle -- --list-themes | wc -l   # 512
 ```
 

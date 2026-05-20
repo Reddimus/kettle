@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **Hardcoded test-count claims removed from user-facing docs.**
+  Cycle 172 caught `docs/TESTING.md`'s "213 tests as of cycle 128"
+  drift (wrong by 40+ cycles); this cycle catches the matching
+  stragglers — `docs/ARCHITECTURE.md` claimed "117 workspace
+  tests" (wrong by 120+) and `docs/INSTALL.md` claimed "213 tests"
+  in its build-verification snippet. Both reworded to range-
+  stable phrasing ("an extensive workspace test suite" / "230+
+  tests"). The cycle-172 drift guard now also flags any future
+  `<digit> workspace tests` / `<digit> tests across` substring in
+  the user-facing markdown set, so the next time someone hardcodes
+  a count it fails CI instead of going stale silently.
+
 ### Added
 - **Visual indicator when broadcast (group-input) mode is on.**
   Pre-cycle, toggling broadcast via Ctrl+Shift+G (or the command
