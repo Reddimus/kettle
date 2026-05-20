@@ -87,10 +87,19 @@ pub fn action_label(a: &Action) -> String {
 }
 
 /// Human-readable lines for the default keymap, sorted by trigger label —
-/// powers `kettle --list-keybinds` so the binding set is discoverable
-/// without reading the source.
+/// powers `kettle --list-keybinds` (no config) so the binding set is
+/// discoverable without reading the source.
 pub fn describe_defaults() -> Vec<String> {
-    let mut lines: Vec<(String, String)> = defaults()
+    describe(&defaults())
+}
+
+/// Human-readable lines for an arbitrary binding map, sorted by trigger
+/// label. Used by `kettle --list-keybinds` together with `--config FILE`
+/// so the user can introspect their *effective* keymap (defaults +
+/// user overrides + unbinds applied) without restarting kettle and
+/// inspecting it by hand.
+pub fn describe(bindings: &Bindings) -> Vec<String> {
+    let mut lines: Vec<(String, String)> = bindings
         .iter()
         .map(|(t, a)| (t.label(), action_label(a)))
         .collect();
@@ -430,6 +439,48 @@ mod tests {
                 "{t:?} should map to {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn describe_reflects_user_overrides_and_unbinds() {
+        // Cycle-103 contract: `--list-keybinds --config FILE` should
+        // show the *effective* keymap, not the built-in defaults. The
+        // pure `describe(&Bindings)` is what powers it; here we drive
+        // it directly with a hand-built map to confirm: overrides
+        // appear with the override action, unbound triggers don't
+        // appear at all, and the output is sorted.
+        let mut m = defaults();
+        // Override a default to a different action.
+        apply_keybind(&mut m, "ctrl+shift+t=close_tab");
+        // Unbind another default.
+        apply_keybind(&mut m, "ctrl+shift+c=unbind");
+
+        let lines = describe(&m);
+        // Override surfaces with the new action label.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Ctrl+Shift+T") && l.contains("CloseTab")),
+            "override should appear with the new action: {lines:?}"
+        );
+        // No line should still show Ctrl+Shift+T → NewTab.
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("Ctrl+Shift+T") && l.contains("NewTab")),
+            "stale default should not coexist with override: {lines:?}"
+        );
+        // Unbound trigger is gone entirely (no Ctrl+Shift+C line).
+        assert!(
+            !lines.iter().any(|l| l.starts_with("Ctrl+Shift+C")),
+            "unbound trigger should not appear: {lines:?}"
+        );
+        // Output remains sorted by trigger label.
+        let mut sorted = lines.clone();
+        sorted.sort();
+        assert_eq!(lines, sorted, "describe must return sorted lines");
+        // And `describe_defaults` is still just `describe(&defaults())`.
+        assert_eq!(describe_defaults(), describe(&defaults()));
     }
 
     #[test]

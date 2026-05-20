@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--list-keybinds` honors `--config` and shows the
+      *effective* keymap.** Previously always printed defaults;
+      no CLI way to confirm overrides + unbinds. New
+      `keybinds::describe(&Bindings)` factors the sort+label
+      rendering out of `describe_defaults` so `main.rs` passes
+      `&cfg.keybinds` (post-apply, defaults + overrides + unbinds
+      collapsed). +1 test.
 - [x] **OSC 1 (icon name) rewrites to OSC 2 in the extractor.**
       VTE/alacritty silently drop OSC 1 entirely; their dispatch
       only matches `"0" | "2"`. But vim / tmux / ranger / mc

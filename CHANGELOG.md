@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **`kettle --list-keybinds` honors `--config FILE` (or the default
+  config path) and shows the *effective* keymap.** Previously the
+  command always printed the built-in defaults regardless of which
+  config was active, so a user who had spent time customizing their
+  keybinds had no CLI way to confirm their `keybind = …` lines and
+  `unbind` sentinels took effect — they had to restart kettle and
+  test the chord by hand. New public `keybinds::describe(bindings:
+  &Bindings) -> Vec<String>` factors out the sort+label rendering
+  so `describe_defaults()` becomes `describe(&defaults())` and
+  `main.rs` can pass `&cfg.keybinds` (which is the post-apply
+  effective map) instead. End-to-end: overridden triggers show
+  the new action label; unbound triggers don't appear in the
+  output at all; brand-new bindings the user added land alongside
+  the defaults, all in the same sorted listing. +1 test
+  (`describe_reflects_user_overrides_and_unbinds`).
+
 ### Fixed
 - **OSC 1 (icon name) now sets the tab title.** xterm distinguishes
   OSC 0 (icon + title), OSC 1 (icon only) and OSC 2 (title only);

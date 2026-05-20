@@ -82,7 +82,25 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.list_keybinds {
-        for line in kettle_config::keybinds::describe_defaults() {
+        // Honor `--config FILE` (and the default config path if it
+        // exists) so users see their *effective* keymap — defaults +
+        // their overrides + their unbinds — not just the built-in set.
+        // Previously a user who had spent time customizing their config
+        // had to restart kettle and inspect by hand to confirm a
+        // `keybind = …` line took effect; now they can introspect from
+        // the CLI in one shot.
+        let lines = match cli
+            .config
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        {
+            Some(p) if p.exists() => {
+                let cfg = kettle_config::Config::load_from(&p);
+                kettle_config::keybinds::describe(&cfg.keybinds)
+            }
+            _ => kettle_config::keybinds::describe_defaults(),
+        };
+        for line in lines {
             println!("{line}");
         }
         return Ok(());
