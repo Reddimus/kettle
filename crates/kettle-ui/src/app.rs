@@ -1481,6 +1481,26 @@ impl App {
                     });
                 }
             }
+            Action::ClearHistory => {
+                // CSI 3 J (ED 3) — clear scrollback only, keep the
+                // visible screen and grid state. Distinct from Reset
+                // (`\e c`, RIS) which wipes everything including
+                // current screen contents. kitty / iTerm2 / WezTerm
+                // all expose this as "Clear Scrollback" or similar.
+                // Honors broadcast (cycle-173/174 invariant): when
+                // group input is on, clear every pane's scrollback,
+                // not just the focused one. The user pressing
+                // clear_history with broadcast on intends "clean
+                // slate for all the panes I'm typing into."
+                if self.mux.broadcast {
+                    self.mux.broadcast_write(b"\x1b[3J");
+                } else if let Some(p) = self.mux.focused() {
+                    p.term.write(b"\x1b[3J");
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             Action::Reset => {
                 // RIS (`ESC c`) full-resets the engine: clears the grid,
                 // restores DEC modes to defaults, drops the alt-screen

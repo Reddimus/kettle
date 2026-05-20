@@ -174,6 +174,11 @@ pub enum Action {
     ToggleBroadcastOff,
     ToggleFullscreen,
     Reset,
+    /// Clear scrollback only, NOT the visible screen — `CSI 3 J`
+    /// (ANSI `ED 3`). Distinct from `Reset` (RIS, `\e c`) which
+    /// wipes the engine to factory defaults. Same chord shape as
+    /// kitty / iTerm2 / WezTerm's "Clear Buffer" / "clear_scrollback".
+    ClearHistory,
     ScrollPageUp,
     ScrollPageDown,
     ScrollLineUp,
@@ -262,6 +267,9 @@ pub fn action_names() -> Vec<&'static str> {
         "toggle_fullscreen",
         "full_screen",
         "reset",
+        "clear_history",
+        "clear_scrollback",
+        "clear_buffer",
         "scroll_page_up",
         "scroll_page_down",
         "scroll_line_up",
@@ -335,6 +343,7 @@ impl Action {
             "broadcast_off" | "ungroup_all" => ToggleBroadcastOff,
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
+            "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
             "scroll_page_up" => ScrollPageUp,
             "scroll_page_down" => ScrollPageDown,
             "scroll_line_up" => ScrollLineUp,

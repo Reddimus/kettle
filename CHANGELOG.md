@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`clear_history` action — clear scrollback without resetting the
+  terminal.** Every modern terminal exposes this (kitty
+  `clear_terminal`, iTerm2 "Clear Buffer", WezTerm
+  `clear_scrollback`). kettle's existing `reset` action is RIS
+  (`\e c`) which clears the screen AND the engine state — bigger
+  hammer than users want. The new `clear_history` action writes
+  `CSI 3 J` (ANSI ED 3) to the focused pane, which clears the
+  scrollback buffer only and leaves the visible grid intact.
+  Aliases: `clear_history` / `clear_scrollback` / `clear_buffer`.
+  Honors broadcast (cycle-173/174 invariant): when group input
+  is on, every pane in the active tab clears its scrollback.
+  Reachable via the command palette ("Clear scrollback") and
+  bindable via `keybind = … = clear_history`. Unbound by
+  default (the natural chord on most terminals — `Ctrl+Shift+L`
+  — collides with the shell's form-feed; the user picks their
+  own preferred chord). docs/CONFIG.md keybind grammar updated.
+
 ### Fixed
 - **Drag-and-drop routes through bracketed paste like clipboard
   paste does.** Cycle-175 follow-up. The drop handler wrote the

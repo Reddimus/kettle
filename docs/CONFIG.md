@@ -85,7 +85,9 @@ N is the tab number — `goto_tab:1` is the first tab), `new_split:right`,
 `focus_next`, `focus_prev`, `goto_split:{up,down,left,right}`,
 `increase_font_size`, `decrease_font_size`, `reset_font_size`,
 `start_search`, `broadcast_all`, `broadcast_off`, `toggle_fullscreen`,
-`reset`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`,
+`reset`, `clear_history` (also `clear_scrollback` / `clear_buffer` —
+wipes scrollback only; keep the visible screen unlike `reset`),
+`scroll_page_up`, `scroll_page_down`, `scroll_to_top`,
 `scroll_to_bottom`, `prev_prompt`, `next_prompt`, `new_ssh`,
 `command_palette`, `hint_mode`, `next_theme`, `prev_theme`,
 `reload_config`.

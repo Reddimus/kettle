@@ -49,6 +49,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
         ("Reset terminal", Reset),
+        ("Clear scrollback", ClearHistory),
         ("Reload config", ReloadConfig),
     ]
 }
@@ -142,6 +143,7 @@ mod tests {
             ToggleBroadcastOff,
             ToggleFullscreen,
             Reset,
+            ClearHistory,
             ScrollPageUp,
             ScrollPageDown,
             ScrollLineUp,
@@ -169,9 +171,10 @@ mod tests {
                 | FocusRight | ResizeUp | ResizeDown | ResizeLeft | ResizeRight | ToggleZoom
                 | IncreaseFontSize | DecreaseFontSize | ResetFontSize | StartSearch
                 | ToggleBroadcastAll | ToggleBroadcastOff | ToggleFullscreen | Reset
-                | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown | ScrollToTop
-                | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh | ReloadConfig
-                | CommandPalette | HintMode | NextTheme | PrevTheme | GotoTab(_) => {}
+                | ClearHistory | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown
+                | ScrollToTop | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh
+                | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme | GotoTab(_) => {
+                }
             }
         }
         let missing: Vec<&Action> = every_action
