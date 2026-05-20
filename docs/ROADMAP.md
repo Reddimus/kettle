@@ -506,6 +506,10 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`cursor-style = beam` aliases `bar`.** Alacritty
+      refugees writing their old spelling no longer get a
+      silent Block fallback. Diagnostic no longer flags it.
+      +1 test.
 - [x] **Typing resets blink phase.** Last user-gesture path
       to gain the cycle 134/135/136/140 blink-reset.
       Alacritty / kitty / iTerm2 / WezTerm all do it on

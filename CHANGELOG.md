@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`cursor-style = beam` accepted as an alias for `bar`.**
+  Alacritty's config calls the vertical-stroke cursor
+  `Beam`; kettle's enum calls it `Bar`. A user copying their
+  Alacritty config got a silent fallback to `Block` plus a
+  `--check-config` malformed-value warning. Now `beam`
+  parses to `CursorStyle::Bar` directly and
+  `detect_malformed_values` no longer flags it.
+  +1 test (`cursor_style_accepts_beam_as_alacritty_alias_for_bar`)
+  covers all four valid values, plus a real typo
+  (`bream`) still flagging.
+
 ### Fixed
 - **Typing also resets the cursor blink phase.** Final
   user-gesture path that still missed the blink reset. A

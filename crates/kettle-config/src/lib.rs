@@ -490,7 +490,12 @@ impl Config {
                 // visible warning. Pin the documented variants here so
                 // `--check-config` flags unknown values; the list mirrors
                 // the apply arms exactly.
-                "cursor-style" => matches!(v.as_str(), "block" | "underline" | "bar"),
+                // `cursor-style = beam` is the Alacritty spelling for
+                // the same vertical-bar cursor kettle calls `bar`.
+                // Cycle 142 accepts it as an alias so a user copying
+                // their Alacritty config doesn't get a silent
+                // fallback to Block.
+                "cursor-style" => matches!(v.as_str(), "block" | "underline" | "bar" | "beam"),
                 "bell" => matches!(
                     v.as_str(),
                     "off" | "none" | "false" | "visual" | "flash" | "attention" | "urgent" | "both"
@@ -718,7 +723,11 @@ impl Config {
                 "cursor-style" => {
                     cfg.cursor_style = match e.value.as_str() {
                         "underline" => CursorStyle::Underline,
-                        "bar" => CursorStyle::Bar,
+                        // `beam` is Alacritty's name for the same
+                        // vertical-bar cursor; cycle 142 added the
+                        // alias so Alacritty refugees don't get a
+                        // silent Block fallback.
+                        "bar" | "beam" => CursorStyle::Bar,
                         _ => CursorStyle::Block,
                     }
                 }
@@ -1650,6 +1659,32 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn cursor_style_accepts_beam_as_alacritty_alias_for_bar() {
+        // Cycle 142: a user copying their Alacritty config writes
+        // `cursor-style = beam`. Pre-fix, the catchall mapped that to
+        // Block (since `beam` wasn't matched), and --check-config
+        // flagged it as malformed. Now `beam` is an explicit alias
+        // for `bar` — same vertical-stroke cursor — and parses
+        // cleanly.
+        let c = Config::parse_text("cursor-style = beam");
+        assert_eq!(c.cursor_style, CursorStyle::Bar);
+        // `bar` still works (regression guard).
+        let c = Config::parse_text("cursor-style = bar");
+        assert_eq!(c.cursor_style, CursorStyle::Bar);
+        // The other two values are unchanged.
+        let c = Config::parse_text("cursor-style = underline");
+        assert_eq!(c.cursor_style, CursorStyle::Underline);
+        let c = Config::parse_text("cursor-style = block");
+        assert_eq!(c.cursor_style, CursorStyle::Block);
+        // `beam` no longer flagged by --check-config.
+        let bad = Config::detect_malformed_values("cursor-style = beam\n");
+        assert!(bad.is_empty(), "beam should now be accepted: {bad:?}");
+        // Real typos still flag.
+        let bad = Config::detect_malformed_values("cursor-style = bream\n");
+        assert_eq!(bad.len(), 1);
     }
 
     #[test]
