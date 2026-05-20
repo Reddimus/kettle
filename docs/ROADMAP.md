@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`docs/CONFIG.md` documents bool aliases / numeric
+      clamps / `beam` alias.** Added a "Type notes"
+      preamble listing the cycle-138 bool aliases and the
+      cycles-118/131/132/133 numeric clamp ranges. Cursor-
+      style row updated with the `beam` alias.
 - [x] **`cursor-style = beam` aliases `bar`.** Alacritty
       refugees writing their old spelling no longer get a
       silent Block fallback. Diagnostic no longer flags it.

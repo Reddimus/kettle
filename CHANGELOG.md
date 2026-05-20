@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/CONFIG.md` documents bool aliases, numeric clamps,
+  and the `beam` cursor-style alias.** The bool-row entries
+  just said `bool` with no hint that "yes" / "no" / "off" /
+  "on" / "0" / "1" / "enabled" / "disabled" are also accepted
+  (cycle 138). Numeric-range clamps (cycles 118/131/132/133)
+  were never mentioned in the docs even though they affected
+  user-facing behavior. The `beam` alias (cycle 142) wasn't
+  in the cursor-style row. Added a "Type notes" preamble
+  that documents all three concerns and updated the
+  cursor-style row's value list.
+
 ### Added
 - **`cursor-style = beam` accepted as an alias for `bar`.**
   Alacritty's config calls the vertical-stroke cursor

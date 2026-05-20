@@ -5,6 +5,15 @@ first `=` splits key and value, surrounding whitespace is trimmed, only
 full-line `#` comments are allowed (a `#` inside a value is part of the value,
 so hex colors work), and some keys may repeat.
 
+**Type notes.** `bool` keys accept the standard aliases (case-insensitive):
+`true` / `yes` / `on` / `1` / `enabled` / `enable` / `y` for true,
+and `false` / `no` / `off` / `0` / `disabled` / `disable` / `n` for false.
+Unrecognized values keep the current setting and surface in `--check-config`
+(cycle 138). Numeric keys with documented ranges
+(`font-size`, `background-opacity`, `unfocused-split-opacity`,
+`scroll-multiplier`, `minimum-contrast`, `cursor-blink-interval`) clamp at
+parse-time *and* flag out-of-range values via `--check-config`.
+
 Config path: `$XDG_CONFIG_HOME/kettle/config` (Linux), the `~/.config`
 fallback, or `%APPDATA%\kettle\config` on Windows. Run `kettle --config-path`
 to print it, or `kettle --check-config` to validate it (resolved settings +
@@ -26,7 +35,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `scrollback` | int / `infinite` | `10000` | Lines of history; `0`, `infinite` or `unlimited` = effectively unbounded |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `background-opacity` | float | `1.0` | 0..1 |
-| `cursor-style` | `block`\|`underline`\|`bar` | `block` | |
+| `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` accepted as Alacritty-spelled alias for `bar` |
 | `cursor-style-blink` | bool | `true` | |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read |
