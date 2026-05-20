@@ -97,6 +97,36 @@ jobs:
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
             echo "headless run OK (exit $rc)"'
+      - name: --screenshot end-to-end (Linux)
+        # Cycle 236: capture_png drives the real GPU text + quad +
+        # image pipeline (bundled Nerd Font, glyphon shaping, wgpu
+        # offscreen device + texture, image::save PNG encode) — none
+        # of that is covered by the offscreen_selftest unit test
+        # (which only compiles the WGSL shaders). Run it against
+        # the software-Vulkan adapter on the Linux job to catch a
+        # regression in any of those layers before users hit it.
+        # No DISPLAY needed — capture_png builds its own offscreen
+        # device with compatible_surface=None.
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          ./target/release/kettle --screenshot /tmp/kettle-ci.png
+          # PNG magic bytes (89 50 4E 47 = \211PNG) — guards against
+          # capture_png silently producing a zero-byte or
+          # not-actually-PNG file. wgpu errors typically surface as
+          # a panic; this is the belt-and-suspenders check on the
+          # encode path.
+          head -c 4 /tmp/kettle-ci.png | xxd | grep -q "8950 4e47"
+          # Sanity floor: the default 96×28 cells render to ~765×500
+          # px ≈ 60 KB. Floor at 10 KB catches an "image::save
+          # produced an empty PNG" failure mode without being too
+          # strict on a future renderer change that shrinks the
+          # default frame.
+          size=$(stat -c%s /tmp/kettle-ci.png)
+          test "$size" -gt 10000 \
+            || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
+          echo "screenshot OK ($size bytes)"
       - name: CLI smoke (all OSes)
         run: |
           # --version exercises the cycle-192/195 build.rs git-SHA

@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### CI
+- **`--screenshot` end-to-end smoke on the Linux runner.**
+  `kettle_render::offscreen_selftest` compiles the WGSL shaders
+  and renders one pass; `--screenshot` exercises the rest of the
+  pipeline (bundled Nerd Font, glyphon shaping, wgpu offscreen
+  texture, image::save PNG encode, scripted demo content). None
+  of that was covered by CI before. New step runs `--screenshot`
+  against the software-Vulkan adapter (LIBGL_ALWAYS_SOFTWARE=1)
+  and asserts the output has the PNG magic header + ≥ 10 KB,
+  catching a wgpu/glyphon/image-crate regression before users
+  hit it. No DISPLAY needed — capture_png builds its own
+  offscreen device with `compatible_surface: None`.
+
 ### Internal
 - **Markdown cross-link drift guard for every user-facing doc.**
   Cycle 223/224's image guard catches `![…](path)` regressions;
