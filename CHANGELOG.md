@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Internal
+- **`theme_filter::is_bundled_theme_filename` doc-comment lists all
+  6 skip categories.** The original doc (cycle 167) listed 4
+  patterns; cycles 186/187/190 expanded the implementation
+  (case-insensitive OS metadata, emacs `#name#` autosave, Office
+  `~$name` lock files) but updated only the inline cycle-N
+  comments inside the function body. The summary list at the top
+  of the doc — which is what a contributor reads first — was
+  stale by 2 entries. Now lists all 6 patterns with one-line
+  context for each. No code change.
+
 - **`build.rs` module-level doc updated to reflect the cycle-195
   `+dirty` marker and rerun-if-changed removal.** The cycle-192
   module doc said "Outputs `KETTLE_GIT_SHA` as one of two forms"

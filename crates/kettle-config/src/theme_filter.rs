@@ -14,11 +14,17 @@
 /// happened to land in the directory.
 ///
 /// The skip list catches:
-/// - `LICENSE` / `README.md` (the upstream repo's own metadata)
-/// - Any dotfile (`.DS_Store` on macOS, `.git*`, `.swp` editor swap files)
+/// - `LICENSE` / `README.md` (the upstream repo's own metadata).
+/// - Any dotfile (`.DS_Store` on macOS, `.git*`, `.swp` editor swap files,
+///   emacs `.#name` lock files).
+/// - Emacs `#name#` autosave files (saved when a buffer crashes mid-edit;
+///   no leading dot so they slip past the dotfile branch).
+/// - Microsoft Office `~$name` lock files (sync-folder fallout when a
+///   contributor edits a doc on OneDrive / SharePoint / Dropbox).
 /// - Windows / macOS desktop metadata (`Thumbs.db`, `desktop.ini`,
-///   `Icon\r`)
-/// - Backup-file patterns (`*~`, `*.bak`, `*.orig`, `*.swp`, `*.swo`)
+///   `Icon\r`), case-insensitive.
+/// - Backup-file patterns by suffix (`*~`, `*.bak`, `*.orig`, `*.swp`,
+///   `*.swo`, `*.tmp`), case-insensitive.
 ///
 /// Without this filter, a maintainer cloning the repo on macOS and
 /// opening the themes folder in Finder would pollute the bundled theme
