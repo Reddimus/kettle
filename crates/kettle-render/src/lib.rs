@@ -1072,7 +1072,17 @@ impl Renderer {
         use alacritty_terminal::vte::ansi::CursorShape as EShape;
         let cp = content.cursor.point;
         let shape = content.cursor.shape;
-        let draw_cursor = shape != EShape::Hidden && cp.line.0 >= 0 && pv.focused;
+        // Cycle 150: also require cursor_visible. The old check fell
+        // through to draw the hollow-outline branch on an unfocused
+        // window even when DEC ?25l had hidden the cursor. So a
+        // program that called `printf '\e[?25l'` (vim, less, fzf…)
+        // and the user clicked away — the unfocused-pane outline
+        // still showed. cursor_visible now gates everything; the
+        // hollow-outline-for-HollowBlock-shape case stays inside the
+        // visible branch since DECSCUSR shapes and DEC ?25 hide are
+        // independent (a program can use HollowBlock to mean "I'm
+        // not in this pane" while still wanting the cursor visible).
+        let draw_cursor = shape != EShape::Hidden && cp.line.0 >= 0 && pv.focused && cursor_visible;
         if draw_cursor {
             let bx = ox + cp.column.0 as f32 * cw;
             let by = oy + cp.line.0 as f32 * ch;
@@ -1092,7 +1102,7 @@ impl Renderer {
                 quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
                 quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
                 quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
-            } else if cursor_visible {
+            } else {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
                     EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),

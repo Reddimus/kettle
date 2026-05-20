@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **DEC ?25l (hide cursor) is respected even when the window
+  is unfocused.** The renderer's `draw_cursor` gate was
+  `shape != Hidden && cp.line.0 >= 0 && pv.focused` — missing
+  the `cursor_visible` flag. So when a TUI (vim, less, fzf,
+  etc.) sent `\e[?25l` to hide its cursor and the user
+  clicked away, the *unfocused-window hollow outline* still
+  drew. Cursor was supposed to be invisible; it wasn't. The
+  shape-based Hidden variant was correctly excluded, but
+  DEC ?25 is a separate mode and routed through a different
+  flag, so the bug only fired on the `shape != Hidden &&
+  cursor_visible == false` combination — i.e. any program
+  using `printf '\e[?25l'` rather than DECSCUSR `q`. Now
+  the `cursor_visible` flag also gates `draw_cursor`, so a
+  hidden cursor stays hidden in both focused and unfocused
+  states, and across all DECSCUSR shapes (Block / Underline
+  / Beam / HollowBlock).
+
+### Fixed
 - **`--screenshot` PNG honors `background-opacity` too.**
   Cycle 148 fixed the live-window path's clear-op alpha
   (`a: cfg.background_opacity`) and surface alpha-mode

@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **DEC ?25l hides cursor even when unfocused.** The
+      `draw_cursor` gate forgot to check `cursor_visible`;
+      the unfocused-window hollow-outline branch fell
+      through even when a TUI had sent `\e[?25l`. Now the
+      flag gates the whole branch.
 - [x] **`--screenshot` honors `background-opacity`.**
       Sibling to cycle 148. Screenshot clear-op hardcoded
       `a: 1.0`; now routes through cfg.background_opacity
