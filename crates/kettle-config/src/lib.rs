@@ -395,8 +395,7 @@ impl Config {
             let ok = match e.key.as_str() {
                 // Floats: clamped or otherwise, the parse itself has to
                 // succeed.
-                "font-size"
-                | "padding-x"
+                "padding-x"
                 | "window-padding-x"
                 | "padding-y"
                 | "window-padding-y"
@@ -405,6 +404,16 @@ impl Config {
                 | "scroll-multiplier"
                 | "mouse-scroll-multiplier"
                 | "minimum-contrast" => v.parse::<f32>().is_ok(),
+                // `font-size`: parses AND lands inside [5.0, 72.0], the
+                // clamp range cycle 118 added to `Renderer::new` /
+                // `set_font_size`. A user with `font-size = 500` got a
+                // silent clamp to 72 at runtime; `--check-config` used
+                // to echo "500pt" verbatim, hiding the discrepancy.
+                // Cycle 131 surfaces the out-of-range case as a
+                // diagnostic (same shape as cycle 124's `palette =
+                // N >= 16`). The runtime still clamps cleanly — the
+                // diagnostic just stops the silent-mismatch.
+                "font-size" => v.parse::<f32>().is_ok_and(|n| (5.0..=72.0).contains(&n)),
                 // Special: scrollback accepts unlimited/infinite/0 as
                 // "no cap" plus any non-negative integer.
                 "scrollback" => {
@@ -1550,6 +1559,35 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn detect_malformed_values_flags_font_size_out_of_renderer_range() {
+        // Cycle 131: font-size = 500 silently clamps to 72 at the
+        // renderer (cycle 118's `clamp_font_size`); --check-config
+        // used to echo the raw value with no hint of the clamp.
+        // Surface out-of-range values as malformed so the docs/UI
+        // ("500pt") and the runtime ("72pt") finally agree.
+        let bad = Config::detect_malformed_values(
+            "font-size = 500\n\
+             font-size = 0\n\
+             font-size = -4\n\
+             font-size = 72.5\n",
+        );
+        // 500, 0, -4 are all out of [5.0, 72.0]; 72.5 too.
+        assert_eq!(bad.len(), 4, "all four out-of-range: {bad:?}");
+        assert!(bad.iter().all(|b| b.contains("font-size")));
+        // In-range values + bounds still pass cleanly.
+        let ok = Config::detect_malformed_values(
+            "font-size = 13\n\
+             font-size = 5\n\
+             font-size = 72\n\
+             font-size = 13.5\n",
+        );
+        assert!(ok.is_empty(), "all in-range: {ok:?}");
+        // Non-numeric still goes through the parse-fail path (cycle 70).
+        let bad = Config::detect_malformed_values("font-size = abc\n");
+        assert_eq!(bad.len(), 1);
     }
 
     #[test]

@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--check-config` flags `font-size` outside [5, 72].**
+      Cycle 118 added a runtime clamp; --check-config still
+      echoed `font: 500pt` verbatim with no mention of the
+      silent runtime cap to 72pt. Now surfaced as malformed
+      (same pattern as cycle 124's palette index ≥ 16). +1
+      test covering all four out-of-range + four in-range.
 - [x] **`Mux::split` exits zoom (was hiding the other half).**
       Splitting a zoomed pane used to leave zoom on while
       focusing the new pane — so `layout()`'s collapse made

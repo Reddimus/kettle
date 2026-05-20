@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--check-config` flags `font-size` outside `[5.0, 72.0]`.**
+  Cycle 118 added a runtime clamp at the renderer; a user
+  config of `font-size = 500` silently rendered at the
+  clamped 72pt. But `--check-config` echoed the raw value
+  verbatim (`font: ... 500pt`), so the docs/diagnostic UI
+  and the runtime disagreed without telling the user.
+  Same shape as cycle 124's `palette = N=#hex` with N ≥ 16:
+  surface the silent clamp as a malformed-value diagnostic.
+  The runtime still clamps cleanly — the warning just stops
+  the silent mismatch. +1 test
+  (`detect_malformed_values_flags_font_size_out_of_renderer_range`)
+  covers 500 / 0 / -4 / 72.5 (out of range) and 5 / 72 /
+  13 / 13.5 (in-range, including bounds).
+
+### Fixed
 - **`Mux::split` while zoomed exits zoom so the user sees both
   halves.** The old `split` set `tab.focus = new_id` but left
   `tab.zoomed = true`, so `Mux::layout`'s zoom-collapse only
