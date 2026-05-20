@@ -46,6 +46,17 @@ end
 function __kettle_preexec --on-event fish_preexec
     printf '\e]133;C\a'
 end
+function __kettle_postexec --on-event fish_postexec
+    printf '\e]133;D;%d\a' $status
+end
+# `B` (end-of-prompt) goes inside the prompt itself — fish doesn't
+# have a dedicated event for it. Append the marker to your prompt's
+# trailing output. With the default prompt, prefix your existing
+# `fish_prompt` definition's final `echo`/`printf` so the marker
+# emits *after* all the prompt text but *before* the user starts
+# typing. (Most users don't need B for jump-to-prompt — A alone
+# is enough; B is only useful if a tool wants to know where the
+# user's input area starts.)
 ```
 
 ## Marks

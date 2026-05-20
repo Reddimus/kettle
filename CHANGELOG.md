@@ -7,6 +7,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **Fish shell-integration hook emits OSC 133 `D` (command finish
+  + exit code).** The bash and zsh sample hooks in
+  `docs/SHELL-INTEGRATION.md` emit all four marks (A / B / C / D);
+  the fish sample only emitted A (prompt start) and C (preexec).
+  Without D, kettle's per-prompt exit-status association is lost
+  for fish users — jump-to-prompt still works (it keys off A) but
+  any downstream tooling that consumes D (some shell-integration-
+  aware status lines, the `__kettle_pc` exit-code template in
+  bash) silently skips fish-driven prompts. Added a
+  `__kettle_postexec` hook using `fish_postexec` + `$status` so
+  fish parity matches bash/zsh. Also documented how to emit B
+  inside the prompt itself (fish doesn't expose a fish_prompt_end
+  event, but B is optional — kettle only needs A for jump-to-
+  prompt). No code change; docs-only.
+
 - **`focused-split-color` row in CONFIG.md notes the broadcast-mode
   override.** Cycle 184 changed the focused-pane border to theme
   yellow when broadcast is on (the cycle-178 sibling indicator for
