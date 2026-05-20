@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`--config FILE` hard-fails at the CLI surface when the file is
+  unreadable.** Cycles 106 / 164 caught the "no such file" and
+  "not a regular file (typically a dir)" classes. Cycle 198 adds
+  the third class: file *exists* and *is regular* but
+  permission-denied / I/O-error on open. Pre-fix, kettle started
+  with defaults, emitted a warn to stderr, and the user saw their
+  theme not apply. Now: `--config FILE: not readable (permission
+  denied or I/O error)` and the CLI exits non-zero. Same shape
+  as the existing rejections — surface the problem at the CLI
+  surface where the user can act on it, instead of silently
+  falling back. Test gains a `#[cfg(unix)]` block that
+  `chmod 000`s a tempfile and asserts the helper returns the
+  right reason; gated on `is_err()` so running tests as root
+  (which bypasses unix perms) doesn't spuriously fail.
+
 ### Performance
 - **`--check-config` reads the config file once, not twice.**
   Cycle-196 follow-up. The cycle-196 fix probed `read_to_string`

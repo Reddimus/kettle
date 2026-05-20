@@ -450,19 +450,28 @@ fn main() -> anyhow::Result<()> {
 
 /// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
 /// by name, two columns aligned to the longest name (floor 4 so single-
-/// Validate a `--config PATH` argument: must be an existing regular file.
-/// Returns `None` when the path is acceptable, or `Some(reason)` ready to
-/// slot into the CLI error template. Pure so the typo / wrong-kind paths
-/// (no such file, directory mistyped for the file inside) are unit-
+/// Validate a `--config PATH` argument: must be an existing regular file
+/// the current process can open. Returns `None` when the path is acceptable,
+/// or `Some(reason)` ready to slot into the CLI error template. Pure-modulo-
+/// the-filesystem so the typo / wrong-kind / unreadable paths (no such file,
+/// directory mistyped for the file inside, perm-denied file) are unit-
 /// testable without spawning the binary. The matching `--working-directory`
 /// check is still inlined below — the messages differ (`not a regular file`
 /// vs `not a directory`) and the call site is short enough; extracting both
 /// into a shared kind-enum helper would add more glue than it removes.
+///
+/// Cycle 198: also probe `File::open` so a permission-denied file fails
+/// at the CLI surface instead of at the silent runtime fallback. Cycles
+/// 106 (no such file), 164 (not a regular file), 198 (unreadable) cover
+/// the three classes of "user typed `--config FILE` but kettle ignored
+/// it" complaints.
 fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
     if !p.exists() {
         Some("no such file")
     } else if !p.is_file() {
         Some("not a regular file")
+    } else if std::fs::File::open(p).is_err() {
+        Some("not readable (permission denied or I/O error)")
     } else {
         None
     }
@@ -516,6 +525,34 @@ mod tests {
             .write_all(b"theme = TokyoNight Night\n")
             .unwrap();
         assert_eq!(config_path_problem(&file), None);
+
+        // Cycle 198: unreadable file (perm-denied) is rejected at the
+        // CLI surface so the runtime doesn't silently fall back to
+        // defaults. Skip on Windows / CI users where chmod-000 doesn't
+        // actually deny read to the calling user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = tmp.join("unreadable.conf");
+            std::fs::File::create(&unreadable)
+                .unwrap()
+                .write_all(b"theme = TokyoNight Night\n")
+                .unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // The check should now flag it. Root bypasses unix perms,
+            // so only assert when we actually can't open it ourselves
+            // — running CI as root would otherwise spuriously fail
+            // the test.
+            if std::fs::File::open(&unreadable).is_err() {
+                assert_eq!(
+                    config_path_problem(&unreadable),
+                    Some("not readable (permission denied or I/O error)"),
+                );
+            }
+            // Restore perms so the cleanup remove can succeed.
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+            let _ = std::fs::remove_file(&unreadable);
+        }
 
         // Cleanup so a re-run of the suite starts fresh.
         let _ = std::fs::remove_file(&file);
