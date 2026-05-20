@@ -964,6 +964,12 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`Config::default_path` treats empty env vars as unset.**
+      Cycle-180 sibling for the config-path probe.
+      `XDG_CONFIG_HOME=""` → relative `kettle/config` reading
+      a stray config in CWD. Filter empty values; refactored
+      to `default_path_from(lookup)` for unit testability. +1
+      test.
 - [x] **`home_dir_fallback` treats empty env vars as unset.**
       Cycle-162 follow-up. `HOME=""` (stripped CI container,
       misconfigured `unset HOME` parent) returned an empty

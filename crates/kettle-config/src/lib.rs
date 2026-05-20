@@ -332,10 +332,32 @@ impl Config {
     /// Standard config path: `$XDG_CONFIG_HOME/kettle/config` (or the platform
     /// equivalent).
     pub fn default_path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
+        Self::default_path_from(|k| std::env::var_os(k))
+    }
+
+    /// Inner of `default_path` parameterized on the env-var lookup so
+    /// the probe order + empty-value filter are unit-testable without
+    /// mutating the real process env (which would race against the
+    /// rest of the parallel suite).
+    ///
+    /// Empty env-var values are treated as unset and the probe
+    /// continues to the next variable. Pre-cycle-181,
+    /// `XDG_CONFIG_HOME=""` (rare but possible in stripped CI
+    /// containers or after a misconfigured `unset`/`export X=`)
+    /// returned `Some(PathBuf::from(""))` from the first arm, and
+    /// the final path became `"kettle/config"` — a *relative* path
+    /// that could pick up a stray `kettle/config` file in whatever
+    /// directory the user launched kettle from. Same shape as
+    /// cycle 180 (`home_dir_fallback`), applied here to the
+    /// config-path probe.
+    pub(crate) fn default_path_from(
+        lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<PathBuf> {
+        let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
+        let base = var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
+            .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .or_else(|| var("APPDATA").map(PathBuf::from))?;
         Some(base.join("kettle").join("config"))
     }
 
@@ -1123,6 +1145,76 @@ mod config_tests {
         assert_eq!(c.theme.foreground, Rgb::new(0xc0, 0xca, 0xf5));
         assert_eq!(c.theme.palette[4], Rgb::new(0x7a, 0xa2, 0xf7));
         assert_eq!(c.font_family, font::FAMILY);
+    }
+
+    #[test]
+    fn default_path_falls_through_empty_env_vars() {
+        // Cycle 181 (sibling to cycle 180): `XDG_CONFIG_HOME=""`
+        // (stripped CI container, misconfigured unset/export) used to
+        // return `Some(PathBuf::from(""))` from the first arm, and the
+        // final path became `"kettle/config"` — a *relative* path that
+        // could pick up a stray `kettle/config` file in whatever
+        // directory the user launched kettle from. Now empty values
+        // are filtered as if unset and the probe continues.
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+
+        fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+            move |k| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| OsString::from(*v))
+            }
+        }
+
+        // XDG_CONFIG_HOME set normally → wins, joins `kettle/config`.
+        // Build the expected value via PathBuf::join so the assertion
+        // uses the platform separator and works on Windows CI too.
+        assert_eq!(
+            Config::default_path_from(from(&[("XDG_CONFIG_HOME", "/x")])),
+            Some(PathBuf::from("/x").join("kettle").join("config")),
+        );
+        // XDG_CONFIG_HOME empty, HOME set → HOME-based path
+        // ($HOME/.config/kettle/config), absolute.
+        assert_eq!(
+            Config::default_path_from(from(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])),
+            Some(
+                PathBuf::from("/h")
+                    .join(".config")
+                    .join("kettle")
+                    .join("config"),
+            ),
+        );
+        // Both empty, APPDATA set (Windows) → APPDATA-based path.
+        // PathBuf::join uses the platform separator (`/` on Linux/Mac,
+        // `\` on Windows); build the expected value the same way
+        // rather than hardcoding either form so the assertion holds on
+        // every CI runner.
+        assert_eq!(
+            Config::default_path_from(from(&[
+                ("XDG_CONFIG_HOME", ""),
+                ("HOME", ""),
+                ("APPDATA", r"C:\u\AppData\Roaming"),
+            ])),
+            Some(
+                PathBuf::from(r"C:\u\AppData\Roaming")
+                    .join("kettle")
+                    .join("config"),
+            ),
+        );
+        // All three empty → None (rather than the pre-cycle relative
+        // `"kettle/config"`).
+        assert_eq!(
+            Config::default_path_from(from(&[
+                ("XDG_CONFIG_HOME", ""),
+                ("HOME", ""),
+                ("APPDATA", ""),
+            ])),
+            None,
+        );
+        // Nothing set at all → None (same outcome).
+        assert_eq!(Config::default_path_from(from(&[])), None);
     }
 
     #[test]

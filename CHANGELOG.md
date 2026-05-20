@@ -7,6 +7,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`XDG_CONFIG_HOME=""` no longer makes `default_path` return a
+  *relative* path.** Cycle-180 sibling: same empty-env-var
+  filter shape, applied to `Config::default_path`. Pre-cycle,
+  the first arm read `var_os("XDG_CONFIG_HOME")` and produced
+  `Some(PathBuf::from(""))` for an empty value — the final path
+  became `"kettle/config"`, a relative path that resolves
+  against whatever the current working directory happens to be.
+  A user launching kettle from a directory that happened to
+  contain a `kettle/` subdirectory could have kettle silently
+  read a stray config file there instead of the user's real
+  one — wrong config OR (worse, in a multi-user-shared CWD
+  scenario) someone else's config. Fix: filter empty values
+  in every arm of the XDG_CONFIG_HOME → HOME → APPDATA fallback;
+  refactored as `default_path_from(lookup)` so the env-probe
+  order + filter are unit-testable without mutating the process
+  env. Test pins all four branches (XDG set / HOME fallback /
+  APPDATA fallback / all-empty-or-unset → None). +1 test
+  (243 total).
+
 - **`HOME=""` (empty env var) is treated as unset in
   `home_dir_fallback`.** Cycle-162 follow-up. The cycle-162 fix
   introduced `home_dir_fallback` to probe HOME → USERPROFILE →
