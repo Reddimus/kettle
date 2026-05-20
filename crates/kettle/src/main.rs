@@ -2,10 +2,20 @@
 
 use clap::Parser;
 
+/// Version string shown by `kettle --version`. Concatenates the
+/// `Cargo.toml` version with the git SHA captured by `build.rs` (or
+/// the empty string when we're not in a git checkout — source
+/// tarballs, vendored builds), so the output is one of:
+///
+/// - `kettle 0.1.0 (a1b2c3d4e5f6)` — git checkout, sha12 in parens.
+/// - `kettle 0.1.0` — non-git build; concat with an empty string
+///   leaves the version pristine. Cycle 192.
+const KETTLE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("KETTLE_GIT_SHA"));
+
 #[derive(Parser, Debug)]
 #[command(
     name = "kettle",
-    version,
+    version = KETTLE_VERSION,
     about = "A fast cross-platform GPU terminal emulator"
 )]
 struct Cli {

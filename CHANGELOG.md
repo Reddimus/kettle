@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **`kettle --version` includes the git SHA.** Pre-cycle, the
+  output was just `kettle 0.1.0` (the Cargo.toml version). Every
+  serious Rust CLI (cargo, rustc, ripgrep, fd) embeds the build's
+  git SHA so users reporting bugs can pin the exact commit they
+  hit it on. With nightly `cargo install --git` builds becoming
+  common, "kettle 0.1.0" on five different days could mean five
+  different binaries. New `build.rs` captures
+  `git rev-parse --short=12 HEAD` and embeds it as
+  `KETTLE_GIT_SHA`; the main const concats it onto the version
+  string. Output: `kettle 0.1.0 (a2ff10b2f36f)` in a git checkout,
+  `kettle 0.1.0` in a source-tarball / vendored build (no SHA
+  available — empty env string concats to nothing). The build
+  script uses cargo:rerun-if-changed on `.git/HEAD` AND the
+  ref file the symbolic ref points at (`refs/heads/<branch>`),
+  so commits trigger a rebuild with the fresh SHA.
+
 ### Performance
 - **`broadcast_paste` caches the two possible payload variants.**
   Cycle 174 introduced per-pane bracketed-paste wrapping inside
