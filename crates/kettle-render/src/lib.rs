@@ -1604,7 +1604,17 @@ pub fn capture_png(
                             r: srgb(bg.r),
                             g: srgb(bg.g),
                             b: srgb(bg.b),
-                            a: 1.0,
+                            // Cycle 149: honor cfg.background_opacity
+                            // here too. The live-window clear op
+                            // already did (line ~862), but the
+                            // screenshot path hardcoded `a: 1.0` —
+                            // so `kettle --screenshot --config
+                            // /transparent.conf` produced an opaque
+                            // PNG regardless. PNG is RGBA8 and stores
+                            // the alpha channel directly; honoring
+                            // the config makes the screenshot match
+                            // what the live window shows.
+                            a: cfg.background_opacity as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },

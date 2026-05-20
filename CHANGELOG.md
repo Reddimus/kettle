@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`--screenshot` PNG honors `background-opacity` too.**
+  Cycle 148 fixed the live-window path's clear-op alpha
+  (`a: cfg.background_opacity`) and surface alpha-mode
+  selection. The screenshot path's clear op still hardcoded
+  `a: 1.0`, so `kettle --config /transparent.conf --screenshot
+  out.png` produced an opaque PNG regardless of what the
+  user asked for. PNG output is RGBA8 and the alpha channel
+  is stored verbatim — honoring the config makes the
+  screenshot match what the live window shows. Verified
+  end-to-end: an `--screenshot` at `background-opacity = 0.5`
+  produces a noticeably larger PNG (alpha varies across
+  pixels) than the same shot at `1.0` (flat 0xff alpha).
+
+### Fixed
 - **`background-opacity` actually produces transparency.**
   Real bug. The old surface config used
   `alpha_mode: caps.alpha_modes[0]` — i.e. whatever the
