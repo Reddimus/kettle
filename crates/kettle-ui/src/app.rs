@@ -157,6 +157,33 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
     kettle_config::template::fill(template, &[("title", t_raw), ("cwd", cwd), ("tab", &tab)])
 }
 
+/// Shell-quote a dropped file path so the user can press Enter without
+/// having to escape spaces / special chars by hand. POSIX-style single
+/// quoting: wrap in `'…'`, replace internal `'` with `'\''` (close the
+/// quote, escape the literal apostrophe, reopen). This is the most
+/// portable form — bash / zsh / fish accept it identically, and so does
+/// PowerShell 7+ (which kettle users on Windows typically run; the
+/// single-quote-string syntax there matches POSIX for non-apostrophe
+/// content). cmd.exe is the outlier, but it's a rare top-level shell on
+/// modern Windows + the user can always re-edit before Enter. Always
+/// quotes — even for plain paths — to keep the output predictable and
+/// avoid a regex matching exercise on what's "special" across shells.
+/// Pure so the quoting rule is unit-tested.
+fn shell_quote_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -2266,6 +2293,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                // Standard modern-terminal affordance: dragging a file
+                // onto the window inserts its (shell-quoted) path at the
+                // cursor, so the user can drop a config / log / Rust
+                // source file and press Enter to act on it without
+                // typing the path. iTerm2 / WezTerm / kitty / Ghostty /
+                // GNOME Terminal all do this. A trailing space lets
+                // `cat ` + drop + Enter Just Work; without it, the
+                // user would have to add a space between the previous
+                // token and the path.
+                //
+                // Honors broadcast (cycle 173/174): when group input
+                // is on, the path goes to every pane in the active
+                // tab, same scoping as keystrokes and clipboard paste.
+                let mut bytes = shell_quote_path(&path).into_bytes();
+                bytes.push(b' ');
+                if self.mux.broadcast {
+                    self.mux.broadcast_write(&bytes);
+                } else if let Some(p) = self.mux.focused() {
+                    p.term.write(&bytes);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::Focused(f) => {
                 self.window_focused = f;
                 // Cycle 171: route through the shared helper so all
@@ -2461,6 +2513,41 @@ impl ApplicationHandler<UserEvent> for App {
 mod tests {
     use super::selection_kind;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn shell_quote_path_handles_spaces_quotes_and_multibyte() {
+        use super::shell_quote_path;
+        use std::path::Path;
+        // Plain path — still wrapped (always-quote keeps the rule simple
+        // and the output predictable across every special-char list).
+        assert_eq!(
+            shell_quote_path(Path::new("/foo/bar.txt")),
+            "'/foo/bar.txt'",
+        );
+        // Spaces in a path — quoting is the *whole point*; cat 'a b.txt'
+        // works, cat a b.txt would be two arguments.
+        assert_eq!(
+            shell_quote_path(Path::new("/foo bar/baz qux.txt")),
+            "'/foo bar/baz qux.txt'",
+        );
+        // Embedded apostrophe — POSIX form is close-quote, escape, reopen.
+        // `/foo'bar` becomes `'/foo'\''bar'`. bash/zsh/fish all accept this
+        // identically.
+        assert_eq!(
+            shell_quote_path(Path::new("/foo'bar.txt")),
+            r"'/foo'\''bar.txt'",
+        );
+        // Multiple apostrophes — each gets the same treatment.
+        assert_eq!(shell_quote_path(Path::new("'a'b'")), r"''\''a'\''b'\'''",);
+        // Multibyte (Japanese path component) — passes through verbatim
+        // inside the quotes; no special handling needed since UTF-8 is
+        // shell-safe.
+        let p = Path::new("/路径/file.txt");
+        assert_eq!(shell_quote_path(p), "'/路径/file.txt'");
+        // Empty path — empty quotes (harmless on shell, the user will
+        // see '' and notice).
+        assert_eq!(shell_quote_path(Path::new("")), "''");
+    }
 
     #[test]
     fn wheel_lines_scales_by_multiplier() {

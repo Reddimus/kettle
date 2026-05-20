@@ -39,6 +39,9 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
   injection-guarded), double-click word / triple-click line selection +
   **Alt-drag rectangular (block) selection**, auto-copy, middle-click
   paste, focus-aware hollow cursor, configurable blink, visual bell.
+- **Drag-and-drop files** — drop any file onto the window and its
+  shell-quoted path is inserted at the cursor (with a trailing space, so
+  `cat ` + drop + Enter works). Honors broadcast mode.
 - **Session restore** — the tab/split tree and each pane's working directory
   are saved and restored across launches; new tabs/splits also inherit the
   focused pane's current directory (OSC 7).

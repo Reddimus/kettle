@@ -964,6 +964,12 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **Drag-and-drop files insert shell-quoted paths.**
+      Standard modern-terminal affordance — drop a file, the
+      shell-quoted path lands at the cursor with a trailing space.
+      Honors broadcast. POSIX-style single-quote escaping
+      (close-escape-reopen) so the same output works on bash /
+      zsh / fish / PowerShell 7+. +1 test.
 - [x] **Paste distributes to every pane in a broadcast group.**
       Cycle 173 sibling. Paste IS input — same scoping as
       `broadcast_write`. Per-pane `BRACKETED_PASTE` wrap so

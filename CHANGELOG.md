@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **Drag-and-drop files.** Dropping a file onto the kettle window
+  inserts its shell-quoted path at the cursor of the focused pane
+  (or broadcasts to every pane in the active tab when group input
+  is on). A trailing space is appended so the common workflow —
+  type `cat `, drop a log file, press Enter — Just Works. POSIX-
+  style single-quote escaping (close-escape-reopen for embedded
+  apostrophes) so the same form works on bash / zsh / fish /
+  PowerShell 7+. iTerm2 / WezTerm / kitty / Ghostty / GNOME
+  Terminal all have this affordance. Test:
+  `shell_quote_path_handles_spaces_quotes_and_multibyte` pins
+  spaces, apostrophe escaping (single + repeated), multibyte
+  paths, and empty input. +1 test (240 total).
+
 ### Fixed
 - **Paste distributes to every pane in a broadcast group, not just
   the focused pane.** Cycle 173 sibling. With broadcast on
