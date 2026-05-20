@@ -40,6 +40,15 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     if name.starts_with('.') {
         return false;
     }
+    // Emacs autosave / lock-file prefix patterns (cycle 187). An
+    // unsaved-buffer autosave is `#name#` (sandwiched between two
+    // literal `#`), an in-progress lock is `.#name` (already caught
+    // by the dotfile branch). Bundled theme names never legitimately
+    // start with `#`. iTerm2 / Vim / nvim swap files also live as
+    // `.name.swp`, again caught by the dotfile branch.
+    if name.starts_with('#') {
+        return false;
+    }
     // OS / desktop-environment metadata that doesn't start with a dot.
     // `Icon\r` is the macOS Finder "custom folder icon" file — the `\r`
     // (0x0D) at the end is part of the literal name. Not a duplicate of
@@ -90,6 +99,10 @@ mod tests {
         assert!(!is_bundled_theme_filename(".gitkeep"));
         assert!(!is_bundled_theme_filename(".directory"));
         assert!(!is_bundled_theme_filename(".#emacs-lock"));
+        // Cycle 187: emacs autosave files are `#name#` — not a
+        // dotfile so the cycle-167 branch missed them.
+        assert!(!is_bundled_theme_filename("#TokyoNight Night#"));
+        assert!(!is_bundled_theme_filename("#3024 Day#"));
 
         // Windows / Finder metadata that does NOT start with a dot.
         assert!(!is_bundled_theme_filename("Thumbs.db"));

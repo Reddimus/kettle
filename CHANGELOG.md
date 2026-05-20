@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Theme filter rejects emacs autosave files (`#name#`).**
+  Cycle 167's filter caught dotfiles (`.DS_Store`, `.gitignore`,
+  `.#emacs-lock`) — but emacs's *unsaved-buffer* autosave is
+  `#name#` (literal `#` on both sides, no leading dot). A
+  maintainer editing a theme file in emacs and crashing leaves
+  `#TokyoNight Night#` next to the real file, which the
+  cycle-167 filter accepted as a theme. Add a leading-`#` skip:
+  bundled themes never legitimately start with `#`, so the
+  rejection is unambiguous. +2 asserts in the existing test.
+
 - **Theme filter is case-insensitive for OS desktop metadata.**
   Cycle-167 follow-up. The bundled-theme filter's OS-metadata
   branch (`Thumbs.db` / `desktop.ini` / macOS `Icon\r`) used an
