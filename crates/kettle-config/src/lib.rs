@@ -494,14 +494,23 @@ impl Config {
                 // the same vertical-bar cursor kettle calls `bar`.
                 // Cycle 142 accepts it as an alias so a user copying
                 // their Alacritty config doesn't get a silent
-                // fallback to Block.
-                "cursor-style" => matches!(v.as_str(), "block" | "underline" | "bar" | "beam"),
+                // fallback to Block. Cycle 146: case-insensitive so
+                // `Block` / `BLOCK` etc. also pass (matching the
+                // parse_collect behavior).
+                "cursor-style" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "block" | "underline" | "bar" | "beam"
+                ),
+                // Cycle 146: enum keys are case-insensitive so
+                // `bell = OFF` validates the same as `bell = off`.
+                // Mirrors the parse_collect change so the diagnostic
+                // and runtime agree.
                 "bell" => matches!(
-                    v.as_str(),
+                    v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "false" | "visual" | "flash" | "attention" | "urgent" | "both"
                 ),
                 "osc52" | "clipboard" => matches!(
-                    v.as_str(),
+                    v.to_ascii_lowercase().as_str(),
                     "off"
                         | "none"
                         | "disabled"
@@ -526,9 +535,17 @@ impl Config {
                 | "scroll-on-output"
                 | "mouse-hide-while-typing"
                 | "mouse-hide" => parse_bool(v).is_some(),
-                "tab-bar" => matches!(v.as_str(), "off" | "none" | "false" | "auto" | "always"),
-                "tab-bar-position" => matches!(v.as_str(), "top" | "bottom"),
-                "scrollbar" => matches!(v.as_str(), "never" | "off" | "false" | "auto" | "always"),
+                "tab-bar" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "off" | "none" | "false" | "auto" | "always"
+                ),
+                "tab-bar-position" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "top" | "bottom")
+                }
+                "scrollbar" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "never" | "off" | "false" | "auto" | "always"
+                ),
                 // `font-feature` is comma-separated; every token must
                 // parse via the documented `FontFeature::parse` shape
                 // (`liga`, `+calt`, `cv01=2`, etc.). One bad token in
@@ -721,7 +738,7 @@ impl Config {
                     }
                 }
                 "cursor-style" => {
-                    cfg.cursor_style = match e.value.as_str() {
+                    cfg.cursor_style = match e.value.to_ascii_lowercase().as_str() {
                         "underline" => CursorStyle::Underline,
                         // `beam` is Alacritty's name for the same
                         // vertical-bar cursor; cycle 142 added the
@@ -748,7 +765,15 @@ impl Config {
                     }
                 }
                 "bell" => {
-                    cfg.bell = match e.value.as_str() {
+                    // Cycle 146: lowercase the value so `bell = OFF`
+                    // matches `bell = off`. Pre-fix any non-lowercase
+                    // spelling silently fell into the catchall (→
+                    // BellMode::Both). Same shape applied to the four
+                    // enum keys (bell / osc52 / tab-bar /
+                    // tab-bar-position / scrollbar / cursor-style)
+                    // and the bool parser already had it via
+                    // `parse_bool`.
+                    cfg.bell = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "false" => BellMode::Off,
                         "visual" | "flash" => BellMode::Visual,
                         "attention" | "urgent" => BellMode::Attention,
@@ -756,7 +781,7 @@ impl Config {
                     }
                 }
                 "osc52" | "clipboard" => {
-                    cfg.osc52 = match e.value.as_str() {
+                    cfg.osc52 = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "disabled" | "false" => Osc52::Off,
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
@@ -764,14 +789,14 @@ impl Config {
                     }
                 }
                 "tab-bar" => {
-                    cfg.tab_bar = match e.value.as_str() {
+                    cfg.tab_bar = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "false" => TabBarMode::Off,
                         "auto" => TabBarMode::Auto,
                         _ => TabBarMode::Always,
                     }
                 }
                 "tab-bar-position" => {
-                    cfg.tab_bar_pos = match e.value.as_str() {
+                    cfg.tab_bar_pos = match e.value.to_ascii_lowercase().as_str() {
                         "bottom" => TabBarPos::Bottom,
                         _ => TabBarPos::Top,
                     }
@@ -802,7 +827,7 @@ impl Config {
                     }
                 }
                 "scrollbar" => {
-                    cfg.scrollbar = match e.value.as_str() {
+                    cfg.scrollbar = match e.value.to_ascii_lowercase().as_str() {
                         "never" | "off" | "false" => ScrollbarMode::Never,
                         "always" => ScrollbarMode::Always,
                         _ => ScrollbarMode::Auto,
@@ -1659,6 +1684,61 @@ mod config_tests {
              keybind = ctrl+shift+w=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
+    }
+
+    #[test]
+    fn enum_keys_are_case_insensitive() {
+        // Cycle 146: bell / osc52 / tab-bar / tab-bar-position /
+        // scrollbar / cursor-style all parsed `e.value.as_str()`
+        // verbatim. So `bell = OFF` fell into the catchall →
+        // BellMode::Both, with --check-config flagging it as
+        // malformed. Now all enum keys lowercase before matching;
+        // the diagnostic agrees.
+
+        // bell: uppercase OFF maps to Off, not the catchall Both.
+        let c = Config::parse_text("bell = OFF");
+        assert_eq!(c.bell, BellMode::Off);
+        let c = Config::parse_text("bell = Visual");
+        assert_eq!(c.bell, BellMode::Visual);
+
+        // osc52
+        let c = Config::parse_text("osc52 = NONE");
+        assert_eq!(c.osc52, Osc52::Off);
+        let c = Config::parse_text("osc52 = Both");
+        assert_eq!(c.osc52, Osc52::Both);
+
+        // tab-bar
+        let c = Config::parse_text("tab-bar = OFF");
+        assert_eq!(c.tab_bar, TabBarMode::Off);
+        let c = Config::parse_text("tab-bar = Auto");
+        assert_eq!(c.tab_bar, TabBarMode::Auto);
+
+        // tab-bar-position
+        let c = Config::parse_text("tab-bar-position = BOTTOM");
+        assert_eq!(c.tab_bar_pos, TabBarPos::Bottom);
+
+        // scrollbar
+        let c = Config::parse_text("scrollbar = NEVER");
+        assert_eq!(c.scrollbar, ScrollbarMode::Never);
+        let c = Config::parse_text("scrollbar = Always");
+        assert_eq!(c.scrollbar, ScrollbarMode::Always);
+
+        // cursor-style (cycle 142's `beam` works with any case too).
+        let c = Config::parse_text("cursor-style = Underline");
+        assert_eq!(c.cursor_style, CursorStyle::Underline);
+        let c = Config::parse_text("cursor-style = BEAM");
+        assert_eq!(c.cursor_style, CursorStyle::Bar);
+
+        // --check-config no longer flags the case-variant spellings.
+        let ok = Config::detect_malformed_values(
+            "bell = OFF\n\
+             osc52 = NONE\n\
+             tab-bar = OFF\n\
+             tab-bar-position = BOTTOM\n\
+             scrollbar = NEVER\n\
+             cursor-style = BEAM\n",
+        );
+        assert!(ok.is_empty(), "case variants should not flag: {ok:?}");
     }
 
     #[test]

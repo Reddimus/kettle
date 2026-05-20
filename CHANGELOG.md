@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **Enum config keys are now case-insensitive.** Cycle 138
+  made the bool keys case-insensitive via `parse_bool`.
+  The six enum keys (`bell`, `osc52`/`clipboard`, `tab-bar`,
+  `tab-bar-position`, `scrollbar`, `cursor-style`) still
+  matched `e.value.as_str()` verbatim, so `bell = OFF`
+  silently fell into the catchall (→ `BellMode::Both`,
+  the default) while `--check-config` flagged the same
+  spelling as malformed. Both surfaces now lowercase
+  before matching, so case variants validate and apply
+  the same way as the canonical lowercase forms. +1 test
+  (`enum_keys_are_case_insensitive`) covers all six keys
+  with uppercase / mixed-case variants and confirms
+  `--check-config` no longer flags them.
+
 ### Changed
 - **`kettle --list-themes` is now case-insensitive alphabetical.**
   The build-script's pre-cycle sort was raw `String::cmp`, which

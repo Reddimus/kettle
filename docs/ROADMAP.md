@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Enum config keys are case-insensitive.** Cycle 138
+      made bools case-insensitive; cycle 146 finishes the
+      job for the six enum keys (`bell`, `osc52`,
+      `tab-bar`, `tab-bar-position`, `scrollbar`,
+      `cursor-style`). Diagnostic + runtime agree on case
+      variants. +1 test.
 - [x] **`--list-themes` case-insensitive alphabetical.**
       Was ASCII-bytewise (uppercase ahead of lowercase →
       `CGA` before `branch`). Now matches `sort` defaults in
