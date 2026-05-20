@@ -202,4 +202,20 @@ jobs:
           if cargo run -q -p kettle -- --shell-integration tcsh 2>/dev/null; then
             echo "expected --shell-integration tcsh to error"; exit 1
           fi
+          # Cycle 237: --print-completions <shell> emits a per-shell
+          # tab-completion script via clap_complete. Verify each
+          # known shell emits non-trivial output mentioning the
+          # `kettle` command name. The unit test
+          # 'print_completions_emits_per_shell_scripts' is the
+          # primary contract; this is the CLI-surface end-to-end
+          # smoke for the wiring between Cli and clap_complete.
+          for sh in bash zsh fish; do
+            cargo run -q -p kettle -- --print-completions "$sh" > "/tmp/k.completions.${sh}"
+            test "$(wc -c < /tmp/k.completions.${sh})" -gt 200
+            grep -q "kettle" "/tmp/k.completions.${sh}"
+          done
+          # Unknown shell errors clearly.
+          if cargo run -q -p kettle -- --print-completions tcsh 2>/dev/null; then
+            echo "expected --print-completions tcsh to error"; exit 1
+          fi
         shell: bash

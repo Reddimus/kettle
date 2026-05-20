@@ -91,6 +91,7 @@ macOS `.app`, and Windows packaging.
 ```sh
 kettle --print-default-config > ~/.config/kettle/config   # bootstrap a commented starter config
 kettle --shell-integration bash >> ~/.bashrc              # OSC 133 jump-to-prompt (zsh/fish also supported)
+kettle --print-completions bash >> ~/.bashrc              # tab-complete every kettle flag
 kettle --list-themes        # list every bundled theme (~512)
 kettle --list-keybinds      # print the *effective* keymap (defaults + your overrides + unbinds)
 kettle --list-actions       # list every action name accepted by `keybind = trigger=action`

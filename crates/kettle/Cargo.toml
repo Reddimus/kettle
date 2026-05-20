@@ -14,6 +14,10 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
+# Cycle 237: bash/zsh/fish/elvish/powershell completion scripts
+# emitted by `kettle --print-completions <shell>`. clap_complete
+# tracks clap itself so the MSRV constraints are aligned.
+clap_complete = "4.6"
 env_logger.workspace = true
 kettle-config = { version = "1.1.0", path = "../kettle-config" }
 kettle-render = { version = "1.1.0", path = "../kettle-render" }
