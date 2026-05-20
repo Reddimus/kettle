@@ -6,7 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-### Added
+## [1.2.0] — 2026-05-20
+
+Second minor release. Theme: **finish the first-launch
+onboarding triplet** + **post-v1.1.0 hardening sweep**.
+
+The 1.0/1.1 line shipped great defaults but onboarding still
+relied on docs lookup for two affordances (OSC 133 shell
+integration and tab completion). 1.2 ships them both as
+one-command embedded CLI flags, joining v1.1's
+`--print-default-config`. After install, three optional lines
+fully configure kettle for daily use:
+
+```sh
+kettle --print-default-config > ~/.config/kettle/config
+kettle --shell-integration bash >> ~/.bashrc
+kettle --print-completions bash >> ~/.bashrc
+```
+
+Plus seven cycles of CI / drift-guard / refactor hardening to
+keep the docs and packaging in sync as the project grows.
+
+### Added (since 1.1.0)
 - **`kettle --print-completions <bash|zsh|fish|elvish|powershell>`
   emits a shell tab-completion script.** Same shape as cycle 227
   (`--print-default-config`) and cycle 229 (`--shell-integration`):

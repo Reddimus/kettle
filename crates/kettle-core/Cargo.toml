@@ -16,7 +16,7 @@ workspace = true
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 crossbeam-channel = "0.5.15"
-kettle-vt = { version = "1.1.0", path = "../kettle-vt" }
+kettle-vt = { version = "1.2.0", path = "../kettle-vt" }
 log.workspace = true
 portable-pty = "0.9.0"
 regex.workspace = true

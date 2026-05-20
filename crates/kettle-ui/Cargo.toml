@@ -17,10 +17,10 @@ anyhow.workspace = true
 arboard = "3.6.1"
 crossbeam-channel = "0.5.15"
 env_logger.workspace = true
-kettle-config = { version = "1.1.0", path = "../kettle-config" }
-kettle-core = { version = "1.1.0", path = "../kettle-core" }
-kettle-render = { version = "1.1.0", path = "../kettle-render" }
-kettle-vt = { version = "1.1.0", path = "../kettle-vt" }
+kettle-config = { version = "1.2.0", path = "../kettle-config" }
+kettle-core = { version = "1.2.0", path = "../kettle-core" }
+kettle-render = { version = "1.2.0", path = "../kettle-render" }
+kettle-vt = { version = "1.2.0", path = "../kettle-vt" }
 log.workspace = true
 notify = "8.2.0"
 open = "5.3.5"
