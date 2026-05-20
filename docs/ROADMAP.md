@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`--list-themes` case-insensitive alphabetical.**
+      Was ASCII-bytewise (uppercase ahead of lowercase →
+      `CGA` before `branch`). Now matches `sort` defaults in
+      a UTF-8 locale; `branch` < `Calamity` etc. Also flows
+      to `next_theme` / `prev_theme` cycle order.
 - [x] **Tab-close clicks (middle / ✕) reset blink phase.**
       Last user-driven focus path missing the cycle 134-141
       pattern. `close_tab_at` shifts focus to a neighbor;

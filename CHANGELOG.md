@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **`kettle --list-themes` is now case-insensitive alphabetical.**
+  The build-script's pre-cycle sort was raw `String::cmp`, which
+  is ASCII-bytewise: uppercase letters (0x41..0x5A) sort before
+  lowercase (0x61..0x7A), so `CGA` came before `branch` because
+  `'C' < 'b'` in ASCII. Skimming the 512-theme list was harder
+  than it needed to be — users expect mixed-case alphabetical
+  (matching what GNU `sort` does in a UTF-8 locale). New sort:
+  `to_lowercase()` primary, original cmp tiebreak. End-to-end:
+  `branch` now precedes `Calamity`; `CGA`/`Chalk` interleave
+  with lowercase c-themes naturally. Also affects the order
+  the `next_theme` / `prev_theme` chord cycles in.
+
 ### Fixed
 - **Closing a tab via middle-click or ✕ also resets blink
   on the now-active tab.** Cycle 120's `reap_tabs` fix
