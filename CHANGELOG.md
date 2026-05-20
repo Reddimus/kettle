@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **`docs/UX-COMPARISON.md` matrix gains drag-and-drop file paths
+  row.** Cycle 175 added drag-drop, cycle 182 made it bracketed-
+  paste-safe — kettle's implementation has the distinctive triple
+  property (shell-quoted, bracketed-paste-safe, broadcast-aware)
+  that's worth recording in the comparison matrix. Row: kettle ✅
+  (with the three properties named) · iTerm2 ✅ (long history) ·
+  kitty ✅ via `paste_from_drop` · WezTerm ✅ configurable ·
+  Terminator 🟡 (GTK builtin; path quoting varies) · Alacritty ⛔.
+
 - **`docs/SHELL-INTEGRATION.md` added to README's Documentation
   list.** The doc has existed since the OSC-133 integration
   landed and got the cycle-189 fish-hook fix, but the README
