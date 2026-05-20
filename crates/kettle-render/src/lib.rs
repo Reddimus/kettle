@@ -270,8 +270,21 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.config.width = width.max(1);
-        self.config.height = height.max(1);
+        // Floor at 1 (`surface.configure(0, …)` panics) and ceiling
+        // at the device's max-texture-dimension-2d. The default wgpu
+        // Limits cap that at 8192 px; an oversized window (stretched
+        // across multiple 4K monitors, an 8K display, or a tiling
+        // WM tile that exceeds the surface limit) used to make
+        // `surface.configure` silently fail validation, leaving a
+        // stale surface that paints nothing on the next frame. Clip
+        // the surface to the device's announced limit so we still
+        // render the visible top-left region cleanly even if the
+        // user has unusually large geometry. Cycle 137 sibling to
+        // cycle 119's `cap_axis_cells` (which fixed the same
+        // class of bug on the `--screenshot` path).
+        let max = self.device.limits().max_texture_dimension_2d.max(1);
+        self.config.width = width.clamp(1, max);
+        self.config.height = height.clamp(1, max);
         self.surface.configure(&self.device, &self.config);
     }
 

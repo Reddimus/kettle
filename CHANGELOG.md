@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **`Renderer::resize` clamps the surface to the device's
+  max texture dimension.** Old `resize` only floor-clamped at 1
+  (`surface.configure(0, …)` would panic). The ceiling went
+  unchecked, so a window stretched past 8192 px (multi-4K
+  spans, 8K displays, or a tiling-WM tile larger than the
+  device limit) used to silently fail `surface.configure`'s
+  validation and leave the surface in a stale state painting
+  nothing. Now `width.clamp(1, device.limits().
+  max_texture_dimension_2d)` clips to whatever the device
+  actually supports — the user sees the visible top-left
+  region cleanly instead of a frozen frame. Sibling to cycle
+  119's `cap_axis_cells` which fixed the same class of bug on
+  the `--screenshot` path.
+
 - **Mouse-driven focus changes also reset the blink phase.**
   Cycle 135 caught the keyboard path; this cycle extends to:
   - Clicking a tab in the tab bar to switch tabs.

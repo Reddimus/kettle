@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **`Renderer::resize` ceiling-clamps at the device's
+      max texture dimension.** A window stretched past 8192
+      px used to silently fail surface.configure and freeze.
+      Clamps now at device.limits().max_texture_dimension_2d.
+      Sibling to cycle 119's screenshot-side fix.
 - [x] **Mouse focus changes also reset blink phase.**
       Extracted cycle 135's pre/post into `focus_key()` +
       `note_focus_change(pre)` helpers; click-a-tab and
