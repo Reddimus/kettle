@@ -1207,6 +1207,17 @@ impl App {
         let (cols, rows) = self.grid_of(area);
         let (cw, ch) = self.cell_px();
         let waker = self.waker();
+        // Snapshot the (tab, pane-leaf) the cursor lives in so we can
+        // detect any focus change the action causes. Cycle 134 reset
+        // the blink phase on `Action::Reset` so the cursor was
+        // immediately visible after a "fresh start"; cycle 135 extends
+        // that to *any* focus-changing action (NextTab, PrevTab,
+        // GotoTab, FocusNext/Prev/Up/Down/Left/Right, ToggleZoom, …).
+        // Without this a user hitting Alt+Right to jump to the next
+        // pane would briefly see no cursor if the blink was on its
+        // off-half — exactly the case where you've just told kettle
+        // "show me where to type next."
+        let pre_focus = (self.mux.active, self.mux.active_focus());
         match action {
             Action::NewTab => {
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
@@ -1439,6 +1450,13 @@ impl App {
                     self.mux.active = i;
                 }
             }
+        }
+        // Cycle 135 (cont.): if focus moved as a result of the action,
+        // land the cursor visible on the new pane right away.
+        let post_focus = (self.mux.active, self.mux.active_focus());
+        if pre_focus != post_focus {
+            self.blink_on = true;
+            self.last_blink = std::time::Instant::now();
         }
         self.resize_all();
         self.save_session();

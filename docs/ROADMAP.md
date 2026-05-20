@@ -506,6 +506,12 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Any focus-changing action resets blink phase.**
+      Extends cycle 134 from `Action::Reset` to every action
+      that flips which pane has focus (NextTab/PrevTab/
+      GotoTab/FocusNext/Prev/Up/Down/Left/Right/ToggleZoom).
+      Snapshot pre + compare post around the match; reset
+      on diff. No per-arm decoration needed.
 - [x] **`Action::Reset` resets cursor blink phase too.**
       Cycle-111 swept modals/selection but missed
       `blink_on`/`last_blink`. Hit Reset on the off-half of

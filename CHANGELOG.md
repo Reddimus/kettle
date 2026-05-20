@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Any focus-changing action also resets cursor blink phase.**
+  Cycle 134 fixed it for `Action::Reset` specifically. The same
+  "where's my cursor?" surprise applied to every focus-changing
+  action: `NextTab` / `PrevTab` / `GotoTab(N)`, `FocusNext` /
+  `Prev` / `Up` / `Down` / `Left` / `Right`, `ToggleZoom`, and
+  any other action that flipped which pane the cursor lives in.
+  Hit `Alt+Right` to jump to the next pane right as `blink_on`
+  was false → cursor invisible on the new pane for up to one
+  `blink_interval` (530 ms default), which is exactly the
+  beat where you've just told kettle "show me where I'm
+  typing next."
+
+  Snapshot `(mux.active, mux.active_focus())` before the
+  match runs; compare after. If the focused (tab, leaf)
+  changed at all, reset `blink_on = true; last_blink =
+  Instant::now()`. Catches every focus-changing path in
+  one place without decorating each arm individually.
+
 - **`Action::Reset` also resets the cursor blink phase.**
   Cycle 111 swept the modal overlays + selection so the
   chord meant "fresh start" — but it left the `blink_on`
