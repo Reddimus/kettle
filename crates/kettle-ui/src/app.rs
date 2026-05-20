@@ -106,16 +106,41 @@ fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
 }
 
 /// Render the OS window title from the user's `window-title-format`
-/// template with the active pane's title / cwd / 1-based tab index. Falls
-/// back to plain `"kettle"` when the pane has no meaningful title (so the
-/// template doesn't yield e.g. `" — kettle"`).
+/// template with the active pane's title / cwd / 1-based tab index. While
+/// the pane title is still the initial placeholder ("kettle") and the cwd
+/// is known, substitute the cwd's basename so `~/Repos/kettle` shows up
+/// as `kettle — kettle` and `~/Documents` as `Documents — kettle`,
+/// matching the cycle-89 tab-title fallback so the OS window title and
+/// the in-app tab agree pre-OSC 2. Real shell-set titles still win the
+/// moment they arrive.
 fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> String {
-    let t = pane_title.trim();
-    if t.is_empty() || t == "kettle" {
-        return "kettle".to_string();
+    let t_raw = pane_title.trim();
+    let pane_placeholder = t_raw.is_empty() || t_raw == "kettle";
+    let cwd_basename = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty());
+    // If the shell hasn't set a real title yet but we know the cwd,
+    // substitute the cwd basename — same behavior as the cycle-89 tab
+    // title fallback so the OS window title and the in-app tab agree
+    // pre-OSC 2. The cwd basename is allowed to literally equal
+    // "kettle" (e.g. cwd `~/Repos/kettle`); only the *placeholder* case
+    // bails out, otherwise the template would never get to use a real
+    // directory just because the name collides with the app's.
+    if pane_placeholder {
+        return match cwd_basename {
+            Some(name) => {
+                let tab = tab.to_string();
+                kettle_config::template::fill(
+                    template,
+                    &[("title", name), ("cwd", cwd), ("tab", &tab)],
+                )
+            }
+            None => "kettle".to_string(),
+        };
     }
     let tab = tab.to_string();
-    kettle_config::template::fill(template, &[("title", t), ("cwd", cwd), ("tab", &tab)])
+    kettle_config::template::fill(template, &[("title", t_raw), ("cwd", cwd), ("tab", &tab)])
 }
 
 /// Map a click count + the Alt modifier to a selection type: double =
@@ -2263,11 +2288,22 @@ mod tests {
             "vim README.md — kettle"
         );
         assert_eq!(window_title(dflt, "  spaced  ", "", 1), "spaced — kettle");
-        // Empty / placeholder titles → just the app name (the template
-        // never produces a stub like " — kettle").
+        // Empty / placeholder titles with no cwd → just the app name (the
+        // template never produces a stub like " — kettle").
         assert_eq!(window_title(dflt, "", "", 1), "kettle");
         assert_eq!(window_title(dflt, "   ", "", 1), "kettle");
         assert_eq!(window_title(dflt, "kettle", "", 1), "kettle");
+        // Empty / placeholder title *with* cwd → cwd basename fills in
+        // (cycle-89 tab-title fallback, same shape for the window title).
+        assert_eq!(
+            window_title(dflt, "", "/home/k/Repos/kettle", 1),
+            "kettle — kettle",
+            "cwd basename `kettle` fills the {{title}} slot pre-OSC 2"
+        );
+        assert_eq!(
+            window_title(dflt, "kettle", "/home/k/Documents", 1),
+            "Documents — kettle"
+        );
         // Custom templates can use {tab} and {cwd}.
         let t = "[{tab}] {title} ({cwd})";
         assert_eq!(

@@ -7,6 +7,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **OS window title also gets the cwd-basename fallback.** Cycle 89
+  taught `Mux::tab_titles` to fall back to the cwd basename before
+  the first OSC 2 — `window_title` (used for the OS-level title via
+  `Window::set_title`) had the same gap and was returning the
+  literal `"kettle"` placeholder even when the cwd was already
+  known. Now mirrors the tab-title behavior so the window title and
+  the in-app tab agree pre-OSC 2. The bail-out is also tighter: a
+  cwd that *literally* equals "kettle" (e.g. `~/Repos/kettle`)
+  doesn't collapse the substitution — only the placeholder-with-
+  no-cwd path bails. +2 new asserts in the existing
+  `window_title_formats_and_falls_back` test (now 1 test split
+  into a wider matrix).
 - **Tab title falls back to cwd basename before the first OSC 2.**
   Fresh tabs showed the literal placeholder "kettle" until the
   shell emitted `\e]2;…\007` on its first prompt. iTerm2 /

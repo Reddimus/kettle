@@ -485,6 +485,10 @@
       tabs show the working-directory name until the shell
       emits its first title. iTerm2/Ghostty/WezTerm parity. +1
       test.
+- [x] **OS window title gets the same cwd-basename fallback.**
+      `window_title` (the `Window::set_title` source) now mirrors
+      the tab-title behavior; a cwd literally named "kettle"
+      no longer collapses the substitution. +2 test asserts.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
