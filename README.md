@@ -134,4 +134,8 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 
 ## License
 
-MIT. Bundled assets and adapted code are credited in [NOTICE](NOTICE).
+MIT. Bundled assets, third-party crates kettle consumes (Alacritty's VT
+core, WezTerm's `portable-pty`, cosmic-text), and the design-source
+projects kettle cites (kitty's graphics protocol spec, Terminator's
+splits-and-broadcast convention, Ghostty's config syntax) are all
+credited in [NOTICE](NOTICE).

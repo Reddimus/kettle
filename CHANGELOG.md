@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **README's License line reflects the cycle-211 NOTICE structure.**
+  Pre-cycle the line said "Bundled assets and adapted code are
+  credited in NOTICE" — implying all NOTICE entries are
+  "adapted code". Cycle 211 added design-source citations
+  (kitty / Terminator / Ghostty) with explicit "no code copied"
+  notes. Updated to: "Bundled assets, third-party crates kettle
+  consumes (Alacritty's VT core, WezTerm's `portable-pty`,
+  cosmic-text), and the design-source projects kettle cites
+  (kitty's graphics protocol spec, Terminator's splits-and-
+  broadcast convention, Ghostty's config syntax)". A user
+  reading the License section now sees what's actually in
+  NOTICE without having to open it.
+
 - **`NOTICE` credits kitty, Terminator, and Ghostty as
   design-source attributions.** Pre-cycle, NOTICE listed only the
   projects whose CODE kettle uses (Alacritty / vte, WezTerm
