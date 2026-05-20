@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description.workspace = true
+# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlays (search/palette/themes), session save/restore"
 
 [dependencies]
 anyhow.workspace = true

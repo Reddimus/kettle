@@ -1169,6 +1169,73 @@ mod config_tests {
     }
 
     #[test]
+    fn library_crates_have_per_crate_descriptions() {
+        // Cycle 213 moved every crate's `[package]` block onto
+        // `workspace.package` inheritance for `version`/`edition`/
+        // `license`/`repository`/`authors`/`description`. Most of
+        // those are honestly the same across all six crates — but
+        // `description` is the *binary's* blurb ("A fast,
+        // cross-platform GPU terminal emulator…"), and inheriting
+        // it for every library means crates.io / `cargo metadata`
+        // shows the same text on kettle-config, kettle-vt, etc.
+        // — misleading to anyone browsing the sub-crates.
+        //
+        // Cycle 218 overrode the description on every *library*
+        // crate (kettle-config / kettle-core / kettle-vt /
+        // kettle-render / kettle-ui) to say what *that* crate
+        // does, while keeping the binary crate (`kettle`) on
+        // workspace inheritance. This guard pins both halves so a
+        // future cycle that "tidies up" Cargo.tomls back to a
+        // uniform `description.workspace = true` is caught.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+
+        let libraries = [
+            "kettle-config",
+            "kettle-core",
+            "kettle-vt",
+            "kettle-render",
+            "kettle-ui",
+        ];
+        for name in libraries {
+            let path = repo_root.join("crates").join(name).join("Cargo.toml");
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing {}: {e}", path.display()));
+            // Per-crate descriptions all start with "kettle: " by
+            // convention so `cargo metadata` and crates.io renders
+            // identify them as part of the same project at a glance.
+            assert!(
+                text.contains("\ndescription = \"kettle: "),
+                "{name}: expected a per-crate `description = \"kettle: …\"` \
+                 override (cycle 218); workspace inheritance would emit the \
+                 binary's blurb on this library"
+            );
+            assert!(
+                !text.contains("description.workspace = true")
+                    && !text.contains("description = { workspace = true }"),
+                "{name}: library crate must NOT inherit \
+                 `description.workspace = true` (cycle 218 contract); \
+                 see kettle-config/Cargo.toml for the rationale"
+            );
+        }
+
+        // The binary keeps inheritance — the workspace description IS
+        // the binary description ("A fast, cross-platform GPU terminal
+        // emulator combining the best of …"). If a future cycle hand-
+        // copies the workspace blurb into the binary's Cargo.toml,
+        // we'd lose the single source of truth.
+        let bin = repo_root.join("crates/kettle/Cargo.toml");
+        let bin_text = std::fs::read_to_string(&bin)
+            .unwrap_or_else(|e| panic!("missing {}: {e}", bin.display()));
+        assert!(
+            bin_text.contains("description.workspace = true"),
+            "kettle (binary): should keep `description.workspace = true` so \
+             the workspace.package description stays the single source of \
+             truth for the binary's blurb"
+        );
+    }
+
+    #[test]
     fn default_is_tokyonight_night() {
         let c = Config::default();
         assert_eq!(c.theme_name, "TokyoNight Night");

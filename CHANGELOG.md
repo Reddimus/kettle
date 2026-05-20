@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+- **Per-crate `description` overrides on every library crate.**
+  Cycle 213 moved every crate's `[package]` block onto
+  `workspace.package` inheritance, including `description`. That
+  works fine for `version` / `license` / `authors` / `edition` /
+  `repository` (genuinely shared), but `workspace.package`'s
+  description is the *binary's* blurb ("A fast, cross-platform
+  GPU terminal emulator combining the best of Ghostty, Terminator,
+  kitty, Alacritty and WezTerm") — and inheriting it gave every
+  library sub-crate the same text. A user browsing `kettle-config`
+  on crates.io or via `cargo metadata` would see the terminal's
+  marketing blurb on the config-parsing crate, the VT-byte-extractor
+  crate, etc. Now each library overrides with what *it* does:
+  - `kettle-config` → "Ghostty-compatible config parsing, bundled
+    theme set, embedded Nerd Font, keybinds, fuzzy matcher"
+  - `kettle-core` → "PTY + alacritty_terminal VT glue, scrollback
+    search, hyperlink/URL/path/IP detection, kitty/Sixel/iTerm2
+    image registries"
+  - `kettle-vt` → "streaming VT byte extractor — kitty/Sixel/iTerm2
+    image protocols, OSC 7 cwd, OSC 133 prompt marks, OSC 1→2
+    title rewrite"
+  - `kettle-render` → "wgpu + glyphon GPU renderer — quads, images,
+    text, overlay pass, headless offscreen self-test"
+  - `kettle-ui` → "winit app, tab/pane mux, Terminator-style splits,
+    overlays (search/palette/themes), session save/restore"
+  - `kettle` (binary) keeps `description.workspace = true` — the
+    workspace blurb IS the binary's blurb, single source of truth.
+  All start with the prefix `"kettle: "` so they identify as part
+  of the same project at a glance. New test
+  `library_crates_have_per_crate_descriptions` reads each Cargo.toml
+  via `std::fs::read_to_string` and pins both halves (libraries
+  must override, binary must inherit) so a future "tidying" cycle
+  that uniformizes the manifests back to `description.workspace =
+  true` is caught.
+
 ### Documentation
 - **`docs/TESTING.md` per-crate counts refreshed and shifted to
   `+N` range form.** Cycle-172/179/214 fixed top-level "workspace

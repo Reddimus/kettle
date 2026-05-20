@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description.workspace = true
+# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+description = "kettle: wgpu + glyphon GPU renderer — quads, images, text, overlay pass, headless offscreen self-test"
 
 [dependencies]
 alacritty_terminal = "0.26.0"

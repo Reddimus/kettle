@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description.workspace = true
+# Per-crate description (cycle 218): workspace.package's
+# description is the binary's blurb ("…GPU terminal emulator…") —
+# correct for `kettle` itself but misleading on every library
+# sub-crate. Each library crate overrides with what *it* does.
+description = "kettle: Ghostty-compatible config parsing, bundled theme set, embedded Nerd Font, keybinds, fuzzy matcher"
 
 [dependencies]
 anyhow.workspace = true

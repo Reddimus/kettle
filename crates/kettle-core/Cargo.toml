@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description.workspace = true
+# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+description = "kettle: PTY + alacritty_terminal VT glue, scrollback search, hyperlink/URL/path/IP detection, kitty/Sixel/iTerm2 image registries"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
