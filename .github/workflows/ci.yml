@@ -33,6 +33,18 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Rustdoc (Linux, warnings denied)
+        # Cycle 219: rustdoc has its own warning class (broken
+        # intra-doc-links, missing docs on public items, malformed
+        # code blocks) that `clippy -D warnings` doesn't catch. The
+        # per-crate doc landings (`mod@search`, `mod@links`
+        # disambiguations, etc.) added in cycles 207-210 will silently
+        # break if a referenced item is renamed — CI didn't catch that
+        # before. One platform is enough; rustdoc is platform-agnostic.
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:

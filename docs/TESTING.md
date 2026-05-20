@@ -117,6 +117,11 @@ name the shape of bug each cycle caught.
 ## CI
 
 `.github/workflows/ci.yml` runs on **ubuntu/macos/windows**: `fmt --check`,
-`build --all-targets`, `clippy -D warnings`, `cargo test --workspace`, a
-**headless GPU smoke** under Xvfb + software Vulkan on Linux, and a CLI
-smoke (`--config-path`, `--list-themes` > 400) on every OS.
+`build --all-targets`, `clippy -D warnings`, `cargo test --workspace`,
+`cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
+catches broken intra-doc-links, malformed examples; rustdoc is platform-
+agnostic so one runner suffices), a **headless GPU smoke** under Xvfb +
+software Vulkan on Linux, and a CLI smoke
+(`--version` SHA-regex, `--check-config` lead line, `--config-path`,
+`--list-themes` > 400, `--list-actions` > 50, `--list-keybinds` > 40)
+on every OS.

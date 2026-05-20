@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### CI
+- **`cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
+  added on the Linux job.** Cycles 207-210 landed crate-level
+  rustdoc on every workspace crate, with disambiguations like
+  `[`mod@search`]` and `[`mod@links`]`. CI's `clippy -D warnings`
+  doesn't catch rustdoc's warning class (broken intra-doc-links,
+  malformed code blocks, missing docs on public items), so a
+  future rename like `mod search` → `mod find` would silently
+  invalidate those references and only be caught by a contributor
+  running `cargo doc` locally. Building docs in CI with warnings
+  denied pins the doc landings as a contract. One platform is
+  enough (rustdoc is platform-agnostic); leaving it Linux-only
+  trades a tiny CI-time saving for the same coverage.
+
 ### Changed
 - **Per-crate `description` overrides on every library crate.**
   Cycle 213 moved every crate's `[package]` block onto
