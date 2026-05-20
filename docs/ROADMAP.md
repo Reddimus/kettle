@@ -506,6 +506,13 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **README Quick-start block catches up to the
+      introspection surface.** Missing `--list-actions`,
+      `--list-ssh-hosts`, `--screenshot`; `--list-keybinds`
+      still claimed "default" not "effective"; `--config`
+      lacked the cycle-106 hard-fail caveat. All four lines
+      added/reworded. README and `--help` are now both
+      truthful sources.
 - [x] **`--help` text catches up to cycles 103/105/106.**
       `--list-keybinds` help said "default keymap" but it
       now shows the effective map (cycle 103). `--config`

@@ -7,6 +7,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Documentation
+- **README Quick-start CLI block matches reality.** Same drift
+  cycle 126 caught in `--help` was also present in README's
+  `Quick start` shell block:
+  - `--list-keybinds` claimed "print the default keymap" — but
+    cycle 103 made it show the *effective* keymap (defaults +
+    overrides + unbinds) when `--config` is active.
+  - `--list-actions` (cycle 104), `--list-ssh-hosts` (cycle
+    105), and `--screenshot` (cycle 69) were missing entirely.
+  - `--config FILE` claim "live-reloaded" stayed, with a new
+    "error if it doesn't exist" addendum from cycle 106.
+  Block updated; tooling claims now match runtime behavior so
+  a first-time user reading the README finds the introspection
+  surface kettle actually ships.
+
 - **`kettle --help` text updated for cycle-103/105/106
   behavior changes.** `--list-keybinds` help previously said
   "Print the default keymap" — but cycle 103 made it show

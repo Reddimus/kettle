@@ -65,14 +65,17 @@ cargo run --release
 ```
 
 ```sh
-kettle --list-themes      # list all bundled themes
-kettle --list-keybinds    # print the default keymap (trigger → action)
-kettle --config-path      # show where the config file is read from
-kettle --check-config     # validate config: resolved settings + unknown keys
-kettle --config FILE      # use a specific config file (live-reloaded)
-kettle -d /path/to/dir    # open the first tab in this directory
-kettle -e htop            # run a command instead of the shell
-kettle -e ssh -t host     # (-e consumes the rest of the args)
+kettle --list-themes        # list every bundled theme (~512)
+kettle --list-keybinds      # print the *effective* keymap (defaults + your overrides + unbinds)
+kettle --list-actions       # list every action name accepted by `keybind = trigger=action`
+kettle --list-ssh-hosts     # print configured `ssh-host = name=target` entries
+kettle --config-path        # show where the config file is read from
+kettle --check-config       # validate config: resolved settings + unknown-key / malformed-value diagnostics
+kettle --config FILE        # use a specific config file (live-reloaded; error if it doesn't exist)
+kettle -d /path/to/dir      # open the first tab in this directory
+kettle -e htop              # run a command instead of the shell
+kettle -e ssh -t host       # (-e consumes the rest of the args)
+kettle --screenshot OUT.png # render a representative frame offscreen and exit (no window)
 ```
 
 ## Default keybindings (Terminator-compatible)
