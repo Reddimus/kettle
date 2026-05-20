@@ -460,6 +460,11 @@
 - [x] **`focused-split-color` config key.** Inactive border was
       already overridable via `split-divider-color`; the focused
       border (the "here am I" accent) was hard-wired. +1 test.
+- [x] **`--check-config` catches malformed color values.**
+      Extended `detect_malformed_values` to also flag bad
+      `background`/`foreground`/`cursor-color`/selection/search/
+      split-color/palette inputs (each routed through
+      `Rgb::parse`, same path the apply arm uses). +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't

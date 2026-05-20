@@ -7,6 +7,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`--check-config` now catches malformed color values.** The
+  cycle-70 `detect_malformed_values` side scan covered numeric/
+  duration keys but skipped colors — `background = #not-a-color`
+  or `cursor-color = whatever` silently kept the default while
+  `--check-config` reported a clean status. Extended to also
+  check `background`, `foreground`, `cursor-color`, `selection-
+  bg/fg`, `search-bg/fg`, `split-divider-color`, `focused-split-
+  color` (incl. alias `split-divider-color-focused`), and
+  `palette = N=#hex` (validates both halves). Each goes through
+  `Rgb::parse` — same path the apply arm uses — so what
+  `--check-config` accepts is what actually applies. +1 test
+  covering 6 bad + 7 good values (including X11 3-char hex
+  shorthand and color names like `red` which are valid).
 - **`focused-split-color` config key.** The inactive pane border
   color was already configurable via `split-divider-color`
   (introduced cycles ago); the *focused* pane's border was

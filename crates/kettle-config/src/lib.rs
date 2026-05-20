@@ -376,6 +376,23 @@ impl Config {
                         || v.parse::<usize>().is_ok()
                 }
                 "cursor-blink-interval" => v.parse::<u64>().is_ok(),
+                // Color keys: `Rgb::parse` accepts `#RRGGBB`, `rgb:RR/GG/BB`,
+                // X11 names ("red"), etc. Bad values otherwise silently
+                // keep the default — same trap as the numeric keys.
+                "background"
+                | "foreground"
+                | "cursor-color"
+                | "selection-background"
+                | "selection-foreground"
+                | "search-foreground"
+                | "search-background"
+                | "split-divider-color"
+                | "focused-split-color"
+                | "split-divider-color-focused" => Rgb::parse(v).is_some(),
+                // `palette = N=#hex` — both halves have to parse.
+                "palette" => v.split_once('=').is_some_and(|(i, h)| {
+                    i.trim().parse::<usize>().is_ok() && Rgb::parse(h.trim()).is_some()
+                }),
                 _ => true,
             };
             if !ok {
@@ -984,6 +1001,45 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_catches_bad_color_keys() {
+        // Same trap as the numeric keys — `Rgb::parse(&value)` returns
+        // None and the apply arm silently keeps the default. A user
+        // writing `cursor-color = #not-a-color` saw a clean `--check-
+        // config` while their color was being ignored. Now flagged.
+        // (`Rgb::parse` does accept 3-char hex shorthand like `#bad`,
+        // which expands to `#bbaadd` — that's intentional X11 behavior,
+        // so the bad-value test uses values with no parseable form.)
+        let bad = Config::detect_malformed_values(
+            "background = #not-a-color\n\
+             cursor-color = whatever\n\
+             selection-foreground = oops\n\
+             split-divider-color = ???\n\
+             focused-split-color = nope\n\
+             palette = junk\n",
+        );
+        assert_eq!(
+            bad.len(),
+            6,
+            "all six bad colors should be flagged: {bad:?}"
+        );
+        assert!(bad.iter().any(|b| b.contains("background")));
+        assert!(bad.iter().any(|b| b.contains("focused-split-color")));
+        assert!(bad.iter().any(|b| b.contains("palette")));
+        // Valid colors / palettes pass cleanly. Includes the X11 3-char
+        // hex shorthand to pin that accepted form.
+        let ok = Config::detect_malformed_values(
+            "background = #1a1b26\n\
+             cursor-color = #c0caf5\n\
+             selection-foreground = red\n\
+             focused-split-color = #00ff00\n\
+             palette = 1=#ff0000\n\
+             palette = 0=red\n\
+             palette = 2=#bad\n",
+        );
+        assert!(ok.is_empty(), "all valid: {ok:?}");
     }
 
     #[test]
