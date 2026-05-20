@@ -9,11 +9,19 @@
   <string>kettle</string>
   <key>CFBundleIdentifier</key>
   <string>org.kettle.terminal</string>
+  <!-- CFBundleVersion / CFBundleShortVersionString are patched at
+       release time by .github/workflows/release.yml from the
+       workspace.package.version in Cargo.toml so the .app reports
+       the same version that `kettle --version` prints. The
+       placeholders below are valid but only kept current up to the
+       last manual edit. -->
   <key>CFBundleVersion</key>
-  <string>0.1.0</string>
+  <string>1.0.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>1.0.0</string>
   <key>CFBundleExecutable</key>
+  <string>kettle</string>
+  <key>CFBundleIconFile</key>
   <string>kettle</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>

@@ -21,3 +21,10 @@ log.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+# Embed packaging/windows/kettle.ico into the .exe so Explorer, the
+# taskbar, Alt-Tab, and the Start menu all show the kettle icon
+# instead of the generic Rust .exe glyph. winresource is the
+# maintained fork of `winres` (which is unmaintained as of 2024).
+winresource = "0.1"

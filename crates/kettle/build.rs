@@ -29,6 +29,30 @@ fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let repo_root = PathBuf::from(&manifest).join("../..");
 
+    // On Windows targets, embed packaging/windows/kettle.ico into the
+    // .exe as a resource so the taskbar, Explorer, and Alt-Tab all
+    // display our icon. No-op on Linux/macOS builds — the `target_os`
+    // cfg-gates the entire winresource path so cross-platform builds
+    // never even consider it. `set_icon` accepts a path relative to
+    // the crate root, hence `../../packaging/...`.
+    #[cfg(target_os = "windows")]
+    {
+        let ico = repo_root.join("packaging/windows/kettle.ico");
+        if ico.exists() {
+            let mut res = winresource::WindowsResource::new();
+            res.set_icon(ico.to_str().unwrap_or_default());
+            if let Err(e) = res.compile() {
+                // Don't fail the build on a resource-compile glitch —
+                // the .exe will just lack an icon and a contributor
+                // working without the MSVC resource compiler can
+                // still iterate. Print to stderr so it shows up in
+                // `cargo build --verbose` but stays out of the way.
+                eprintln!("warning: winresource compile failed: {e}");
+            }
+            println!("cargo:rerun-if-changed=../../packaging/windows/kettle.ico");
+        }
+    }
+
     // Cycle 195 note: we intentionally *don't* call
     // `cargo:rerun-if-changed=…` here. Restricting the rerun set to
     // `.git/HEAD` + the symbolic-ref file (the cycle-192 design) made

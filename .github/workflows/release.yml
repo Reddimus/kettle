@@ -75,6 +75,21 @@ jobs:
         run: |
           APP=dist/kettle.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          # Convert the maintained .iconset directory to .icns using
+          # Apple's own iconutil — only available on macOS. The result
+          # lands at Resources/kettle.icns and the Info.plist's
+          # CFBundleIconFile=kettle (no extension) picks it up so the
+          # Finder, Dock, and ⌘-Tab switcher all show our icon.
+          iconutil -c icns packaging/macos/kettle.iconset \
+            -o "$APP/Contents/Resources/kettle.icns"
+          # Patch the Info.plist version from the workspace Cargo.toml
+          # at release time so a CFBundleVersion drift from a forgotten
+          # manual bump can't ship. PlistBuddy is built into macOS.
+          VERSION=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" \
+            packaging/macos/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+            packaging/macos/Info.plist
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
           cp LICENSE NOTICE README.md "$APP/Contents/Resources/"
@@ -86,6 +101,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/kettle | Out-Null
           Copy-Item target/release/kettle.exe dist/kettle/
+          # The .ico file is embedded into the .exe by build.rs +
+          # winresource (see crates/kettle/Cargo.toml + build.rs); we
+          # also ship the standalone .ico in the zip so Windows Start
+          # menu pinning and right-click "Pin to taskbar" pick it up
+          # if the user moves the .exe out of its install directory.
+          Copy-Item packaging/windows/kettle.ico dist/kettle/
           Copy-Item LICENSE,NOTICE,README.md dist/kettle/
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 

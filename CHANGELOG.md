@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+- **macOS `.app` icon (`kettle.icns`) + Windows `.exe` icon (`kettle.ico`).**
+  Cycle 222 (v1.0.0) shipped a Linux SVG + PNG icon set and an
+  `install.sh` that wires it into XDG paths so the kettle tile shows
+  up in GNOME / Ubuntu Super-key search / KDE Krunner. Same wasn't
+  true on macOS and Windows — the macOS `.app` bundle had no
+  `CFBundleIconFile`, so Finder / Dock / ⌘-Tab showed a generic
+  document glyph; the Windows `.exe` had no embedded icon, so the
+  taskbar / Alt-Tab / Explorer showed the default Rust binary glyph.
+  Now:
+  - **macOS**: `packaging/macos/kettle.iconset/` holds the ten
+    Apple-required PNGs (16/32/128/256/512 in 1× and 2× variants),
+    rendered from the master `packaging/linux/kettle.svg` so a future
+    icon refresh is a single-file change. `release.yml`'s macOS step
+    runs `iconutil -c icns` (built-in on macOS, no extra deps) to
+    produce `kettle.icns`, drops it into `Contents/Resources/`, and
+    sets `CFBundleIconFile=kettle` so the bundle picks it up. Also
+    patches `CFBundleVersion` / `CFBundleShortVersionString` from
+    `Cargo.toml`'s workspace version via `PlistBuddy` so a forgotten
+    manual bump can't ship a stale `0.1.0` plist.
+  - **Windows**: `packaging/windows/kettle.ico` is a 6-resolution
+    `.ico` (16/32/48/64/128/256) built from the same SVG. The
+    `winresource` build-dep (Windows-only, gated by
+    `cfg(target_os = "windows")` in `build.rs`) compiles it into the
+    `.exe` so Explorer, the taskbar, Start-menu pins, and Alt-Tab
+    all display the kettle icon. The `.ico` also ships standalone in
+    the release zip for Start-menu re-pinning if the user moves the
+    `.exe`.
+
 ## [1.0.0] — 2026-05-20
 
 First "ready for daily use" release. Eleven months and ~240 audit
