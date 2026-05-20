@@ -7,6 +7,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### CI
+- **`--list-ssh-hosts` empty-case smoke.** Cycle 105's
+  `format_ssh_hosts` empty-fallback emits "(no ssh-host entries
+  configured)" so a user with no SSH hosts configured sees
+  *something* instead of silence. CI never verified that;
+  a regression silently producing no output would slip through.
+  New smoke step asserts the explicit fallback line via
+  `grep -E '^\(no ssh-host entries configured\)$'`.
+
 - **Release artifacts now ship `CHANGELOG.md`.** Linux tarball,
   macOS `.app` (`Contents/Resources/`), and Windows zip already
   carry `LICENSE` / `NOTICE` / `README.md`. CHANGELOG was the

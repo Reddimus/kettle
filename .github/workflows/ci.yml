@@ -172,6 +172,16 @@ jobs:
           # while still catching "I accidentally cleared `defaults()`".
           cargo run -q -p kettle -- --list-keybinds > keybinds.txt
           test "$(wc -l < keybinds.txt)" -gt 40
+          # Cycle 240: `--list-ssh-hosts` on a fresh CI runner has no
+          # configured hosts. The cycle-105 `format_ssh_hosts` empty
+          # fallback emits an explicit "(no ssh-host entries configured)"
+          # line so the user sees *something* (not silence) when their
+          # config has no `ssh-host = name=target` entries. Pin the
+          # contract here so a regression that drops the fallback
+          # — silently producing no output — fails CI instead of
+          # surprising the user.
+          cargo run -q -p kettle -- --list-ssh-hosts \
+            | grep -E '^\(no ssh-host entries configured\)$'
           # `--print-default-config` is the one-command first-launch
           # bootstrap (`kettle --print-default-config > ~/.config/
           # kettle/config`). It emits the embedded
