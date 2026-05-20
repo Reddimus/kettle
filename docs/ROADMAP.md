@@ -489,6 +489,23 @@
       `window_title` (the `Window::set_title` source) now mirrors
       the tab-title behavior; a cwd literally named "kettle"
       no longer collapses the substitution. +2 test asserts.
+- [x] **`--check-config` echoes window padding, opacity, split
+      colors.** The cycle-59 expansion missed
+      padding/opacity/unfocused-split-opacity and the cycle-83
+      split-color overrides; new `window:` line (always shown) +
+      conditional `splits:` line surface them.
+- [x] **`--list-keybinds` renders `Goto tab N` (1-based).** The
+      Debug-derived `GotoTab(0)` label leaked the 0-based
+      internal index; new `action_label` helper renders the
+      1-based human form for `GotoTab` and falls back to Debug
+      for the rest. +1 test.
+- [x] **SSH tab title seeded from the target.** Fresh SSH tabs
+      and session-restored ones with an `ssh` argv now read
+      `ssh <target>` until the remote shell sends its first
+      OSC 2 — cycle-89's cwd-basename fallback can't help SSH
+      panes since they have no local cwd. Pure
+      `initial_pane_title(argv)` helper wired into `spawn_pane`
+      so both fresh and restored paths share it. +1 test.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
