@@ -58,7 +58,7 @@ jobs:
         run: |
           mkdir -p dist/kettle/packaging/linux
           cp target/release/kettle dist/kettle/
-          cp LICENSE NOTICE README.md dist/kettle/
+          cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
           # Desktop integration assets — packaged at the SAME relative
           # paths the in-tree `scripts/install.sh` expects, so a user
           # who extracts the tarball can run `./kettle/install.sh` and
@@ -99,7 +99,7 @@ jobs:
             packaging/macos/Info.plist
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
-          cp LICENSE NOTICE README.md "$APP/Contents/Resources/"
+          cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
           # Cycle 230: shell-integration snippets in Resources/ so a
           # macOS user can read them alongside the LICENSE / NOTICE
           # without needing the source tree. Same content as the
@@ -119,7 +119,7 @@ jobs:
           # menu pinning and right-click "Pin to taskbar" pick it up
           # if the user moves the .exe out of its install directory.
           Copy-Item packaging/windows/kettle.ico dist/kettle/
-          Copy-Item LICENSE,NOTICE,README.md dist/kettle/
+          Copy-Item LICENSE,NOTICE,README.md,CHANGELOG.md dist/kettle/
           # Cycle 230: shell-integration snippets — useful for Windows
           # users running Git Bash, MSYS2, or WSL inside kettle on
           # ConPTY. Same files as on the other platforms.

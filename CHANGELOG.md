@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### CI
+- **Release artifacts now ship `CHANGELOG.md`.** Linux tarball,
+  macOS `.app` (`Contents/Resources/`), and Windows zip already
+  carry `LICENSE` / `NOTICE` / `README.md`. CHANGELOG was the
+  obvious missing companion — a user who downloaded a tarball had
+  no offline way to see "what's new in this release" without
+  visiting GitHub. Adding it to all three platform packagings is
+  one file each. The `--print-default-config` and
+  `--shell-integration` snippets are already embedded in the
+  binary; CHANGELOG.md is the one piece of release-time
+  documentation the binary doesn't carry.
+
 ### Tests
 - **VT conformance: individual SGR-off codes
   (22/23/24/27/29).** `sgr_truecolor_bold_and_reset` and
