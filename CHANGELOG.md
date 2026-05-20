@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+- **`scroll-on-keystroke` (default `true`) now applies to every
+  pane in a broadcast group, not just the focused pane.** The
+  config flag says "snap the viewport back to the bottom on every
+  keystroke" — meant to keep the user's view of incoming output
+  current. With broadcast off, only the focused pane is written
+  to and only it snaps; self-consistent. With broadcast on (the
+  Ctrl+Shift+G group-input mode where typing goes to every pane
+  in the active tab), the pre-cycle code wrote the bytes to all
+  panes but skipped the snap entirely — so a user with broadcast
+  on AND any pane scrolled back saw their typing reach the remote
+  shells fine while the local view of those panes stayed pinned
+  to history (no way to tell from the screen that the bytes
+  actually went through). Fix: new
+  `Mux::broadcast_scroll_to_bottom` companion to `broadcast_write`,
+  same active-tab scoping (cycle-112 invariant); called from the
+  same `scroll_on_keystroke` gate. No new test — the scoping
+  matches `broadcast_write`'s, which is pinned by the cycle-112
+  `leaf_ids` test; the snap itself requires a real Term lock that
+  the existing mux unit tests don't stand up. Same shape as
+  cycle 151 — chrome-only fix, correctness-by-construction.
+
 ### Documentation
 - **User-facing docs no longer leak internal `cycle N` references.**
   Cycle 168 caught the audit-trail leak in `kettle --help`; this

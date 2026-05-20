@@ -863,6 +863,28 @@ impl Mux {
         }
     }
 
+    /// Snap every pane in the active tab's broadcast set back to the
+    /// bottom of its scrollback. Cycle-173 companion to
+    /// `broadcast_write`: `scroll-on-keystroke` (default true) needs to
+    /// apply to every targeted pane, not just the focused one, otherwise
+    /// the user broadcasting input to N panes sees a confusing mismatch
+    /// (typing reaches the remote shells but the local view of any
+    /// scrolled-back pane stays pinned to history). Same scoping as
+    /// `broadcast_write` — active tab's leaves only, never other tabs.
+    pub fn broadcast_scroll_to_bottom(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let ids = tab.root.leaf_ids();
+        for id in ids {
+            if let Some(p) = self.panes.get_mut(&id)
+                && let Ok(mut t) = p.term.term.lock()
+            {
+                t.scroll_display(kettle_core::Scroll::Bottom);
+            }
+        }
+    }
+
     pub fn tab_titles(&self) -> Vec<String> {
         self.tabs
             .iter()

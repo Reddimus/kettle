@@ -964,6 +964,14 @@
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
       test pairing with last cycle's OSC 4/10/11/12 query path.
+- [x] **`scroll-on-keystroke` applies to broadcast groups too.**
+      With broadcast on (Ctrl+Shift+G), typing wrote to every
+      pane but skipped the scroll-to-bottom snap, so any
+      scrolled-back pane stayed pinned to history while the
+      bytes invisibly reached the remote shell. New
+      `Mux::broadcast_scroll_to_bottom` matches `broadcast_write`'s
+      scope (cycle-112 leaf_ids). No new test — same chrome-only
+      pattern as cycle 151.
 - [x] **`Trigger::label` uses Plus/Minus/Equal for the punctuation
       keys.** `Ctrl++` (zoom in) showed as `Ctrl++` — ambiguous on
       first read. Parser already accepts `plus` / `minus` /

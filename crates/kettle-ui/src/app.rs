@@ -2358,6 +2358,25 @@ impl ApplicationHandler<UserEvent> for App {
                     self.reset_blink_phase();
                     if self.mux.broadcast {
                         self.mux.broadcast_write(&bytes);
+                        // `scroll-on-keystroke` (Ghostty / Alacritty
+                        // default) snaps the viewport back to the
+                        // bottom on every keystroke. With broadcast
+                        // *off* (the next branch), only the focused
+                        // pane gets typed into and only it snaps —
+                        // self-consistent. With broadcast *on*, the
+                        // bytes go to every pane in the active tab;
+                        // the pre-cycle-173 code only wrote the bytes
+                        // and skipped the snap, so a user with
+                        // broadcast on AND any pane scrolled back saw
+                        // a confusing mismatch: typing reached the
+                        // remote shells but the local view stayed
+                        // pinned to history. Snap every pane in the
+                        // broadcast set, matching the non-broadcast
+                        // path's behavior so the config flag is
+                        // honored consistently regardless of mode.
+                        if self.cfg.scroll_on_keystroke {
+                            self.mux.broadcast_scroll_to_bottom();
+                        }
                     } else if let Some(p) = self.mux.focused() {
                         p.term.write(&bytes);
                         // Yank back to the bottom *if* the user wants it
