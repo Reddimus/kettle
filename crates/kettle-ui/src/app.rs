@@ -1117,8 +1117,31 @@ impl App {
         let (cw, ch) = self.cell_px();
         let waker = self.waker();
         match action {
-            Action::NewTab | Action::NewWindow => {
+            Action::NewTab => {
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
+            }
+            Action::NewWindow => {
+                // Spawn a *separate* kettle process so the user gets a real
+                // OS window, not just a new tab in this one. Detached so a
+                // crash here doesn't take the parent down; we forget the
+                // child handle on purpose (the OS reaps it). Falls back to
+                // a new tab if the current executable isn't resolvable,
+                // which keeps the keybind useful on weird platforms (snap,
+                // appimage with custom argv0) instead of silently failing.
+                let spawned = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .ok()
+                    })
+                    .is_some();
+                if !spawned {
+                    let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
+                }
             }
             Action::SplitRight => {
                 let _ = self

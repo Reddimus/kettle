@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Security
+- **`Action::NewWindow` (Ctrl+Shift+I) opens an actual new OS
+  window.** The handler was sharing an arm with `Action::NewTab` —
+  the parsed keybind dispatched cleanly all the way to a new
+  *tab* in the existing window, so users pressing the "new
+  window" chord were silently getting a tab (same shape as the
+  empty-arm bug fixed in cycle 55). Now spawns a separate kettle
+  process via `std::env::current_exe()` + `Command::spawn`, with
+  stdio nulled and the child handle dropped so the OS reaps it.
+  Falls back to a new tab if the current executable isn't
+  resolvable (snap / appimage with custom argv0), keeping the
+  keybind useful on weird platforms instead of silently failing.
 - **OSC 10 (set default foreground) now reaches the per-pane
   text-area default color.** Companion to the OSC 11 chrome fix
   in cycle 65: a program issuing `OSC 10 ; rgb:RR/GG/BB ST` was

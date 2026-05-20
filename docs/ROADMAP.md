@@ -395,6 +395,11 @@
       Glyphon `TextArea.default_color` (fallback for spans without
       explicit color) now reads from `term_colors[256]` per pane.
       Chrome (tab bar text) keeps `theme.foreground`.
+- [x] **`Action::NewWindow` spawns a separate kettle process.**
+      Was collapsed with `Action::NewTab`; Ctrl+Shift+I silently
+      opened just a tab. Now `current_exe()` + detached `spawn`;
+      falls back to a tab on platforms where the path doesn't
+      resolve.
 - [x] **`scroll-on-keystroke` + `scroll-on-output`** (Alacritty/
       xterm parity). Keystroke default `true` (current behavior, now
       opt-out); output default `false` so background chatter doesn't
