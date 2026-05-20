@@ -13,11 +13,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   holds Ctrl (or Cmd, on macOS) and the pointer is on a
   hyperlink — same chord that actually opens the URL. Without
   this affordance, the underline-on-hover (already there) is the
-  only hint that the link is clickable. Re-syncs on both
-  `CursorMoved` (position changed → hit-test may flip) and
-  `ModifiersChanged` (Ctrl pressed/released → affordance flips
-  without the mouse moving). Deduped via `last_cursor_icon` so
-  we don't issue a `set_cursor` syscall on every CursorMoved.
+  only hint that the link is clickable. Re-syncs on:
+  - `CursorMoved` (position changed → hit-test may flip)
+  - `ModifiersChanged` (Ctrl pressed/released → affordance flips
+    without the mouse moving)
+  - Per-frame in `redraw()` after `update_links()` so a URL
+    scrolling out from under a held Ctrl (Ctrl+PageUp, scroll-
+    on-output, etc.) doesn't leave the pointer-hand icon stuck
+    on a now-empty cell.
+  Deduped via `last_cursor_icon` so we don't issue a `set_cursor`
+  syscall on every frame.
 - **`selection-foreground` is now actually applied.** The config
   key was parsed, stored on `Theme.selection_foreground`, and then…
   ignored by the renderer — selected cells kept their normal text

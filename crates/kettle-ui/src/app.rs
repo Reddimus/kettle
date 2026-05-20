@@ -1134,6 +1134,12 @@ impl App {
         }
         self.update_search();
         self.update_links();
+        // Link set may have changed (scroll, output, mode flip) — re-sync
+        // the cursor icon so a URL scrolling out from under a held Ctrl
+        // doesn't leave the pointer-hand icon stuck on a now-empty cell.
+        // Deduped via `last_cursor_icon` so this is a cheap per-frame
+        // recheck when nothing changed.
+        self.sync_cursor_icon();
         let overlay = self.overlay();
         let area = self.area();
         let tabbar = self.tab_bar();
