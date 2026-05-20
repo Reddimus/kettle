@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
 ### Fixed
+- **Typing also resets the cursor blink phase.** Final
+  user-gesture path that still missed the blink reset. A
+  fast typist hitting a key right as `blink_on` was false
+  saw a brief flash of no-cursor before the next half-
+  period. Alacritty / kitty / iTerm2 / WezTerm all reset
+  on every keystroke; matches the rest of the user-driven
+  paths kettle now handles (cycle 134: Reset; cycle 135:
+  focus actions; cycle 136: mouse focus; cycle 140: modal
+  close).
+
 - **Closing a modal overlay also resets the cursor blink
   phase.** Cycle 134 fixed the chord-Reset path; cycles
   135/136 covered focus changes (keyboard and mouse). The

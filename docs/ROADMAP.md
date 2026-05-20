@@ -506,6 +506,11 @@
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
+- [x] **Typing resets blink phase.** Last user-gesture path
+      to gain the cycle 134/135/136/140 blink-reset.
+      Alacritty / kitty / iTerm2 / WezTerm all do it on
+      every keystroke; matches the rest of kettle's
+      user-driven paths.
 - [x] **Modal-close paths reset blink phase.** Cycle 134
       covered Action::Reset; cycles 135/136 the focus
       changes. Escape closing search/palette/hint/ssh

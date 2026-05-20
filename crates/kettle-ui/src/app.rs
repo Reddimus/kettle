@@ -2236,6 +2236,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // this so typing after a select doesn't leave a stale
                     // highlight behind.
                     self.clear_selection_on_input();
+                    // Cycle 141: typing should land the cursor visible
+                    // immediately. Without this, a fast typist hitting
+                    // a key right as `blink_on` was false saw a brief
+                    // flash of no-cursor before the next half-period.
+                    // Alacritty / kitty / iTerm2 / WezTerm all reset
+                    // the blink phase on every keystroke. Same shape
+                    // as cycles 134-140 (Reset, focus changes, modal
+                    // close, mouse focus); typing is the last
+                    // user-driven path that still needed it.
+                    self.reset_blink_phase();
                     if self.mux.broadcast {
                         self.mux.broadcast_write(&bytes);
                     } else if let Some(p) = self.mux.focused() {
