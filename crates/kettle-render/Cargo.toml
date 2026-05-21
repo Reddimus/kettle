@@ -20,7 +20,6 @@ glyphon = "0.11.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config = { version = "1.2.0", path = "../kettle-config" }
 kettle-core = { version = "1.2.0", path = "../kettle-core" }
-log.workspace = true
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 unicode-width.workspace = true
