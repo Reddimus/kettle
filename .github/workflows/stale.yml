@@ -1,0 +1,96 @@
+# Stale-issue / stale-PR bot. Closes inactive items so the tracker
+# stays a signal of *currently-active* work rather than a graveyard.
+# Conservative defaults to avoid closing real reports a maintainer
+# hasn't had time to triage:
+#
+#   - Issues: warn after 90 days of inactivity, close after another
+#             14 (104 days total). Maintainers / reporters can keep
+#             a thread alive by commenting; a maintainer can pin or
+#             apply the `pinned` label to opt out entirely.
+#   - PRs:    warn after 60 days (more aggressive — a stale PR
+#             usually means the contributor lost interest), close
+#             after another 14 (74 days total).
+#
+# Daily 06:30 UTC schedule — runs after the `audit.yml` cron at
+# 06:00 UTC so any new advisory has had time to surface before the
+# stale-bot might touch a related issue.
+name: Stale
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # Conservative thresholds — see the header comment.
+          days-before-issue-stale: 90
+          days-before-issue-close: 14
+          days-before-pr-stale: 60
+          days-before-pr-close: 14
+
+          # Labels applied at each stage so reporters can search /
+          # filter, and so a maintainer can `gh issue list -l stale`
+          # to see what the bot has flagged.
+          stale-issue-label: stale
+          stale-pr-label: stale
+          close-issue-label: closed-stale
+          close-pr-label: closed-stale
+
+          # Opt-out: a maintainer can apply any of these labels to
+          # keep an issue/PR alive indefinitely (e.g., "this is a
+          # tracking issue for a multi-cycle feature" or "this PR is
+          # behind a blocker on my plate, not the contributor's").
+          exempt-issue-labels: pinned,security,enhancement,help-wanted
+          exempt-pr-labels: pinned,security,blocked-on-maintainer
+
+          # Stage messages — friendly + actionable.
+          stale-issue-message: |
+            This issue has been quiet for 90 days. Per the project's
+            stale-bot policy, it'll be auto-closed in 14 days if
+            nothing further lands here.
+
+            If this is still relevant, leave a comment (any comment
+            keeps the thread alive) or apply the `pinned` label.
+            For security issues, please file via
+            <https://github.com/Reddimus/kettle/security/advisories/new>
+            instead — that channel is exempt from this bot.
+          close-issue-message: |
+            Auto-closed by the stale-bot after 104 days of inactivity.
+            This isn't a final verdict on the issue — if it's still
+            relevant, open a new issue and link this one. The
+            history stays searchable.
+          stale-pr-message: |
+            This PR has been quiet for 60 days. Per the project's
+            stale-bot policy, it'll be auto-closed in 14 days if
+            nothing further lands here.
+
+            If you'd like to revive it: rebase on `main`, push, and
+            leave a comment summarizing what's still outstanding —
+            the bot won't re-flag a PR that's been touched since.
+          close-pr-message: |
+            Auto-closed by the stale-bot after 74 days of inactivity.
+            The branch + commits stay in your fork; re-open or open
+            a fresh PR whenever you'd like to pick this back up.
+
+          # Operate on `created-after` so the bot doesn't churn
+          # through ancient history on its first run. Anchored at
+          # the v1.0 cut so legacy items from kettle's
+          # pre-production-grade era stay manual.
+          start-date: "2026-05-01T00:00:00Z"
+
+          # Process at most 30 items per run — keeps the bot light
+          # on the GH API quota and avoids "100 issues closed in
+          # one batch" noise on the maintainer's notifications.
+          operations-per-run: 30
+          # Order oldest-first so the most-deserving-of-attention
+          # items get processed first if the per-run cap kicks in.
+          ascending: true
