@@ -174,17 +174,14 @@ close focused pane (or tab if last pane)
 .B Ctrl+PgUp/PgDn
 previous / next tab
 .TP
-.B Ctrl+Shift+,
-move tab left
+.B Ctrl+Shift+PgUp/PgDn
+move tab left / right
 .TP
-.B Ctrl+Shift+.
-move tab right
+.B Ctrl+Shift+I
+new window
 .TP
-.B Ctrl+Shift+Z
-undo close tab
-.TP
-.B Ctrl+Shift+D
-duplicate tab
+.B Ctrl+Shift+Q
+close window
 .SS Splits / panes
 .TP
 .B Ctrl+Shift+O
@@ -193,14 +190,30 @@ split top/bottom (Terminator-exact)
 .B Ctrl+Shift+E
 split left/right (Terminator-exact)
 .TP
-.B Ctrl+Shift+arrow
-focus pane in direction
+.B Ctrl+Shift+A
+auto-split (longest axis)
+.TP
+.B Alt+arrow
+focus pane up / down / left / right
+.TP
+.B Ctrl+Shift+N
+focus next pane (DFS order)
+.TP
+.B Ctrl+Shift+P
+focus previous pane
 .TP
 .B Ctrl+Shift+X
 toggle pane zoom (maximize / restore)
-.TP
-.B Ctrl+Shift+Alt+D
-duplicate focused pane
+.PP
+Additional actions available via the command palette
+.RB ( Ctrl+Shift+K ):
+.BR UndoCloseTab ,
+.BR DuplicateTab ,
+.BR DuplicatePane ,
+.BR Reset
+\(em not default-bound (bind via the
+.B keybind
+config entry if you want a hotkey).
 .SS Overlays
 .TP
 .B Ctrl+Shift+K
@@ -227,10 +240,27 @@ jump to previous OSC 133 prompt
 .TP
 .B Ctrl+Down
 jump to next OSC 133 prompt
+.SS Scrollback movement
+.TP
+.B Ctrl+Shift+Up/Down
+scroll one line
+.TP
+.B PageUp/PageDown
+scroll one page
 .SS Group / broadcast
 .TP
 .B Super+G
-toggle broadcast / group-input on this tab
+toggle broadcast (group-input) on this tab
+.TP
+.B Shift+Super+G
+turn broadcast off
+.SS Font size
+.TP
+.B Ctrl+Shift+Plus
+increase font size
+.TP
+.B Ctrl+Shift+Minus
+decrease font size
 .SS Right-click
 A right click anywhere in a pane opens a context menu with:
 Copy / Paste / Split Right / Split Down / Close Pane / New Tab.
