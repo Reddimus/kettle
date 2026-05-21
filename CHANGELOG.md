@@ -6,6 +6,105 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-21
+
+Minor release. Theme: **production-grade UX cycle — tabs, splits,
+right-click, Terminator + iTerm2 + WezTerm parity sweep.**
+
+Seven focused sub-cycles addressing three user-reported issues (tab
+`×` looked like a character not a button; `Ctrl+Shift+W` closed the
+whole tab instead of just the focused split; right-click behaved
+weirdly) plus four feature parities from other major terminals. Each
+sub-cycle landed as its own commit with a drift-guard test pinning
+the contract.
+
+### Fixed
+- **`Ctrl+Shift+W` on a split closes the pane, not the whole tab**
+  (cycle 240). `Mux::close_focused` matched `Err(_)` and treated
+  every error variant the same — `Err(None)` (only leaf, close
+  tab) was conflated with `Err(Some(sibling))` (sibling needs
+  promoting, keep tab). Split the arm and merge the
+  promote-sibling branch with the regular `Ok(n)` path; both have
+  identical post-conditions. Drift guard
+  `close_focused_promotes_sibling_in_two_pane_split` pins the
+  contract.
+
+### Added — UX parity
+- **Tab `×` hover affordance** (cycle 241). Click handler already
+  hit-tests `seg.close` and dispatches `close_tab_at`; the bug was
+  purely visual. A red chip background now appears behind the
+  `✕` glyph on hover and the OS cursor flips to `Pointer` — Chrome
+  / Firefox / Safari tab convention. Two pure helpers
+  (`hovered_close_button`, `tab_close_hover_icon`) make the
+  geometry + cursor decisions unit-testable.
+- **Right-click opens a context menu** (cycle 245). Replaces the
+  cycle-49 silent no-op with a floating panel of 8 entries
+  (Copy / Paste / sep / Split Right / Split Down / Close Pane /
+  sep / New Tab). Reuses the modal-overlay infrastructure (cycle
+  111 command palette + hint mode pattern). Keyboard nav `↑↓ Tab`
+  step the highlight skipping separators + disabled rows;
+  `Enter Space` dispatch; `Esc` closes. Mouse click on a row
+  dispatches; click outside dismisses. Anchor clamps via pure
+  `clamp_context_menu_anchor` so a right-click near the bottom-
+  right corner flips the panel up-and-left instead of rendering
+  off-screen. Shift+right-click over an existing selection
+  preserves the cycle-49 extend-selection muscle memory.
+- **Tab-bar activity / bell dots** (cycle 246, Terminator parity).
+  Per-`Tab` `last_output_at` / `last_seen_at` / `bell` fields +
+  pure `classify_tab_activity(is_active, bell, last_output_at,
+  last_seen_at) -> TabActivity { Normal | Output | Bell }`. The
+  reader thread already advances per-pane history; that signal
+  now also latches the containing tab's `last_output_at` (active
+  tab short-circuits — the focused-tab accent is enough). The
+  renderer draws a 6-px square in the lower-left corner of
+  inactive segments — palette[3] yellow for Bell, palette[6] cyan
+  for Output. Same brand colors the cycle-178 broadcast accent
+  uses, so the visual language stays consistent.
+- **Undo-close-tab** (cycle 247, WezTerm parity).
+  `Mux::closed_tabs: VecDeque<ClosedTab>` bounded LIFO ring of 10;
+  `close_tab_at` snapshots the first leaf's argv + OSC-7 cwd
+  before drop. New `Pane::argv` field (load-bearing for the SSH
+  re-spawn case). `Action::UndoCloseTab` (aliases
+  `reopen_tab` / `restore_tab`) re-spawns the same program in the
+  same cwd at the same tab index. Surfaced in the command palette;
+  no default keybind (kettle's Terminator-inherited `Ctrl+Shift+T
+  = NewTab` muscle memory takes priority — users who want
+  WezTerm's chord add `keybind = ctrl+shift+t=undo_close_tab` to
+  their config).
+- **Duplicate tab + duplicate pane** (cycle 248, iTerm2 parity).
+  `Action::DuplicateTab` / `Action::DuplicatePane` read the
+  focused pane's argv (via the cycle-247 field) + OSC-7 cwd and
+  clone into a new tab / horizontal split. An `ssh prod` tab
+  duplicates to a second `ssh prod`; a `kettle -e vim file` tab
+  duplicates to a second vim editing the same file. Empty argv
+  falls back to the configured shell. Both surfaced in the
+  command palette; no default keybindings.
+- **Mouse-drag tab reorder** (cycle 249, kitty / iTerm2 / Ghostty
+  parity). Pure `tab_drag_target_index(cursor_x, n, strip_w)`
+  helper + a tiny `tab_drag_active` flag on `App`. A left-button
+  press on a tab segment arms the drag; subsequent `CursorMoved`
+  events compute the target index and call `Mux::move_active_tab`
+  (cycle ~125 swap-with-clamp). Release disarms. No ghost-render
+  of the dragged segment — kept out of scope; the bar snaps to
+  the new order at each boundary crossing.
+
+### Drift guards (+8 across the workspace)
+- `close_focused_promotes_sibling_in_two_pane_split` (mux.rs)
+- `hovered_close_button_finds_only_the_close_rect_hits` (app.rs)
+- `tab_close_hover_icon_overrides_chrome_default` (app.rs)
+- `next_context_menu_highlight_skips_separators_and_disabled` (app.rs)
+- `clamp_context_menu_anchor_keeps_panel_on_screen` (app.rs)
+- `classify_tab_activity_picks_the_right_indicator` (mux.rs)
+- `closed_tab_ring_bounded_and_lifo` (mux.rs)
+- `tab_drag_target_index_clamps_to_strip` (app.rs)
+
+The cycle-117 palette-completeness exhaustive match guards the
+three new actions (`OpenContextMenu`, `UndoCloseTab`,
+`DuplicateTab`, `DuplicatePane`) — a future Action variant landed
+without a palette decision fails to compile.
+
+Workspace tests: 252 → 259.
+
 ## [1.2.1] — 2026-05-21
 
 Patch release. Theme: **production-grade hardening — supply-chain
