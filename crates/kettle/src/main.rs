@@ -1216,6 +1216,13 @@ mod tests {
             "Ctrl+Shift+X", // ToggleZoom
             // Broadcast
             "Super+G", // ToggleBroadcastAll
+            // Vi-mode (cycle 298). The Ctrl+Shift+Space entry point
+            // is load-bearing — without it, vi-mode users can't
+            // enter the mode at all. h/j/k/l are mentioned in the
+            // man page but not pinned here (they're the de-facto
+            // vi keys, swapping them would be a deliberate config
+            // override rather than a doc drift).
+            "Ctrl+Shift+Space", // ToggleViMode
         ];
         let mut missing: Vec<&str> = Vec::new();
         for trigger in load_bearing {

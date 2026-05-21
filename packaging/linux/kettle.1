@@ -253,6 +253,50 @@ scroll one line
 .TP
 .B PageUp/PageDown
 scroll one page
+.SS Vi-mode (Alacritty parity)
+Enter vi-mode for the focused pane's scrollback. A magenta hollow
+block marks the vi cursor; the terminal cursor stays in place so
+you can see both. Movement, visual selection, and yank all live
+on standard vi keys.
+.TP
+.B Ctrl+Shift+Space
+toggle vi-mode (enter / exit)
+.TP
+.B h j k l
+move vi cursor left / down / up / right
+.TP
+.B arrow keys
+same as h/j/k/l
+.TP
+.B 0 ^
+jump to line start
+.TP
+.B $
+jump to line end
+.TP
+.B g H
+jump to top of viewport
+.TP
+.B G L
+jump to bottom of viewport
+.TP
+.B M
+jump to middle of viewport
+.TP
+.B v
+toggle char-visual selection (anchor at cursor)
+.TP
+.B y
+yank visual selection to clipboard, exit vi-mode
+.TP
+.B Esc
+exit vi-mode
+.SS Quake / dropdown mode
+.TP
+.B kettle \-\-toggle
+flip the running window's visibility, sent via the remote-control
+IPC. Bind your compositor / DE / OS global hotkey to this for
+Quake / Yakuake / Tilda dropdown UX.
 .SS Group / broadcast
 .TP
 .B Super+G
