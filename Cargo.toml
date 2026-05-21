@@ -15,16 +15,19 @@ version = "1.3.0"
 # "2024" individually. Bumped here to match reality and let crates
 # inherit via `edition.workspace = true`.
 edition = "2024"
-# Cycle 225: MSRV declaration. The workspace uses let-chains
-# (`if X && let Y = ... && Z`) in several places — kettle-vt,
-# kettle-config, kettle-render, kettle (binary). Let-chains
-# stabilized in Rust 1.88. Without `rust-version` set, a user on
-# 1.85-1.87 (which support edition 2024 but predate let-chain
-# stabilization) hits cryptic `expected expression, found
-# keyword 'let'` syntax errors instead of cargo's clean "package
-# requires rustc 1.88" message at the resolver level. This is a
-# floor, not a ceiling; we still develop and CI on stable.
-rust-version = "1.88"
+# MSRV declaration. The workspace uses let-chains (`if X && let
+# Y = ... && Z`) in kettle-vt / kettle-config / kettle-render /
+# kettle, which stabilized in Rust 1.88 (cycle 225 — the original
+# floor). Cycle 250: the *effective* MSRV is now 1.89 because two
+# transitive deps (`cosmic-text 0.18.2`, `smol_str 0.3.6`) bumped
+# their floors to 1.89; declaring 1.88 here misled `cargo install`
+# users into a confusing transitive-dep failure instead of the
+# clean cargo "package requires rustc 1.89" message. The cycle-250
+# `msrv` CI job builds + tests on exactly the declared rustc so a
+# future dep bump that raises the effective floor again fails CI
+# instead of silently breaking `cargo install`. This is a floor,
+# not a ceiling; we still develop and CI on stable.
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Reddimus/kettle"
 authors = ["kettle contributors"]
