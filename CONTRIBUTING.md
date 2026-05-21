@@ -76,6 +76,17 @@ Each cycle has the same shape:
    cargo test --workspace
    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
    ```
+   Or, if you have [`just`](https://just.systems) installed
+   (`cargo install just`), one command runs the whole gate:
+   ```sh
+   just gauntlet
+   ```
+   The Justfile at the repo root mirrors every CI step so a
+   green `just gauntlet` locally is the same gate every PR
+   runs on every OS. `just --list` shows every recipe
+   (`fmt` / `clippy` / `test` / `doc` / `build` / `release` /
+   `screenshot` / `menu` / `bench` / `install` / `uninstall` /
+   `run` / `clean`).
    The CI matrix on `main` runs the same on Linux / macOS / Windows
    plus a headless GPU smoke under Xvfb on Linux, a `--screenshot`
    end-to-end check (cycle 236), a `--screenshot-menu` visual
