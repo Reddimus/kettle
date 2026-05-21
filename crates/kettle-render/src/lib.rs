@@ -212,6 +212,13 @@ pub struct TabBar {
     /// background only appears on hover. Computed in the UI's cursor-
     /// sync path so the renderer has zero geometry knowledge.
     pub hovered_close_idx: Option<usize>,
+    /// Cycle 255 ghost-drag indicator: `Some(cursor_x)` while a
+    /// left-button drag is in progress in the tab bar. The renderer
+    /// draws a translucent overlay copy of the dragged (active) tab
+    /// segment centered at `cursor_x`, so the user sees what's being
+    /// moved while the underlying segments snap into place via
+    /// `Mux::move_active_tab`. `None` while no drag is active.
+    pub drag_cursor_x: Option<f32>,
 }
 
 impl TabBar {
@@ -223,6 +230,7 @@ impl TabBar {
             new_tab: (0.0, 0.0, 0.0, 0.0),
             broadcast: false,
             hovered_close_idx: None,
+            drag_cursor_x: None,
         }
     }
 }
@@ -644,6 +652,51 @@ impl Renderer {
             // New-tab (+) button background.
             let (nx, _, nw, _) = tabbar.new_tab;
             quads.push(rect(nx, by, nw, tabbar.height, theme.palette[8], 1.0));
+            // Cycle 255: drag-in-progress ghost. While the user holds a
+            // left button down on the tab bar (cycle 249), paint a
+            // translucent overlay copy of the active segment centered
+            // at the cursor x. The underlying segments still snap to
+            // their target positions via `move_active_tab`; the ghost
+            // gives the bar a "you're picking this tab up" affordance
+            // so the snap doesn't read as a confusing teleport. Push
+            // to `over` (post-text) so the ghost sits above the live
+            // segment text. Drawn only when both a drag is active
+            // *and* there's an active segment to copy from.
+            if let Some(cx) = tabbar.drag_cursor_x
+                && let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
+            {
+                let (_, _, seg_w, seg_h) = active_seg.rect;
+                // Clamp the ghost's left edge so the box doesn't slide
+                // entirely off either end of the bar — same idea as
+                // cycle 245's context-menu anchor clamp.
+                let half = seg_w * 0.5;
+                let max_x = (sw - seg_w).max(0.0);
+                let ghost_x = (cx - half).clamp(0.0, max_x);
+                // Soft drop shadow under the ghost (same trick as the
+                // cycle-251 context menu).
+                over.push(rect(
+                    ghost_x + 3.0,
+                    by + 3.0,
+                    seg_w,
+                    seg_h,
+                    Rgb::new(0, 0, 0),
+                    0.30,
+                ));
+                // Ghost background — theme.background at 0.85 opacity
+                // so the bar shows through enough that it reads as a
+                // floating preview rather than a real new tab.
+                over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, 0.85));
+                // Accent strip on the left edge, same color the live
+                // active segment uses (palette[3] yellow under
+                // broadcast, palette[4] blue otherwise — keeps the
+                // ghost visually identical to the source segment).
+                let accent = if tabbar.broadcast {
+                    theme.palette[3]
+                } else {
+                    theme.palette[4]
+                };
+                over.push(rect(ghost_x, by, 2.0, seg_h, accent, 1.0));
+            }
         }
 
         // Per-pane grid + dividers/border.

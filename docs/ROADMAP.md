@@ -1213,6 +1213,15 @@
       the zsh placement (the doc wrote to `~/.config/kettle/_kettle`,
       not on `$fpath`; now `"${fpath[1]}/_kettle"`). v1.2.1.
 
+- [x] **Ghost-render of the dragged tab during reorder** (cycle 255).
+      The cycle-249 drag-to-reorder snapped the live bar to the new
+      order at each boundary crossing but gave no "you're picking
+      this tab up" affordance — the dragged segment teleported between
+      positions. Now a translucent overlay copy of the active segment
+      (background at 0.85 + matching accent strip + soft drop shadow)
+      floats under the cursor while `tab_drag_active`. Anchor clamped
+      to the bar width via the same shape as the cycle-245 context-
+      menu anchor clamp.
 - [x] **Per-tab silence watcher** (Terminator parity, v1.3.3
       cycle 252). Inactive tab whose unseen output stopped arriving
       for ≥ `tab-silence-threshold-ms` (default 10 s, clamped
@@ -1229,9 +1238,9 @@
 - [ ] Native macOS menu bar
 - [ ] Code-signed/notarized macOS build; Windows MSI installer
 - [ ] Broader `vttest` conformance sweep
-- [ ] Ghost-render of the dragged tab segment during reorder
 - [ ] Vi-mode for the scrollback (Alacritty parity)
 - [ ] tmux passthrough (`-CC` mode, iTerm2 parity)
+- [ ] Homebrew tap + AUR package + nixpkgs flake
 
 ## Quality bar each cycle
 

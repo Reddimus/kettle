@@ -686,6 +686,16 @@ impl App {
             // the close glyph; UI's `sync_cursor_icon` flips the OS
             // cursor to Pointer at the same time.
             hovered_close_idx: self.hovered_close_idx,
+            // Cycle 255: while a tab-bar drag is in progress, hand
+            // the renderer the cursor x so it paints a translucent
+            // ghost of the dragged segment under the cursor — gives
+            // the cycle-249 reorder a "I'm picking this tab up"
+            // affordance instead of the bare snap behavior.
+            drag_cursor_x: if self.tab_drag_active {
+                Some(self.cursor.x as f32)
+            } else {
+                None
+            },
         }
     }
 
