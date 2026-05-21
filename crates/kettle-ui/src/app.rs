@@ -542,6 +542,14 @@ impl App {
                 })
             {
                 let _ = std::fs::create_dir_all(&dir);
+                // Cycle 306: truncate any leftover content on
+                // startup so commands that arrived after a previous
+                // kettle crashed mid-process don't replay as bytes
+                // typed into the NEW kettle's focused pane. Subtle
+                // bug surfaced by audit. Failing to truncate is
+                // fine (file may not exist yet) — the watcher will
+                // still fire on next write.
+                let _ = std::fs::write(&path, "");
                 let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
                 remote_watcher = Some(w);
             }
