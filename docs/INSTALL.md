@@ -80,7 +80,11 @@ GitHub runners for every platform:
   path above, or copy the files manually.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Unzip and
   drag `kettle.app` to `/Applications`. First launch: right-click → Open
-  (unsigned build).
+  (unsigned build). A ready-to-use Homebrew formula lives at
+  [`packaging/homebrew/kettle.rb`](../packaging/homebrew/kettle.rb);
+  see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)
+  for the one-time tap-repo setup that lets users install with
+  `brew tap reddimus/kettle && brew install kettle`.
 - **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`. Unzip
   anywhere and run; uses ConPTY + your default shell (PowerShell/cmd).
 
