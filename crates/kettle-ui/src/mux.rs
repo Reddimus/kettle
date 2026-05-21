@@ -629,21 +629,34 @@ impl Mux {
         ch: u16,
         mk: &dyn Fn() -> Waker,
     ) -> bool {
-        for st in &s.tabs {
-            if let Ok(root) = self.build_node(&st.root, cfg, cw, ch, mk) {
-                // Restore the focused leaf at its DFS index (saved by
-                // `snapshot`). `nth_leaf` falls back to the first leaf
-                // if the index is past the end, which keeps trimmed-
-                // tree sessions sane.
-                let focus = root.nth_leaf(st.focus);
-                self.tabs.push(Tab {
-                    root,
-                    focus,
-                    zoomed: false,
-                    last_output_at: None,
-                    last_seen_at: None,
-                    bell: false,
-                });
+        for (i, st) in s.tabs.iter().enumerate() {
+            match self.build_node(&st.root, cfg, cw, ch, mk) {
+                Ok(root) => {
+                    // Restore the focused leaf at its DFS index (saved
+                    // by `snapshot`). `nth_leaf` falls back to the
+                    // first leaf if the index is past the end, which
+                    // keeps trimmed-tree sessions sane.
+                    let focus = root.nth_leaf(st.focus);
+                    self.tabs.push(Tab {
+                        root,
+                        focus,
+                        zoomed: false,
+                        last_output_at: None,
+                        last_seen_at: None,
+                        bell: false,
+                    });
+                }
+                Err(e) => {
+                    // Don't fail the whole restore — a single broken
+                    // tab (e.g. saved cwd no longer exists, PTY
+                    // allocation under quota) shouldn't sink the
+                    // others. But surface it in the log so a user
+                    // wondering "where did my session go?" can see
+                    // the cause under `RUST_LOG=warn` (the default
+                    // filter). Pre-fix this was a silent skip — the
+                    // user just saw fewer tabs than they remembered.
+                    log::warn!("session restore: tab {i} failed to rebuild and was skipped: {e}");
+                }
             }
         }
         self.active = s.active.min(self.tabs.len().saturating_sub(1));
