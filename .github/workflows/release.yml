@@ -31,7 +31,7 @@ jobs:
       # `--version` output would also say 1.3.9; only the tag would
       # claim 1.3.10). Fail fast before any build kicks off so the
       # fix is a tag retag, not a publish-then-yank.
-      - name: Tag ↔ Cargo.toml version consistency
+      - name: Tag ↔ Cargo.toml ↔ CHANGELOG consistency
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
         shell: bash
         run: |
@@ -44,7 +44,20 @@ jobs:
             echo "::error::either retag with v$CARGO_VER or bump Cargo.toml to $TAG_VER first"
             exit 1
           fi
-          echo "tag and Cargo.toml agree on version $TAG_VER"
+          # Cycle 286: also verify CHANGELOG.md has a section for this
+          # version. A release without a CHANGELOG entry leaves users
+          # who hit `kettle --version` then look at the project's
+          # release notes wondering what changed. Auto-generated
+          # release notes from softprops cover commit messages but
+          # not the human-curated [Unreleased] → [vX.Y.Z] promotion
+          # which is what the repo's Keep-a-Changelog format relies
+          # on.
+          if ! grep -qE "^## \[${TAG_VER}\]" CHANGELOG.md; then
+            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER]' section"
+            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' before tagging"
+            exit 1
+          fi
+          echo "tag, Cargo.toml, and CHANGELOG.md all agree on version $TAG_VER"
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
         if: runner.os == 'Linux'
