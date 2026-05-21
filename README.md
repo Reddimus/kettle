@@ -65,28 +65,55 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 
-## Quick start
+## Install
+
+### Linux — one-line installer (recommended)
+
+Downloads the latest prebuilt binary + XDG launcher + icons and drops
+everything into `~/.local/` (no `sudo`, no Rust toolchain):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
+```
+
+Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
+Super-key, or run `kettle` from any shell on your `$PATH`.
+
+Pin a specific version: `KETTLE_VERSION=v1.3.2 sh` instead of `sh`.
+Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
+
+### macOS
+
+Grab `kettle-macos-universal.zip` from
+[the latest release](https://github.com/Reddimus/kettle/releases/latest),
+unzip, and drag `kettle.app` to `/Applications`. The binary is a true
+arm64 + x86_64 universal — runs natively on every Mac.
+
+### Windows 11
+
+Grab `kettle-windows-x86_64.zip` from
+[the latest release](https://github.com/Reddimus/kettle/releases/latest),
+unzip, and add the folder to your `PATH` (or just `cd` into it and run
+`kettle.exe`).
+
+### Build from source
 
 ```sh
 # Linux build deps (Debian/Ubuntu)
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
   libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
 
-cargo run --release
+git clone https://github.com/Reddimus/kettle && cd kettle
+cargo run --release                   # try it
+./scripts/install.sh                  # XDG desktop install
+./scripts/install.sh --uninstall      # undo later
 ```
 
-**Easy desktop install on Linux** — drop the binary, launcher entry, and
-icon into the standard XDG user paths so kettle shows up in the GNOME
-Activities overview / Ubuntu **Super-key** search / KDE Krunner:
+Rust ≥ 1.89 (the workspace MSRV). See
+[`docs/INSTALL.md`](docs/INSTALL.md) for packaging details across all
+three platforms.
 
-```sh
-./scripts/install.sh                  # from a cloned repo (builds release first)
-./install.sh                          # from a release tarball (uses bundled binary)
-./scripts/install.sh --uninstall      # remove everything later
-```
-
-See [`docs/INSTALL.md`](docs/INSTALL.md) for prebuilt release tarballs,
-macOS `.app`, and Windows packaging.
+## CLI quick reference
 
 ```sh
 kettle --print-default-config > ~/.config/kettle/config   # bootstrap a commented starter config
