@@ -3,6 +3,7 @@
 [![CI](https://github.com/Reddimus/kettle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/ci.yml)
 [![Audit](https://github.com/Reddimus/kettle/actions/workflows/audit.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/audit.yml)
 [![cargo-deny](https://github.com/Reddimus/kettle/actions/workflows/deny.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/deny.yml)
+[![cargo-machete](https://github.com/Reddimus/kettle/actions/workflows/machete.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/machete.yml)
 [![Latest release](https://img.shields.io/github/v/release/Reddimus/kettle?label=release&color=blue)](https://github.com/Reddimus/kettle/releases/latest)
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
