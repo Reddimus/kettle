@@ -1,0 +1,49 @@
+# actionlint — static analysis of every `.github/workflows/*.yml`.
+#
+# Why this is its own workflow (instead of folding into ci.yml):
+#   - Triggers only on changes that touch the workflow files, so it
+#     doesn't add ~30 s to every code-only PR.
+#   - Runs the bundled `shellcheck` check on every `run: |` block
+#     across all six workflows in one pass — catches a dash-vs-bash
+#     bug like cycle-253's (the bundled install.sh's
+#     `set -o pipefail` was a Bash-only construct invoked via sh)
+#     before the PR ships.
+#   - Catches mistyped action references (`actions/checkout@v44`
+#     instead of `@v4`) at PR time — currently those only surface
+#     when the workflow actually runs.
+#
+# Linux-only runner. The check is platform-agnostic and one OS is
+# enough — same rationale as the cycle-219 rustdoc-on-Linux-only job.
+name: actionlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/labeler.yml"
+      - ".github/dependabot.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/labeler.yml"
+      - ".github/dependabot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Download the actionlint binary via the upstream-maintained
+      # install script and run it. Matches the canonical README
+      # recipe — avoids the docker:// overhead on the runner and
+      # pins the script source to the official rhysd/actionlint repo.
+      - name: Run actionlint
+        shell: bash
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

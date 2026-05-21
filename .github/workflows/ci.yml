@@ -93,6 +93,12 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           cargo build --release -p kettle
+          # The `bash -c '…$rc…'` invocation is single-quoted on
+          # purpose so the inner `$rc` expands inside the *nested*
+          # bash, not the outer wrapper. SC2016 flags the outer-shell
+          # view; disabled here because the inner expansion is what
+          # we want.
+          # shellcheck disable=SC2016
           xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >/tmp/out.log 2>&1; rc=$?; \
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
