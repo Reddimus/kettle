@@ -717,18 +717,32 @@ impl Mux {
     }
 
     /// Close the focused pane. Returns true if no tabs remain.
+    ///
+    /// `Node::remove_leaf` returns three distinct shapes that need three
+    /// different responses; the previous `match Err(_)` arm conflated two
+    /// of them and closed the whole tab when only a sibling-promote was
+    /// needed:
+    ///
+    /// - `Ok(n)` — the leaf was nested deep; tree was restructured around
+    ///   it. Replace the root with `n` and keep the tab.
+    /// - `Err(Some(n))` — the focused leaf was directly under the root
+    ///   `Split`; the sibling `n` is now the new root. Keep the tab —
+    ///   `Ctrl+Shift+E` then `Ctrl+Shift+W` should close the pane, not
+    ///   the whole tab.
+    /// - `Err(None)` — the focused leaf was the only one in the tab
+    ///   (single-pane tab); the tab is now empty and should close.
     pub fn close_focused(&mut self) -> bool {
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
             let root = std::mem::replace(&mut tab.root, Node::Leaf(0));
             match root.remove_leaf(focus) {
-                Ok(n) => {
+                Ok(n) | Err(Some(n)) => {
                     tab.root = n;
                     tab.focus = tab.root.first_leaf();
                     self.panes.remove(&focus);
                 }
-                Err(_) => {
+                Err(None) => {
                     self.panes.remove(&focus);
                     self.tabs.remove(a);
                     if self.active >= self.tabs.len() && self.active > 0 {
@@ -1223,6 +1237,43 @@ mod node_tests {
         assert_eq!(m.active, 0);
         // Closing the final tab reports "empty".
         assert!(m.close_tab_at(0));
+        assert!(m.tabs.is_empty());
+    }
+
+    #[test]
+    fn close_focused_promotes_sibling_in_two_pane_split() {
+        // Repro for the `Ctrl+Shift+E` then `Ctrl+Shift+W` regression:
+        // `match Err(_)` used to conflate two distinct `Node::remove_leaf`
+        // results — `Err(None)` (the focused leaf was the only one, close
+        // the tab) and `Err(Some(sibling))` (the focused leaf had a
+        // sibling, promote it). The wrong arm fired for the second case
+        // and closed the whole tab on what should have been a per-pane
+        // close. Pin the contract here so a future refactor that
+        // re-conflates them fails CI rather than re-introducing the bug.
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(10);
+        assert!(root.split_leaf(10, 20, Dir::Horizontal));
+        m.tabs.push(Tab {
+            root,
+            focus: 10,
+            zoomed: false,
+        });
+        m.active = 0;
+        // Close the focused (left) pane → tab survives with the right
+        // pane promoted to root.
+        assert!(!m.close_focused(), "tab should NOT be reported empty");
+        assert_eq!(m.tabs.len(), 1, "tab should still exist");
+        assert_eq!(m.active, 0);
+        assert!(
+            matches!(m.tabs[0].root, Node::Leaf(20)),
+            "sibling (id=20) should be the new root after closing the focused leaf"
+        );
+        assert_eq!(
+            m.tabs[0].focus, 20,
+            "focus should move to the promoted sibling, not linger on the closed leaf"
+        );
+        // Closing the now-last pane drains the tab.
+        assert!(m.close_focused(), "last-pane close should report empty");
         assert!(m.tabs.is_empty());
     }
 
