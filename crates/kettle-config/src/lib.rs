@@ -141,6 +141,19 @@ pub enum TabBarPos {
     Bottom,
 }
 
+/// Cycle 295 (iTerm2 / kitty parity): status-bar position. A thin
+/// strip showing HH:MM:SS · theme · focused pane title. Disabled by
+/// default — turning it on subtracts one row from each pane's grid,
+/// so chatty users with 80x24 budgets stay in control. Future cycle
+/// adds CPU / MEM widgets via `sysinfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusBarMode {
+    #[default]
+    Off,
+    Top,
+    Bottom,
+}
+
 /// When the per-pane scrollback scrollbar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
@@ -245,6 +258,8 @@ pub struct Config {
     pub osc52: Osc52,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
+    /// Cycle 295: status-bar mode. See [`StatusBarMode`].
+    pub status_bar: StatusBarMode,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -388,6 +403,7 @@ impl Default for Config {
             osc52: Osc52::Copy,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
+            status_bar: StatusBarMode::Off,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -999,6 +1015,14 @@ impl Config {
                     cfg.tab_bar_pos = match e.value.to_ascii_lowercase().as_str() {
                         "bottom" => TabBarPos::Bottom,
                         _ => TabBarPos::Top,
+                    }
+                }
+                "status-bar" | "statusbar" => {
+                    cfg.status_bar = match e.value.to_ascii_lowercase().as_str() {
+                        "off" | "false" | "none" => StatusBarMode::Off,
+                        "top" => StatusBarMode::Top,
+                        "bottom" | "true" | "on" => StatusBarMode::Bottom,
+                        _ => StatusBarMode::Off,
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2843,6 +2867,46 @@ mod config_tests {
         assert_eq!(cfg.font_size, 14.0);
         // Typo'd / unknown keys collected, sorted + deduped.
         assert_eq!(unknown, vec!["bogus".to_string(), "font-szie".to_string()]);
+    }
+
+    #[test]
+    fn status_bar_parses_off_top_bottom_with_aliases() {
+        // Cycle 295 drift guard. Default is Off (no row stolen from
+        // the pane grid). Three explicit modes (off / top / bottom)
+        // plus permissive aliases (`statusbar` no-dash, `true` / `on`
+        // for bottom, `false` / `none` for off). Unknown values fall
+        // back to Off so a future kettle adding a new mode doesn't
+        // surprise-enable on an old config typo.
+        assert_eq!(Config::default().status_bar, StatusBarMode::Off);
+        assert_eq!(
+            Config::parse_text("status-bar = top").status_bar,
+            StatusBarMode::Top
+        );
+        assert_eq!(
+            Config::parse_text("status-bar = bottom").status_bar,
+            StatusBarMode::Bottom
+        );
+        assert_eq!(
+            Config::parse_text("statusbar = bottom").status_bar,
+            StatusBarMode::Bottom
+        );
+        assert_eq!(
+            Config::parse_text("status-bar = true").status_bar,
+            StatusBarMode::Bottom
+        );
+        assert_eq!(
+            Config::parse_text("status-bar = off").status_bar,
+            StatusBarMode::Off
+        );
+        assert_eq!(
+            Config::parse_text("status-bar = none").status_bar,
+            StatusBarMode::Off
+        );
+        // Unknown value → safe fallback (Off, not bottom).
+        assert_eq!(
+            Config::parse_text("status-bar = funky").status_bar,
+            StatusBarMode::Off
+        );
     }
 
     #[test]
