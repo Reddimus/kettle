@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-05-21
+
+Patch release. Docs catch-up against the v1.4.0 → v1.7.0 feature
+sweep. The bundled `kettle.1` man page in the Linux release
+tarball had drifted; users running `man kettle` after upgrading
+would have seen pre-v1.4.0 keybinds. The fix ships as a binary
+release so the tarball-bundled man page gets the v1.4.0+ content.
+
+### Docs
+- `packaging/linux/kettle.1` gains a "Vi-mode (Alacritty parity)"
+  subsection with all 11 keymap entries (`Ctrl+Shift+Space` to
+  enter; h/j/k/l/0/$/g/G/H/M/L/v/y/Esc) and a "Quake / dropdown
+  mode" subsection documenting `kettle --toggle`.
+- `docs/CONFIG.md` gains rows for the three v1.4.0-era config
+  keys that were undocumented: `accent-color`, `status-bar`,
+  `trigger`.
+- `docs/UX-COMPARISON.md` matrix gains 9 new rows (vi-mode,
+  remote-control IPC, Quake toggle, triggers, named-layout /
+  profile, peacock accent, annotated screenshots, status bar) +
+  a "Shipped in v1.4.0 → v1.7.0" chronological block. Vi-mode
+  moved out of the "Future" list.
+
+### Drift guard
+- `man_page_documents_load_bearing_default_keybinds` extended
+  with `Ctrl+Shift+Space` (vi-mode entry point). Without this,
+  the same gap could recur on a future man-page rewrite.
+
+No code change. Workspace tests 267 stay green.
+
 ## [1.7.0] — 2026-05-21
 
 Feature-bump release — adds Quake-style dropdown via the cycle-302
