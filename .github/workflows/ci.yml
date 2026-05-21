@@ -182,6 +182,22 @@ jobs:
           # un-noticed.
           cargo run -q -p kettle -- --version | tee /tmp/kettle-version.txt
           grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' /tmp/kettle-version.txt
+          # Cycle 282: `--help` itself wasn't smoked previously. Pin
+          # the help output's shape: clap's "Usage: kettle ..." prelude,
+          # the cycle-241 verbatim-doc-comment flags (--shell-
+          # integration, --print-completions, --print-default-config),
+          # and three load-bearing flags (--config, --screenshot,
+          # --gpu-info) all surface. A clap-derive regression that
+          # silently drops or renames a flag would fail this step
+          # instead of slipping past CI to a confused user.
+          cargo run -q -p kettle -- --help > /tmp/kettle-help.txt
+          grep -qE '^Usage: kettle' /tmp/kettle-help.txt
+          grep -q -- '--config' /tmp/kettle-help.txt
+          grep -q -- '--screenshot' /tmp/kettle-help.txt
+          grep -q -- '--gpu-info' /tmp/kettle-help.txt
+          grep -q -- '--shell-integration' /tmp/kettle-help.txt
+          grep -q -- '--print-completions' /tmp/kettle-help.txt
+          grep -q -- '--print-default-config' /tmp/kettle-help.txt
           # --check-config exercises the cycle-194/196/197 lead-line
           # version + read-once + i/o-error categorization. On a
           # fresh CI runner there's no kettle config, so it falls
