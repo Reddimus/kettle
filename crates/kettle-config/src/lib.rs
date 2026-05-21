@@ -422,6 +422,37 @@ impl Config {
         Self::default_path_from(|k| std::env::var_os(k))
     }
 
+    /// Cycle 292: resolve a named-profile config path. Returns
+    /// `<config-dir>/profiles/<sanitized>.config`. Name is sanitized to
+    /// `[A-Za-z0-9._-]` so a `--profile ../../etc/passwd` can't
+    /// traverse out of the profiles directory. Returns `None` if the
+    /// config dir isn't resolvable.
+    ///
+    /// Used by the kettle binary's `--profile NAME` flag: when set,
+    /// kettle loads the named-profile config file instead of the
+    /// default `<config-dir>/config`. Distinct from cycle-291's
+    /// `--layout` which switches the *session* file (tab tree)
+    /// while keeping the same config.
+    pub fn path_for_profile(name: &str) -> Option<PathBuf> {
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if safe.is_empty() {
+            return None;
+        }
+        Self::default_path().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("profiles").join(format!("{safe}.config")))
+        })
+    }
+
     /// Inner of `default_path` parameterized on the env-var lookup so
     /// the probe order + empty-value filter are unit-testable without
     /// mutating the real process env (which would race against the

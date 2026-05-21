@@ -151,6 +151,21 @@ struct Cli {
     #[arg(long, value_name = "NAME", verbatim_doc_comment)]
     layout: Option<String>,
 
+    /// Launch with a named-profile *config* (distinct from --layout
+    /// which picks the *session*). Loads
+    /// `<config-dir>/profiles/<NAME>.config` instead of the default
+    /// `<config-dir>/config`. Lets a user keep distinct
+    /// font/theme/keybind sets per workspace:
+    ///
+    ///   kettle --profile dark    # uses profiles/dark.config
+    ///   kettle --profile light --layout docs
+    ///
+    /// `--config` takes precedence over `--profile` if both are
+    /// given. Name is sanitized to `[A-Za-z0-9._-]` so a
+    /// `--profile ../../etc/passwd` can't traverse out.
+    #[arg(long, value_name = "NAME", verbatim_doc_comment)]
+    profile: Option<String>,
+
     /// Run this command in the first tab instead of the shell, e.g.
     /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
     /// arguments (hyphenated flags for the program are passed through).
@@ -626,10 +641,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Resolve --profile if --config didn't override it. --config wins
+    // when both are given so a user can quickly debug a profile
+    // against an explicit config file.
+    let config_path = cli.config.or_else(|| {
+        cli.profile
+            .as_deref()
+            .and_then(kettle_config::Config::path_for_profile)
+    });
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
-        config: cli.config,
+        config: config_path,
         layout: cli.layout,
     })
 }
