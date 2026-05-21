@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-05-21
+
+Patch release. Real durability fix in the cycle-302 remote-control IPC.
+
+### Fixed
+- **Stale remote-command bytes replayed on next launch (cycle 306).**
+  If kettle window A is running and accumulates pending `send-text
+  TEXT\n` lines mid-process — OR crashes mid-process — and the user
+  then launches kettle window B with the same `--remote-file PATH`,
+  B's startup-time notify watcher would not fire (no write since B
+  started watching) — but the first subsequent external
+  `--remote-send` write triggers a re-read of the WHOLE file,
+  including A's leftover bytes. B's focused pane then receives stale
+  bytes typed as if the user had just sent them.
+
+  Fix: `std::fs::write(&path, "")` once at startup, immediately
+  before `w.watch(...)`. Truncates any leftover content; the
+  watcher still fires on every subsequent write.
+
+  Surfaced by a post-feature-sweep audit, not a user report.
+
+### Code quality
+- Dropped two duplicate `#[allow(clippy::too_many_arguments)]`
+  annotations on `Terminal::new` and `Renderer::build_pane`
+  (harmless but a code smell — pre-v1.4.0 era).
+
+### Docs
+- TESTING.md per-crate test counts refreshed (261 → 267 post-sweep).
+- CONTRIBUTING.md cycle / test counts refreshed (250+ → 300+, 261+
+  → 267+).
+
+Workspace tests 267 stay green.
+
 ## [1.7.1] — 2026-05-21
 
 Patch release. Docs catch-up against the v1.4.0 → v1.7.0 feature
