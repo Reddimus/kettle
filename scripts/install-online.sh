@@ -130,7 +130,11 @@ if [ ! -x "$TMP/kettle/install.sh" ]; then
 fi
 
 # `--skip-build` because the tarball already ships a release binary.
-sh "$TMP/kettle/install.sh" --skip-build
+# Invoke via the script's own shebang (`#!/usr/bin/env bash`) — the
+# bundled install.sh uses `set -euo pipefail`, a Bash-ism that fails
+# under dash (Debian/Ubuntu `sh` is dash). The release.yml ships
+# install.sh with mode 755 so the bare exec path works.
+"$TMP/kettle/install.sh" --skip-build
 
 # Stash a copy of install.sh under share/ so the user can later run
 # `~/.local/share/kettle/install.sh --uninstall` without re-downloading.
