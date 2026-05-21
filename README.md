@@ -13,13 +13,15 @@ combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
 
 ![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
-> **Status: v1.0 — ready for daily use** on Linux, macOS and Windows 11.
+> **Status: v1.3.x — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
-> for prebuilt binaries (Linux tarball with installer, macOS universal
-> `.app`, Windows zip with embedded `.ico`). The CI matrix runs on all
-> three OSes every push: `fmt` → `clippy -D warnings` → `cargo test
-> --workspace` → `cargo doc -D warnings` → headless GPU smoke (Linux) →
-> CLI smoke + packaging smoke on every OS. See
+> for prebuilt binaries (Linux tarball with installer + `.sha256`
+> sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
+> Eight CI workflows gate every push: build/test on all three OSes →
+> `cargo doc -D warnings` → headless GPU smoke → `--screenshot-menu`
+> visual regression → MSRV (Rust 1.89) verify → `cargo audit` →
+> `cargo deny` (licenses + sources + bans) → `cargo machete` (unused
+> deps) → `actionlint` (workflow YAML). See
 > [docs/ROADMAP.md](docs/ROADMAP.md) for what is landing next.
 
 ## Highlights
