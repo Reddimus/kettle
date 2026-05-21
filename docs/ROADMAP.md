@@ -1243,17 +1243,82 @@
       saturation guard so a monotonic-clock skew between calls
       doesn't false-trigger Silent.
 
+## v1.4.0 → v1.7.0 — parity sweep (cycles 288-303, shipped)
+
+- [x] **Smart selection** (iTerm2 parity, cycle 288). Double-click
+      expands to URL / file path / IPv4 / git SHA via the cycle-218
+      hint regex set instead of the under-/over-shooting alacritty
+      Semantic word.
+- [x] **Triggers — regex match on PTY output fires window urgency**
+      (iTerm2 parity, cycles 289+290). `trigger = REGEX` config key
+      + 2 s throttle + window-focused gate + alternation-pattern-
+      survives drift guard.
+- [x] **Named-workspace session** `--layout NAME` (Terminator parity,
+      cycle 291). `<config-dir>/layouts/<NAME>.json`. Path sanitized.
+- [x] **Named-config split** `--profile NAME` (Terminator + iTerm2,
+      cycle 292). `<config-dir>/profiles/<NAME>.config`. Composes
+      with `--layout`.
+- [x] **Peacock accent** `accent-color` + `--accent COLOR` (cycle
+      293). One config knob cascades to tab strip, focused pane
+      border, dragged-tab ghost. Multi-window setups visually
+      distinguishable.
+- [x] **Annotated screenshots** `--annotate TEXT` (iTerm2 caption
+      variant, cycle 294). Translucent bottom strip + caption.
+      Distinct from iTerm2's persistent in-terminal annotations
+      (those would be a multi-cycle thread).
+- [x] **Status bar** `status-bar = off | top | bottom` (iTerm2 /
+      kitty parity, cycles 295+296). `HH:MM:SS UTC · theme name ·
+      focused pane title`. CPU/MEM widgets via `sysinfo` are a
+      follow-up.
+- [x] **Vi-mode scrollback** (Alacritty parity, cycles 298-301).
+      `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L + arrows;
+      `v` visual selection; `y` yank to clipboard; Esc exit.
+      Magenta hollow block at vi cursor + selection-background
+      highlight for the visual range.
+- [x] **Remote-control IPC** (kitty `@` parity, cycle 302).
+      `kettle --remote-send TEXT` writes to a notify-watched file;
+      the running kettle's receiver dispatches `send-text TEXT` to
+      its focused pane. File IPC over the cycle-151 notify
+      watcher — cross-platform free; per-window socket addressing
+      is a planned follow-up.
+- [x] **Quake dropdown** `--toggle` (Yakuake / Tilda / Ghostty
+      quick-terminal parity, cycle 303). Piggybacks on the cycle-
+      302 remote-control IPC; receiver flips
+      `window.set_visible()` + `focus_window`. Users bind their
+      compositor / DE / OS global hotkey to `kettle --toggle` —
+      no cross-platform global-hotkey code in kettle.
+
 ## Next (in priority order)
-- [ ] Detachable mux server (remote attach)
-- [ ] Native macOS menu bar
-- [ ] Code-signed/notarized macOS build; Windows MSI installer
-- [ ] Broader `vttest` conformance sweep
-- [ ] Vi-mode for the scrollback (Alacritty parity)
-- [ ] tmux passthrough (`-CC` mode, iTerm2 parity)
-- [ ] Source-build AUR companion (`kettle`) + Homebrew `--HEAD`
-      formula (build from `main` rather than the latest tag)
+
+Each of these is a genuine multi-session focused-cycle thread, not
+a "squeeze into the tail of a long session" item. Listed roughly
+in tractability order.
+
+- [ ] tmux `-CC` passthrough (iTerm2 parity) — control-protocol
+      parser. tmux outputs `%begin/%end/%output/...` sequences when
+      run with `-CC`; the integration would intercept those lines,
+      parse them, surface tmux windows as kettle tabs. Two-way:
+      kettle sends user input back to tmux. Multi-cycle (~5).
+- [ ] Lua scripting (WezTerm parity) — embed `mlua`, expose a
+      `kettle` API table (`send_text`, `set_tab_title`, event
+      hooks). Useful as a programmatic config layer. Multi-cycle
+      (~4-6).
+- [ ] Detachable mux server (WezTerm parity) — server protocol,
+      auth, network layer, attach UX. Multi-week.
+- [ ] Persistent in-terminal annotations (iTerm2 parity, distinct
+      from the cycle-294 screenshot caption) — scrollback-position
+      metadata + sticky-note overlay + search-jump-to. Multi-cycle
+      (~4).
+- [ ] sysinfo CPU / MEM widgets for the cycle-295 status bar.
+- [ ] Native macOS menu bar (needs macOS-hands-on dev).
+- [ ] Code-signed / notarized macOS build; Windows MSI installer
+      (needs Apple Developer cert / Windows code-signing cert).
+- [ ] Source-build AUR companion (`kettle`, no `-bin` suffix) +
+      Homebrew `--HEAD` formula (build from `main` rather than the
+      latest tag).
 - [ ] Submit to nixpkgs proper so `nix-env -iA nixpkgs.kettle`
-      works without the flake-input dance
+      works without the flake-input dance.
+- [ ] Broader `vttest` conformance sweep — per-test cycle.
 
 ## Quality bar each cycle
 
