@@ -6,6 +6,11 @@ a test, and lands behind the full gate. This file explains how a cycle
 looks so a new contributor can land their first change the same shape as
 the existing 150+ in [CHANGELOG.md](CHANGELOG.md).
 
+Participation in this project — issues, PRs, discussions, code review —
+is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
+confidential vulnerability reports see [`SECURITY.md`](SECURITY.md)
+instead.
+
 ## The audit cycle
 
 Each cycle has the same shape:
