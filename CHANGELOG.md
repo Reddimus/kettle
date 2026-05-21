@@ -6,7 +6,87 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-### CI
+## [1.2.1] — 2026-05-21
+
+Patch release. Theme: **production-grade hardening — supply-chain
+hygiene, governance scaffolding, and `--help` polish.**
+
+No new features and no behavior change for any windowed-run user. The
+v1.2.0 line shipped the first-launch onboarding triplet
+(`--print-default-config` / `--shell-integration` / `--print-completions`);
+1.2.1 finishes the `verbatim_doc_comment` story on `--help`, adds
+project-level security + automation pieces a production-grade Rust
+project is expected to have, and pins two `cycle-106/107` hard-fails
+in CI that previously only had unit-test coverage.
+
+### Fixed
+- **`--help` indented examples for `--print-default-config` /
+  `--shell-integration` / `--print-completions` no longer reflow.** The
+  cycle-227/229/237 doc-comments contain indented `  kettle --… > …`
+  example lines; without `verbatim_doc_comment`, clap collapsed the
+  leading spaces in `--help`, flattening the examples into prose
+  ("…file: kettle --print-default-config > ~/.config/kettle/config
+  Everything in…"). All three flags now carry the attribute. New
+  `cli_help_preserves_indented_code_examples` drift guard walks the
+  clap `CommandFactory` arg list and asserts each indented example
+  survives literally in `get_long_help()`, so a future refactor that
+  drops the attribute fails CI with a pointer to the missing field.
+- **`kettle --print-completions zsh` no-op fix.** The doc-comment's
+  zsh example wrote the script to `~/.config/kettle/_kettle` — a path
+  `compinit` would never look at because it isn't on `$fpath`.
+  `clap_complete::Shell::Zsh` emits `#compdef kettle` at the top of
+  the script, which only loads via autoload. The example now points
+  at `"${fpath[1]}/_kettle"`, which lands in zsh's first
+  function-path entry on every default install. Bash + fish lines
+  were already correct.
+- **Workspace-wide rustdoc warning silenced on the new zsh example.**
+  `${fpath[1]}` is valid zsh array-indexing syntax but rustdoc tried
+  to resolve `[1]` as an intra-doc link. Field-scoped
+  `#[allow(rustdoc::broken_intra_doc_links)]` on `print_completions`
+  silences just this one site rather than reaching for a workspace
+  allow; backslash-escaping the brackets in the doc-comment would
+  have leaked into clap's `verbatim_doc_comment` `--help` output and
+  made the example un-copy-pasteable.
+
+### Security
+- **`SECURITY.md` — coordinated-disclosure policy via GitHub private
+  advisories.** A terminal emulator parses untrusted PTY output every
+  time the focused program is a remote shell, a `less` of an
+  attacker-controlled file, or a CI log replay. New SECURITY.md
+  points to GitHub's private vulnerability-reporting form (so we can
+  triage and ship a fix before the issue is public) and enumerates
+  the in-scope classes (PTY-to-host escape, OSC 52 read-leak past
+  the cycle-49 default-deny, URI scheme abuse past
+  `links::is_safe_url`, bracketed-paste-marker injection past the
+  cycle-49 strip, resource exhaustion past the cycle-47/118 caps,
+  config/session tampering, build-time supply chain).
+
+### CI / supply chain
+- **Dependabot — weekly Cargo + GitHub Actions update PRs.** Monday
+  08:00 UTC cadence, 5 PRs per ecosystem max, patch + minor bumps
+  grouped into a single PR per ecosystem so a slow review week
+  doesn't pile up 15 individual bumps. Major bumps stay on their own
+  so semver-meaningful changes get individual review. Commit prefixes
+  align with the existing `fix(…) / feat(…) / ci(…) / docs(…)` scope
+  convention (`deps:` / `ci(deps):`).
+- **`cargo audit` workflow (`.github/workflows/audit.yml`).** Runs
+  the official `rustsec/audit-check` action against the RustSec
+  advisory DB on every push/PR that touches `Cargo.lock` plus a daily
+  06:00 UTC cron — that catches advisories *published* against an
+  unchanged Cargo.lock that Dependabot wouldn't notice until Monday.
+  On pushes to `main`, findings open (or update) a single tracking
+  issue per advisory rather than spamming the issue tracker.
+- **`--config` / `--working-directory` hard-fail smoke (all OSes).**
+  Cycle 106 (`--config /typo` exits 1) and cycle 107
+  (`--working-directory /typo` exits 1) were covered by unit tests
+  but never by CI's actual exit-code path. A regression that
+  silently fell back to defaults would have passed the unit tests
+  and reached users. Three assertions added at the tail of the CLI
+  smoke step: typo'd `--config` exits non-zero, typo'd
+  `--working-directory` exits non-zero, and the happy-path round-trip
+  `--config /tmp/k.cfg --config-path` echoes the path and exits 0
+  (also confirms the bootstrap one-liner survives a round-trip
+  through `--config`). Self-contained via `$RANDOM` sentinel paths.
 - **`--list-ssh-hosts` empty-case smoke.** Cycle 105's
   `format_ssh_hosts` empty-fallback emits "(no ssh-host entries
   configured)" so a user with no SSH hosts configured sees
@@ -14,17 +94,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   a regression silently producing no output would slip through.
   New smoke step asserts the explicit fallback line via
   `grep -E '^\(no ssh-host entries configured\)$'`.
-
 - **Release artifacts now ship `CHANGELOG.md`.** Linux tarball,
   macOS `.app` (`Contents/Resources/`), and Windows zip already
   carry `LICENSE` / `NOTICE` / `README.md`. CHANGELOG was the
   obvious missing companion — a user who downloaded a tarball had
   no offline way to see "what's new in this release" without
   visiting GitHub. Adding it to all three platform packagings is
-  one file each. The `--print-default-config` and
-  `--shell-integration` snippets are already embedded in the
-  binary; CHANGELOG.md is the one piece of release-time
-  documentation the binary doesn't carry.
+  one file each.
+
+### Governance
+- **GitHub issue + PR templates aligned with the cycle pattern.**
+  `.github/ISSUE_TEMPLATE/{config,bug_report,feature_request}.yml`
+  plus `.github/PULL_REQUEST_TEMPLATE.md`. `config.yml` disables
+  blank issues, routes security reports at the SECURITY.md advisory
+  form, and routes usage questions at Discussions — so the issue
+  tracker stays bug + feature signal. The bug-report form requires
+  the fields a cycle review would otherwise ping-pong over
+  (`kettle --version` incl. the cycle-192/195 git SHA, OS + version,
+  numbered repro with escape-sequence printf hints, expected vs
+  actual, `RUST_LOG` output, `--check-config` snapshot). PR
+  template mirrors the cycle shape from CONTRIBUTING.md:
+  Summary / Why / Approach / Verification checklist / Cycle metadata.
 
 ### Tests
 - **VT conformance: individual SGR-off codes
