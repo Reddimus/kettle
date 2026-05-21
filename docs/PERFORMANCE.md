@@ -11,11 +11,11 @@ and prints the wall-clock + peak-RSS for each invocation.
 
 ## Numbers
 
-Captured against **v1.3.5** (commit `5ee39dd`):
+Captured against **v1.3.8 + cycle 277** (commit `1026858`):
 
 | Measurement | Value | Notes |
 |---|---:|---|
-| Release binary size | 29.3 MB | Includes embedded JetBrains Mono Nerd Font + ~500 themes |
+| Release binary size | 24.7 MB | Includes embedded JetBrains Mono Nerd Font + ~500 themes. Cycle 277 trimmed ~6 MB by narrowing `image` features to PNG/JPEG/GIF (was pulling AVIF/`rav1e` + EXR + WebP + HDR + TIFF + …) and disabling `arboard`'s image-clipboard default feature |
 | `kettle --version` startup | < 10 ms wall, 5.0 MB peak RSS | Cold (no warm pages); 5 runs all rounded to 0.00 s |
 | `kettle --screenshot OUT.png` | ≈ 250–270 ms wall, 236 MB peak RSS | Includes wgpu adapter init, offscreen Vulkan device, font system load, full GPU text + quad pipelines |
 | `kettle --screenshot-menu OUT.png` | ≈ 240–250 ms wall, 236 MB peak RSS | Same as above + the second TextRenderer / menu_quads pass; identical memory footprint, ~10 ms faster on the GPU pipeline warmup pattern |
