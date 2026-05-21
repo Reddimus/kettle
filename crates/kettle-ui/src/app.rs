@@ -8,8 +8,8 @@ use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
 use kettle_config::{TabBarMode, TabBarPos};
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
-    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneView, Renderer, TabBar,
-    TabSeg,
+    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneView, Renderer,
+    TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -610,18 +610,41 @@ impl App {
         let plus_w = height;
         let strip = (sw - plus_w).max(plus_w);
         let seg_w = strip / n as f32;
+        let active = self.mux.active;
         let segments = titles
             .iter()
             .enumerate()
             .map(|(i, t)| {
                 let x = i as f32 * seg_w;
+                // Cycle 246: pull per-tab activity into the segment so
+                // the renderer can draw the indicator dot. Active tabs
+                // short-circuit to Normal (the focused-tab accent
+                // already signals "you are here").
+                let activity = self
+                    .mux
+                    .tabs
+                    .get(i)
+                    .map(|tab| {
+                        match crate::mux::classify_tab_activity(
+                            i == active,
+                            tab.bell,
+                            tab.last_output_at,
+                            tab.last_seen_at,
+                        ) {
+                            crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
+                            crate::mux::TabActivity::Output => RenderTabActivity::Output,
+                            crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
+                        }
+                    })
+                    .unwrap_or(RenderTabActivity::Normal);
                 TabSeg {
                     idx: i,
                     rect: (x, y, seg_w, height),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close: (x + seg_w - height, y, height, height),
                     title: t.clone(),
-                    active: i == self.mux.active,
+                    active: i == active,
+                    activity,
                 }
             })
             .collect();
@@ -863,11 +886,15 @@ impl App {
 
     fn drain_events(&mut self) {
         let mut bell = false;
+        // Cycle 246: pane ids that fired `TermEvent::Bell` this drain
+        // pass — latched onto their containing tabs *after* the
+        // values_mut() iteration so we don't double-borrow mux.panes.
+        let mut bell_panes: Vec<u64> = Vec::new();
         // Cell size is renderer-owned and uniform across panes, so resolve it
         // once per drain rather than per event (a sixel/kitty app polling CSI
         // 14 t doesn't need a renderer lookup per CSI).
         let (cell_w, cell_h) = self.cell_px();
-        for pane in self.mux.panes.values_mut() {
+        for (&pane_id, pane) in self.mux.panes.iter_mut() {
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
                     TermEvent::Title(t) => {
@@ -948,7 +975,10 @@ impl App {
                         self.blink_on = true;
                         self.last_blink = std::time::Instant::now();
                     }
-                    TermEvent::Bell => bell = true,
+                    TermEvent::Bell => {
+                        bell = true;
+                        bell_panes.push(pane_id);
+                    }
                     TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
                     _ => {}
                 }
@@ -964,6 +994,15 @@ impl App {
             {
                 w.request_user_attention(Some(UserAttentionType::Informational));
             }
+        }
+        // Cycle 246: latch any per-pane bells onto their tab's
+        // activity flag so the tab-bar dot survives even on tabs the
+        // user isn't currently looking at. Active-tab bells were
+        // already handled visually (`last_bell` above triggers the
+        // visual-bell flash); the latching helper skips the active
+        // tab so we don't double-signal.
+        for id in bell_panes {
+            self.mux.touch_tab_bell(id);
         }
     }
 
@@ -1324,7 +1363,12 @@ impl App {
         // `should_scroll_on_output` rule so the "what counts as new
         // output" decision lives outside the render path.
         let want_sob = self.cfg.scroll_on_output;
-        for pane in self.mux.panes.values_mut() {
+        // Cycle 246: track which panes produced output this frame so
+        // we can latch their tab's `last_output_at`. Collected here
+        // and dispatched after the borrow ends — same shape as the
+        // `bell_panes` collection in `drain_events`.
+        let mut output_panes: Vec<u64> = Vec::new();
+        for (&pane_id, pane) in self.mux.panes.iter_mut() {
             let now = pane
                 .term
                 .term
@@ -1335,12 +1379,22 @@ impl App {
                     t.grid().history_size()
                 })
                 .unwrap_or(0);
+            let advanced = match pane.last_history {
+                Some(prev) => now > prev,
+                None => false,
+            };
+            if advanced {
+                output_panes.push(pane_id);
+            }
             if kettle_core::scrollbar::should_scroll_on_output(want_sob, pane.last_history, now)
                 && let Ok(mut t) = pane.term.term.lock()
             {
                 t.scroll_display(Scroll::Bottom);
             }
             pane.last_history = Some(now);
+        }
+        for id in output_panes {
+            self.mux.touch_tab_output(id);
         }
         // Auto-scroll while dragging a selection past the focused pane's
         // top/bottom edge — every modern terminal does this so the user
@@ -1972,6 +2026,7 @@ impl App {
                 let i = n as usize;
                 if i < self.mux.tabs.len() {
                     self.mux.active = i;
+                    self.mux.touch_active_tab_seen();
                 }
             }
         }
@@ -2594,6 +2649,7 @@ impl ApplicationHandler<UserEvent> for App {
                         } else {
                             let pre = self.focus_key();
                             self.mux.active = seg.idx;
+                            self.mux.touch_active_tab_seen();
                             self.note_focus_change(pre);
                         }
                     }
@@ -3164,6 +3220,7 @@ mod tests {
                 close: (76.0, 0.0, 24.0, 24.0),
                 title: "one".into(),
                 active: true,
+                activity: kettle_render::TabActivity::Normal,
             },
             TabSeg {
                 idx: 1,
@@ -3171,6 +3228,7 @@ mod tests {
                 close: (176.0, 0.0, 24.0, 24.0),
                 title: "two".into(),
                 active: false,
+                activity: kettle_render::TabActivity::Normal,
             },
         ];
         // Cursor over title area of segment 0 → no close hit.

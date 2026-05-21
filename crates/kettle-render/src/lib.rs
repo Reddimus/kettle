@@ -153,6 +153,19 @@ pub struct Overlay {
 /// Pixel rectangle `(x, y, w, h)`.
 pub type Rect4 = (f32, f32, f32, f32);
 
+/// Activity state of a tab — `Normal` draws no indicator, `Output`
+/// draws a small cyan dot, `Bell` draws a yellow dot. Terminator-
+/// parity affordance ("you've got new output in an inactive tab")
+/// cycle 246. Renderer-side enum so the UI doesn't need to leak its
+/// `kettle_ui::mux::TabActivity` type across crate boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabActivity {
+    #[default]
+    Normal,
+    Output,
+    Bell,
+}
+
 /// One tab segment in the tab bar.
 pub struct TabSeg {
     pub idx: usize,
@@ -162,6 +175,10 @@ pub struct TabSeg {
     pub close: Rect4,
     pub title: String,
     pub active: bool,
+    /// Inactive-tab activity (cycle 246). Always `Normal` on the
+    /// active segment so the focused-tab accent isn't doubled-up by
+    /// a redundant dot.
+    pub activity: TabActivity,
 }
 
 /// The tab bar geometry — computed once in the UI, used for both drawing
@@ -513,6 +530,30 @@ impl Renderer {
                     theme.background,
                     0.5,
                 ));
+                // Activity indicator dot (cycle 246) — a small disc-
+                // approximation in the lower-left of any *inactive*
+                // segment whose tab has produced output (cyan) or
+                // rung the terminal bell (yellow) since the user last
+                // looked at it. Terminator's Activity / Urgent
+                // Watcher affordance, surfaced inline on the tab bar
+                // so a user driving long-running jobs in background
+                // tabs sees the cue without polling each tab.
+                let dot_color = match s.activity {
+                    TabActivity::Bell => Some(theme.palette[3]),
+                    TabActivity::Output => Some(theme.palette[6]),
+                    TabActivity::Normal => None,
+                };
+                if let Some(c) = dot_color {
+                    let r = (tabbar.height * 0.18).clamp(3.0, 6.0);
+                    let dx = x + 6.0;
+                    let dy = by + tabbar.height - r * 2.0 - 4.0;
+                    // Render the dot as a small square — wgpu doesn't
+                    // have a circle primitive here and a 4×4 / 6×6
+                    // square at high opacity reads as a "bullet" at
+                    // typical tab-bar sizes (kitty / iTerm2 do the
+                    // same in their text-only inactive-tab indicators).
+                    quads.push(rect(dx, dy, r * 2.0, r * 2.0, c, 1.0));
+                }
                 // Hover background behind the `✕` close button so the
                 // user can tell the trailing glyph is a clickable
                 // affordance, not part of the title text. Drawn only

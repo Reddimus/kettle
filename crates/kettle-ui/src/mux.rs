@@ -307,6 +307,62 @@ pub struct Tab {
     pub focus: u64,
     /// When true, only the focused pane is shown at full size.
     pub zoomed: bool,
+    /// Cycle 246: per-tab activity state for the tab-bar dot
+    /// indicator. `last_output_at` updates whenever any pane in this
+    /// tab produces output. `last_seen_at` updates when this tab
+    /// becomes active. The renderer compares the two to decide
+    /// whether to draw the "new output in inactive tab" dot. `bell`
+    /// latches a `TermEvent::Bell` from any pane in this tab until
+    /// the user activates the tab. Matches the Terminator "Activity
+    /// Watcher" affordance.
+    pub last_output_at: Option<std::time::Instant>,
+    pub last_seen_at: Option<std::time::Instant>,
+    pub bell: bool,
+}
+
+/// Activity state of an *inactive* tab, used by the renderer to pick
+/// the tab-bar indicator-dot color. Active tabs are always `Normal`
+/// (the focused tab's "you are here" accent already says enough).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabActivity {
+    /// Nothing to surface — active tab OR inactive tab with no output
+    /// since the user last saw it.
+    Normal,
+    /// Output arrived since the user last looked at this tab. Drawn
+    /// as a cyan dot — the standard "something happened" cue.
+    Output,
+    /// A `TermEvent::Bell` fired since the user last looked. Drawn as
+    /// a yellow dot, overrides `Output` because a bell is a stronger
+    /// signal (the focused program explicitly asked for attention).
+    Bell,
+}
+
+/// Pure: classify an inactive tab's activity from its state. Active
+/// tabs short-circuit to `Normal` because the focused-pane border and
+/// the tab-bar accent already convey focus — adding a dot there would
+/// be redundant.
+pub fn classify_tab_activity(
+    is_active: bool,
+    bell: bool,
+    last_output_at: Option<std::time::Instant>,
+    last_seen_at: Option<std::time::Instant>,
+) -> TabActivity {
+    if is_active {
+        return TabActivity::Normal;
+    }
+    if bell {
+        return TabActivity::Bell;
+    }
+    let output_after_seen = match (last_output_at, last_seen_at) {
+        (Some(o), Some(s)) => o > s,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if output_after_seen {
+        TabActivity::Output
+    } else {
+        TabActivity::Normal
+    }
 }
 
 pub struct Mux {
@@ -327,6 +383,52 @@ impl Mux {
             search: SearchState::default(),
             broadcast: false,
             next_id: 1,
+        }
+    }
+
+    /// Mark the active tab as just-seen by the user — clears its bell
+    /// flag and updates `last_seen_at` so `classify_tab_activity` no
+    /// longer reports `Output` / `Bell` on it. Call after any
+    /// `self.active = ...` change so the tab the user just switched
+    /// to drops its indicator immediately. Cycle 246.
+    pub fn touch_active_tab_seen(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.last_seen_at = Some(std::time::Instant::now());
+            tab.bell = false;
+        }
+    }
+
+    /// Find the tab containing `pane_id` and record output activity on
+    /// it. Skipped for the currently-active tab (the user is looking at
+    /// it; surfacing a dot would be visual noise). Called from the
+    /// chrome layer on every pane redraw — see `App::drain_events`.
+    pub fn touch_tab_output(&mut self, pane_id: u64) {
+        let active = self.active;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if i == active {
+                continue;
+            }
+            if tab.root.contains(pane_id) {
+                tab.last_output_at = Some(std::time::Instant::now());
+                return;
+            }
+        }
+    }
+
+    /// Latch a `TermEvent::Bell` from `pane_id` onto its containing
+    /// tab so the indicator survives until the user activates the
+    /// tab. Skipped for the active tab (the visual-bell flash already
+    /// surfaces it there).
+    pub fn touch_tab_bell(&mut self, pane_id: u64) {
+        let active = self.active;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if i == active {
+                continue;
+            }
+            if tab.root.contains(pane_id) {
+                tab.bell = true;
+                return;
+            }
         }
     }
 
@@ -477,6 +579,9 @@ impl Mux {
                     root,
                     focus,
                     zoomed: false,
+                    last_output_at: None,
+                    last_seen_at: None,
+                    bell: false,
                 });
             }
         }
@@ -517,6 +622,9 @@ impl Mux {
             root: Node::Leaf(id),
             focus: id,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -544,6 +652,9 @@ impl Mux {
             root: Node::Leaf(id),
             focus: id,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -615,12 +726,14 @@ impl Mux {
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
+            self.touch_active_tab_seen();
         }
     }
 
     pub fn prev_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            self.touch_active_tab_seen();
         }
     }
 
@@ -1185,6 +1298,9 @@ mod node_tests {
                 root: Node::Leaf(id),
                 focus: id,
                 zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
             });
         }
         // Move tab at index 1 (id=2) one place right → swap with id=3.
@@ -1211,6 +1327,9 @@ mod node_tests {
             root: Node::Leaf(1),
             focus: 1,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         });
         assert!(!single.move_active_tab(1));
     }
@@ -1224,6 +1343,9 @@ mod node_tests {
                 root: Node::Leaf(id),
                 focus: id,
                 zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
             });
         }
         m.active = 2; // third tab
@@ -1257,6 +1379,9 @@ mod node_tests {
             root,
             focus: 10,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         });
         m.active = 0;
         // Close the focused (left) pane → tab survives with the right
@@ -1278,6 +1403,68 @@ mod node_tests {
     }
 
     #[test]
+    fn classify_tab_activity_picks_the_right_indicator() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let earlier = now - Duration::from_secs(5);
+        let later = now + Duration::from_secs(5);
+
+        // Active tab → always Normal, regardless of output / bell. The
+        // focused-tab accent + window-title already telegraph "you're
+        // here" so adding a dot would be redundant.
+        assert_eq!(
+            classify_tab_activity(true, true, Some(later), Some(earlier)),
+            TabActivity::Normal
+        );
+        assert_eq!(
+            classify_tab_activity(true, false, Some(later), Some(earlier)),
+            TabActivity::Normal
+        );
+
+        // Inactive tab + bell → Bell, regardless of output state.
+        // Bell is the stronger signal (the focused program explicitly
+        // asked for attention) so it wins over plain output activity.
+        assert_eq!(
+            classify_tab_activity(false, true, None, None),
+            TabActivity::Bell
+        );
+        assert_eq!(
+            classify_tab_activity(false, true, Some(later), Some(earlier)),
+            TabActivity::Bell
+        );
+
+        // Inactive tab + output after last-seen → Output.
+        assert_eq!(
+            classify_tab_activity(false, false, Some(later), Some(earlier)),
+            TabActivity::Output
+        );
+
+        // Inactive tab + output BEFORE the user last looked → Normal.
+        // The user already saw this output; no need to nudge again.
+        assert_eq!(
+            classify_tab_activity(false, false, Some(earlier), Some(later)),
+            TabActivity::Normal
+        );
+
+        // First-output edge: no last_seen_at yet → Output (the user
+        // has never been on this tab and something happened on it).
+        assert_eq!(
+            classify_tab_activity(false, false, Some(later), None),
+            TabActivity::Output
+        );
+
+        // No activity recorded at all → Normal.
+        assert_eq!(
+            classify_tab_activity(false, false, None, None),
+            TabActivity::Normal
+        );
+        assert_eq!(
+            classify_tab_activity(false, false, None, Some(earlier)),
+            TabActivity::Normal
+        );
+    }
+
+    #[test]
     fn reap_tabs_keeps_active_pointed_at_the_same_tab() {
         // Cycle-120 contract. `reap` used to handle only the "active
         // tab was the last one and the list shrunk" case via the
@@ -1292,6 +1479,9 @@ mod node_tests {
                 root: Node::Leaf(id),
                 focus: id,
                 zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
             }
         }
         // Scenario 1 (the cycle-120 bug): focused on the middle tab
@@ -1364,6 +1554,9 @@ mod node_tests {
                 root,
                 focus: id * 10,
                 zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
             });
         }
         m.active = 1;
@@ -1391,6 +1584,9 @@ mod node_tests {
             root: Node::Leaf(1),
             focus: 1,
             zoomed: true, // already zoomed before the split
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         };
         super::insert_split(&mut tab, 2, Dir::Horizontal);
         assert_eq!(tab.focus, 2, "focus moves to the new pane");
@@ -1405,6 +1601,9 @@ mod node_tests {
             root: Node::Leaf(1),
             focus: 1,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         };
         super::insert_split(&mut tab, 2, Dir::Vertical);
         assert!(!tab.zoomed);
@@ -1420,6 +1619,9 @@ mod node_tests {
             root,
             focus: 2,
             zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
         });
         m.active = 0;
         assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
