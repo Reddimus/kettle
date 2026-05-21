@@ -263,6 +263,22 @@ struct ContextMenuState {
     highlight: usize,
 }
 
+/// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
+/// given `n` segments tiling a strip of width `strip_w`. Used by the
+/// cycle-249 drag-to-reorder handler — the user grabs a tab, drags,
+/// and the bar reorders to keep the dragged segment under the cursor.
+/// Clamped to `[0, n-1]` so a cursor that overshoots either edge of
+/// the strip still produces a valid target. Returns 0 for an empty
+/// or zero-width bar (the no-op case).
+fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
+    if n == 0 || strip_w <= 0.0 {
+        return 0;
+    }
+    let seg_w = strip_w / n as f32;
+    let raw = (cursor_x / seg_w).floor() as isize;
+    raw.clamp(0, n as isize - 1) as usize
+}
+
 /// Pure: walk the menu item list to find the next enabled, non-
 /// separator row index, given a `delta` (±1) and a wrap-around at the
 /// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
@@ -340,6 +356,11 @@ pub struct App {
     /// `None` until the first call, which guarantees the initial state
     /// gets pushed exactly once.
     last_cursor_icon: Option<CursorIcon>,
+    /// Cycle 249: drag-to-reorder tab state. `Some(_)` while a left-
+    /// mouse-button press in the tab bar is being held; cleared on
+    /// release. Mouse moves while held swap the active tab by the
+    /// delta between the current cursor index and the active index.
+    tab_drag_active: bool,
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over. Drives both the OS pointer-cursor swap and
     /// the renderer's hover-background quad so the trailing `✕` reads
@@ -428,6 +449,7 @@ impl App {
             window_focused: true,
             mouse_hidden: false,
             last_cursor_icon: None,
+            tab_drag_active: false,
             hovered_close_idx: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
@@ -2590,6 +2612,39 @@ impl ApplicationHandler<UserEvent> for App {
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor();
                 self.sync_cursor_icon();
+                // Cycle 249: drag-to-reorder tabs (kitty / iTerm2 /
+                // Ghostty parity). When a left-button press in the tab
+                // bar armed `tab_drag_active`, walk the bar geometry,
+                // compute the target index under the cursor, and swap
+                // the active tab toward it via `move_active_tab`
+                // (cycle ~125's pure swap-with-clamp helper).
+                if self.tab_drag_active {
+                    let bar = self.tab_bar();
+                    if bar.height > 0.0 && !bar.segments.is_empty() {
+                        let (_, _, nw, _) = bar.new_tab;
+                        let (sw, _) = self
+                            .renderer
+                            .as_ref()
+                            .map(|r| {
+                                let (w, h) = r.surface_size();
+                                (w as f32, h as f32)
+                            })
+                            .unwrap_or((800.0, 600.0));
+                        let strip_w = (sw - nw).max(1.0);
+                        let target = tab_drag_target_index(
+                            self.cursor.x as f32,
+                            bar.segments.len(),
+                            strip_w,
+                        );
+                        let delta = target as i32 - self.mux.active as i32;
+                        if delta != 0 && self.mux.move_active_tab(delta) {
+                            self.mux.touch_active_tab_seen();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                }
                 if let Some(btn) = self.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
                     if self.send_mouse(btn, true, true) {
@@ -2695,6 +2750,16 @@ impl ApplicationHandler<UserEvent> for App {
                             self.mux.active = seg.idx;
                             self.mux.touch_active_tab_seen();
                             self.note_focus_change(pre);
+                            // Cycle 249: arm the drag-to-reorder
+                            // handler so a subsequent CursorMoved
+                            // event with the left button still held
+                            // can swap the active tab toward the
+                            // cursor. Cleared in the Released arm
+                            // below. Only on bare left-click (bcode 0
+                            // == left, not middle / close).
+                            if bcode == 0 {
+                                self.tab_drag_active = true;
+                            }
                         }
                     }
                     self.resize_all();
@@ -2829,6 +2894,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.selecting = false;
                     self.dragging_scrollbar = false;
+                    // Cycle 249: end the drag-to-reorder gesture on
+                    // left-button release. Any swaps that happened
+                    // during the drag are already committed; this just
+                    // disarms the CursorMoved handler.
+                    self.tab_drag_active = false;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -3288,6 +3358,27 @@ mod tests {
         assert_eq!(hovered_close_button(&segs, 88.0, 24.0), None);
         // Empty bar (single-pane, tabs hidden) → no hit ever.
         assert_eq!(hovered_close_button(&[], 50.0, 10.0), None);
+    }
+
+    #[test]
+    fn tab_drag_target_index_clamps_to_strip() {
+        use super::tab_drag_target_index;
+        // 3 tabs, 300-px strip → 100 px per segment. Cursor at 50 →
+        // tab 0; 150 → tab 1; 250 → tab 2.
+        assert_eq!(tab_drag_target_index(50.0, 3, 300.0), 0);
+        assert_eq!(tab_drag_target_index(150.0, 3, 300.0), 1);
+        assert_eq!(tab_drag_target_index(250.0, 3, 300.0), 2);
+        // Right at the boundary: 100 → tab 1 (floor); 200 → tab 2.
+        assert_eq!(tab_drag_target_index(100.0, 3, 300.0), 1);
+        assert_eq!(tab_drag_target_index(200.0, 3, 300.0), 2);
+        // Negative cursor (past the left edge) → clamps to 0.
+        assert_eq!(tab_drag_target_index(-50.0, 3, 300.0), 0);
+        // Past the right edge → clamps to last segment, not n.
+        assert_eq!(tab_drag_target_index(900.0, 3, 300.0), 2);
+        assert_eq!(tab_drag_target_index(f32::MAX, 3, 300.0), 2);
+        // Empty bar or zero strip → 0 (defensive no-op).
+        assert_eq!(tab_drag_target_index(50.0, 0, 300.0), 0);
+        assert_eq!(tab_drag_target_index(50.0, 3, 0.0), 0);
     }
 
     #[test]
