@@ -42,6 +42,11 @@ pub struct Options {
     /// multiple distinct workspaces ("dev", "ops", "docs") and snap
     /// between them via `kettle --layout dev`. Terminator parity.
     pub layout: Option<String>,
+    /// Cycle 293 peacock parity: one-off accent color override that
+    /// wins over the config `accent-color` key. Plumbed through from
+    /// the `--accent COLOR` CLI flag. `None` = use whatever the
+    /// resolved config says.
+    pub accent_override: Option<kettle_config::Rgb>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

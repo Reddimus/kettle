@@ -266,6 +266,17 @@ pub struct Config {
     /// `palette[4]`, the blue accent). Lets users tune the
     /// here-am-I indicator without re-themeing the whole palette.
     pub focused_split_color: Option<Rgb>,
+    /// Cycle 293 peacock parity. When set, this color overrides
+    /// every "kettle accent" surface — active tab segment's accent
+    /// strip, focused-pane border (unless `focused-split-color` is
+    /// also set; that wins for backward-compat), the cycle-255
+    /// dragged-tab ghost strip. Lets a user run multiple kettle
+    /// windows (`--profile dev` + `--profile ops`) and tell them
+    /// apart at a glance. `palette[4]` and `palette[3]` (broadcast
+    /// warning) are *not* overridden — broadcast stays yellow so
+    /// the high-priority state isn't confused with a workspace
+    /// identity color.
+    pub accent_color: Option<Rgb>,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
     /// Cycle 252: an inactive tab whose unseen output went quiet for
@@ -385,6 +396,7 @@ impl Default for Config {
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
             focused_split_color: None,
+            accent_color: None,
             cursor_blink_interval: 530,
             tab_silence_threshold_ms: 10_000,
             copy_on_select: true,
@@ -1029,6 +1041,11 @@ impl Config {
                 "focused-split-color" | "split-divider-color-focused" => {
                     if let Some(c) = Rgb::parse(&e.value) {
                         cfg.focused_split_color = Some(c);
+                    }
+                }
+                "accent-color" => {
+                    if let Some(c) = Rgb::parse(&e.value) {
+                        cfg.accent_color = Some(c);
                     }
                 }
                 "cursor-blink-interval" => {

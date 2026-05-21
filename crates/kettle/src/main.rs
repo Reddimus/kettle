@@ -166,6 +166,22 @@ struct Cli {
     #[arg(long, value_name = "NAME", verbatim_doc_comment)]
     profile: Option<String>,
 
+    /// One-off accent color (peacock parity — distinguishes multi-
+    /// window kettle setups visually). Overrides the tab-bar accent
+    /// strip + dragged-tab ghost + focused-pane border. Accepts
+    /// `#rrggbb`, `#rgb`, `0xRRGGBB`, or an X11 color name —
+    /// whatever `Rgb::parse` accepts. Example:
+    ///
+    ///   kettle --accent '#ff6b35' --layout dev
+    ///   kettle --accent teal --layout ops
+    ///
+    /// For persistent assignment, put `accent-color = #ff6b35` in
+    /// a `<config-dir>/profiles/<NAME>.config` and launch via
+    /// `--profile <NAME>`. `--accent` always wins over the config
+    /// `accent-color` key when both are set.
+    #[arg(long, value_name = "COLOR", verbatim_doc_comment)]
+    accent: Option<String>,
+
     /// Run this command in the first tab instead of the shell, e.g.
     /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
     /// arguments (hyphenated flags for the program are passed through).
@@ -605,7 +621,7 @@ fn main() -> anyhow::Result<()> {
         // both unknown keys *and* malformed values, which made it
         // confusing when a screenshot didn't reflect what the user
         // thought their config said.
-        let cfg = match cli
+        let mut cfg = match cli
             .config
             .clone()
             .or_else(kettle_config::Config::default_path)
@@ -613,6 +629,13 @@ fn main() -> anyhow::Result<()> {
             Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
         };
+        // Cycle 293: --accent CLI flag wins over the config
+        // `accent-color` key for screenshots too, so a user
+        // generating per-workspace docs gets the accent applied
+        // without editing a config file.
+        if let Some(rgb) = cli.accent.as_deref().and_then(kettle_config::Rgb::parse) {
+            cfg.accent_color = Some(rgb);
+        }
         // Clamp dimensions to a sane range — wgpu textures cap at 8192 px
         // per side on most GPUs, so a typo like `--cols 100000` used to
         // panic with `dimension X exceeds the limit of 8192` instead of
@@ -649,11 +672,18 @@ fn main() -> anyhow::Result<()> {
             .as_deref()
             .and_then(kettle_config::Config::path_for_profile)
     });
+    // --accent parses via the same Rgb parser the config uses, so
+    // every format the config key accepts (#rrggbb / #rgb / 0xRRGGBB
+    // / X11 names) works on the CLI too. A malformed value silently
+    // falls through to the config's accent-color (or palette[4]) —
+    // same shape as the config parse arm, no hard fail.
+    let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
         config: config_path,
         layout: cli.layout,
+        accent_override,
     })
 }
 

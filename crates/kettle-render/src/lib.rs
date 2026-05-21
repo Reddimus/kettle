@@ -569,7 +569,11 @@ impl Renderer {
                     let accent = if tabbar.broadcast {
                         theme.palette[3]
                     } else {
-                        theme.palette[4]
+                        // Cycle 293 peacock parity: user-set
+                        // `accent-color` wins so multi-window kettle
+                        // setups are visually distinguishable. Falls
+                        // back to palette[4] when unset.
+                        cfg.accent_color.unwrap_or(theme.palette[4])
                     };
                     quads.push(rect(x, by, 2.0, tabbar.height, accent, 1.0));
                 }
@@ -688,12 +692,13 @@ impl Renderer {
                 over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, 0.85));
                 // Accent strip on the left edge, same color the live
                 // active segment uses (palette[3] yellow under
-                // broadcast, palette[4] blue otherwise — keeps the
-                // ghost visually identical to the source segment).
+                // broadcast, cycle-293 accent-color → palette[4]
+                // otherwise — keeps the ghost visually identical to
+                // the source segment).
                 let accent = if tabbar.broadcast {
                     theme.palette[3]
                 } else {
-                    theme.palette[4]
+                    cfg.accent_color.unwrap_or(theme.palette[4])
                 };
                 over.push(rect(ghost_x, by, 2.0, seg_h, accent, 1.0));
             }
@@ -724,7 +729,16 @@ impl Renderer {
                 if tabbar.broadcast {
                     theme.palette[3]
                 } else {
-                    cfg.focused_split_color.unwrap_or(theme.palette[4])
+                    // Cycle 293: cascade order is
+                    //   focused-split-color (explicit override)
+                    //   → accent-color (peacock)
+                    //   → palette[4] (theme default)
+                    // Backward-compat: anyone who set
+                    // `focused-split-color` before cycle 293 keeps
+                    // their pinned color regardless of accent.
+                    cfg.focused_split_color
+                        .or(cfg.accent_color)
+                        .unwrap_or(theme.palette[4])
                 }
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
@@ -2070,8 +2084,14 @@ pub fn capture_png_with(
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
         let segw = 240.0_f32.min((wf - 44.0) / 2.0);
         // Active tab 0: themed background + left accent bar.
+        // Cycle 293: cascade through accent-color so peacock works
+        // in --screenshot too (same code path the live renderer uses
+        // at line 572, but capture_png_with builds its own synthetic
+        // scene rather than calling render_frame, so the cascade has
+        // to be duplicated here).
+        let screenshot_accent = cfg.accent_color.unwrap_or(theme.palette[4]);
         q.push(rect(0.0, 0.0, segw, tab_h, theme.background, 1.0));
-        q.push(rect(0.0, 0.0, 2.0, tab_h, theme.palette[4], 1.0));
+        q.push(rect(0.0, 0.0, 2.0, tab_h, screenshot_accent, 1.0));
         // Per-segment separators.
         q.push(rect(segw - 1.0, 0.0, 1.0, tab_h, theme.background, 0.5));
         q.push(rect(
@@ -2094,7 +2114,12 @@ pub fn capture_png_with(
             theme.palette[8],
             1.0,
         ));
-        let foc = theme.palette[4];
+        // Cycle 293: cascade focused_split_color → accent_color → palette[4]
+        // (same order as the live renderer at line 727+).
+        let foc = cfg
+            .focused_split_color
+            .or(cfg.accent_color)
+            .unwrap_or(theme.palette[4]);
         let ly = tab_h;
         let lh = hf - tab_h;
         q.push(rect(0.0, ly, split_x, 1.0, foc, 1.0));

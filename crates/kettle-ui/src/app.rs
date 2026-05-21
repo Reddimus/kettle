@@ -493,11 +493,19 @@ impl App {
         // Inlining the `Config::load*` inside the struct-init lost
         // access to a local name for the triggers; the bare `cfg.…`
         // would otherwise hit the `cfg!()` macro.
-        let initial_cfg = startup
+        let mut initial_cfg = startup
             .config
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
+        // Cycle 293 peacock parity: --accent CLI flag wins over the
+        // config `accent-color` key. Applied here once at startup;
+        // a runtime reload (cycle 151) would reread the config but
+        // we don't currently re-thread the CLI overrides, which is
+        // intended — CLI flags are launch-time intent.
+        if let Some(rgb) = startup.accent_override {
+            initial_cfg.accent_color = Some(rgb);
+        }
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         let mut app = App {
             cfg: initial_cfg,
