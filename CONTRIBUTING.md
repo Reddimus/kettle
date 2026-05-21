@@ -193,3 +193,36 @@ where the wasteful events came from (cycle 109 atomic save). Done.
 - **Tests live next to the code they test** (`#[cfg(test)] mod`),
   not in `tests/`. Workspace-wide tests don't exist; each crate
   is self-contained.
+
+## Releasing
+
+Releases go through `scripts/release.sh`, which does the four ops
+atomically (working-tree clean check, CHANGELOG section check,
+Cargo.toml bump, Cargo.lock refresh, single commit, annotated
+tag). Doing them by hand is what tripped cycle 307: the CHANGELOG
+section got committed AFTER the tag, the cycle-286 CI guard
+correctly rejected the Linux job at pre-flight, and the macOS +
+Windows jobs uploaded a partial release. Always use the script.
+
+Flow:
+
+1. Land your changes on `main`.
+2. Add a `## [X.Y.Z] — YYYY-MM-DD` section to `CHANGELOG.md`
+   describing what changed since the previous version. Commit it.
+3. Run `scripts/release.sh X.Y.Z`. It refuses to proceed if the
+   working tree is dirty, if the CHANGELOG section is missing,
+   if the tag already exists, or if VERSION isn't strict semver.
+   On success: commits the bump + creates the annotated tag.
+4. Sanity-check the commit + tag, then push:
+       git push origin main && git push origin vX.Y.Z
+5. The release workflow builds + uploads the three platform
+   tarballs + their `.sha256` sidecars. Watch it with:
+       gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+6. Verify the install path resolves:
+       KETTLE_VERSION=vX.Y.Z sh scripts/install-online.sh
+
+Patch vs minor vs major: kettle follows semver loosely — a new
+config key or CLI flag is a minor (e.g., v1.7 → v1.8). A bug fix
+without API surface change is a patch (v1.7.1 → v1.7.2). A
+breaking change to the config schema or library surface is a
+major (v1.x → v2.0), though kettle has yet to make one.
