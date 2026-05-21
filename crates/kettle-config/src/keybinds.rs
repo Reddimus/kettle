@@ -193,6 +193,12 @@ pub enum Action {
     HintMode,
     NextTheme,
     PrevTheme,
+    /// Open the right-click context menu (Copy / Paste / Split Right /
+    /// Split Down / Close Pane / New Tab) anchored at the click point.
+    /// Bound to bare right-click in cycle 245 — replacing the cycle-49
+    /// silent no-op that left first-time users confused. Shift+right-
+    /// click still extends the selection (xterm convention preserved).
+    OpenContextMenu,
     GotoTab(u8),
 }
 
@@ -287,6 +293,8 @@ pub fn action_names() -> Vec<&'static str> {
         "hint_mode",
         "hints",
         "quick_select",
+        "context_menu",
+        "open_context_menu",
         "next_theme",
         "prev_theme",
         "previous_theme",
@@ -355,6 +363,7 @@ impl Action {
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
+            "context_menu" | "open_context_menu" => OpenContextMenu,
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,

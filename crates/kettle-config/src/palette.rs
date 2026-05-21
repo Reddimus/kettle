@@ -105,6 +105,11 @@ mod tests {
             ResizeRight,
             GotoTab(0), // placeholder for the parametric family
             CommandPalette,
+            // Cycle 245: OpenContextMenu is the right-click handler
+            // itself — surfacing it inside the palette would be a
+            // weird self-reference (palette → context menu → palette
+            // entry). Triggered by the mouse only, not user-typed.
+            OpenContextMenu,
         ];
         // Enumerate every Action variant explicitly via this exhaustive
         // list; if a future variant is added the match below fails to
@@ -158,6 +163,7 @@ mod tests {
             HintMode,
             NextTheme,
             PrevTheme,
+            OpenContextMenu,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -173,8 +179,8 @@ mod tests {
                 | ToggleBroadcastAll | ToggleBroadcastOff | ToggleFullscreen | Reset
                 | ClearHistory | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown
                 | ScrollToTop | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh
-                | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme | GotoTab(_) => {
-                }
+                | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme
+                | OpenContextMenu | GotoTab(_) => {}
             }
         }
         let missing: Vec<&Action> = every_action

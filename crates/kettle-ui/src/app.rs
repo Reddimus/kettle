@@ -7,7 +7,10 @@ use anyhow::Result;
 use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
 use kettle_config::{TabBarMode, TabBarPos};
 use kettle_core::{Scroll, TermEvent};
-use kettle_render::{HighlightRect, HintLabel, Overlay, PaneView, Renderer, TabBar, TabSeg};
+use kettle_render::{
+    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneView, Renderer, TabBar,
+    TabSeg,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -235,6 +238,71 @@ struct HintTarget {
     text: String,
 }
 
+/// One entry in the right-click context menu. `Separator` rows render
+/// as a thin divider in the menu and are skipped during keyboard nav
+/// and click dispatch; `Item` rows carry the action to fire.
+#[derive(Clone)]
+enum ContextMenuItem {
+    Item {
+        label: &'static str,
+        action: Action,
+        enabled: bool,
+    },
+    Separator,
+}
+
+/// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
+/// Anchor is the post-clamp panel top-left; rows mirror the renderer's
+/// `ContextMenu` slice but carry the live `Action` for dispatch.
+struct ContextMenuState {
+    anchor: (f32, f32),
+    items: Vec<ContextMenuItem>,
+    /// Index of the currently highlighted item — always points at an
+    /// enabled `Item`, never a `Separator` or disabled row. Updated by
+    /// keyboard nav (`↑↓`) and mouse hover.
+    highlight: usize,
+}
+
+/// Pure: walk the menu item list to find the next enabled, non-
+/// separator row index, given a `delta` (±1) and a wrap-around at the
+/// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
+/// unchanged if no enabled rows exist at all (defensive — the menu
+/// shouldn't have been opened with zero actionable rows).
+fn next_context_menu_highlight(items: &[ContextMenuItem], current: usize, delta: isize) -> usize {
+    if items.is_empty() {
+        return current;
+    }
+    let len = items.len() as isize;
+    let step = if delta >= 0 { 1 } else { -1 };
+    let mut i = current as isize;
+    for _ in 0..len {
+        i = (i + step).rem_euclid(len);
+        if let ContextMenuItem::Item { enabled: true, .. } = items[i as usize] {
+            return i as usize;
+        }
+    }
+    current
+}
+
+/// Pure: clamp the requested panel anchor so the panel of size
+/// `(panel_w, panel_h)` stays fully inside a surface of size
+/// `(surface_w, surface_h)`. A 4-px screen-edge margin so the panel
+/// reads as floating rather than glued to the edge. Right-click near
+/// the bottom-right corner therefore flips the menu up-and-left
+/// instead of rendering off-screen.
+fn clamp_context_menu_anchor(
+    (req_x, req_y): (f32, f32),
+    (panel_w, panel_h): (f32, f32),
+    (surface_w, surface_h): (f32, f32),
+) -> (f32, f32) {
+    let margin = 4.0_f32;
+    let max_x = (surface_w - panel_w - margin).max(margin);
+    let max_y = (surface_h - panel_h - margin).max(margin);
+    let x = req_x.clamp(margin, max_x);
+    let y = req_y.clamp(margin, max_y);
+    (x, y)
+}
+
 pub struct App {
     cfg: Config,
     window: Option<Arc<Window>>,
@@ -258,6 +326,11 @@ pub struct App {
     palette_input: Option<(String, usize)>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     hint_state: Option<(Vec<HintTarget>, String)>,
+    /// Right-click context menu state (`Some` while open). Lives next
+    /// to the other modal overlays — same close-all-modals discipline,
+    /// same Esc-to-dismiss key route. Anchored at the click point so
+    /// the menu appears where the user looked, not at a fixed corner.
+    context_menu: Option<ContextMenuState>,
     window_focused: bool,
     /// True while the OS mouse cursor is hidden because the user is typing
     /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
@@ -351,6 +424,7 @@ impl App {
             ssh_input: None,
             palette_input: None,
             hint_state: None,
+            context_menu: None,
             window_focused: true,
             mouse_hidden: false,
             last_cursor_icon: None,
@@ -1158,6 +1232,7 @@ impl App {
             })
             .unwrap_or(0.0);
 
+        let context_menu = self.context_menu_overlay();
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
@@ -1170,6 +1245,7 @@ impl App {
                 window_focused,
                 cursor_visible,
                 bell,
+                context_menu,
                 ..Overlay::default()
             };
         }
@@ -1203,6 +1279,7 @@ impl App {
             window_focused,
             cursor_visible,
             bell,
+            context_menu,
         }
     }
 
@@ -1364,17 +1441,239 @@ impl App {
         self.palette_input = None;
         self.hint_state = None;
         self.ssh_input = None;
+        self.context_menu = None;
     }
 
     /// `true` while any modal overlay (search bar, command palette, hint
-    /// mode, SSH launcher) is up. Mirrors `close_all_modals` so the two
-    /// stay in lock-step — extracted in cycle 161 to drive the cursor-icon
-    /// override (the OS arrow, not the I-beam, belongs over modal chrome).
+    /// mode, SSH launcher, context menu) is up. Mirrors `close_all_modals`
+    /// so the two stay in lock-step — extracted in cycle 161 to drive the
+    /// cursor-icon override (the OS arrow, not the I-beam, belongs over
+    /// modal chrome) and extended in cycle 245 for the right-click menu.
     fn any_modal_open(&self) -> bool {
         self.mux.search.open
             || self.palette_input.is_some()
             || self.hint_state.is_some()
             || self.ssh_input.is_some()
+            || self.context_menu.is_some()
+    }
+
+    /// Build the right-click context-menu item list. Copy is enabled
+    /// only when the focused pane has a non-empty selection (matches
+    /// Terminator / GNOME Terminal: the row stays visible but greyed
+    /// out, so the user sees the option exists without it being
+    /// actionable when nothing is selected). All other items are
+    /// always enabled.
+    fn context_menu_items(&mut self) -> Vec<ContextMenuItem> {
+        let has_selection = self
+            .mux
+            .focused()
+            .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
+            .unwrap_or(false);
+        vec![
+            ContextMenuItem::Item {
+                label: "Copy",
+                action: Action::Copy,
+                enabled: has_selection,
+            },
+            ContextMenuItem::Item {
+                label: "Paste",
+                action: Action::Paste,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "Split Right",
+                action: Action::SplitRight,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Split Down",
+                action: Action::SplitDown,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Close Pane",
+                action: Action::ClosePane,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "New Tab",
+                action: Action::NewTab,
+                enabled: true,
+            },
+        ]
+    }
+
+    /// Open the right-click context menu at `(px, py)`. Closes any other
+    /// open modal first so we don't render two overlays at once
+    /// (cycle 156 close_all_modals discipline), then computes the panel
+    /// size from the cell metrics and clamps the anchor so the menu fits
+    /// the surface (right-click near the bottom-right corner flips up-
+    /// and-left rather than rendering off-screen).
+    fn open_context_menu(&mut self, px: f32, py: f32) {
+        self.close_all_modals();
+        let items = self.context_menu_items();
+        // Highlight the first enabled non-separator item.
+        let highlight = items
+            .iter()
+            .position(|it| matches!(it, ContextMenuItem::Item { enabled: true, .. }))
+            .unwrap_or(0);
+        let (cw, ch) = self.cell_px();
+        let (cw, ch) = (cw as f32, ch as f32);
+        let row_h = ch + 6.0;
+        let sep_h = 6.0_f32;
+        let panel_h: f32 = items
+            .iter()
+            .map(|it| match it {
+                ContextMenuItem::Separator => sep_h,
+                ContextMenuItem::Item { .. } => row_h,
+            })
+            .sum();
+        let max_chars = items
+            .iter()
+            .filter_map(|it| match it {
+                ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0) as f32;
+        let panel_w = (max_chars * cw + 32.0).max(140.0);
+        let (sw, sh) = self
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let anchor = clamp_context_menu_anchor((px, py), (panel_w, panel_h), (sw, sh));
+        self.context_menu = Some(ContextMenuState {
+            anchor,
+            items,
+            highlight,
+        });
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Move the context-menu highlight by `delta` (±1), skipping
+    /// `Separator` rows and disabled `Item` rows. Wraps at the ends so
+    /// `↑` on the first row jumps to the last enabled row and vice
+    /// versa — Chrome / Firefox menu convention. Pure on `(items,
+    /// current)` so the wrap+skip math is unit-testable independent of
+    /// the App / cursor state.
+    fn step_context_menu_highlight(&mut self, delta: isize) {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        let next = next_context_menu_highlight(&menu.items, menu.highlight, delta);
+        menu.highlight = next;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Resolve a mouse-button press into a context-menu action, if any.
+    /// Only a *left*-click (bcode 0) inside the panel can fire a row
+    /// — right and middle clicks are ignored so right-click re-anchor
+    /// still feels distinct from "select this menu item." Returns
+    /// `None` if the click missed the panel, hit a separator, or hit a
+    /// disabled row; the caller then either dismisses (left-click
+    /// outside) or falls through to the regular click handling
+    /// (right-click → re-open at the new point).
+    fn context_menu_click_action(&self, bcode: u8) -> Option<Action> {
+        if bcode != 0 {
+            return None;
+        }
+        let menu = self.context_menu.as_ref()?;
+        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry()?;
+        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+        if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
+            return None;
+        }
+        let (_, ch) = self.cell_px();
+        let row_h = ch as f32 + 6.0;
+        let sep_h = 6.0_f32;
+        let mut row_y = ay;
+        for item in &menu.items {
+            let h = match item {
+                ContextMenuItem::Separator => sep_h,
+                ContextMenuItem::Item { .. } => row_h,
+            };
+            if py >= row_y && py < row_y + h {
+                if let ContextMenuItem::Item {
+                    action,
+                    enabled: true,
+                    ..
+                } = item
+                {
+                    return Some(action.clone());
+                }
+                return None;
+            }
+            row_y += h;
+        }
+        None
+    }
+
+    /// `(items, anchor, panel_w, panel_h)` snapshot for the click /
+    /// hover hit-tests — returned in pixels so callers don't have to
+    /// re-derive the layout. `None` when the menu isn't open.
+    fn context_menu_geometry(&self) -> Option<((f32, f32), (f32, f32))> {
+        let menu = self.context_menu.as_ref()?;
+        let (cw, ch) = self.cell_px();
+        let (cw, ch) = (cw as f32, ch as f32);
+        let row_h = ch + 6.0;
+        let sep_h = 6.0_f32;
+        let panel_h: f32 = menu
+            .items
+            .iter()
+            .map(|it| match it {
+                ContextMenuItem::Separator => sep_h,
+                ContextMenuItem::Item { .. } => row_h,
+            })
+            .sum();
+        let max_chars = menu
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0) as f32;
+        let panel_w = (max_chars * cw + 32.0).max(140.0);
+        Some((menu.anchor, (panel_w, panel_h)))
+    }
+
+    /// Build the renderer-side `ContextMenu` slice from the App-side
+    /// state. Splits the labels (owned `String`) from the dispatch
+    /// actions so the renderer stays Action-agnostic.
+    fn context_menu_overlay(&self) -> Option<ContextMenu> {
+        let menu = self.context_menu.as_ref()?;
+        let rows = menu
+            .items
+            .iter()
+            .map(|it| match it {
+                ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
+                    label: (*label).to_string(),
+                    separator: false,
+                    enabled: *enabled,
+                },
+                ContextMenuItem::Separator => ContextMenuRow {
+                    label: String::new(),
+                    separator: true,
+                    enabled: false,
+                },
+            })
+            .collect();
+        Some(ContextMenu {
+            anchor: menu.anchor,
+            rows,
+            highlight: menu.highlight,
+        })
     }
 
     /// Force the next redraw to render the cursor visible. Shared by:
@@ -1644,6 +1943,14 @@ impl App {
                     self.hint_state = Some((targets, String::new()));
                 }
             }
+            Action::OpenContextMenu => {
+                // Keyboard-triggered open: anchor at the current mouse
+                // position so the menu lands where the user is looking;
+                // falls back to the center of the focused pane when
+                // dispatched programmatically (e.g. from the palette).
+                let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+                self.open_context_menu(px, py);
+            }
             Action::NextTheme | Action::PrevTheme => {
                 let fwd = matches!(action, Action::NextTheme);
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
@@ -1835,6 +2142,48 @@ impl App {
                     q.push_str(t);
                     *sel = 0;
                 }
+            }
+        }
+    }
+
+    /// Keyboard routing while the right-click context menu is open.
+    /// `Esc` closes, `↑/↓` step the highlight (skipping separators +
+    /// disabled rows via `next_context_menu_highlight`), `Enter` fires
+    /// the highlighted action. Any other key is swallowed so a stray
+    /// keypress doesn't leak into the focused pane while the menu is
+    /// expecting nav input.
+    fn context_menu_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.context_menu = None;
+                self.reset_blink_phase();
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                self.step_context_menu_highlight(1);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.step_context_menu_highlight(-1);
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                let chosen = self
+                    .context_menu
+                    .as_ref()
+                    .and_then(|m| match &m.items[m.highlight] {
+                        ContextMenuItem::Item {
+                            action,
+                            enabled: true,
+                            ..
+                        } => Some(action.clone()),
+                        _ => None,
+                    });
+                self.context_menu = None;
+                self.reset_blink_phase();
+                if let Some(a) = chosen {
+                    self.handle_action(a, event_loop);
+                }
+            }
+            _ => {
+                // Swallow other keys — the user is in menu-nav mode.
             }
         }
     }
@@ -2178,6 +2527,28 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // Context menu (cycle 245): if the menu is open, a left-
+                // click either fires the row that was hit or — if the
+                // click landed outside the panel — closes the menu (the
+                // GNOME / browser convention; right-click on another
+                // location is handled as a re-open after this close
+                // because the right-click handler runs the open path).
+                if self.context_menu.is_some()
+                    && let Some(action) = self.context_menu_click_action(bcode)
+                {
+                    self.context_menu = None;
+                    self.handle_action(action, event_loop);
+                    return;
+                }
+                if self.context_menu.is_some() && bcode == 0 {
+                    // Left-click outside the panel — dismiss without
+                    // firing anything (matches every modern menu).
+                    self.context_menu = None;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
                 // middle = close that tab).
                 let bar = self.tab_bar();
@@ -2270,19 +2641,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Right-click extends an existing selection to the click
-                // (xterm convention). Mouse-tracking already short-circuited
-                // above when active, so this only fires for "chrome" use;
-                // and we only extend an *existing* selection so a bare
-                // right-click on empty space is still a no-op (avoiding a
-                // surprising selection that the user didn't ask for).
-                if bcode == 2 && self.extend_selection_to_cursor(area) {
-                    if self.cfg.copy_on_select {
-                        self.copy_selection();
+                // Right-click handling — layered:
+                //
+                // 1. `Shift + right-click` *with* an existing selection
+                //    keeps the cycle-49 extend-selection behavior (xterm
+                //    convention; muscle memory for kettle's power users
+                //    since v1.0).
+                // 2. Any other right-click opens the context menu at the
+                //    click point (Terminator / GNOME / iTerm2 default).
+                //    Before cycle 245 this branch was a silent no-op,
+                //    which left first-time users confused.
+                //
+                // Mouse-tracking already short-circuited above when the
+                // focused program is consuming mouse events, so this only
+                // fires for the kettle chrome.
+                if bcode == 2 {
+                    if self.mods.shift_key() && self.extend_selection_to_cursor(area) {
+                        if self.cfg.copy_on_select {
+                            self.copy_selection();
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
                     }
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                    self.open_context_menu(px, py);
                     return;
                 }
                 if bcode == 0 {
@@ -2475,6 +2858,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // every modern terminal). Re-shown on the next CursorMoved.
                 self.hide_mouse_cursor();
                 let text = event.text.as_ref().map(|s| s.as_str());
+
+                if self.context_menu.is_some() {
+                    self.context_menu_key(&event.logical_key, event_loop);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
 
                 if self.hint_state.is_some() {
                     self.hint_key(&event.logical_key, text);
@@ -2795,6 +3186,89 @@ mod tests {
         assert_eq!(hovered_close_button(&segs, 88.0, 24.0), None);
         // Empty bar (single-pane, tabs hidden) → no hit ever.
         assert_eq!(hovered_close_button(&[], 50.0, 10.0), None);
+    }
+
+    #[test]
+    fn next_context_menu_highlight_skips_separators_and_disabled() {
+        use super::{ContextMenuItem, next_context_menu_highlight};
+        use kettle_config::Action;
+        // Layout: [Copy(disabled), Paste, Separator, SplitRight,
+        //          ClosePane(disabled), Separator, NewTab]
+        // Indices:  0               1      2          3
+        //           4                       5          6
+        // Enabled-only walk should land 1 → 3 → 6 → 1 (wrap).
+        let items = vec![
+            ContextMenuItem::Item {
+                label: "Copy",
+                action: Action::Copy,
+                enabled: false,
+            },
+            ContextMenuItem::Item {
+                label: "Paste",
+                action: Action::Paste,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "Split Right",
+                action: Action::SplitRight,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Close Pane",
+                action: Action::ClosePane,
+                enabled: false,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "New Tab",
+                action: Action::NewTab,
+                enabled: true,
+            },
+        ];
+        // ↓ from Paste (1) skips Separator(2) → SplitRight(3).
+        assert_eq!(next_context_menu_highlight(&items, 1, 1), 3);
+        // ↓ from SplitRight(3) skips disabled ClosePane(4) + Separator
+        // (5) → NewTab(6).
+        assert_eq!(next_context_menu_highlight(&items, 3, 1), 6);
+        // ↓ from NewTab(6) wraps past disabled Copy(0) → Paste(1).
+        assert_eq!(next_context_menu_highlight(&items, 6, 1), 1);
+        // ↑ from Paste(1) wraps past disabled Copy(0) → NewTab(6).
+        assert_eq!(next_context_menu_highlight(&items, 1, -1), 6);
+        // No enabled items at all — return `current` unchanged so the
+        // caller doesn't crash. (Defensive — caller shouldn't open an
+        // empty menu, but the guard exists.)
+        let all_disabled = vec![ContextMenuItem::Separator];
+        assert_eq!(next_context_menu_highlight(&all_disabled, 0, 1), 0);
+    }
+
+    #[test]
+    fn clamp_context_menu_anchor_keeps_panel_on_screen() {
+        use super::clamp_context_menu_anchor;
+        // 800x600 surface, 200x300 panel — anchors inside the safe
+        // region pass through unchanged.
+        assert_eq!(
+            clamp_context_menu_anchor((100.0, 100.0), (200.0, 300.0), (800.0, 600.0)),
+            (100.0, 100.0)
+        );
+        // Right-click near the bottom-right corner gets clamped so the
+        // panel still fits with the 4-px margin (max_x = 800 - 200 - 4
+        // = 596, max_y = 600 - 300 - 4 = 296).
+        assert_eq!(
+            clamp_context_menu_anchor((780.0, 580.0), (200.0, 300.0), (800.0, 600.0)),
+            (596.0, 296.0)
+        );
+        // Right-click in the top-left corner clamps up against the
+        // 4-px screen-edge margin so the panel doesn't glue to the
+        // bezel.
+        assert_eq!(
+            clamp_context_menu_anchor((0.0, 0.0), (200.0, 300.0), (800.0, 600.0)),
+            (4.0, 4.0)
+        );
+        // Pathological: panel larger than the surface — anchor clamps
+        // to the 4-px margin without producing a NaN / negative.
+        let (x, y) = clamp_context_menu_anchor((100.0, 100.0), (2000.0, 2000.0), (800.0, 600.0));
+        assert!(x >= 4.0 && y >= 4.0);
     }
 
     #[test]

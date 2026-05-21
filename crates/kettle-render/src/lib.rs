@@ -90,6 +90,37 @@ pub struct HintLabel {
     pub dim: bool,
 }
 
+/// One row of the right-click context menu. Action labels are owned
+/// `String` so the UI can build them on-demand (e.g. conditionally
+/// enable Copy based on whether a selection exists); the renderer
+/// stays agnostic of the `Action` enum that drives them.
+pub struct ContextMenuRow {
+    pub label: String,
+    /// `true` when the row is a horizontal separator rather than a
+    /// selectable item. The renderer draws a thin divider line and
+    /// the UI skips it during keyboard / mouse highlight changes.
+    pub separator: bool,
+    /// Greyed-out (e.g. Copy with no selection). Still drawn, still
+    /// gives the user a sense of "this is an option that's not
+    /// available right now," but not selectable.
+    pub enabled: bool,
+}
+
+/// Right-click context menu (Terminator / GNOME Terminal / iTerm2
+/// parity). Drawn as a floating panel anchored at the click point;
+/// the UI clamps the anchor so the panel fits the surface. The
+/// renderer reads this slice each frame and draws if `Some` — the
+/// UI is the single source of truth for state + dispatch.
+pub struct ContextMenu {
+    /// Top-left of the panel in surface pixels (already clamped).
+    pub anchor: (f32, f32),
+    pub rows: Vec<ContextMenuRow>,
+    /// Index of the currently highlighted (selectable) row. Always
+    /// points at an enabled, non-separator row when the menu is
+    /// non-empty.
+    pub highlight: usize,
+}
+
 /// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
@@ -113,6 +144,10 @@ pub struct Overlay {
     pub cursor_visible: bool,
     /// Visual-bell intensity, 0.0 (none) .. 1.0 (just rang).
     pub bell: f32,
+    /// `Some` while the right-click context menu is open. Rendered on
+    /// top of everything else so an overlapping pane border doesn't
+    /// occlude the menu.
+    pub context_menu: Option<ContextMenu>,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -192,6 +227,10 @@ pub struct Renderer {
     pane_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
+    /// One text buffer per row of the right-click context menu. Reused
+    /// across openings to amortize allocation; trimmed when the row
+    /// count shrinks for a smaller menu.
+    context_menu_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
     search_buffer: TextBuffer,
 
@@ -327,6 +366,7 @@ impl Renderer {
             pane_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
+            context_menu_buffers: Vec::new(),
             tabbar_buffer,
             search_buffer,
             quads,
@@ -779,6 +819,42 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        // Context-menu row labels (one buffer per row, separators skipped).
+        if let Some(menu) = &overlay.context_menu {
+            while self.context_menu_buffers.len() < menu.rows.len() {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.context_menu_buffers.push(b);
+            }
+            // Approximate widest label so the panel fits without
+            // wrapping; the renderer doesn't try to measure precisely
+            // because the labels are short and we pad generously.
+            let max_chars = menu
+                .rows
+                .iter()
+                .filter(|r| !r.separator)
+                .map(|r| r.label.chars().count())
+                .max()
+                .unwrap_or(0) as f32;
+            let panel_w = (max_chars * cw + 32.0).max(140.0);
+            let row_h = ch + 6.0;
+            for (i, row) in menu.rows.iter().enumerate() {
+                if row.separator {
+                    continue;
+                }
+                let buf = &mut self.context_menu_buffers[i];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    &row.label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -911,6 +987,95 @@ impl Renderer {
                     default_color: GColor::rgb(lab.r, lab.g, lab.b),
                     custom_glyphs: &[],
                 });
+            }
+        }
+
+        // Right-click context menu: floating panel with rows. Drawn last so
+        // it sits on top of every pane / image / hint chip. Background +
+        // highlight + separator lines go into `over` (the post-text quad
+        // pass) so the row-highlight tint reads as a chip *behind* the
+        // label text but *in front of* whatever pane content sits under
+        // the anchor.
+        if let Some(menu) = &overlay.context_menu {
+            let max_chars = menu
+                .rows
+                .iter()
+                .filter(|r| !r.separator)
+                .map(|r| r.label.chars().count())
+                .max()
+                .unwrap_or(0) as f32;
+            let panel_w = (max_chars * cw + 32.0).max(140.0);
+            let row_h = ch + 6.0;
+            let sep_h = 6.0_f32;
+            let panel_h: f32 = menu
+                .rows
+                .iter()
+                .map(|r| if r.separator { sep_h } else { row_h })
+                .sum();
+            let (ax, ay) = menu.anchor;
+            // 1-px outline so the panel reads as a distinct surface
+            // even when the underlying pane bg matches palette[8].
+            over.push(rect(
+                ax - 1.0,
+                ay - 1.0,
+                panel_w + 2.0,
+                panel_h + 2.0,
+                theme.palette[4],
+                1.0,
+            ));
+            // Panel background — use the chrome bar color so the menu
+            // visually belongs to the same chrome family as the tab bar.
+            over.push(rect(ax, ay, panel_w, panel_h, theme.palette[8], 0.97));
+            // Row contents: highlight + separator lines + text. Keep a
+            // running y so separators take less vertical space than rows.
+            let mut row_y = ay;
+            for (i, row) in menu.rows.iter().enumerate() {
+                if row.separator {
+                    // Centered 1-px line, inset horizontally so it reads
+                    // as a divider rather than a top/bottom edge.
+                    over.push(rect(
+                        ax + 8.0,
+                        row_y + sep_h * 0.5 - 0.5,
+                        panel_w - 16.0,
+                        1.0,
+                        theme.foreground,
+                        0.25,
+                    ));
+                    row_y += sep_h;
+                    continue;
+                }
+                if i == menu.highlight && row.enabled {
+                    // Highlight chip on the active row — same accent as
+                    // the focused-pane border (cycle 184 invariant: the
+                    // accent is the user's "you are here" signal).
+                    over.push(rect(ax, row_y, panel_w, row_h, theme.palette[4], 0.85));
+                }
+                // Label text. Disabled rows render at half opacity via
+                // a custom color blend toward the bg.
+                let fg = if row.enabled {
+                    theme.foreground
+                } else {
+                    Rgb::new(
+                        ((theme.foreground.r as u16 + theme.palette[8].r as u16) / 2) as u8,
+                        ((theme.foreground.g as u16 + theme.palette[8].g as u16) / 2) as u8,
+                        ((theme.foreground.b as u16 + theme.palette[8].b as u16) / 2) as u8,
+                    )
+                };
+                areas.push(TextArea {
+                    buffer: &self.context_menu_buffers[i],
+                    left: ax + 12.0,
+                    top: row_y + 3.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: row_y as i32,
+                        right: (ax + panel_w) as i32,
+                        bottom: (row_y + row_h) as i32,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+                row_y += row_h;
             }
         }
 
