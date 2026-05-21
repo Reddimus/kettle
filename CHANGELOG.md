@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.8] — 2026-05-21
+
+Patch release.
+
+### Fixed
+- **Session restore now surfaces a `warn!` when a tab can't be
+  rebuilt** (was a silent skip). The cycle-pattern audit found
+  `Mux::restore` quietly dropping any tab whose stored cwd /
+  argv couldn't be re-spawned — a user wondering "where did my
+  N-tab session go after restart?" had no signal. Converted to
+  a `match` that logs `WARN session restore: tab N failed to
+  rebuild and was skipped: <error>` per skipped tab. Behavior
+  preserved (still don't sink the whole restore on one bad tab);
+  visibility added.
+
+### CI / automation
+- **actionlint workflow** lints `.github/workflows/*.yml` on every
+  workflow-file PR. Runs shellcheck on every `run: |` block —
+  caught a real SC2016 in cycle 205's headless GPU smoke
+  (single-quoted `$rc` in a nested `bash -c '…'`) which was
+  intentional but un-documented; now suppressed inline with a
+  shellcheck disable directive + explanatory comment.
+- **stale-issue / stale-PR bot**. Conservative thresholds: issues
+  warn at 90 days, close at 104; PRs warn at 60 days, close at
+  74. Daily 06:30 UTC. Opt-out labels: `pinned`, `security`,
+  `enhancement`, `help-wanted`, `blocked-on-maintainer`.
+
+### Docs
+- **Bug-report issue template** asks for `kettle --gpu-info`
+  output (optional, rendering-related bugs only). Reduces the
+  triage round-trip on "blank window" / "wrong colors" reports.
+
+No code-behavior changes elsewhere from v1.3.7. Workspace tests
+stay at 261 green.
+
 ## [1.3.7] — 2026-05-21
 
 Patch release.
