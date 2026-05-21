@@ -187,3 +187,35 @@ jobs:
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
           generate_release_notes: true
+
+      # Cycle 285 defense-in-depth. softprops/action-gh-release@v2
+      # uploads via Octokit with no built-in retry — a transient
+      # `uploads.github.com:443` Connect Timeout (which hit the v1.3.11
+      # Linux runner and dropped the .sha256 sidecar) fails the whole
+      # step. This follow-on step uses `gh release upload --clobber`
+      # in a retry loop to fill any missing assets. If softprops
+      # already uploaded everything, every upload no-ops (the
+      # `--clobber` flag refreshes existing assets idempotently). If
+      # softprops dropped one, this step retries it 3 times with 5s
+      # backoff before giving up. Net effect: a single transient
+      # timeout per artifact no longer drops a sidecar.
+      - name: Verify + retry-upload missing assets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in "${{ matrix.artifact }}" "${{ matrix.artifact }}.sha256"; do
+            for attempt in 1 2 3; do
+              if gh release upload "$GITHUB_REF_NAME" "$file" --clobber; then
+                echo "ensured $file is attached"
+                break
+              fi
+              echo "upload of $file failed (attempt $attempt/3) — retrying in 5s"
+              sleep 5
+              if [ "$attempt" = "3" ]; then
+                echo "::error::failed to upload $file after 3 attempts"
+                exit 1
+              fi
+            done
+          done
