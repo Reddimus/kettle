@@ -116,6 +116,13 @@ pub struct Pane {
     /// to detect new output for `scroll-on-output`. `None` while no frame
     /// has been drawn yet (so the first frame doesn't look like growth).
     pub last_history: Option<usize>,
+    /// Launching argv ([] means the configured shell). Held so a
+    /// closed-tab snapshot can re-spawn the same program in
+    /// `Action::UndoCloseTab` (cycle 247) — SSH tabs and `-e PROG`
+    /// tabs reopen as the same SSH connection / TUI, not a generic
+    /// shell. Doesn't track environment / cwd-after-launch — those
+    /// re-derive from the OSC-7 cwd that's already snapshotted.
+    pub argv: Vec<String>,
 }
 
 pub enum Node {
@@ -365,12 +372,39 @@ pub fn classify_tab_activity(
     }
 }
 
+/// Snapshot of a tab captured at close time so `Action::UndoCloseTab`
+/// can re-spawn the same program in the same directory. WezTerm /
+/// browser-tab convention; closing a tab is no longer irreversible.
+/// Tree topology isn't preserved — undo re-creates as a single pane
+/// from the first leaf's argv+cwd (the user's complaint is "bring my
+/// tab back," not "reproduce my exact split layout from N closes ago").
+#[derive(Clone)]
+pub struct ClosedTab {
+    /// Tab index at the time of close. On undo we clamp to the
+    /// current tab-count so an `undo` after several intervening
+    /// `new_tab`s still lands somewhere sensible.
+    pub original_index: usize,
+    /// Argv of the first leaf — empty means the configured shell.
+    pub argv: Vec<String>,
+    /// OSC-7 cwd of the first leaf at the moment of close, or `None`
+    /// if no usable cwd was reported.
+    pub cwd: Option<String>,
+}
+
+/// Max closed-tab snapshots held for `Action::UndoCloseTab`. Browser-
+/// standard is 8-10; we keep 10 to amortize accidental close-bursts.
+const CLOSED_TAB_RING_CAP: usize = 10;
+
 pub struct Mux {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
     pub search: SearchState,
     pub broadcast: bool,
+    /// Ring buffer of recently-closed tab snapshots (cycle 247).
+    /// Bounded so a long-running session doesn't accumulate state.
+    /// LIFO: `pop_back` returns the most-recently-closed tab.
+    pub closed_tabs: std::collections::VecDeque<ClosedTab>,
     next_id: u64,
 }
 
@@ -382,6 +416,7 @@ impl Mux {
             active: 0,
             search: SearchState::default(),
             broadcast: false,
+            closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
             next_id: 1,
         }
     }
@@ -470,6 +505,7 @@ impl Mux {
                 title: initial_title,
                 closed: false,
                 last_history: None,
+                argv: argv.to_vec(),
             },
         );
         Ok(id)
@@ -889,6 +925,22 @@ impl Mux {
     /// Close the tab at `idx` (all its panes). Returns true if no tabs remain.
     pub fn close_tab_at(&mut self, idx: usize) -> bool {
         if idx < self.tabs.len() {
+            // Cycle 247: snapshot the first leaf's argv+cwd before
+            // dropping the tab so `Action::UndoCloseTab` can bring it
+            // back. The ring is LIFO-bounded; closing tabs faster than
+            // we undo evicts the oldest.
+            let first_leaf = self.tabs[idx].root.first_leaf();
+            if let Some(pane) = self.panes.get(&first_leaf) {
+                let snap = ClosedTab {
+                    original_index: idx,
+                    argv: pane.argv.clone(),
+                    cwd: usable_cwd(pane.term.current_dir()),
+                };
+                if self.closed_tabs.len() >= CLOSED_TAB_RING_CAP {
+                    self.closed_tabs.pop_front();
+                }
+                self.closed_tabs.push_back(snap);
+            }
             let mut ids = Vec::new();
             collect_ids(&self.tabs[idx].root, &mut ids);
             for id in ids {
@@ -902,6 +954,51 @@ impl Mux {
             }
         }
         self.tabs.is_empty()
+    }
+
+    /// Restore the most-recently-closed tab. Returns `true` if a tab
+    /// was actually restored. Inserts at the original index (clamped
+    /// to the current tab count); the new tab becomes active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn undo_close_tab(
+        &mut self,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+    ) -> Result<bool> {
+        let Some(snap) = self.closed_tabs.pop_back() else {
+            return Ok(false);
+        };
+        // Re-spawn the same argv + cwd. Empty argv → configured shell
+        // (matches `new_tab_with`'s contract).
+        let id = self.spawn_pane(
+            cfg,
+            cols,
+            rows,
+            cw,
+            ch,
+            waker,
+            snap.cwd.as_deref(),
+            &snap.argv,
+        )?;
+        let insert_at = snap.original_index.min(self.tabs.len());
+        self.tabs.insert(
+            insert_at,
+            Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+            },
+        );
+        self.active = insert_at;
+        self.touch_active_tab_seen();
+        Ok(true)
     }
 
     /// Reap panes whose child exited; prune empty splits/tabs.
@@ -1461,6 +1558,38 @@ mod node_tests {
         assert_eq!(
             classify_tab_activity(false, false, None, Some(earlier)),
             TabActivity::Normal
+        );
+    }
+
+    #[test]
+    fn closed_tab_ring_bounded_and_lifo() {
+        // Cycle 247: snapshot ring is bounded at `CLOSED_TAB_RING_CAP`
+        // and pops LIFO (most-recent first). Builds a fake ring
+        // directly so we don't need to spawn real PTYs.
+        let mut m = Mux::new();
+        for i in 0..(super::CLOSED_TAB_RING_CAP + 3) {
+            if m.closed_tabs.len() >= super::CLOSED_TAB_RING_CAP {
+                m.closed_tabs.pop_front();
+            }
+            m.closed_tabs.push_back(super::ClosedTab {
+                original_index: i,
+                argv: vec![format!("argv-{i}")],
+                cwd: Some(format!("/tmp/{i}")),
+            });
+        }
+        // Cap honored: oldest 3 entries fell off the front.
+        assert_eq!(m.closed_tabs.len(), super::CLOSED_TAB_RING_CAP);
+        assert_eq!(m.closed_tabs.front().unwrap().original_index, 3);
+        assert_eq!(
+            m.closed_tabs.back().unwrap().original_index,
+            super::CLOSED_TAB_RING_CAP + 2
+        );
+        // LIFO: pop_back gives the most-recently-closed snapshot.
+        let last = m.closed_tabs.pop_back().unwrap();
+        assert_eq!(last.original_index, super::CLOSED_TAB_RING_CAP + 2);
+        assert_eq!(
+            last.argv,
+            vec![format!("argv-{}", super::CLOSED_TAB_RING_CAP + 2)]
         );
     }
 

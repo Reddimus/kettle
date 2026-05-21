@@ -2005,6 +2005,22 @@ impl App {
                 let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
                 self.open_context_menu(px, py);
             }
+            Action::UndoCloseTab => {
+                let waker = self.waker();
+                match self
+                    .mux
+                    .undo_close_tab(&self.cfg, cols, rows, cw, ch, waker)
+                {
+                    Ok(true) => {
+                        self.resize_all();
+                        self.save_session();
+                    }
+                    Ok(false) => {
+                        log::debug!("undo_close_tab: ring is empty, nothing to restore");
+                    }
+                    Err(e) => log::error!("undo_close_tab failed: {e}"),
+                }
+            }
             Action::NextTheme | Action::PrevTheme => {
                 let fwd = matches!(action, Action::NextTheme);
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);

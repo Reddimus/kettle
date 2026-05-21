@@ -199,6 +199,13 @@ pub enum Action {
     /// silent no-op that left first-time users confused. Shift+right-
     /// click still extends the selection (xterm convention preserved).
     OpenContextMenu,
+    /// Cycle 247: restore the most-recently-closed tab (WezTerm /
+    /// browser convention). Pops the most recent entry from
+    /// `Mux::closed_tabs` (bounded ring of 10) and re-spawns the same
+    /// argv + OSC-7 cwd at the same tab index. No-op when the ring is
+    /// empty. Bound to `Ctrl+Shift+T` by default — same chord
+    /// WezTerm / Chrome / Firefox use for "reopen closed tab."
+    UndoCloseTab,
     GotoTab(u8),
 }
 
@@ -295,6 +302,9 @@ pub fn action_names() -> Vec<&'static str> {
         "quick_select",
         "context_menu",
         "open_context_menu",
+        "undo_close_tab",
+        "reopen_tab",
+        "restore_tab",
         "next_theme",
         "prev_theme",
         "previous_theme",
@@ -364,6 +374,7 @@ impl Action {
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
             "context_menu" | "open_context_menu" => OpenContextMenu,
+            "undo_close_tab" | "reopen_tab" | "restore_tab" => UndoCloseTab,
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,

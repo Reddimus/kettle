@@ -14,6 +14,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
     vec![
         ("New tab", NewTab),
         ("Close tab", CloseTab),
+        ("Undo close tab", UndoCloseTab),
         ("Next tab", NextTab),
         ("Previous tab", PrevTab),
         ("Move tab left", MoveTabLeft),
@@ -164,6 +165,7 @@ mod tests {
             NextTheme,
             PrevTheme,
             OpenContextMenu,
+            UndoCloseTab,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -180,7 +182,7 @@ mod tests {
                 | ClearHistory | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown
                 | ScrollToTop | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh
                 | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme
-                | OpenContextMenu | GotoTab(_) => {}
+                | OpenContextMenu | UndoCloseTab | GotoTab(_) => {}
             }
         }
         let missing: Vec<&Action> = every_action
