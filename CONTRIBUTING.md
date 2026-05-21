@@ -4,7 +4,7 @@ kettle is built one *audit cycle* at a time — each cycle picks one bug or
 parity gap, fixes it with a durable implementation, pins the contract with
 a test, and lands behind the full gate. This file explains how a cycle
 looks so a new contributor can land their first change the same shape as
-the existing 150+ in [CHANGELOG.md](CHANGELOG.md).
+the existing 250+ in [CHANGELOG.md](CHANGELOG.md).
 
 Participation in this project — issues, PRs, discussions, code review —
 is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
@@ -29,11 +29,40 @@ Each cycle has the same shape:
    `kettle-render::clamp_font_size` (cycle 118) for examples.
 3. **Wire it in.** Call the helper from the chrome path. Keep the
    call site small — the helper does the work.
-4. **Pin the contract with a test.** Hand-rolled scenarios that
-   would have failed pre-fix. Most cycles add 1–3 assertions; the
-   workspace test suite grows ~1/cycle. Run `cargo test --workspace`
-   for today's count (CHANGELOG entries also name the count after each
-   cycle's `+N tests`).
+4. **Pin the contract with a test — and add a drift guard if the
+   bug class can recur.** Hand-rolled scenarios that would have
+   failed pre-fix. Most cycles add 1–3 assertions; the workspace
+   test suite grows ~1/cycle (currently 261+, see
+   `cargo test --workspace`).
+
+   A **drift guard** is a separate test that catches *the next
+   time someone reintroduces the same shape of bug* — not just
+   the specific instance you fixed. Drift guards are how kettle
+   stays consistent across 250+ cycles without regressing. Three
+   kinds you'll see in the codebase:
+
+   - **Exhaustive-match guards.** When a new `Action` variant is
+     added, the cycle-117 `palette_includes_every_user_facing_action`
+     test fails at compile time until the variant is categorized
+     (palette entry / excluded with rationale). Same shape:
+     cycle-220 `defaults_has_no_shadow_collisions`,
+     cycle-219 `cli_help_text_has_no_internal_cycle_refs`.
+   - **Drift-against-source guards.** Tests that read a Markdown
+     doc or a source string and assert it stays consistent with
+     a contract — e.g. cycle-232 cross-link drift between docs,
+     cycle-241 `cli_help_preserves_indented_code_examples` (walks
+     clap's `CommandFactory` and asserts indented examples survive
+     verbatim).
+   - **Pixel / output guards.** Render-pipeline regressions are
+     hard to catch with logic tests — cycle-251's
+     `tests/menu_visual.rs` renders to PNG and asserts pixel-color
+     invariants so the v1.3.0/v1.3.1 blank-menu regression class
+     can't recur.
+
+   If your cycle's bug class is bounded ("a typo here" — no drift
+   guard needed) say so in the CHANGELOG paragraph. If it's
+   structural ("`_ => Default` silent fallback") add the guard.
+
 5. **Run the gate locally.**
    ```sh
    cargo fmt --all              # rewrite in place
@@ -45,10 +74,14 @@ Each cycle has the same shape:
                                 # gate match the CI gate exactly.
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
+   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
    ```
    The CI matrix on `main` runs the same on Linux / macOS / Windows
-   plus a headless GPU smoke under Xvfb on Linux. The local gate
-   must be green before pushing.
+   plus a headless GPU smoke under Xvfb on Linux, a `--screenshot`
+   end-to-end check (cycle 236), a `--screenshot-menu` visual
+   regression (cycle 251), a MSRV (Rust 1.89) build verification
+   (cycle 250), and a `cargo audit` advisory scan (cycle 244). The
+   local gate must be green before pushing.
 6. **Update docs.** `CHANGELOG.md` gets a paragraph under
    `[Unreleased]` describing the bug shape and the fix.
    `docs/ROADMAP.md`'s `Done` list gets a one-paragraph entry of the
