@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.3] — 2026-05-21
+
+Repackaging of v1.7.2. Same code; v1.7.2 was tagged before the
+CHANGELOG `[1.7.2]` section was committed, so the cycle-286
+tag↔Cargo↔CHANGELOG consistency guard correctly failed the Linux
+build at pre-flight — the v1.7.2 GitHub release shipped without
+its Linux tarball.
+
+v1.7.3 retags from the corrected HEAD so the Linux tarball ships
+this time. Use this release instead of v1.7.2.
+
+### Process catch (cycle 307)
+
+The cycle-286 guard worked as designed — caught a real bug
+(tag-before-CHANGELOG race). The fix is to tag AFTER the CHANGELOG
+commit. A future cycle could harden the release script (a
+`scripts/release.sh` that does the bump + CHANGELOG + commit + tag
+atomically in one command) to prevent the race entirely.
+
+### Carries v1.7.2's intended changes:
+
+- Remote-control IPC truncate-on-startup (cycle 306) — see [1.7.2]
+  below for full rationale.
+- Two duplicate `#[allow(clippy::too_many_arguments)]` removed.
+
 ## [1.7.2] — 2026-05-21
 
 Patch release. Real durability fix in the cycle-302 remote-control IPC.
