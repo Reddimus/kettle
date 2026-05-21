@@ -14,7 +14,13 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arboard = "3.6.1"
+# Cycle 277: default-features off drops the `image_data` feature,
+# which transitively pulls `image` with default features (= every
+# format incl. avif/rav1e). kettle's clipboard surface is text-
+# only (selection copy / paste / OSC 52); no image-to-clipboard
+# path exists. Saves another ~MB on the binary alongside the
+# kettle-vt feature narrowing.
+arboard = { version = "3.6.1", default-features = false }
 crossbeam-channel = "0.5.15"
 kettle-config = { version = "1.2.0", path = "../kettle-config" }
 kettle-core = { version = "1.2.0", path = "../kettle-core" }

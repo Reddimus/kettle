@@ -16,7 +16,13 @@ workspace = true
 anyhow.workspace = true
 base64 = "0.22.1"
 flate2 = "1.1.9"
-image = "0.25.10"
+# Cycle 277: narrow features to the formats iTerm2's inline-image
+# protocol spec actually accepts (PNG, JPEG, GIF). Default features
+# pull in EVERY image format the `image` crate supports — avif via
+# `rav1e` (~1.6 MB!), exr, webp, tiff, hdr, qoi, dds, ico, etc. —
+# none of which kettle's inline-image path ever decodes. Cuts ~3 MB
+# off the release binary.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
 log.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
