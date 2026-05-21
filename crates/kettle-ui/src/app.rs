@@ -236,6 +236,25 @@ struct ViState {
     visual_anchor: Option<(usize, usize)>,
 }
 
+/// Cycle 308: pure-helper char-boundary truncation for status-bar
+/// titles. Caps at `max` chars; appends `…` when truncated so the
+/// elision is visible. Uses char count (not bytes) so UTF-8
+/// multibyte glyphs aren't split. Returns the original string if it
+/// already fits.
+///
+/// Before this helper, a long pane title fed to the cycle-296
+/// status bar would wrap past the strip's 1-cell height — the user
+/// saw the first ~80 chars and the rest was invisible with no
+/// indication.
+fn cap_title_for_status_bar(title: &str, max: usize) -> String {
+    if title.chars().count() <= max {
+        return title.to_string();
+    }
+    let mut out: String = title.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -1839,8 +1858,14 @@ impl App {
             .map(|p| p.title.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "kettle".to_string());
+        // Cycle 308: cap the title at a character budget so a chatty
+        // prompt that puts the full cwd in the window title
+        // (e.g. `PROMPT_COMMAND='echo -ne "\033]0;$PWD\007"'`)
+        // doesn't overflow the strip's 1-cell height. Pure helper
+        // so we can drift-guard it in tests.
+        let title_capped = cap_title_for_status_bar(&title, 60);
         let text = format!(
-            "{hh:02}:{mm:02}:{ss:02} UTC  ·  {}  ·  {title}",
+            "{hh:02}:{mm:02}:{ss:02} UTC  ·  {}  ·  {title_capped}",
             self.cfg.theme_name
         );
         kettle_render::StatusBar { height: h, y, text }
@@ -3872,6 +3897,34 @@ impl ApplicationHandler<UserEvent> for App {
 mod tests {
     use super::selection_kind;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn cap_title_for_status_bar_truncates_at_char_budget_with_ellipsis() {
+        // Cycle 308 drift guard. The status-bar strip is 1 cell tall;
+        // a long title would wrap past the visible region without
+        // this cap. Pins the contract:
+        //   - under-budget: returned as-is, no `…`.
+        //   - over-budget: truncated to `max` chars + `…`.
+        //   - UTF-8 multibyte: char-count not byte-count (so a
+        //     "🦀🦀🦀…" title isn't mis-truncated in the middle of
+        //     a surrogate pair).
+        use super::cap_title_for_status_bar;
+        assert_eq!(cap_title_for_status_bar("short", 60), "short");
+        assert_eq!(cap_title_for_status_bar("", 60), "");
+        let exactly_60 = "x".repeat(60);
+        assert_eq!(cap_title_for_status_bar(&exactly_60, 60), exactly_60);
+        let long = "x".repeat(80);
+        let capped = cap_title_for_status_bar(&long, 60);
+        assert_eq!(capped.chars().count(), 61); // 60 + the `…`
+        assert!(capped.ends_with('…'));
+        // UTF-8 multibyte at the boundary — must split on a char
+        // boundary, not a byte boundary.
+        let crab_run = "🦀".repeat(80);
+        let capped_crab = cap_title_for_status_bar(&crab_run, 60);
+        assert_eq!(capped_crab.chars().count(), 61);
+        // Every char before the `…` should still be a full crab.
+        assert!(capped_crab.chars().take(60).all(|c| c == '🦀'));
+    }
 
     #[test]
     fn shell_quote_path_handles_spaces_quotes_and_multibyte() {
