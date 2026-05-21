@@ -2573,6 +2573,33 @@ impl App {
                 if let Some(p) = self.mux.focused() {
                     p.term.write(decoded.as_bytes());
                 }
+            } else if line == "toggle-window" {
+                // Cycle 303 Quake dropdown: minimize/restore the
+                // window. Users bind their compositor / DE / OS
+                // global hotkey to `kettle --toggle` (which sends
+                // this command via remote-control). Sidesteps the
+                // cross-platform global-hotkey problem entirely —
+                // each user picks the binding their setup already
+                // honors.
+                if let Some(w) = &self.window {
+                    let visible = w.is_visible().unwrap_or(true);
+                    w.set_visible(!visible);
+                    if !visible {
+                        // Returning to visible: also focus + raise so
+                        // it pops above other windows (the typical
+                        // Quake / Yakuake / Tilda behavior). winit's
+                        // focus_window is best-effort per OS.
+                        w.focus_window();
+                    }
+                }
+            } else if line == "new-tab" {
+                // Forward-compat: another planned remote-control verb.
+                // No-op for v1 because the App's NewTab dispatch path
+                // expects an Action through the keybind layer; wiring
+                // that from here would need an Action-emitter helper.
+                // Logging the recognition so a user testing the path
+                // sees it landed.
+                log::info!("remote-control: new-tab (not yet implemented)");
             } else {
                 log::warn!("remote command not recognized: {line:?}");
             }

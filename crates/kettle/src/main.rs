@@ -192,6 +192,24 @@ struct Cli {
     #[arg(long, value_name = "COLOR", verbatim_doc_comment)]
     accent: Option<String>,
 
+    /// Toggle the running kettle window's visibility (Quake /
+    /// Yakuake / Tilda dropdown UX) via the remote-control IPC and
+    /// exit. Bind this to your compositor / DE / OS global hotkey
+    /// to get a true dropdown terminal:
+    ///
+    ///   # GNOME: Settings → Keyboard → Custom Shortcuts → kettle --toggle
+    ///   # KDE:   System Settings → Shortcuts → Custom → kettle --toggle
+    ///   # Sway:  bindsym $mod+grave exec kettle --toggle
+    ///   # Hyprland: bind = SUPER, grave, exec, kettle --toggle
+    ///   # macOS: Karabiner / Raycast → run "kettle --toggle"
+    ///   # Win11: PowerToys Keyboard Manager → kettle --toggle
+    ///
+    /// Sidesteps the cross-platform global-hotkey problem — each
+    /// user picks the binding their setup already honors. Honors
+    /// the same `--remote-file PATH` arbitration as `--remote-send`.
+    #[arg(long, verbatim_doc_comment)]
+    toggle: bool,
+
     /// Send TEXT to a running kettle via the remote-command file
     /// (default `<config-dir>/kettle/remote.cmd`) and exit. Used by
     /// external scripts to drive an already-open kettle without
@@ -701,6 +719,28 @@ fn main() -> anyhow::Result<()> {
                 out.display()
             );
         }
+        return Ok(());
+    }
+
+    // Cycle 303 Quake dropdown: `--toggle` is sugar for `--remote-send`
+    // with a fixed `toggle-window` command. Same path-resolution
+    // (--remote-file or default) so a user can bind their global
+    // hotkey to `kettle --toggle` without any extra config.
+    if cli.toggle {
+        let path = cli
+            .remote_file
+            .clone()
+            .or_else(default_remote_file)
+            .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(b"toggle-window\n")?;
         return Ok(());
     }
 
