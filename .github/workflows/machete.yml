@@ -1,0 +1,49 @@
+# cargo-machete — catch unused workspace dependencies before they land.
+# Pairs with the cycle-244 audit + cycle-264 deny workflows: every
+# `cargo add` PR now passes through three supply-chain checks:
+#
+#   audit.yml      — RustSec security advisories
+#   deny.yml       — licenses, sources, banned crates
+#   machete.yml    — actually-used (this one, cycle 274)
+#
+# Each one catches a class the others miss. cargo-machete in
+# particular finds dependencies declared in `Cargo.toml` but never
+# imported in source — a class cycle 274 caught 11 of in one pass
+# (`log` in kettle-render + kettle-core, `serde` / `thiserror` /
+# `unicode-width` in kettle-core, `env_logger` / `kettle-vt` /
+# `raw-window-handle` / `toml` in kettle-ui). Adding the workflow
+# means the next contributor adding a dep "just in case" gets the
+# warning at PR time, not in a future grep.
+name: cargo-machete
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/machete.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/machete.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  machete:
+    name: unused deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: machete
+      # `bnjbvr/cargo-machete` is the upstream maintainer's official
+      # action. Pinned to v0 for now since the project's still on the
+      # 0.x line; bump when a v1 cuts. The action vendors cargo-machete
+      # so no separate `cargo install` step is needed.
+      - uses: bnjbvr/cargo-machete@v0.7.0
