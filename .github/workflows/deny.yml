@@ -1,0 +1,58 @@
+# cargo-deny — licenses + sources + banned-crate check. Pairs with
+# the cycle-244 `audit.yml` workflow: that one scans for security
+# advisories via `rustsec/audit-check`; this one catches the rest of
+# the supply-chain surface (a transitive dep introduces a GPL
+# license, a `git = "..."` direct dep slips into Cargo.lock, a banned
+# crate name lands in the tree, etc.).
+#
+# Runs on:
+#   - every push / PR that touches Cargo.toml / Cargo.lock / deny.toml
+#     / this workflow — fast feedback on the change that could
+#     introduce the issue.
+#   - a weekly cron (Sunday 06:00 UTC) so a yanked-license-edit on
+#     an existing dep still surfaces even without a local manifest
+#     change.
+#
+# Linux-only runner. deny.toml lists every release-target triple it
+# checks against, so a single OS exercise covers the policy across
+# all platforms.
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  schedule:
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The official EmbarkStudios action vendors `cargo-deny`
+      # itself; no separate `cargo install` step needed. Pinned to
+      # v2 so a future v3 breaking change doesn't silently flip
+      # check outputs.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Run every check class except `advisories` — the
+          # cycle-244 `audit.yml` already covers those via the
+          # official rustsec/audit-check action and we don't want
+          # two workflows opening duplicate tracking issues on the
+          # same advisory.
+          command: check licenses sources bans
