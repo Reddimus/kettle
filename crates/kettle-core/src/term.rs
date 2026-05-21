@@ -102,7 +102,6 @@ pub struct Terminal {
 
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         argv: &[String],
         cwd: Option<&str>,
