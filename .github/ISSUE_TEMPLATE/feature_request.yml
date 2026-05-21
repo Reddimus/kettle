@@ -1,0 +1,47 @@
+name: Feature request
+description: A new feature, escape-sequence conformance gap, or UX improvement.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        kettle's design is "borrow the best from Ghostty / Terminator /
+        kitty / Alacritty / WezTerm." If a feature already exists in one
+        of those, link to its docs — that gives us the spec to match.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or hard to do today? Concrete is better than abstract.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: How would you like it to work? Include keybinds / config keys / CLI flags if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Prior art
+      description: |
+        How do Ghostty / Terminator / kitty / Alacritty / WezTerm /
+        iTerm2 / xterm handle this? Links welcome.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This isn't already on [docs/ROADMAP.md](../docs/ROADMAP.md) as Done.
+          required: true
+        - label: I searched existing issues + discussions for a duplicate.
+          required: true
