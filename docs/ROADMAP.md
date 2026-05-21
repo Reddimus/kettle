@@ -1213,6 +1213,16 @@
       the zsh placement (the doc wrote to `~/.config/kettle/_kettle`,
       not on `$fpath`; now `"${fpath[1]}/_kettle"`). v1.2.1.
 
+- [x] **Packaging templates: Homebrew formula, AUR PKGBUILD, Nix
+      flake.** Closes the macOS / Arch / NixOS install gaps the
+      cycle-253 curl|sh installer intentionally doesn't address.
+      Each template lives under `packaging/{homebrew,arch,nix}/`
+      with a README walking the per-platform submission /
+      maintenance loop. Per-release maintenance is one line + one
+      sha256 bump (cycle-254 sidecars give the values). Same
+      template-in-source pattern: the PKGBUILD / formula / flake
+      pin exact SHA-256s tied to a release, so they bump in the
+      same PR as Cargo.toml.
 - [x] **Ghost-render of the dragged tab during reorder** (cycle 255).
       The cycle-249 drag-to-reorder snapped the live bar to the new
       order at each boundary crossing but gave no "you're picking
@@ -1240,7 +1250,10 @@
 - [ ] Broader `vttest` conformance sweep
 - [ ] Vi-mode for the scrollback (Alacritty parity)
 - [ ] tmux passthrough (`-CC` mode, iTerm2 parity)
-- [ ] Homebrew tap + AUR package + nixpkgs flake
+- [ ] Source-build AUR companion (`kettle`) + Homebrew `--HEAD`
+      formula (build from `main` rather than the latest tag)
+- [ ] Submit to nixpkgs proper so `nix-env -iA nixpkgs.kettle`
+      works without the flake-input dance
 
 ## Quality bar each cycle
 

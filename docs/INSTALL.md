@@ -82,7 +82,10 @@ GitHub runners for every platform:
   [`packaging/arch/PKGBUILD`](../packaging/arch/PKGBUILD); see
   [`packaging/arch/README.md`](../packaging/arch/README.md) for the
   one-time AUR submission walkthrough that lets users install via
-  `yay -S kettle-bin`.
+  `yay -S kettle-bin`. NixOS / nix-flake users:
+  `nix run github:reddimus/kettle` runs without installing; see
+  [`packaging/nix/README.md`](../packaging/nix/README.md) for
+  `nix profile install` + dev-shell + home-manager usage.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Unzip and
   drag `kettle.app` to `/Applications`. First launch: right-click → Open
   (unsigned build). A ready-to-use Homebrew formula lives at
