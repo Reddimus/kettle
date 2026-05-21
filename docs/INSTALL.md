@@ -2,13 +2,27 @@
 
 ## Linux — easy desktop install (Ubuntu / Fedora / Arch / GNOME / KDE)
 
-The simplest path on Linux is the bundled installer. It builds the
-release binary (or unpacks a pre-built one from a release tarball),
-drops the launcher entry + icon into the right XDG paths, and the
-kettle tile shows up in the GNOME Activities overview / Ubuntu Super-
-key search / KDE Krunner.
+### One-line installer (recommended)
 
-**From source** (cloned repo):
+Downloads the latest prebuilt binary + XDG launcher + icons and drops
+everything into `~/.local/`. No `sudo`, no Rust toolchain:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
+```
+
+Pin a specific version (recommended for reproducible installs):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
+  | KETTLE_VERSION=v1.3.2 sh
+```
+
+The script verifies the gzip magic bytes on the downloaded tarball and
+runs everything in a `mktemp -d` cleaned up on exit. Uninstall later
+via `~/.local/share/kettle/install.sh --uninstall`.
+
+### From source (cloned repo)
 
 ```sh
 # Build deps (Debian / Ubuntu)
@@ -20,7 +34,9 @@ cd kettle
 ./scripts/install.sh
 ```
 
-**From a release tarball** (no Rust toolchain needed):
+Requires Rust ≥ 1.89 (the workspace MSRV).
+
+### From a downloaded release tarball
 
 ```sh
 tar -xzf kettle-linux-x86_64.tar.gz
