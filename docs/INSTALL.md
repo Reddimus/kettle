@@ -15,12 +15,24 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v1.3.2 sh
+  | KETTLE_VERSION=v1.3.4 sh
 ```
 
-The script verifies the gzip magic bytes on the downloaded tarball and
-runs everything in a `mktemp -d` cleaned up on exit. Uninstall later
-via `~/.local/share/kettle/install.sh --uninstall`.
+System-wide install (writes to a custom prefix; needs the
+corresponding permissions):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
+  | KETTLE_PREFIX=/usr/local sh
+# binary at /usr/local/bin/kettle, launcher under /usr/local/share/applications
+```
+
+`KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once.
+
+The script verifies the gzip magic bytes on the downloaded tarball,
+checks the SHA-256 against the published sidecar (v1.3.4+), and runs
+everything in a `mktemp -d` cleaned up on exit. Uninstall later via
+`~/.local/share/kettle/install.sh --uninstall`.
 
 ### From source (cloned repo)
 

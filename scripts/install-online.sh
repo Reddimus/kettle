@@ -11,7 +11,11 @@
 #
 # Or with a pinned version (recommended for reproducible installs):
 #
-#   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_VERSION=v1.3.2 sh
+#   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_VERSION=v1.3.4 sh
+#
+# Or with a custom install prefix (e.g. system-wide):
+#
+#   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_PREFIX=/usr/local sh
 #
 # Notes
 # - Linux x86_64 only today. macOS users: grab the `.app` bundle from
@@ -166,7 +170,17 @@ fi
 # bundled install.sh uses `set -euo pipefail`, a Bash-ism that fails
 # under dash (Debian/Ubuntu `sh` is dash). The release.yml ships
 # install.sh with mode 755 so the bare exec path works.
-"$TMP/kettle/install.sh" --skip-build
+#
+# `KETTLE_PREFIX` env var (optional) plumbs through to install.sh's
+# `--prefix=<DIR>` so a power user can do, e.g.,
+#   KETTLE_PREFIX=/usr/local sh install-online.sh
+# for a system-wide install (with appropriate write perms). Default
+# is `~/.local/` — matches the standalone `install.sh` default.
+if [ -n "${KETTLE_PREFIX:-}" ]; then
+  "$TMP/kettle/install.sh" --skip-build "--prefix=$KETTLE_PREFIX"
+else
+  "$TMP/kettle/install.sh" --skip-build
+fi
 
 # Stash a copy of install.sh under share/ so the user can later run
 # `~/.local/share/kettle/install.sh --uninstall` without re-downloading.
