@@ -33,6 +33,28 @@ repository = "https://github.com/Reddimus/kettle"
 authors = ["kettle contributors"]
 description = "A fast, cross-platform GPU terminal emulator combining the best of Ghostty, Terminator, kitty, Alacritty and WezTerm"
 
+# Workspace-wide dependency policy (enforced in CI):
+#
+#   - `cargo audit`  (audit.yml, cycle 244)  — RustSec security advisories.
+#   - `cargo deny`   (deny.yml,  cycle 264)  — license SPDX allow-list,
+#                                              source restrictions (crates.io
+#                                              only, no `git = …`), banned
+#                                              crates, wildcard `*` denied.
+#   - `cargo machete` (machete.yml, cycle 274) — every dep listed here +
+#                                                in per-crate manifests is
+#                                                actually imported in source.
+#                                                Cycle 273 removed 11 unused
+#                                                workspace deps in one pass;
+#                                                this guard prevents another
+#                                                accumulation.
+#   - MSRV verify   (ci.yml,   cycle 250)    — workspace builds + tests on
+#                                              exactly the declared
+#                                              rust-version.
+#
+# Before adding a dep: check it's not transitively available via an
+# existing one (often the case for `pollster`, `bytemuck`, etc.) and
+# that its license is in deny.toml's allow-list. After adding: run
+# `cargo machete` locally to confirm it actually gets imported.
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
