@@ -215,23 +215,20 @@ fn shell_quote_path(p: &std::path::Path) -> String {
     out
 }
 
-/// Cycle 298 vi-mode (Alacritty parity), foundation sub-cycle. Carries
-/// the vi cursor's position when vi-mode is active. Sub-cycles 2-4
-/// extend with visual-selection anchor + motion history.
-///
-/// `#[allow(dead_code)]` on the fields because foundation sub-cycle
-/// only constructs ViState; sub-cycle 2 reads `row` + `col` for
-/// h/j/k/l movement. Removing the allow then will surface a real
-/// warning if the wiring isn't done.
+/// Cycle 298-301 vi-mode (Alacritty parity). Carries the vi cursor's
+/// position + the visual-selection anchor when vi-mode is active.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 struct ViState {
     /// Vi cursor row in the focused pane's grid coordinates (0 = top
-    /// of viewport; future sub-cycle allows negative rows for
-    /// scrollback navigation).
+    /// of viewport).
     row: usize,
     /// Vi cursor column.
     col: usize,
+    /// Cycle 301 sub-cycle 4: `Some((row, col))` after the user
+    /// presses `v` to start a visual selection. The selection spans
+    /// from this anchor to the current (row, col). `y` yanks the
+    /// selection to the clipboard and exits vi-mode.
+    visual_anchor: Option<(usize, usize)>,
 }
 
 /// Map a click count + the Alt modifier to a selection type: double =
@@ -928,6 +925,48 @@ impl App {
     /// regex against the actual cells the user clicked on. Returns
     /// `None` if there's no focused pane, the lock can't be acquired,
     /// or the row is out of range.
+    /// Cycle 301 sub-cycle 4: extract the text of the vi visual
+    /// selection from the focused pane's grid. Inclusive on both
+    /// ends. Joins rows with `\n`. Returns "" on no focus / lock
+    /// failure. Same row→column iteration shape as
+    /// `line_text_for_smart_select` to keep grid-read paths
+    /// consistent.
+    fn yank_vi_selection(&mut self, start: (usize, usize), end: (usize, usize)) -> String {
+        let Some(pane) = self.mux.focused() else {
+            return String::new();
+        };
+        let Ok(t) = pane.term.term.lock() else {
+            return String::new();
+        };
+        use kettle_core::Dimensions;
+        let cols = t.columns();
+        let rows = t.screen_lines();
+        let (sr, sc) = start;
+        let (er, ec) = end;
+        if sr >= rows {
+            return String::new();
+        }
+        let mut out = String::new();
+        for r in sr..=er.min(rows.saturating_sub(1)) {
+            let first = if r == sr { sc } else { 0 };
+            let last = if r == er { ec.min(cols - 1) } else { cols - 1 };
+            for c in first..=last {
+                let p =
+                    kettle_core::Point::new(kettle_core::Line(r as i32), kettle_core::Column(c));
+                out.push(t.grid()[p].c);
+            }
+            if r != er {
+                out.push('\n');
+            }
+        }
+        // Trim trailing whitespace from each line so blank cells at
+        // the end of a yanked range don't pollute the clipboard.
+        out.lines()
+            .map(|l| l.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn line_text_for_smart_select(&mut self, row: usize) -> Option<String> {
         use kettle_core::Dimensions;
         let pane = self.mux.focused()?;
@@ -1561,6 +1600,7 @@ impl App {
             bell,
             context_menu,
             vi_cursor: self.vi_mode.map(|v| (v.row, v.col)),
+            vi_visual_anchor: self.vi_mode.and_then(|v| v.visual_anchor),
         }
     }
 
@@ -2320,7 +2360,11 @@ impl App {
                             })
                         })
                         .unwrap_or((0, 0));
-                    self.vi_mode = Some(ViState { row, col });
+                    self.vi_mode = Some(ViState {
+                        row,
+                        col,
+                        visual_anchor: None,
+                    });
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -2595,6 +2639,35 @@ impl App {
             'H' => state.row = 0,
             'M' => state.row = max_row / 2,
             'L' => state.row = max_row,
+            // Cycle 301 sub-cycle 4: `v` toggles char-visual mode.
+            // Setting the anchor at the current cursor position begins
+            // a selection; pressing `v` again clears it.
+            'v' => {
+                state.visual_anchor = match state.visual_anchor {
+                    Some(_) => None,
+                    None => Some((state.row, state.col)),
+                };
+            }
+            // Cycle 301: `y` yanks the visual selection to clipboard
+            // (system + selection) and exits vi-mode — same shape as
+            // Alacritty.
+            'y' => {
+                if let Some(anchor) = state.visual_anchor {
+                    let cur = (state.row, state.col);
+                    let (start, end) = if anchor <= cur {
+                        (anchor, cur)
+                    } else {
+                        (cur, anchor)
+                    };
+                    let yanked = self.yank_vi_selection(start, end);
+                    if !yanked.is_empty()
+                        && let Some(clip) = self.clipboard.as_mut()
+                    {
+                        let _ = clip.set_text(yanked);
+                    }
+                }
+                self.vi_mode = None;
+            }
             _ => {
                 // Arrow keys also navigate.
                 match key {

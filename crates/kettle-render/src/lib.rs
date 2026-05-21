@@ -154,6 +154,11 @@ pub struct Overlay {
     /// Different chrome from the terminal cursor (block vs outline)
     /// so the user can tell the two modes apart at a glance.
     pub vi_cursor: Option<(usize, usize)>,
+    /// Cycle 301 vi-mode visual selection (sub-cycle 4). `Some` when
+    /// the user has pressed `v` to start a selection. The renderer
+    /// highlights cells from `vi_visual_anchor` to `vi_cursor`
+    /// (inclusive both ends) using theme.selection_background.
+    pub vi_visual_anchor: Option<(usize, usize)>,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -836,6 +841,7 @@ impl Renderer {
                 overlay.window_focused,
                 overlay.cursor_visible,
                 overlay.vi_cursor,
+                overlay.vi_visual_anchor,
                 &mut quads,
             );
 
@@ -1502,6 +1508,7 @@ impl Renderer {
 
     /// Build one pane's text buffer + background/cursor/selection/search quads.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn build_pane(
         &mut self,
         idx: usize,
@@ -1511,6 +1518,7 @@ impl Renderer {
         window_focused: bool,
         cursor_visible: bool,
         vi_cursor: Option<(usize, usize)>,
+        vi_visual_anchor: Option<(usize, usize)>,
         quads: &mut Vec<QuadInstance>,
     ) {
         let theme = &cfg.theme;
@@ -1728,6 +1736,42 @@ impl Renderer {
                     EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 0.55, ch, 0.0),
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
+            }
+        }
+
+        // Cycle 301 vi-mode visual selection (sub-cycle 4). Drawn
+        // BEFORE the vi cursor so the cursor's hollow block reads on
+        // top of the selection's solid fill. Selection spans
+        // [anchor..cursor] inclusive; the anchor / cursor order is
+        // normalized to (start, end) ordered ascending.
+        if pv.focused
+            && let (Some((arow, acol)), Some((crow, ccol))) = (vi_visual_anchor, vi_cursor)
+        {
+            let (start, end) = if (arow, acol) <= (crow, ccol) {
+                ((arow, acol), (crow, ccol))
+            } else {
+                ((crow, ccol), (arow, acol))
+            };
+            // Char-visual semantics (Alacritty default): start..end
+            // sweeps cells row by row.
+            let mut r = start.0;
+            while r <= end.0 {
+                let first = if r == start.0 { start.1 } else { 0 };
+                let last = if r == end.0 {
+                    end.1
+                } else {
+                    // No clean way to get cols from here without an
+                    // extra param; use a generous bound — extra cells
+                    // get clipped by the pane rect at draw time.
+                    256
+                };
+                if last >= first {
+                    let bx = ox + first as f32 * cw;
+                    let by = oy + r as f32 * ch;
+                    let bw = (last - first + 1) as f32 * cw;
+                    quads.push(rect(bx, by, bw, ch, theme.selection_background, 0.55));
+                }
+                r += 1;
             }
         }
 
