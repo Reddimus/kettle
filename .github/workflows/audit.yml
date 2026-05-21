@@ -1,0 +1,48 @@
+# Security audit — runs `cargo audit` against the RustSec advisory DB so a
+# newly-published vulnerability in any transitive dep surfaces as a CI
+# failure within a day instead of at the next release cut.
+#
+# Runs on:
+#   - every push/PR that touches Cargo.lock or this workflow (fast feedback)
+#   - a daily 06:00 UTC cron so an advisory published *after* a Cargo.lock
+#     change still surfaces on its own (dependabot picks up the patched
+#     dep on Monday; this catches the window in between).
+#
+# Linux-only — `cargo audit` is platform-agnostic and the advisory DB lives
+# in one place; running on three OSes would be triple cache + triple noise.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
+    # catch the gap, far enough off CI-peak hours to keep Actions queues quiet.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+  issues: write   # rustsec/audit-check opens an issue on a finding (idempotent)
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Official RustSec action. It vendors `cargo-audit`, runs against
+      # the advisory DB, and on push to the default branch opens (or
+      # updates) a single tracking issue per finding rather than spamming
+      # the issue tracker. The token is the standard GITHUB_TOKEN.
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
