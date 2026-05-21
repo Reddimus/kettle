@@ -6,6 +6,46 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.7] — 2026-05-21
+
+Patch release.
+
+### Added
+- **`kettle --gpu-info`** prints the wgpu adapter / backend /
+  driver / texture limits the live renderer would pick on this
+  machine, then exits — no GUI / PTY needed. Closes the gap
+  between "blank window" / "no adapter" bug reports and the
+  diagnostic info maintainers need to triage them. Output is
+  predictable line-based `Key: value` so a shell script can
+  consume it; CI smoke pins three invariant lines (`Backend:`,
+  `Adapter:`, `Max texture: N px / side`).
+
+  ```text
+  $ kettle --gpu-info
+  Backend:        Vulkan
+  Adapter:        NVIDIA GeForce RTX 2080
+  Adapter type:   DiscreteGpu
+  Driver:         NVIDIA
+  Driver info:    580.142
+  Vendor (PCI):   0x10de
+  Device (PCI):   0x1e87
+  Max texture:    32768 px / side
+  Max buffer:     4292870144 bytes
+  Max bind groups: 8
+  ```
+
+### CI / automation
+- **`actions/labeler@v5`** workflow auto-tags PRs by changed file
+  paths (`docs`, `ui`, `vt`, `core`, `render`, `config`, `cli`,
+  `ci`, `automation`, `packaging`, `tests`, `dependencies`,
+  `release`, `tooling`). Triggered on `pull_request_target` with
+  `pull-requests: write` so labels apply to fork PRs too.
+  Additive (`sync-labels: false`) so manually-applied labels like
+  `triage` / `good-first-issue` survive the auto-run.
+
+No code-behavior changes elsewhere from v1.3.6. Workspace tests stay
+at 261 green.
+
 ## [1.3.6] — 2026-05-21
 
 Patch release. Theme: **post-v1.3.5 tooling + governance + supply-
