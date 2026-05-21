@@ -333,6 +333,14 @@ jobs:
   msrv:
     name: msrv (rust 1.89)
     runs-on: ubuntu-latest
+    # Cycle 287: the cycle-251 `menu_visual.rs` integration test
+    # initializes wgpu (it renders a PNG via the same `capture_png_with`
+    # path the `--screenshot-menu` CLI flag uses). The MSRV job needs
+    # the same Vulkan + GL setup the matrix `build` job uses, otherwise
+    # `cargo test --workspace` panics in menu_visual.rs with
+    # `no GPU adapter: NotFound`. Caught on the cycle-286 push.
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
@@ -341,7 +349,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv-1.89

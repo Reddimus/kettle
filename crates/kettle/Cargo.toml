@@ -33,3 +33,12 @@ libc = "0.2"
 # instead of the generic Rust .exe glyph. winresource is the
 # maintained fork of `winres` (which is unmaintained as of 2024).
 winresource = "0.1"
+
+# Cycle 287: `winresource` is a Windows-only build-dependency used
+# from `build.rs` (not from any `src/` file), so cargo-machete
+# (which only scans `src/`) flags it as unused. The `package.metadata`
+# section is the standard escape hatch for known false positives.
+# The flag must include `winresource` only — every other dep on this
+# crate is genuinely imported in source.
+[package.metadata.cargo-machete]
+ignored = ["winresource"]
