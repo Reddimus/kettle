@@ -148,6 +148,12 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
+    /// Cycle 300 vi-mode cursor (sub-cycle 3 of 4). `Some((row,col))`
+    /// while the user is in vi-mode; the renderer paints a 1-cell
+    /// outlined block at that grid position in the focused pane.
+    /// Different chrome from the terminal cursor (block vs outline)
+    /// so the user can tell the two modes apart at a glance.
+    pub vi_cursor: Option<(usize, usize)>,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -829,6 +835,7 @@ impl Renderer {
                 &family,
                 overlay.window_focused,
                 overlay.cursor_visible,
+                overlay.vi_cursor,
                 &mut quads,
             );
 
@@ -1503,6 +1510,7 @@ impl Renderer {
         family: &str,
         window_focused: bool,
         cursor_visible: bool,
+        vi_cursor: Option<(usize, usize)>,
         quads: &mut Vec<QuadInstance>,
     ) {
         let theme = &cfg.theme;
@@ -1721,6 +1729,33 @@ impl Renderer {
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
             }
+        }
+
+        // Cycle 300 vi-mode cursor (sub-cycle 3 of 4). When the user
+        // is in vi-mode, draw a magenta hollow block at the vi
+        // cursor's grid position over the focused pane. Distinct
+        // from the terminal cursor (different color + always hollow,
+        // even in focused-block mode) so the user can tell vi-mode
+        // is on at a glance. Drawn only on the focused pane —
+        // multi-pane setups don't paint vi cursors over inactive
+        // panes.
+        if pv.focused
+            && let Some((vrow, vcol)) = vi_cursor
+        {
+            let vi_color = theme.palette[5]; // magenta — distinct from
+            // broadcast yellow (3),
+            // accent blue (4), text fg.
+            let bx = ox + vcol as f32 * cw;
+            let by = oy + vrow as f32 * ch;
+            // Hollow block outline (4 quads). Same shape as the
+            // HollowBlock terminal cursor above but a dedicated
+            // color so the two never visually merge.
+            quads.push(rect(bx, by, cw, 1.0, vi_color, 1.0));
+            quads.push(rect(bx, by + ch - 1.0, cw, 1.0, vi_color, 1.0));
+            quads.push(rect(bx, by, 1.0, ch, vi_color, 1.0));
+            quads.push(rect(bx + cw - 1.0, by, 1.0, ch, vi_color, 1.0));
+            // Faint fill so the block reads even on busy text.
+            quads.push(rect(bx, by, cw, ch, vi_color, 0.20));
         }
 
         // Lay out the text buffer.

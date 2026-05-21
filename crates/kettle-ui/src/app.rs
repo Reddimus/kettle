@@ -1560,6 +1560,7 @@ impl App {
             cursor_visible,
             bell,
             context_menu,
+            vi_cursor: self.vi_mode.map(|v| (v.row, v.col)),
         }
     }
 
@@ -2548,6 +2549,73 @@ impl App {
     /// to move the selection, `Enter` to run it, `Esc` to cancel.
     /// Quick-select hint key handling: type the label of a target to act on
     /// it (open URLs, copy paths/hashes/IPs); `Esc` cancels.
+    /// Cycle 299: vi-mode key dispatcher (sub-cycle 2). Handles
+    /// h/j/k/l movement, 0/$/g/G/H/M/L jumps, and Esc exit. Other
+    /// keys are absorbed (no PTY write) so a stray press doesn't
+    /// land bytes in the shell while the user thinks they're
+    /// navigating.
+    ///
+    /// Movement clamps to the focused pane's grid (no negative rows
+    /// yet — sub-cycle 3 extends into scrollback).
+    fn vi_mode_key(&mut self, key: &Key, text: Option<&str>) {
+        // Esc exits.
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.vi_mode = None;
+            return;
+        }
+        // Grab the focused pane's grid dims to clamp movement.
+        let (max_row, max_col) = self
+            .mux
+            .focused()
+            .and_then(|p| {
+                p.term.term.lock().ok().map(|t| {
+                    use kettle_core::Dimensions;
+                    (
+                        t.screen_lines().saturating_sub(1),
+                        t.columns().saturating_sub(1),
+                    )
+                })
+            })
+            .unwrap_or((23, 79));
+        let Some(state) = self.vi_mode.as_mut() else {
+            return;
+        };
+        // Character-based dispatch — works for both `Key::Character`
+        // and `event.text` paths.
+        let ch = text.and_then(|s| s.chars().next()).unwrap_or('\0');
+        match ch {
+            'h' => state.col = state.col.saturating_sub(1),
+            'l' => state.col = (state.col + 1).min(max_col),
+            'k' => state.row = state.row.saturating_sub(1),
+            'j' => state.row = (state.row + 1).min(max_row),
+            '0' | '^' => state.col = 0,
+            '$' => state.col = max_col,
+            'g' => state.row = 0,
+            'G' => state.row = max_row,
+            'H' => state.row = 0,
+            'M' => state.row = max_row / 2,
+            'L' => state.row = max_row,
+            _ => {
+                // Arrow keys also navigate.
+                match key {
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        state.col = state.col.saturating_sub(1);
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        state.col = (state.col + 1).min(max_col);
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        state.row = state.row.saturating_sub(1);
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        state.row = (state.row + 1).min(max_row);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn hint_key(&mut self, key: &Key, text: Option<&str>) {
         match key {
             Key::Named(NamedKey::Escape) => {
@@ -3445,6 +3513,18 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if self.context_menu.is_some() {
                     self.context_menu_key(&event.logical_key, event_loop);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Cycle 299: vi-mode key dispatch (sub-cycle 2). When
+                // vi_mode is Some, intercept keys for vi-style
+                // navigation before they reach the PTY. h/j/k/l move
+                // the vi cursor; 0/$/g/G jump; Esc exits.
+                if self.vi_mode.is_some() {
+                    self.vi_mode_key(&event.logical_key, text);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
