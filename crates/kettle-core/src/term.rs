@@ -515,17 +515,25 @@ impl Terminal {
                     runs.push(Vec::new());
                 }
                 let marks: Vec<char> = cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default();
-                runs.last_mut().unwrap().push((
-                    RawCell {
-                        fg: fg_id_bits(cell.fg),
-                        // Underline color carries the placement id (0/absent
-                        // ⇒ any placement); spec §"Unicode placeholders".
-                        placement_id: cell.underline_color().map(fg_id_bits).unwrap_or(0),
-                        diacritics: CellDiacritics::parse(&marks),
-                    },
-                    top + p.line.0 as i64,
-                    p.column.0,
-                ));
+                // `last_mut().expect(...)` is safe: either we just pushed
+                // an empty Vec above (`runs.push(Vec::new())`) or
+                // `contiguous` was true *and* runs wasn't empty (the
+                // negation of the if-condition). Either way `runs` carries
+                // at least one entry. Documented via `expect` so a future
+                // refactor breaking the invariant fails clearly.
+                runs.last_mut()
+                    .expect("runs non-empty after the conditional push above")
+                    .push((
+                        RawCell {
+                            fg: fg_id_bits(cell.fg),
+                            // Underline color carries the placement id (0/absent
+                            // ⇒ any placement); spec §"Unicode placeholders".
+                            placement_id: cell.underline_color().map(fg_id_bits).unwrap_or(0),
+                            diacritics: CellDiacritics::parse(&marks),
+                        },
+                        top + p.line.0 as i64,
+                        p.column.0,
+                    ));
                 last = Some((p.line.0, p.column.0 as i32));
             } else {
                 last = None;

@@ -129,12 +129,19 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
     }
     // Finite, non-loading loop count: freeze on the last shown frame once
     // all passes have elapsed.
+    //
+    // The three `shown.last().expect(...)` calls below are safe because we
+    // early-returned at line `if shown.is_empty() { return clamp_current(); }`
+    // — past that point `shown` carries at least one entry, so `last()`
+    // never returns None. Documenting via `expect` rather than `unwrap`
+    // so a future refactor that breaks the invariant fails with a
+    // pinpointed message instead of a bare `unwrap on None`.
     if !st.loading && st.loops > 0 && elapsed_ms >= total * st.loops as u128 {
-        return shown.last().unwrap().0;
+        return shown.last().expect("shown non-empty after early-return").0;
     }
     // Loading mode never loops: hold the last shown frame at/after the end.
     if st.loading && elapsed_ms >= total {
-        return shown.last().unwrap().0;
+        return shown.last().expect("shown non-empty after early-return").0;
     }
     let mut t = elapsed_ms % total;
     for &(idx, g) in &shown {
@@ -143,7 +150,7 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
         }
         t -= g;
     }
-    shown.last().unwrap().0
+    shown.last().expect("shown non-empty after early-return").0
 }
 
 /// What a kitty APC resolved to.
@@ -346,7 +353,15 @@ impl KittyState {
             if more {
                 return KittyOut::None;
             }
-            let (fid, Acc { control, payload }) = self.frame_in_flight.take().unwrap();
+            // `take()` is safe because the `get_or_insert_with(...)` above
+            // guarantees `frame_in_flight` is `Some` by this point — we
+            // either matched an existing slot or just inserted one. Using
+            // `expect` documents that invariant so a future refactor that
+            // breaks it fails with a pinpointed message.
+            let (fid, Acc { control, payload }) = self
+                .frame_in_flight
+                .take()
+                .expect("frame_in_flight is Some after get_or_insert_with");
             if let Some(patch) = decode(&control, &payload) {
                 let fc = parse_control(&control);
                 let g = |k: &str| fc.get(k).and_then(|v| v.parse::<u32>().ok());
