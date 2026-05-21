@@ -6,6 +6,45 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-05-21
+
+Feature-bump release — adds Quake-style dropdown via the cycle-302
+remote-control IPC.
+
+### Added — `--toggle` (Quake / Yakuake / Tilda dropdown UX)
+
+`kettle --toggle` flips the running kettle window's visibility,
+piggybacking on the cycle-302 remote-control IPC. The user binds
+their compositor / DE / OS existing global-hotkey mechanism to
+`kettle --toggle` — sidesteps the cross-platform global-hotkey
+problem entirely (no XGrabKey / Carbon HotKey / RegisterHotKey
+code per OS).
+
+  GNOME       Settings → Keyboard → Custom Shortcuts → `kettle --toggle`
+  KDE         System Settings → Shortcuts → Custom
+  Sway        bindsym $mod+grave exec kettle --toggle
+  Hyprland    bind = SUPER, grave, exec, kettle --toggle
+  macOS       Karabiner / Raycast / Hammerspoon
+  Windows 11  PowerToys Keyboard Manager / AutoHotKey
+
+Protocol extension: the cycle-302 remote-control file now also
+accepts the `toggle-window` command. Receiver calls
+`window.set_visible(!is_visible()) + focus_window` so the window
+pops above other windows when returning to visible (typical
+Quake / Yakuake / Tilda behavior).
+
+CLI surface:
+  --toggle    sugar that writes `toggle-window` to the
+              `--remote-file` path + exits.
+
+Protocol v1.7 (one command per line — receiver-side):
+  send-text TEXT     write TEXT (with `\n` → newline) to PTY
+  toggle-window      flip window visibility (Quake dropdown)
+  new-tab            recognized but not yet implemented (logs warn)
+  # ...              comments + empty lines skipped
+
+Workspace tests 267 stay green.
+
 ## [1.6.0] — 2026-05-21
 
 Feature-bump release — adds remote-control IPC (kitty `@ send-text`

@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "kettle"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-config"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "bitflags 2.11.1",
  "log",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-core"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-render"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ui"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-vt"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "base64",
  "flate2",
