@@ -1,0 +1,366 @@
+.\" kettle.1 - manual page for kettle terminal emulator
+.\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
+.\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
+.TH KETTLE 1 "2026-05-21" "kettle" "User Commands"
+.
+.SH NAME
+kettle \- fast, cross-platform, GPU-accelerated terminal emulator
+.
+.SH SYNOPSIS
+.B kettle
+.RI [ OPTIONS ]
+.RI [ \-\-\ COMMAND
+.RI [ ARGS... ]]
+.
+.SH DESCRIPTION
+.B kettle
+is a Rust-based terminal emulator combining the best ideas of
+.BR Ghostty ,
+.BR Terminator ,
+.BR kitty ,
+.B Alacritty
+and
+.B WezTerm
+into one tool. Cross-platform (Linux, macOS, Windows), GPU-accelerated
+via
+.BR wgpu ,
+and built on the battle-tested
+.B alacritty_terminal
+VT engine.
+.PP
+Features include split panes (Terminator-style binary tree),
+multiple tabs with drag-to-reorder + activity / silence / bell
+indicators, inline images (sixel, kitty graphics, iTerm2 inline
+image protocols), OSC 8 hyperlinks, OSC 133 shell-integration
+jump-to-prompt, ligatures, infinite scrollback, fuzzy-search
+overlays (command palette, themes, SSH-host launcher), undo
+close tab, duplicate tab/pane, and broadcast / group-input mode.
+.PP
+Without arguments
+.B kettle
+launches a windowed session running the user's default shell.
+.
+.SH OPTIONS
+.SS Launch
+.TP
+.BI \-e \ "PROGRAM \fR[\fIARGS...\fR]"
+Run
+.I PROGRAM
+instead of the default shell. Everything after
+.B \-e
+is treated as the command and its arguments.
+.TP
+.BI \-\-working-directory \ "DIR" \fR,\fP\fB\ \-d\ \fIDIR
+Set the initial working directory for the launched program.
+Hard-fails with a non-zero exit status if
+.I DIR
+does not exist (catches typos at launch time, not at the first
+.B cd
+inside the running shell).
+.TP
+.BI \-\-config \ FILE
+Load configuration from
+.I FILE
+instead of the auto-detected path. Hard-fails if the path doesn't exist.
+.
+.SS Introspection (prints and exits)
+.TP
+.B \-\-version
+Print version string (with the git SHA on git checkouts) and exit.
+.TP
+.B \-\-help
+Print every flag and its description.
+.TP
+.B \-\-config-path
+Print the resolved config-file path (or the fallback message if no
+config is loaded) and exit.
+.TP
+.B \-\-check-config
+Validate the resolved config and print every effective setting +
+diagnostic lines for unknown keys / malformed values.
+.TP
+.B \-\-print-default-config
+Print every option with its default value, in the Ghostty-style
+.RI """ key " = " value """
+format. Useful as a starting point for
+.IR ~/.config/kettle/config .
+.TP
+.B \-\-gpu-info
+Print the
+.B wgpu
+adapter / backend / driver / texture-limit details kettle would
+use on this machine. Useful for "blank window" / "no GPU adapter"
+bug reports.
+.TP
+.B \-\-list-themes
+Print every bundled theme name (>500 themes, sourced from the
+Ghostty + iTerm2-Color-Schemes sets).
+.TP
+.B \-\-list-actions
+Print every recognized keybind action name + every alias.
+.TP
+.B \-\-list-keybinds
+Print every active keybind (default + user-overridden), grouped
+by trigger.
+.TP
+.B \-\-list-ssh-hosts
+Print every
+.BR ssh-host
+declaration in the config + every freeform host kettle has cached
+from prior
+.B Ctrl+Shift+S
+launcher use.
+.TP
+.BI \-\-shell-integration \ "SHELL"
+Print the OSC 133 shell-integration snippet for
+.I SHELL
+(one of:
+.BR bash ", " zsh ", " fish ).
+Append to your rc file to enable jump-to-prompt
+.RB ( "Ctrl+Up" " / " "Ctrl+Down" )
+inside kettle:
+.PP
+.RS 4
+.EX
+kettle --shell-integration bash >> ~/.bashrc
+.EE
+.RE
+.TP
+.BI \-\-print-completions \ SHELL
+Print a tab-completion script for the kettle CLI in
+.IR SHELL 's
+native format. Supports
+.BR bash ", " zsh ", " fish ", " powershell ", "
+and
+.BR elvish .
+.
+.SS Debug / capture
+.TP
+.BI \-\-screenshot \ PATH
+Render one frame of the canonical kettle layout (single pane,
+TokyoNight Night theme) to a PNG file at
+.IR PATH .
+Honors
+.BR \-\-cols ", " \-\-rows ", and " \-\-config .
+Used by the visual-regression CI smoke + the
+.IR docs/PERFORMANCE.md
+baseline.
+.TP
+.BI \-\-screenshot-menu \ PATH
+Same as
+.B \-\-screenshot
+but renders with a synthetic right-click context menu open over
+the pane. Pins the menu render-pass-order against the v1.3.0
+blank-menu regression class.
+.TP
+.BI \-\-cols \ "N\fR, \fP\fB\-\-rows \ N"
+Override the rendered grid size (in cells) for
+.BR \-\-screenshot " / " \-\-screenshot-menu .
+Default 96x28.
+.
+.SH KEY BINDINGS
+Defaults (every binding remappable via
+.IR ~/.config/kettle/config 's
+.B keybind
+entries). Cmd is the macOS modifier; Ctrl on Linux / Windows.
+.SS Tabs
+.TP
+.B Ctrl+Shift+T
+new tab
+.TP
+.B Ctrl+Shift+W
+close focused pane (or tab if last pane)
+.TP
+.B Ctrl+PgUp/PgDn
+previous / next tab
+.TP
+.B Ctrl+Shift+,
+move tab left
+.TP
+.B Ctrl+Shift+.
+move tab right
+.TP
+.B Ctrl+Shift+Z
+undo close tab
+.TP
+.B Ctrl+Shift+D
+duplicate tab
+.SS Splits / panes
+.TP
+.B Ctrl+Shift+O
+split top/bottom (Terminator-exact)
+.TP
+.B Ctrl+Shift+E
+split left/right (Terminator-exact)
+.TP
+.B Ctrl+Shift+arrow
+focus pane in direction
+.TP
+.B Ctrl+Shift+X
+toggle pane zoom (maximize / restore)
+.TP
+.B Ctrl+Shift+Alt+D
+duplicate focused pane
+.SS Overlays
+.TP
+.B Ctrl+Shift+K
+command palette (fuzzy actions)
+.TP
+.B Ctrl+Shift+F
+find in scrollback (regex + smart-case)
+.TP
+.B Ctrl+Shift+H
+URL / path quick-select hints
+.TP
+.B Ctrl+Shift+S
+SSH-host launcher
+.SS Scrollback / clipboard
+.TP
+.B Ctrl+Shift+C
+copy selection
+.TP
+.B Ctrl+Shift+V
+paste (bracketed if app enabled it)
+.TP
+.B Ctrl+Up
+jump to previous OSC 133 prompt
+.TP
+.B Ctrl+Down
+jump to next OSC 133 prompt
+.SS Group / broadcast
+.TP
+.B Super+G
+toggle broadcast / group-input on this tab
+.SS Right-click
+A right click anywhere in a pane opens a context menu with:
+Copy / Paste / Split Right / Split Down / Close Pane / New Tab.
+.
+.SH CONFIGURATION
+Configuration lives at
+.IR ~/.config/kettle/config
+(Linux),
+.IR ~/Library/Application\ Support/kettle/config
+(macOS), or
+.IR %APPDATA%\\kettle\\config
+(Windows). Format is Ghostty-style
+.RI """ key " = " value """
+lines; everything after
+.B #
+is a comment.
+.PP
+See
+.B kettle\ \-\-print\-default\-config
+for every option with its default + inline docstring, and the
+.B kettle
+docs at
+.UR https://github.com/Reddimus/kettle/blob/main/docs/CONFIG.md
+.UE
+for the full reference.
+.
+.SH ENVIRONMENT
+.TP
+.B SHELL
+Program kettle launches when no
+.B \-e
+is given.
+.TP
+.B RUST_LOG
+Standard
+.B env_logger
+filter (e.g.
+.IR info ", " debug ", " "kettle=trace" ).
+Default
+.I warn
+surfaces session-restore failures + GPU init errors on stderr.
+.TP
+.B XDG_CONFIG_HOME
+Linux/Unix config root (default
+.IR ~/.config ).
+.TP
+.B KETTLE_VERSION " / " KETTLE_PREFIX
+Used by
+.B scripts/install-online.sh
+(the curl-pipe installer), not the
+.B kettle
+binary itself.
+.B KETTLE_VERSION
+pins which release to download;
+.B KETTLE_PREFIX
+overrides the install root.
+.
+.SH FILES
+.TP
+.I ~/.config/kettle/config
+User config file (Linux). See CONFIGURATION above.
+.TP
+.I ~/.local/share/kettle/sessions/
+Per-window session JSON (atomic write-then-rename); restored on next
+launch with the same window id. Failures are logged via
+.BR log::warn! .
+.TP
+.I ~/.local/bin/kettle
+Default install location for the
+.B scripts/install.sh
++
+.B install-online.sh
+paths.
+.TP
+.I ~/.local/share/applications/kettle.desktop
+XDG launcher (GNOME Activities / KDE Krunner / rofi).
+.TP
+.I ~/.local/share/icons/hicolor/scalable/apps/kettle.svg
+Scalable launcher icon (plus PNG fallbacks at 32 / 48 / 64 / 128 / 256).
+.
+.SH EXAMPLES
+.PP
+Launch a windowed kettle running
+.BR htop :
+.PP
+.RS 4
+.EX
+kettle -e htop
+.EE
+.RE
+.PP
+Validate the resolved config and exit:
+.PP
+.RS 4
+.EX
+kettle --check-config
+.EE
+.RE
+.PP
+Generate a fresh config file with every option commented:
+.PP
+.RS 4
+.EX
+kettle --print-default-config > ~/.config/kettle/config
+.EE
+.RE
+.PP
+Diagnose a rendering bug (capture for issue report):
+.PP
+.RS 4
+.EX
+kettle --gpu-info > /tmp/gpu.txt
+kettle --screenshot /tmp/kettle.png
+.EE
+.RE
+.
+.SH SEE ALSO
+.BR ssh (1),
+.BR tmux (1),
+.BR alacritty (1),
+.BR xterm (1)
+.PP
+Project home:
+.UR https://github.com/Reddimus/kettle
+.UE
+.
+.SH AUTHORS
+kettle contributors. See
+.UR https://github.com/Reddimus/kettle/graphs/contributors
+.UE
+for the full list. Bug reports + feature requests at
+.UR https://github.com/Reddimus/kettle/issues
+.UE .

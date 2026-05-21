@@ -88,6 +88,9 @@ jobs:
           cp packaging/linux/kettle.desktop dist/kettle/packaging/linux/
           cp packaging/linux/kettle.svg     dist/kettle/packaging/linux/
           cp packaging/linux/kettle-*.png   dist/kettle/packaging/linux/ || true
+          # Cycle 279: man page ships with the Linux tarball so the
+          # bundled install.sh can drop it into ~/.local/share/man/man1.
+          cp packaging/linux/kettle.1       dist/kettle/packaging/linux/
           install -Dm755 scripts/install.sh dist/kettle/install.sh
           # Cycle 230: also ship the OSC 133 shell-integration snippets
           # so a user can read/customize them before sourcing. The same

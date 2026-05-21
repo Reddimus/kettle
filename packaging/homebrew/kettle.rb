@@ -69,6 +69,10 @@ class Kettle < Formula
       # the binary + LICENSE + NOTICE + README + CHANGELOG +
       # packaging assets at the root.
       bin.install "kettle/kettle"
+      # Cycle 279: man page so `man kettle` works after install.
+      if File.exist?("kettle/packaging/linux/kettle.1")
+        man1.install "kettle/packaging/linux/kettle.1"
+      end
       # Keep the XDG launcher + icons so a `brew install`-ed kettle
       # also shows up in GNOME Activities / Ubuntu Super-key search
       # on Homebrew-on-Linux users (Linuxbrew). Same paths the

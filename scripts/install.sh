@@ -65,12 +65,14 @@ fi
 BIN_DIR="${PREFIX}/bin"
 APP_DIR="${PREFIX}/share/applications"
 ICON_BASE="${PREFIX}/share/icons/hicolor"
+MAN_DIR="${PREFIX}/share/man/man1"
 
 if [[ "${UNINSTALL}" -eq 1 ]]; then
   echo "Removing kettle from ${PREFIX}…"
   rm -f \
     "${BIN_DIR}/kettle" \
     "${APP_DIR}/kettle.desktop" \
+    "${MAN_DIR}/kettle.1" \
     "${ICON_BASE}/scalable/apps/kettle.svg" \
     "${ICON_BASE}/32x32/apps/kettle.png" \
     "${ICON_BASE}/48x48/apps/kettle.png" \
@@ -117,6 +119,15 @@ for size in 32 48 64 128 256; do
   fi
 done
 
+# 3b) Man page (cycle 279) — `man kettle` works after install if
+# /usr/share/man/<...>/man1 (or the user's $MANPATH) is searched. Many
+# distros pre-include ~/.local/share/man via /etc/manpath.config; if
+# not, the user can `export MANPATH=~/.local/share/man:$MANPATH`.
+MAN_SRC="${REPO_ROOT}/packaging/linux/kettle.1"
+if [[ -f "${MAN_SRC}" ]]; then
+  install -Dm644 "${MAN_SRC}" "${MAN_DIR}/kettle.1"
+fi
+
 # 4) Refresh caches so GNOME/KDE pick the new entry up immediately.
 # Both tools no-op silently if absent.
 command -v update-desktop-database >/dev/null 2>&1 \
@@ -131,6 +142,7 @@ cat <<MSG
     binary  : ${BIN_DIR}/kettle
     desktop : ${APP_DIR}/kettle.desktop
     icons   : ${ICON_BASE}/{scalable,256x256,…}/apps/kettle.{svg,png}
+    man page: ${MAN_DIR}/kettle.1   (try: man kettle)
 
 Open the GNOME Activities overview (Super key) and type "kettle" to
 launch it. If the entry doesn't appear immediately, log out and back

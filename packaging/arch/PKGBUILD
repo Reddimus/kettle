@@ -81,6 +81,10 @@ package() {
     install -Dm644 README.md "${pkgdir}/usr/share/doc/kettle/README.md"
     install -Dm644 CHANGELOG.md "${pkgdir}/usr/share/doc/kettle/CHANGELOG.md"
 
+    # Cycle 279: man page so `man kettle` works after install.
+    install -Dm644 packaging/linux/kettle.1 \
+        "${pkgdir}/usr/share/man/man1/kettle.1"
+
     # Cycle-230 shell-integration snippets so users can source them
     # directly rather than going through `kettle --shell-integration
     # <shell>` (which embeds the same bodies via include_str!).
