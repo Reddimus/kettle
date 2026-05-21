@@ -23,7 +23,7 @@ jobs:
           - os: windows-latest
             artifact: kettle-windows-x86_64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Guard against tagging drift — if someone tags `v1.3.10` but
       # forgot to bump `Cargo.toml` from `1.3.9`, the artifacts here
       # would end up with mixed versions (macOS .app bundle would say

@@ -46,7 +46,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Official RustSec action. Vendors `cargo-audit`, runs against the
       # advisory DB, posts a Checks-API annotation per finding, and on
       # `push` to `main` syncs a per-advisory tracking issue. The token

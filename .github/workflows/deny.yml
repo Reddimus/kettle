@@ -43,7 +43,7 @@ jobs:
     name: cargo deny check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The official EmbarkStudios action vendors `cargo-deny`
       # itself; no separate `cargo install` step needed. Pinned to
       # v2 so a future v3 breaking change doesn't silently flip

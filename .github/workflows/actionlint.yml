@@ -37,7 +37,7 @@ jobs:
     name: lint workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Download the actionlint binary via the upstream-maintained
       # install script and run it. Matches the canonical README
       # recipe — avoids the docker:// overhead on the runner and
