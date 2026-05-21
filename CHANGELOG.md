@@ -6,6 +6,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-05-21
+
+Patch release. Two additions:
+
+### Added
+- **Per-tab silence watcher (Terminator parity).** Companion to the
+  v1.3.0 output/bell tab indicators. An inactive tab whose unseen
+  output stopped arriving for ≥ N seconds now transitions to a dim
+  chrome-gray `Silent` dot — useful for tail-following long jobs
+  (`tail -f`, build watchers, network monitors) where the *absence*
+  of recent output is the signal you want.
+
+  Configurable via `tab-silence-threshold-ms` (default 10 s, clamped
+  `[1000, 600_000]`). Pure `classify_tab_activity` now takes
+  `now: Instant` + `silence_threshold: Duration` so the wall clock
+  flows in from the caller, keeping the function unit-testable. New
+  drift guard `classify_tab_activity_transitions_to_silent_after_threshold`
+  pins the threshold-boundary transitions + the bell-wins-over-silent
+  precedence + the backward-clock saturation guard.
+
+- **One-line online installer (Linux).** `curl -fsSL
+  https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh
+  | sh` downloads the latest release tarball, verifies the gzip
+  magic bytes, extracts to a `mktemp -d` (cleaned up on exit), and
+  runs the bundled `install.sh --skip-build`. POSIX-sh (dash /
+  bash / ash compatible), zero non-coreutils deps, shellcheck-
+  clean. Pin to a version via `KETTLE_VERSION=v1.3.3 sh`. Caught
+  a real Bash-vs-dash bug in the bundled install.sh during
+  end-to-end testing (now invoked via shebang, not `sh`).
+
+### Docs
+- README "Install" section reworked so the curl-pipe is the
+  headline. macOS / Windows / build-from-source are first-class
+  alternatives. New "CLI quick reference" heading wraps the
+  post-install command list.
+- `docs/INSTALL.md` brought into lock-step with the README's new
+  install hierarchy.
+- `docs/CONFIG.md` documents `tab-silence-threshold-ms` next to
+  `cursor-blink-interval`.
+- `docs/ARCHITECTURE.md` gains a mermaid `flowchart LR` of the
+  six-pass render order — the cycle-251 fix relied on implicit
+  reasoning about pass order; the diagram makes it explicit so a
+  future overlay layer doesn't repeat the v1.3.0/v1.3.1
+  blank-menu trap.
+
+### CI
+- **MSRV verification job.** Cargo.toml declared `rust-version =
+  "1.88"` but nothing in CI verified the workspace + its transitive
+  deps still built there. Adding `dtolnay/rust-toolchain@1.89` to
+  ci.yml surfaced the real bug — `cosmic-text@0.18.2` +
+  `smol_str@0.3.6` both require 1.89. Declared `rust-version`
+  bumped to match; new MSRV job catches the next dep-floor drift
+  at PR time instead of release time.
+
+Workspace tests: 260 → 261.
+
 ## [1.3.2] — 2026-05-21
 
 Patch release. Direct response to user feedback on v1.3.1: *"The

@@ -1213,14 +1213,23 @@
       the zsh placement (the doc wrote to `~/.config/kettle/_kettle`,
       not on `$fpath`; now `"${fpath[1]}/_kettle"`). v1.2.1.
 
+- [x] **Per-tab silence watcher** (Terminator parity, v1.3.3
+      cycle 252). Inactive tab whose unseen output stopped arriving
+      for ≥ `tab-silence-threshold-ms` (default 10 s, clamped
+      `[1000, 600_000]`) transitions from the cyan `Output` dot to a
+      dim chrome-gray `Silent` dot. Pure `classify_tab_activity`
+      now takes `now: Instant` + `silence_threshold: Duration` so
+      the wall clock flows in from the caller. Bell still wins over
+      Silent (explicit-attention > absence-signal). Backward-clock
+      saturation guard so a monotonic-clock skew between calls
+      doesn't false-trigger Silent.
+
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)
 - [ ] Native macOS menu bar
 - [ ] Code-signed/notarized macOS build; Windows MSI installer
 - [ ] Broader `vttest` conformance sweep
 - [ ] Ghost-render of the dragged tab segment during reorder
-- [ ] Per-tab silence-watcher (output stopped for ≥ N seconds —
-      complement to the v1.3.0 output-watcher dot)
 - [ ] Vi-mode for the scrollback (Alacritty parity)
 - [ ] tmux passthrough (`-CC` mode, iTerm2 parity)
 
