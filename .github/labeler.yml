@@ -1,0 +1,112 @@
+# Auto-labels PRs by which files they touch — used by
+# `.github/workflows/labeler.yml` which calls `actions/labeler@v5`.
+#
+# Each top-level key is a label name; the value is one or more glob
+# matchers. `any-glob-to-any-file` matches if ANY of the changed
+# files matches ANY of the globs.
+#
+# Labels are kept short and orthogonal — a PR touching, say, the
+# UI + the renderer + the docs gets three labels (ui + render + docs)
+# without a "ui-render-docs" combo label.
+
+# --- Per-crate labels (mirror the crates/ directory) ------------------
+config:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-config/**"
+
+vt:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-vt/**"
+
+core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-core/**"
+
+render:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-render/**"
+
+ui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-ui/**"
+
+# CLI binary crate — separate from `ui` so a clap / startup change
+# gets its own scan.
+cli:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle/**"
+
+# --- Cross-cutting ----------------------------------------------------
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "**/*.md"
+          - "CHANGELOG.md"
+          - "CONTRIBUTING.md"
+          - "CODE_OF_CONDUCT.md"
+          - "SECURITY.md"
+          - "README.md"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/**"
+          - ".github/dependabot.yml"
+          - "deny.toml"
+
+# CI workflows + repo automation files — kept as a separate, narrower
+# label that catches scaffolding changes the broader `ci` label
+# wouldn't.
+automation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/labeler.yml"
+          - ".github/ISSUE_TEMPLATE/**"
+          - ".github/PULL_REQUEST_TEMPLATE.md"
+
+packaging:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packaging/**"
+          - "scripts/install.sh"
+          - "scripts/install-online.sh"
+          - "flake.nix"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/*/tests/**"
+          - "**/tests.rs"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/Cargo.toml"
+          - "**/Cargo.lock"
+
+# `release` covers the version-bump + tag-day PR shape.
+release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "Cargo.toml"
+          - "Cargo.lock"
+          - "CHANGELOG.md"
+
+# `tooling` for `.editorconfig`, `Justfile`, `scripts/bench.sh`, etc.
+# — anything that touches the dev workflow but not the shipped
+# binary.
+tooling:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".editorconfig"
+          - "Justfile"
+          - "scripts/bench.sh"
+          - "rust-toolchain.toml"

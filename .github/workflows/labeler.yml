@@ -1,0 +1,41 @@
+# Auto-labels PRs by which files they touch, using rules in
+# `.github/labeler.yml`. Saves maintainers a manual triage step on
+# every PR and gives the PR list a glance-readable shape (`docs +
+# vt + tests` at a glance reads as "VT conformance + doc update").
+#
+# Triggered on:
+#   - pull_request_target (with `permissions.pull-requests: write`)
+#     so the action can apply labels. The bare `pull_request` event
+#     runs in a forked PR's context with no write perms — labels
+#     would silently no-op. `pull_request_target` runs in the base
+#     repo's context with the maintainer's token; safe here because
+#     we only read the file list, never check out the fork's code.
+
+name: PR Auto-label
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    name: Apply labels by changed paths
+    runs-on: ubuntu-latest
+    steps:
+      # The `actions/labeler` action vendors all the logic itself —
+      # no setup-node / etc. needed. Pinned to v5 (current latest as
+      # of v1.3.6) so a future v6 breaking change doesn't silently
+      # flip label assignment.
+      - uses: actions/labeler@v5
+        with:
+          configuration-path: .github/labeler.yml
+          # Don't sync-labels — keep manually-applied labels (e.g.,
+          # `triage` or `good-first-issue` set by a maintainer) on
+          # the PR even after the auto-labeler runs. The action's
+          # default is to remove non-matching labels; `sync-labels:
+          # false` flips that to additive-only.
+          sync-labels: false
