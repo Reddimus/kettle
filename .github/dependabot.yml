@@ -1,0 +1,50 @@
+# Dependabot keeps the Cargo + GitHub Actions surface patched without us
+# noticing the advisory. We group patch/minor updates so the review queue
+# stays one PR per ecosystem per week, not ten.
+version: 2
+updates:
+  # Rust / Cargo workspace at the repo root. Hits both
+  # `[workspace.dependencies]` and every per-crate Cargo.toml in `crates/`.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "deps"
+      include: scope
+    groups:
+      # Bundle non-breaking bumps so a slow review week doesn't pile up
+      # 15 PRs. Major bumps stay on their own so we can weigh each one.
+      cargo-patch-and-minor:
+        update-types:
+          - patch
+          - minor
+
+  # GitHub Actions used by ci.yml / release.yml. Same weekly cadence so
+  # the review surface lands together.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"
+      include: scope
+    groups:
+      actions-patch-and-minor:
+        update-types:
+          - patch
+          - minor
