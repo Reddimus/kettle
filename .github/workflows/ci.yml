@@ -97,6 +97,30 @@ jobs:
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
             echo "headless run OK (exit $rc)"'
+      - name: --screenshot-menu visual regression (Linux)
+        # Cycle 251: the v1.3.0/v1.3.1 blank-menu bug shipped because
+        # nothing in CI exercised the context menu's render path —
+        # `--screenshot` renders a no-overlay frame and the unit
+        # tests in `kettle-ui::app` only pinned the menu's behavior
+        # (highlight stepping, anchor clamping), not its appearance.
+        # The `--screenshot-menu` CLI flag + offscreen Vulkan adapter
+        # closes that gap.
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          ./target/release/kettle --screenshot-menu /tmp/kettle-menu.png
+          head -c 4 /tmp/kettle-menu.png | xxd | grep -q "8950 4e47"
+          # The menu render is larger than the no-menu baseline by
+          # ~5 KB on the default 96×28 grid (~30k pixels of panel
+          # chrome + 6 anti-aliased label rows). Floor at 40 KB —
+          # well above 0 / the byte-identical blank-menu regression
+          # would produce, well below the typical 55+ KB the real
+          # render outputs.
+          size=$(stat -c%s /tmp/kettle-menu.png)
+          test "$size" -gt 40000 \
+            || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
+          echo "screenshot-menu OK ($size bytes)"
       - name: --screenshot end-to-end (Linux)
         # Cycle 236: capture_png drives the real GPU text + quad +
         # image pipeline (bundled Nerd Font, glyphon shaping, wgpu

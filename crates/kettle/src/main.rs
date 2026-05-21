@@ -99,6 +99,14 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     screenshot: Option<std::path::PathBuf>,
 
+    /// Render like `--screenshot` but with a synthetic right-click
+    /// context menu open over the rendered pane. Useful for verifying
+    /// the menu's render path without opening the windowed app, and
+    /// for visual-regression tests in CI. Honors `--cols` / `--rows`
+    /// / `--config` the same as `--screenshot`. PNG-only.
+    #[arg(long, value_name = "PATH")]
+    screenshot_menu: Option<std::path::PathBuf>,
+
     /// Columns for `--screenshot` (default 96).
     #[arg(long, default_value_t = 96)]
     cols: u32,
@@ -502,7 +510,24 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    if let Some(out) = &cli.screenshot {
+    // Both `--screenshot` and `--screenshot-menu` (cycle 251) share
+    // the same pre-validation + config load + capture path; the only
+    // difference is the `DebugScene` passed to `capture_png_with`.
+    // The flags are mutually exclusive — pick the first one set.
+    let screenshot_target = cli
+        .screenshot
+        .as_ref()
+        .map(|p| (p, kettle_render::DebugScene::Default, "--screenshot"))
+        .or_else(|| {
+            cli.screenshot_menu.as_ref().map(|p| {
+                (
+                    p,
+                    kettle_render::DebugScene::ContextMenu,
+                    "--screenshot-menu",
+                )
+            })
+        });
+    if let Some((out, scene, flag_name)) = screenshot_target {
         // The renderer's `capture_png` writes via `image::save`, which
         // dispatches on file extension and is compiled with PNG-only
         // support (kettle-render/Cargo.toml: `features = ["png"]`).
@@ -517,14 +542,14 @@ fn main() -> anyhow::Result<()> {
             Some(e) if e.eq_ignore_ascii_case("png") => {}
             Some(e) => {
                 return Err(anyhow::anyhow!(
-                    "--screenshot {}: extension .{e} not supported; \
+                    "{flag_name} {}: extension .{e} not supported; \
                      only .png is built in",
                     out.display()
                 ));
             }
             None => {
                 return Err(anyhow::anyhow!(
-                    "--screenshot {}: missing .png extension",
+                    "{flag_name} {}: missing .png extension",
                     out.display()
                 ));
             }
@@ -553,11 +578,13 @@ fn main() -> anyhow::Result<()> {
         // every realistic screenshot fits.
         let cols = cli.cols.clamp(20, 400);
         let rows = cli.rows.clamp(8, 200);
-        // `capture_png` may shrink (cols, rows) further to fit the GPU
-        // texture limit at the active font size; show what was actually
-        // rendered, with a hint when it differs from the request so the
-        // user notices their cli args didn't fully apply.
-        let (actual_cols, actual_rows) = kettle_render::capture_png(&cfg, cols, rows, out)?;
+        // `capture_png_with` may shrink (cols, rows) further to fit
+        // the GPU texture limit at the active font size; show what
+        // was actually rendered, with a hint when it differs from the
+        // request so the user notices their cli args didn't fully
+        // apply.
+        let (actual_cols, actual_rows) =
+            kettle_render::capture_png_with(&cfg, cols, rows, out, scene)?;
         if actual_cols == cols && actual_rows == rows {
             println!("wrote {} ({cols}×{rows} cells)", out.display());
         } else {

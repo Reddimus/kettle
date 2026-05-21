@@ -262,6 +262,22 @@ pub struct Renderer {
     quads: QuadPipeline,
     /// Second quad pass drawn *after* text (pane dimming, scrollbar).
     overlay_quads: QuadPipeline,
+    /// Third quad pass drawn after the overlay quads — reserved for
+    /// the right-click context menu's shadow / panel / border /
+    /// highlight quads. Lives in its own pass so the menu's text
+    /// (rendered by `menu_text_renderer` below) lands *on top of* the
+    /// panel bg rather than underneath it. Cycle 251 split this out
+    /// after v1.3.0+v1.3.1 shipped a blank menu — opaque panel-bg
+    /// quad in `overlay_quads` was painted on top of the menu text
+    /// (which was bundled with all other text in the single
+    /// `text_renderer.render` call between `quads.draw` and
+    /// `overlay_quads.draw`).
+    menu_quads: QuadPipeline,
+    /// Dedicated TextRenderer for the context-menu rows. Shares
+    /// `atlas` + `viewport` with `text_renderer` (glyphon allows
+    /// multiple renderers against one atlas); rendered as the final
+    /// pass so menu labels sit above the panel bg.
+    menu_text_renderer: TextRenderer,
     imgs: imgpipe::ImagePipeline,
 
     font_family: String,
@@ -377,6 +393,9 @@ impl Renderer {
 
         let quads = QuadPipeline::new(&device, format);
         let overlay_quads = QuadPipeline::new(&device, format);
+        let menu_quads = QuadPipeline::new(&device, format);
+        let menu_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let imgs = imgpipe::ImagePipeline::new(&device, format);
 
         Ok(Renderer {
@@ -398,6 +417,8 @@ impl Renderer {
             search_buffer,
             quads,
             overlay_quads,
+            menu_quads,
+            menu_text_renderer,
             imgs,
             font_family: cfg.font_family.clone(),
             font_size,
@@ -502,6 +523,12 @@ impl Renderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        // Third quad pass — drawn after `over` so the right-click
+        // context menu's bg/shadow/border/highlight sit on top of
+        // every other UI element. The menu's text is rendered by
+        // `menu_text_renderer` after this pass so the labels land on
+        // top of the panel bg. Cycle 251.
+        let mut menu_q: Vec<QuadInstance> = Vec::new();
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::new();
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
@@ -983,6 +1010,15 @@ impl Renderer {
         // (where there's no specific pane to take an OSC 10 override from).
         let fg = theme.foreground;
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
+        // Menu text lives in its own areas vec so we can hand it to a
+        // dedicated `menu_text_renderer.prepare(...)` call after the
+        // main `text_renderer.prepare(...)`. Cycle 251 — drawing the
+        // menu's bg / shadow / border / highlight before the menu's
+        // text in the same pass painted text right under bg; this
+        // split fixes that by giving the menu its own
+        // bg→border→highlight→text pipeline at the end of the render
+        // pass.
+        let mut menu_areas: Vec<TextArea> = Vec::new();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
@@ -1110,13 +1146,19 @@ impl Renderer {
             }
         }
 
-        // Right-click context menu: floating panel with rows. Drawn last so
-        // it sits on top of every pane / image / hint chip. Background +
-        // highlight + separator lines go into `over` (the post-text quad
-        // pass) so the row-highlight tint reads as a chip *behind* the
-        // label text but *in front of* whatever pane content sits under
-        // the anchor.
+        // Right-click context menu — drawn in its own final pass
+        // (cycle 251). v1.3.0/v1.3.1 put the menu's panel-bg quad in
+        // `over` (drawn AFTER text), with the opaque bg covering the
+        // menu text underneath. Now: chrome quads go to `menu_q`
+        // (drawn after `over` via `self.menu_quads.draw`); row labels
+        // go to `menu_areas` (drawn via a dedicated
+        // `self.menu_text_renderer.render` call after the menu
+        // quads). The bg-under-text order finally matches reality.
         if let Some(menu) = &overlay.context_menu {
+            let chrome = menu_chrome_quads(menu, theme, cw, ch);
+            menu_q.extend(chrome);
+            // Row labels — collected into `menu_areas` so the second
+            // TextRenderer can prepare them as their own batch.
             let max_chars = menu
                 .rows
                 .iter()
@@ -1125,103 +1167,18 @@ impl Renderer {
                 .max()
                 .unwrap_or(0) as f32;
             let panel_w = (max_chars * cw + 40.0).max(180.0);
-            // Match the row_h chosen in the prep loop above so the
-            // label rect inside each row stays inside its background
-            // chip — easy to silently desync, easy to verify visually.
             let row_h = ch + 12.0;
             let sep_h = 8.0_f32;
-            let panel_h: f32 = menu
-                .rows
-                .iter()
-                .map(|r| if r.separator { sep_h } else { row_h })
-                .sum();
             let (ax, ay) = menu.anchor;
-            // Soft shadow under the panel — a single offset quad in
-            // near-black at low opacity. Gives the menu depth so it
-            // reads as floating *above* the pane content rather than
-            // pasted on. 4-px offset is the GTK / iTerm2 convention.
-            over.push(rect(
-                ax + 4.0,
-                ay + 4.0,
-                panel_w,
-                panel_h,
-                Rgb::new(0, 0, 0),
-                0.35,
-            ));
-            // Panel background — theme.background opaque. Matches the
-            // pane bg color the user is already calibrated for, so the
-            // menu reads as part of kettle's visual language rather
-            // than a system widget. Replaces the v1.3.0 palette[8]
-            // (chrome dim gray) which clashed with the pane underneath
-            // on themes that put the chrome and the pane bg at very
-            // different brightnesses.
-            over.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
-            // Subtle 1-px border in dim chrome — was palette[4] (full-
-            // opacity blue) in v1.3.0 which fought every other accent
-            // on screen. palette[8] at 0.65 gives the surface
-            // definition without yelling for attention.
-            // Top edge.
-            over.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
-            // Bottom edge.
-            over.push(rect(
-                ax,
-                ay + panel_h - 1.0,
-                panel_w,
-                1.0,
-                theme.palette[8],
-                0.65,
-            ));
-            // Left edge.
-            over.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
-            // Right edge.
-            over.push(rect(
-                ax + panel_w - 1.0,
-                ay,
-                1.0,
-                panel_h,
-                theme.palette[8],
-                0.65,
-            ));
-            // Row contents: highlight + separator lines + text. Keep
-            // a running y so separators take less vertical space.
             let mut row_y = ay;
             for (i, row) in menu.rows.iter().enumerate() {
                 if row.separator {
-                    // Centered 1-px line, inset more horizontally so
-                    // it reads as a divider rather than a panel edge.
-                    over.push(rect(
-                        ax + 12.0,
-                        row_y + sep_h * 0.5 - 0.5,
-                        panel_w - 24.0,
-                        1.0,
-                        theme.palette[8],
-                        0.55,
-                    ));
                     row_y += sep_h;
                     continue;
                 }
-                if i == menu.highlight && row.enabled {
-                    // Subtle blue tint on the highlighted row — was
-                    // palette[4] at 0.85 in v1.3.0 (Saturday-cartoon
-                    // bright). Now palette[4] at 0.18 — visible "you
-                    // are here" without overwhelming the label text.
-                    over.push(rect(
-                        ax + 1.0,
-                        row_y,
-                        panel_w - 2.0,
-                        row_h,
-                        theme.palette[4],
-                        0.18,
-                    ));
-                    // 2-px accent strip on the left of the highlighted
-                    // row — same shape as the cycle-178 active-tab
-                    // accent and the cycle-184 focused-pane border, so
-                    // "you are here" reads consistently across kettle's
-                    // chrome surfaces.
-                    over.push(rect(ax + 1.0, row_y, 2.0, row_h, theme.palette[4], 1.0));
-                }
-                // Label text. Disabled rows render at ~55% opacity via
-                // a custom color blend toward the panel bg.
+                // Disabled rows blend toward the panel bg so a greyed
+                // Copy reads as ~55% transparent without alpha-blending
+                // through to whatever lives under the panel.
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
@@ -1231,7 +1188,7 @@ impl Renderer {
                         ((theme.foreground.b as u16 + theme.background.b as u16 * 5) / 6) as u8,
                     )
                 };
-                areas.push(TextArea {
+                menu_areas.push(TextArea {
                     buffer: &self.context_menu_buffers[i],
                     left: ax + 16.0,
                     top: row_y + 6.0,
@@ -1258,6 +1215,18 @@ impl Renderer {
             areas,
             &mut self.swash,
         )?;
+        // Second TextRenderer prepare — context-menu rows. Empty
+        // `menu_areas` is fine; glyphon's prepare handles a zero-area
+        // batch as a no-op.
+        self.menu_text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            menu_areas,
+            &mut self.swash,
+        )?;
         self.quads
             .upload(&self.device, &self.queue, [sw, sh], &quads);
         self.imgs
@@ -1265,6 +1234,8 @@ impl Renderer {
         self.imgs.gc(&live);
         self.overlay_quads
             .upload(&self.device, &self.queue, [sw, sh], &over);
+        self.menu_quads
+            .upload(&self.device, &self.queue, [sw, sh], &menu_q);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -1312,6 +1283,15 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
             // Dimming + scrollbar sit on top of glyphs.
             self.overlay_quads.draw(&mut pass);
+            // Cycle 251: the right-click context menu owns the last
+            // two passes — chrome quads (shadow / bg / border /
+            // highlight) then row labels — so the menu sits above
+            // every other UI element AND the row labels sit above the
+            // menu's own panel bg. Both calls are cheap no-ops when
+            // the menu is closed (empty uploads / zero areas).
+            self.menu_quads.draw(&mut pass);
+            self.menu_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -1686,6 +1666,109 @@ fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
     }
 }
 
+/// Build the right-click context-menu chrome quads — shadow, panel
+/// background, 1-px border on each edge, per-row highlight bg + 2-px
+/// accent strip, and inter-row separator lines. Pure: takes the menu
+/// state + theme + cell metrics, returns the quads in draw order
+/// (shadow first so the bg paints over it; bg second so the border
+/// sits on its edge; etc.).
+///
+/// Shared between [`Renderer::render_frame`] and [`capture_png_with`]
+/// so the live menu and the headless visual-regression screenshot
+/// produce identical pixels. Cycle 251.
+fn menu_chrome_quads(
+    menu: &ContextMenu,
+    theme: &kettle_config::Theme,
+    cw: f32,
+    ch: f32,
+) -> Vec<QuadInstance> {
+    let mut out: Vec<QuadInstance> = Vec::new();
+    let max_chars = menu
+        .rows
+        .iter()
+        .filter(|r| !r.separator)
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(0) as f32;
+    let panel_w = (max_chars * cw + 40.0).max(180.0);
+    let row_h = ch + 12.0;
+    let sep_h = 8.0_f32;
+    let panel_h: f32 = menu
+        .rows
+        .iter()
+        .map(|r| if r.separator { sep_h } else { row_h })
+        .sum();
+    let (ax, ay) = menu.anchor;
+
+    // Soft drop shadow — offset 4 px down-right at low opacity for
+    // depth (GTK / iTerm2 convention).
+    out.push(rect(
+        ax + 4.0,
+        ay + 4.0,
+        panel_w,
+        panel_h,
+        Rgb::new(0, 0, 0),
+        0.35,
+    ));
+    // Panel background — theme.background opaque so the menu inherits
+    // the pane bg color the user is calibrated for.
+    out.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
+    // 1-px border in dim chrome, each edge separate so a future tweak
+    // can color them individually if needed.
+    out.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
+    out.push(rect(
+        ax,
+        ay + panel_h - 1.0,
+        panel_w,
+        1.0,
+        theme.palette[8],
+        0.65,
+    ));
+    out.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
+    out.push(rect(
+        ax + panel_w - 1.0,
+        ay,
+        1.0,
+        panel_h,
+        theme.palette[8],
+        0.65,
+    ));
+
+    // Per-row highlight + separators.
+    let mut row_y = ay;
+    for (i, row) in menu.rows.iter().enumerate() {
+        if row.separator {
+            out.push(rect(
+                ax + 12.0,
+                row_y + sep_h * 0.5 - 0.5,
+                panel_w - 24.0,
+                1.0,
+                theme.palette[8],
+                0.55,
+            ));
+            row_y += sep_h;
+            continue;
+        }
+        if i == menu.highlight && row.enabled {
+            // Soft accent tint across the row.
+            out.push(rect(
+                ax + 1.0,
+                row_y,
+                panel_w - 2.0,
+                row_h,
+                theme.palette[4],
+                0.18,
+            ));
+            // 2-px accent strip on the left of the highlighted row —
+            // same pattern as the cycle-178 active-tab accent and
+            // cycle-184 focused-pane border.
+            out.push(rect(ax + 1.0, row_y, 2.0, row_h, theme.palette[4], 1.0));
+        }
+        row_y += row_h;
+    }
+    out
+}
+
 fn srgb(c: u8) -> f64 {
     let c = c as f64 / 255.0;
     if c <= 0.04045 {
@@ -1734,16 +1817,51 @@ fn gc(c: Rgb) -> GColor {
 /// per-tab `✕`, trailing `+`), with a themed shell session on the left and a
 /// monitor-style readout on the right. Content is synthetic; the rendering
 /// pipeline is identical to the live one.
-/// Render a screenshot PNG; returns the **actual** (cols, rows) used after
-/// the cycle-119 texture-limit cap so the CLI can report what was rendered
-/// rather than what was requested (which can differ when the user asks for
-/// more cells than the wgpu 8192-px-per-side limit allows at the active
-/// font size).
+/// Which synthetic scene to render in [`capture_png_with`]. Cycle 251.
+///
+/// The default screenshot path renders a single-pane, single-tab,
+/// no-overlay representative frame — what `kettle --screenshot` ships
+/// today. `ContextMenu` adds a synthetic right-click context menu over
+/// the rendered pane so the menu's render path can be visually verified
+/// without opening the windowed app. Visible only via the
+/// `kettle --screenshot-menu PATH` CLI flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugScene {
+    /// Existing `--screenshot` behavior (cycle 168).
+    #[default]
+    Default,
+    /// Render with a synthetic right-click context menu open over the
+    /// pane. The menu carries the eight items kettle ships (Copy,
+    /// Paste, sep, Split Right, Split Down, Close Pane, sep, New
+    /// Tab) with the first enabled row highlighted, anchored at a
+    /// fixed position so the resulting PNG is byte-deterministic
+    /// across runs.
+    ContextMenu,
+}
+
+/// Back-compat wrapper for the cycle-168 `capture_png` callers (the CLI
+/// smoke + the cycle-236 `--screenshot` end-to-end CI step). Always
+/// renders [`DebugScene::Default`].
 pub fn capture_png(
     cfg: &Config,
     cols: u32,
     rows: u32,
     out: &std::path::Path,
+) -> Result<(u32, u32)> {
+    capture_png_with(cfg, cols, rows, out, DebugScene::Default)
+}
+
+/// Render a screenshot PNG; returns the **actual** (cols, rows) used after
+/// the cycle-119 texture-limit cap so the CLI can report what was rendered
+/// rather than what was requested (which can differ when the user asks for
+/// more cells than the wgpu 8192-px-per-side limit allows at the active
+/// font size).
+pub fn capture_png_with(
+    cfg: &Config,
+    cols: u32,
+    rows: u32,
+    out: &std::path::Path,
+    scene: DebugScene,
 ) -> Result<(u32, u32)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
@@ -1775,6 +1893,13 @@ pub fn capture_png(
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let mut swash = SwashCache::new();
         let mut quads = QuadPipeline::new(&device, format);
+        // Second pipelines for the `DebugScene::ContextMenu` overlay.
+        // Allocated unconditionally (small, cheap) so the render pass
+        // can always call `draw` / `render` on them — empty uploads
+        // are a no-op. Mirrors the live `Renderer` (cycle 251).
+        let mut menu_quads_pipe = QuadPipeline::new(&device, format);
+        let mut menu_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
         let theme = &cfg.theme;
         let fam = cfg.font_family.clone();
@@ -2009,6 +2134,152 @@ pub fn capture_png(
             &mut swash,
         )?;
 
+        // `DebugScene::ContextMenu`: build a synthetic context menu at
+        // a fixed anchor (so the resulting PNG is byte-deterministic)
+        // with the same eight items the live `App::context_menu_items`
+        // ships. Quads go through the shared `menu_chrome_quads`
+        // helper; text areas are built inline here because the
+        // capture-path text-buffer pool is local to this function.
+        // Cycle 251.
+        let mut menu_text_buffers: Vec<TextBuffer> = Vec::new();
+        let mut menu_q: Vec<QuadInstance> = Vec::new();
+        let mut menu_areas: Vec<TextArea> = Vec::new();
+        if scene == DebugScene::ContextMenu {
+            // 8 items mirroring `App::context_menu_items`. Copy is
+            // *disabled* in the synthetic scene because there is no
+            // selection (matches the more-common state a user opens
+            // the menu in). Highlight starts on Paste (idx 1), the
+            // first enabled non-separator row.
+            let rows = vec![
+                ContextMenuRow {
+                    label: "Copy".into(),
+                    separator: false,
+                    enabled: false,
+                },
+                ContextMenuRow {
+                    label: "Paste".into(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuRow {
+                    label: String::new(),
+                    separator: true,
+                    enabled: false,
+                },
+                ContextMenuRow {
+                    label: "Split Right".into(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuRow {
+                    label: "Split Down".into(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuRow {
+                    label: "Close Pane".into(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuRow {
+                    label: String::new(),
+                    separator: true,
+                    enabled: false,
+                },
+                ContextMenuRow {
+                    label: "New Tab".into(),
+                    separator: false,
+                    enabled: true,
+                },
+            ];
+            let menu = ContextMenu {
+                // Anchor at a fixed offset from the top-left chrome.
+                // Keeps the resulting PNG deterministic regardless of
+                // window dimensions (--cols / --rows from CLI).
+                anchor: (pad + cw * 2.0, tab_h + pad + ch * 2.0),
+                rows,
+                highlight: 1,
+            };
+            menu_q.extend(menu_chrome_quads(&menu, theme, cw, ch));
+
+            // Text areas — one TextBuffer per non-separator row.
+            // Positioning mirrors the live renderer's menu block.
+            let max_chars = menu
+                .rows
+                .iter()
+                .filter(|r| !r.separator)
+                .map(|r| r.label.chars().count())
+                .max()
+                .unwrap_or(0) as f32;
+            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            let row_h = ch + 12.0;
+            let sep_h = 8.0_f32;
+            let (ax, ay) = menu.anchor;
+            // Allocate buffers first (one per row, separators get an
+            // empty placeholder so indices align with `menu.rows`).
+            for row in &menu.rows {
+                let mut buf = TextBuffer::new(&mut font_system, metrics);
+                if !row.separator {
+                    buf.set_metrics(&mut font_system, metrics);
+                    buf.set_size(&mut font_system, Some(panel_w), Some(row_h));
+                    buf.set_text(
+                        &mut font_system,
+                        &row.label,
+                        &Attrs::new().family(Family::Name(&fam)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buf.shape_until_scroll(&mut font_system, false);
+                }
+                menu_text_buffers.push(buf);
+            }
+            // Now build TextAreas referring to the freshly-shaped
+            // buffers. Borrow rules: collect indices first, then push
+            // areas in a second pass so the borrow checker sees a
+            // single shared borrow at the time of `menu_areas.push`.
+            let mut row_y = ay;
+            for (i, row) in menu.rows.iter().enumerate() {
+                if row.separator {
+                    row_y += sep_h;
+                    continue;
+                }
+                let fg = if row.enabled {
+                    theme.foreground
+                } else {
+                    Rgb::new(
+                        ((theme.foreground.r as u16 + theme.background.r as u16 * 5) / 6) as u8,
+                        ((theme.foreground.g as u16 + theme.background.g as u16 * 5) / 6) as u8,
+                        ((theme.foreground.b as u16 + theme.background.b as u16 * 5) / 6) as u8,
+                    )
+                };
+                menu_areas.push(TextArea {
+                    buffer: &menu_text_buffers[i],
+                    left: ax + 16.0,
+                    top: row_y + 6.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: row_y as i32,
+                        right: (ax + panel_w) as i32,
+                        bottom: (row_y + row_h) as i32,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+                row_y += row_h;
+            }
+        }
+        menu_quads_pipe.upload(&device, &queue, [wf, hf], &menu_q);
+        menu_text_renderer.prepare(
+            &device,
+            &queue,
+            &mut font_system,
+            &mut atlas,
+            &vp,
+            menu_areas,
+            &mut swash,
+        )?;
+
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kettle-screenshot-target"),
             size: wgpu::Extent3d {
@@ -2073,6 +2344,12 @@ pub fn capture_png(
             });
             quads.draw(&mut pass);
             text_renderer.render(&atlas, &vp, &mut pass)?;
+            // Cycle 251: menu chrome + menu text, same pass order as
+            // the live `Renderer::render_frame`. Cheap no-ops for the
+            // `DebugScene::Default` path because both uploads are
+            // empty.
+            menu_quads_pipe.draw(&mut pass);
+            menu_text_renderer.render(&atlas, &vp, &mut pass)?;
         }
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
