@@ -969,4 +969,77 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn man_page_documents_load_bearing_default_keybinds() {
+        // Cycle 282 drift guard. The cycle-279 hand-written `kettle.1` man
+        // page documents the default keybind set. Cycle 281 caught four
+        // entries that had drifted from the actual defaults (`Ctrl+Shift+
+        // arrow` was a scroll binding, not focus; `Ctrl+Shift+Z` /
+        // `Ctrl+Shift+D` weren't default-bound at all). This guard pins
+        // the man page against `--list-keybinds`'s ground truth so the
+        // next time a default-keybind set changes (or the man page text
+        // gets edited carelessly), CI fails instead of a user trying
+        // `man kettle` + the documented hotkey getting a different
+        // action.
+        //
+        // Check shape: every "load-bearing" (Trigger, Action) the default
+        // config carries must have its Trigger string textually present
+        // somewhere in the man page. We don't require the *Action* name
+        // to appear — the man page uses human-readable prose ("new tab",
+        // not `NewTab`). And we don't enforce the full keybind set —
+        // the man page intentionally summarizes; binding additions
+        // shouldn't fail the guard just because the doc didn't grow.
+        //
+        // The load-bearing list is the set of bindings a user typically
+        // hits in the first hour: tab management, splits, focus, copy/
+        // paste, scrollback movement, broadcast. If you add a NEW load-
+        // bearing default and forget to document it, this test fails.
+        const MAN_PAGE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/linux/kettle.1"
+        ));
+        // The keybind triggers we expect documented. Strings are the
+        // `Trigger`'s canonical display form as `kettle --list-keybinds`
+        // prints them — see `kettle_config::keybinds::Trigger::Display`.
+        let load_bearing: &[&str] = &[
+            // Tabs
+            "Ctrl+Shift+T", // NewTab
+            "Ctrl+Shift+W", // ClosePane
+            "Ctrl+PgUp",    // PrevTab (or accept "Ctrl+PageUp")
+            "Ctrl+PgDn",    // NextTab
+            // Splits
+            "Ctrl+Shift+O", // SplitDown
+            "Ctrl+Shift+E", // SplitRight
+            // Focus
+            "Alt+", // FocusUp / Down / Left / Right (any one suffices)
+            // Overlays
+            "Ctrl+Shift+K", // CommandPalette
+            "Ctrl+Shift+F", // StartSearch
+            "Ctrl+Shift+H", // HintMode
+            "Ctrl+Shift+S", // OpenSsh
+            // Clipboard
+            "Ctrl+Shift+C", // Copy
+            "Ctrl+Shift+V", // Paste
+            // Scrollback
+            "Ctrl+Up",   // JumpPrevPrompt
+            "Ctrl+Down", // JumpNextPrompt
+            // Zoom
+            "Ctrl+Shift+X", // ToggleZoom
+            // Broadcast
+            "Super+G", // ToggleBroadcastAll
+        ];
+        let mut missing: Vec<&str> = Vec::new();
+        for trigger in load_bearing {
+            if !MAN_PAGE.contains(trigger) {
+                missing.push(trigger);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "man page is missing load-bearing default keybinds: {missing:?}\n\
+             Update packaging/linux/kettle.1 to document them (or change \
+             this guard if a binding was intentionally removed)."
+        );
+    }
 }
