@@ -1,0 +1,55 @@
+# EditorConfig keeps indent + charset consistent across IDEs without
+# a per-editor settings file (https://editorconfig.org/). Most editors
+# read this automatically: VS Code, JetBrains IDEs, neovim with a
+# plugin, emacs with `editorconfig.el`, Sublime, Helix.
+
+root = true
+
+# Sensible defaults: UTF-8, LF line endings, trim trailing whitespace,
+# final newline, soft tabs. Cargo's rustfmt enforces 4-space indent on
+# every .rs file already; codifying it here keeps non-Rust files
+# (TOML, YAML, Markdown, shell, build scripts) in the same key.
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Rust — matches `cargo fmt` defaults so a save-on-format in any IDE
+# produces output cargo fmt won't re-touch.
+[*.rs]
+indent_size = 4
+
+# TOML — matches the Cargo manifest and crates.io conventions.
+[*.toml]
+indent_size = 2
+
+# YAML — GitHub Actions / Dependabot / Issue templates. 2 spaces is
+# the canonical YAML indent and most actions parsers reject tabs
+# outright.
+[*.{yml,yaml}]
+indent_size = 2
+
+# JSON — kept at 2 to match jq / VS Code default for settings.json,
+# tsconfig.json, etc.
+[*.json]
+indent_size = 2
+
+# Markdown — 2-space indent for nested lists is the standard rendered
+# form. Don't trim trailing whitespace because two trailing spaces on
+# a line is a hard line break in Markdown.
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false
+
+# Shell scripts — POSIX sh + bash. install.sh / install-online.sh use
+# 2-space indent; keep that consistent.
+[*.{sh,bash}]
+indent_size = 2
+
+# Makefile (in case one ever lands) — *requires* tabs for recipe
+# lines; codify so an editor doesn't silently convert them.
+[Makefile]
+indent_style = tab
