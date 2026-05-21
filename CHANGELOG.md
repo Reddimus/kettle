@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-05-21
+
+Patch release.
+
+### Added
+- **Ghost-render of the dragged tab during reorder.** The cycle-249
+  drag-to-reorder snapped the live bar to the new tab order at each
+  boundary crossing — functionally correct but the dragged segment
+  visibly teleported. Adds the standard chrome / browser-tab
+  affordance: a translucent ghost copy of the active segment floats
+  under the cursor while the drag is active (theme.background at
+  0.85 opacity + matching palette[4]/palette[3]-under-broadcast
+  accent strip + soft drop shadow). Anchor clamped to bar width via
+  the same shape as the cycle-245 context-menu clamp.
+- **`KETTLE_PREFIX` env var in `install-online.sh`.** Composes with
+  `KETTLE_VERSION` so a pinned-version system-wide install is one
+  line:
+  ```sh
+  curl -fsSL .../install-online.sh \
+    | KETTLE_VERSION=v1.3.5 KETTLE_PREFIX=/usr/local sh
+  ```
+  Default (env unset) → `~/.local/`, unchanged.
+
+### Tooling
+- **`.editorconfig`** at the repo root. Codifies indent + charset +
+  line-ending rules across IDEs (VS Code, JetBrains, neovim, emacs,
+  Sublime, Helix all read it). 4-space Rust matches cargo fmt;
+  2-space TOML/YAML/JSON/Markdown/sh; tab Makefile. Existing files
+  already conform.
+
+No code-behavior changes from v1.3.4. Workspace tests stay at 261
+green; `--screenshot-menu` still produces the canonical menu PNG.
+
 ## [1.3.4] — 2026-05-21
 
 Patch release. Theme: **production-grade supply-chain + governance
