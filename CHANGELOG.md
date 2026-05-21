@@ -6,6 +6,135 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-05-21
+
+Feature-bump release — eight new user-facing capabilities landed in
+direct response to the parity sweep against other open-source
+terminals. First minor version bump (was 1.3.11 → 1.4.0) because
+the release introduces new public surface (config keys + CLI flags
++ library types) rather than only patch-level changes.
+
+### Added — Selection / output
+
+- **Smart selection (iTerm2 parity).** Double-click on a URL /
+  file path / IPv4 / git SHA selects the whole match instead of
+  the alacritty Semantic word, which usually under- or over-shoots
+  structured tokens. Reuses the cycle-218 hint regex set.
+  Falls through to the existing word-boundary semantic selection
+  when nothing matches. (cycle 288)
+
+- **Triggers (iTerm2 parity).** New `trigger = REGEX` config key.
+  When a regex matches PTY output in an unfocused pane, kettle
+  calls `window.request_user_attention(Critical)` — Wayland
+  notification counter, X11 WM_HINTS urgency, macOS dock bounce,
+  Windows taskbar flash. Three guard rails:
+  - empty trigger set: zero cost (the default);
+  - 2 s throttle: chatty builds don't pulse 100×;
+  - window-focused check: don't pulse the user's own window.
+
+  Drift guard pins alternation patterns (`(BUILD SUCCESSFUL|
+  FAILED)` survives intact — the parser doesn't split on `|`).
+  (cycles 289 + 290)
+
+### Added — Workspaces
+
+- **`--layout NAME` named-workspace session.** Saves + restores
+  from `<config-dir>/layouts/<NAME>.json` so a user can maintain
+  distinct workspaces ("dev", "ops", "docs") without each one
+  clobbering the others on close. Composes with the v1.4.0
+  `--profile NAME` config split below. Path-sanitized so a
+  `--layout ../../etc/passwd` can't traverse out. Terminator
+  parity. (cycle 291)
+
+- **`--profile NAME` named-config split.** Loads
+  `<config-dir>/profiles/<NAME>.config` instead of the default
+  `<config-dir>/config`. Lets a user keep distinct font / theme /
+  keybind sets per workspace. `--config FILE` wins when both are
+  given. (cycle 292)
+
+- **`accent-color` (peacock-for-VS-Code parity).** One config knob
+  cascades to every "kettle accent" surface — active tab segment
+  strip, focused pane border, cycle-255 dragged-tab ghost. Lets a
+  user run multiple kettle windows (`--profile dev` + `--profile
+  ops`) and tell them apart at a glance. CLI override:
+  `--accent COLOR` (wins over the config key). `palette[3]`
+  broadcast yellow and the cursor stay un-overridden by design.
+  (cycle 293)
+
+### Added — Screenshots / chrome
+
+- **`--annotate TEXT` annotated screenshots.** Bottom-strip caption
+  overlay on `--screenshot` / `--screenshot-menu` output. Useful
+  for docs / README hero images / bug reports that want a version
+  / repro / env note baked into the PNG. Translucent dark panel
+  + 1 px chrome border + theme.foreground caption. None-passthrough
+  on the unannotated path keeps the cycle-251 visual regression
+  baseline pixel-stable. (cycle 294)
+
+- **`status-bar = off | top | bottom` status strip (iTerm2 / kitty
+  parity).** Thin row at the configured edge of the surface
+  showing `HH:MM:SS UTC  ·  theme name  ·  focused pane title`.
+  Disabled by default — turning it on subtracts one cell from each
+  pane's grid. Composes with peacock accent for per-workspace
+  identification. Live windowed app only; `--screenshot` paths
+  intentionally don't render the status bar so the cycle-251
+  visual regression baseline stays pixel-stable. Future cycle
+  adds sysinfo CPU / MEM widgets. (cycles 295 + 296)
+
+### Library / API additions
+
+- `kettle_config::OutputTrigger { pattern, action }`
+- `kettle_config::TriggerAction { Urgency }`
+- `kettle_config::StatusBarMode { Off, Top, Bottom }`
+- `kettle_config::Config::accent_color: Option<Rgb>`
+- `kettle_config::Config::triggers: Vec<OutputTrigger>`
+- `kettle_config::Config::status_bar: StatusBarMode`
+- `kettle_config::Config::path_for_profile(name) -> Option<PathBuf>`
+- `kettle_render::StatusBar`
+- `kettle_render::capture_png_with_annotation(...)`
+- `kettle_render::Renderer::render_frame_with_status(...)`
+- `kettle_ui::Options { ..., layout, accent_override }`
+- `kettle_ui::session::Session::path_for_layout(name)` +
+  `Session::load_layout(name)` + `Session::save_layout(name)`
+
+### CLI additions
+
+- `--layout NAME` — named-workspace session.
+- `--profile NAME` — named-config split.
+- `--accent COLOR` — one-off peacock override.
+- `--annotate TEXT` — bottom caption on screenshots.
+
+### Known sub-cycles
+
+These shipped in v1.4.0 with the minimum bounded scope; future
+sub-cycles extend them:
+
+- Triggers v1 only fires `Urgency`. Cycles 297+ add Bell,
+  set-tab-title=text, notify-text.
+- Profiles v1 fully replaces the base config. Cycle 297+ adds
+  overlay-merge so a profile can override just a few keys.
+- Status-bar v1 shows clock + theme + title. Cycle 297 adds
+  sysinfo CPU / MEM widgets.
+
+### Still deferred (multi-cycle, future)
+
+- Vi-mode for scrollback (Alacritty parity) — keymap + cursor +
+  visual selection + yank, 3-5 cycles.
+- tmux `-CC` passthrough (iTerm2 parity) — control-protocol parser.
+- Remote control protocol (kitty `@` commands) — IPC socket +
+  handlers.
+- Quake-style dropdown — OS global hotkey + window-state save.
+- Lua scripting (WezTerm parity) — embed mlua, expose event hooks.
+- Detachable mux server (WezTerm parity) — network protocol + auth.
+- Persistent in-terminal annotations (iTerm2 parity, distinct
+  from the v1.4.0 screenshot caption) — scrollback-position +
+  sticky-note + search-jump.
+
+These deserve dedicated cycles each rather than being half-shipped
+alongside the v1.4.0 sweep.
+
+Workspace tests: 261 → 267.
+
 ## [1.3.11] — 2026-05-21
 
 Patch release.
