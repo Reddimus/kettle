@@ -228,6 +228,40 @@ fn selection_kind(clicks: u8, alt: bool) -> kettle_core::SelectionType {
     }
 }
 
+/// Cycle 290: compile each configured `OutputTrigger`'s pattern to a
+/// `regex::Regex`, log + drop invalid patterns. Pure helper so the
+/// App constructor + `reload_config` path use exactly the same
+/// regex set after a config edit. An empty input returns an empty
+/// vec — `match_triggers` short-circuits on that.
+fn compile_triggers(
+    triggers: &[kettle_config::OutputTrigger],
+) -> Vec<(regex::Regex, kettle_config::TriggerAction)> {
+    let mut out = Vec::with_capacity(triggers.len());
+    for t in triggers {
+        match regex::Regex::new(&t.pattern) {
+            Ok(re) => out.push((re, t.action)),
+            Err(e) => {
+                log::warn!("trigger pattern {:?} failed to compile: {e}", t.pattern);
+            }
+        }
+    }
+    out
+}
+
+/// Cycle 290: scan `text` for any compiled trigger match, returning the
+/// first action that fires. Pure helper used by `App::run_triggers` and
+/// the drift guard. Returns `None` when no trigger fires so the caller
+/// can skip the urgency-attention call.
+fn match_triggers(
+    text: &str,
+    triggers: &[(regex::Regex, kettle_config::TriggerAction)],
+) -> Option<kettle_config::TriggerAction> {
+    triggers
+        .iter()
+        .find(|(re, _)| re.is_match(text))
+        .map(|(_, action)| *action)
+}
+
 /// Cycle 288 smart selection (iTerm2 parity). When a double-click
 /// lands inside a `kettle_core::hints::detect` match (URL, file path,
 /// IPv4, git SHA), return the match's `[start_col, end_col]` inclusive
@@ -387,6 +421,18 @@ pub struct App {
     /// Updated in `sync_cursor_icon` on `CursorMoved`; cleared when
     /// the cursor leaves the bar or the bar is hidden.
     hovered_close_idx: Option<usize>,
+    /// Cycle 290 triggers: compiled regex set built from
+    /// `cfg.triggers` at App construction (and after live reload).
+    /// Invalid patterns are logged via `log::warn!` and dropped, so a
+    /// malformed `trigger = ` line on one rule doesn't sink the whole
+    /// trigger set.
+    compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
+    /// Cycle 290: per-trigger last-fire timestamps. Dedupes a fast-
+    /// arriving match flood (e.g., a build script printing 100 error
+    /// lines in one frame should only nudge the user once, not
+    /// 100×). Cleared when any trigger fires past a 2-second
+    /// quietness window.
+    last_trigger_fire: std::time::Instant,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -442,12 +488,19 @@ impl App {
             }
         }
 
+        // Cycle 290: hoist the config load so the OutputTrigger
+        // compile + the cfg field assignment can both reference it.
+        // Inlining the `Config::load*` inside the struct-init lost
+        // access to a local name for the triggers; the bare `cfg.…`
+        // would otherwise hit the `cfg!()` macro.
+        let initial_cfg = startup
+            .config
+            .as_deref()
+            .map(Config::load_from)
+            .unwrap_or_else(Config::load);
+        let initial_triggers = compile_triggers(&initial_cfg.triggers);
         let mut app = App {
-            cfg: startup
-                .config
-                .as_deref()
-                .map(Config::load_from)
-                .unwrap_or_else(Config::load),
+            cfg: initial_cfg,
             window: None,
             renderer: None,
             mux: Mux::new(),
@@ -470,6 +523,8 @@ impl App {
             last_cursor_icon: None,
             tab_drag_active: false,
             hovered_close_idx: None,
+            compiled_triggers: initial_triggers,
+            last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -2217,10 +2272,76 @@ impl App {
             r.set_font_family(new.font_family.clone());
             r.set_font_size(new.font_size);
         }
+        // Cycle 290: re-compile triggers from the freshly-loaded config
+        // BEFORE assigning, while `new` is still owned. Recompile
+        // catches added/removed/changed patterns. Throttle stamp
+        // resets to "60s ago" so a fresh edit can fire immediately
+        // even mid-throttle.
+        self.compiled_triggers = compile_triggers(&new.triggers);
+        self.last_trigger_fire = std::time::Instant::now() - std::time::Duration::from_secs(60);
         self.cfg = new;
         self.resize_all();
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Cycle 290: scan every pane's recent output for configured
+    /// trigger patterns. On the first match in this tick, raise the
+    /// OS window's attention indicator (taskbar flash / dock bounce
+    /// / WM_HINTS urgency) — but only if the window isn't focused,
+    /// AND throttle to one fire per 2 seconds so a build script
+    /// printing 100 error lines doesn't pulse the taskbar 100×.
+    fn run_triggers(&mut self) {
+        if self.compiled_triggers.is_empty() {
+            return;
+        }
+        // Throttle. `last_trigger_fire` is pre-set to "60 seconds ago"
+        // at construct/reload time so the first match always fires.
+        if self.last_trigger_fire.elapsed().as_millis() < 2000 {
+            return;
+        }
+        // Don't pulse the user's own window when it's already focused.
+        if self.window_focused {
+            return;
+        }
+        // Pull each pane's bottom-of-screen text. Visible viewport
+        // only — scanning the whole scrollback every wakeup would
+        // burn CPU on a chatty pane. Last 50 rows is the typical
+        // "what just happened" window.
+        let snapshots: Vec<String> = {
+            let mut out = Vec::with_capacity(self.mux.panes.len());
+            for pane in self.mux.panes.values() {
+                if let Ok(t) = pane.term.term.lock() {
+                    use kettle_core::Dimensions;
+                    let rows = t.screen_lines();
+                    let cols = t.columns();
+                    let from = rows.saturating_sub(50);
+                    let mut s = String::with_capacity((rows - from) * cols);
+                    for r in from..rows {
+                        for c in 0..cols {
+                            let p = kettle_core::Point::new(
+                                kettle_core::Line(r as i32),
+                                kettle_core::Column(c),
+                            );
+                            s.push(t.grid()[p].c);
+                        }
+                        s.push('\n');
+                    }
+                    out.push(s);
+                }
+            }
+            out
+        };
+        for snap in &snapshots {
+            if match_triggers(snap, &self.compiled_triggers).is_some() {
+                if let Some(w) = &self.window {
+                    use winit::window::UserAttentionType;
+                    w.request_user_attention(Some(UserAttentionType::Critical));
+                }
+                self.last_trigger_fire = std::time::Instant::now();
+                break;
+            }
         }
     }
 
@@ -2658,6 +2779,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::Wakeup => {
+                // Cycle 290: run output triggers before the redraw —
+                // a match fires window urgency so the user notices the
+                // event even if they're focused on another OS window.
+                // Cheap when triggers are empty (which is the default).
+                self.run_triggers();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -3654,6 +3780,61 @@ mod tests {
         // A 0 click-count (no cell) still behaves like a single click.
         assert!(matches!(selection_kind(0, false), SelectionType::Simple));
         assert!(matches!(selection_kind(0, true), SelectionType::Block));
+    }
+
+    #[test]
+    fn match_triggers_finds_pattern_anywhere_in_text() {
+        // Cycle 290 drift guard. The matching engine should fire on
+        // the first regex hit, return its action, and silently no-op
+        // when nothing matches. Anchors (`^` / `$`) work too because
+        // we scan multi-line viewport snapshots; the trigger uses
+        // `regex::Regex::is_match` which doesn't auto-anchor.
+        use super::{compile_triggers, match_triggers};
+        use kettle_config::{OutputTrigger, TriggerAction};
+        let cfg = vec![
+            OutputTrigger {
+                pattern: r"error.*panic".into(),
+                action: TriggerAction::Urgency,
+            },
+            OutputTrigger {
+                pattern: r"(BUILD SUCCESSFUL|FAILED)".into(),
+                action: TriggerAction::Urgency,
+            },
+        ];
+        let compiled = compile_triggers(&cfg);
+        assert_eq!(compiled.len(), 2);
+
+        // Bare match anywhere in the snapshot.
+        assert!(match_triggers("thread 'main' panicked: error panic", &compiled).is_some());
+        // Alternation pattern still matches both branches.
+        assert!(match_triggers("BUILD SUCCESSFUL in 1m23s", &compiled).is_some());
+        assert!(match_triggers("BUILD FAILED with 3 errors", &compiled).is_some());
+        // Non-matching text: no fire.
+        assert!(match_triggers("just normal output, nothing here", &compiled).is_none());
+        assert!(match_triggers("", &compiled).is_none());
+
+        // Empty trigger set never fires.
+        assert!(match_triggers("error.*panic any text", &[]).is_none());
+
+        // Invalid regex is dropped at compile time (warn-logged); the
+        // remaining valid ones still work.
+        let cfg_mixed = vec![
+            OutputTrigger {
+                pattern: r"valid_pattern".into(),
+                action: TriggerAction::Urgency,
+            },
+            OutputTrigger {
+                pattern: r"unclosed[".into(), // invalid regex
+                action: TriggerAction::Urgency,
+            },
+        ];
+        let compiled_mixed = compile_triggers(&cfg_mixed);
+        assert_eq!(
+            compiled_mixed.len(),
+            1,
+            "invalid regex should be dropped at compile time"
+        );
+        assert!(match_triggers("here is the valid_pattern token", &compiled_mixed).is_some());
     }
 
     #[test]

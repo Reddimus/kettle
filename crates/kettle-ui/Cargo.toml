@@ -29,6 +29,12 @@ log.workspace = true
 notify = "8.2.0"
 open = "5.3.5"
 pollster = "0.4.0"
+# Cycle 290: triggers (cycle 289 config) compile to `regex::Regex`
+# in the App layer (not kettle-core) — the matching engine reads
+# the focused-pane viewport via the existing Mux API, no reader-
+# thread plumbing needed. Workspace-pinned via the cycle-264
+# deny.toml license allow-list.
+regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.149"
 winit = "0.30.13"
