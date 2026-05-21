@@ -6,6 +6,48 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.10] — 2026-05-21
+
+Patch release. One user-visible addition + two CI hardenings.
+
+### Added
+- **`man kettle`** — `packaging/linux/kettle.1` is a 366-line
+  hand-written man page covering NAME, SYNOPSIS, DESCRIPTION,
+  OPTIONS (Launch / Introspection / Debug+capture), KEY BINDINGS
+  (Tabs / Splits / Overlays / Scrollback / Group), CONFIGURATION,
+  ENVIRONMENT, FILES, EXAMPLES, SEE ALSO, AUTHORS. Wired into all
+  four install paths:
+  - `scripts/install.sh` drops it under `~/.local/share/man/man1`
+    (or `${PREFIX}/share/man/man1` if `--prefix` overrides).
+    `--uninstall` removes it too.
+  - `release.yml` bundles the `.1` into the Linux release tarball
+    so the bundled `install.sh` finds it.
+  - `packaging/arch/PKGBUILD` installs to `/usr/share/man/man1`
+    so `man kettle` works system-wide on Arch.
+  - `packaging/homebrew/kettle.rb` uses `man1.install` for
+    Linuxbrew.
+
+  Format is groff/man macros — uses `.TP` paragraphs instead of
+  `.TS/.TE` tables so it renders cleanly without the `tbl`
+  preprocessor (some `man -l` invocations skip preprocessors).
+  Verified via `groff -man -Tutf8 packaging/linux/kettle.1`.
+
+### CI / automation
+- **Tag ↔ Cargo.toml version consistency guard** in `release.yml`.
+  An early Linux-only step extracts the version from the pushed
+  tag's `$GITHUB_REF_NAME` and the workspace's `Cargo.toml`,
+  failing fast with `::error::` annotations if they disagree.
+  Without this guard, a future "tag v1.3.11 but forgot to bump
+  Cargo.toml" would silently ship artifacts with mixed versions
+  (macOS `.app` Info.plist saying 1.3.10, binary `--version` saying
+  1.3.10, tag saying 1.3.11).
+- **cargo-machete badge** in the README badge row. Closes the
+  README's supply-chain badge trio (audit + deny + machete) so
+  the supply-chain story is visible above the fold.
+
+No code-behavior changes elsewhere from v1.3.9. Workspace tests
+stay at 261 green.
+
 ## [1.3.9] — 2026-05-21
 
 Patch release. **~20% binary size reduction.**
