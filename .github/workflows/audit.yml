@@ -31,7 +31,15 @@ on:
 
 permissions:
   contents: read
-  issues: write   # rustsec/audit-check opens an issue on a finding (idempotent)
+  # rustsec/audit-check uses the Checks API to annotate the run summary
+  # with each finding; without `checks: write` it errors with "Resource
+  # not accessible by integration" because an explicit `permissions:`
+  # block zeroes everything not listed.
+  checks: write
+  # On push to the default branch the action opens (or updates) a single
+  # tracking issue per finding (idempotent) instead of spamming new
+  # issues every run.
+  issues: write
 
 jobs:
   audit:
@@ -39,10 +47,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Official RustSec action. It vendors `cargo-audit`, runs against
-      # the advisory DB, and on push to the default branch opens (or
-      # updates) a single tracking issue per finding rather than spamming
-      # the issue tracker. The token is the standard GITHUB_TOKEN.
+      # Official RustSec action. Vendors `cargo-audit`, runs against the
+      # advisory DB, posts a Checks-API annotation per finding, and on
+      # `push` to `main` syncs a per-advisory tracking issue. The token
+      # is the standard GITHUB_TOKEN; permissions come from the
+      # workflow-level `permissions:` block above.
+      #
+      # `ignore`: RUSTSEC-2024-0436 is `paste` "no longer maintained" —
+      # informational only (no vulnerability), and `paste` reaches us
+      # purely through `image → rav1e → paste` (the AVIF decoder path).
+      # We can't migrate upstream off `paste` from kettle's side; the
+      # alternative is a permanently-red audit job, which trains the
+      # team to ignore the signal we want it to keep. Revisit when
+      # `rav1e` or `image` cut a release on `pastey`.
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2024-0436
