@@ -2254,7 +2254,14 @@ impl App {
     fn save_session(&self) {
         let mut s = self.mux.snapshot();
         s.theme = Some(self.cfg.theme_name.clone());
-        s.save();
+        // Cycle 291: when launched with `--layout NAME`, save to the
+        // named-layout file instead of the default session.json. Lets
+        // the user maintain distinct workspaces ("dev", "ops", "docs")
+        // without each one clobbering the others on close.
+        match &self.startup.layout {
+            Some(name) => s.save_layout(name),
+            None => s.save(),
+        }
     }
 
     fn reload_config(&mut self) {
@@ -2721,7 +2728,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             true
         } else {
-            match crate::session::Session::load() {
+            // Cycle 291: load the named layout if `--layout NAME` was
+            // passed; otherwise fall through to the default session
+            // (which is the per-install last-state file).
+            let loaded = match self.startup.layout.as_deref() {
+                Some(name) => crate::session::Session::load_layout(name),
+                None => crate::session::Session::load(),
+            };
+            match loaded {
                 Some(s) if !s.is_empty() => {
                     // A theme picked at runtime last session sticks until
                     // the user changes it again or reloads the config.

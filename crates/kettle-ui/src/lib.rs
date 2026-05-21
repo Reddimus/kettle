@@ -36,6 +36,12 @@ pub struct Options {
     pub cwd: Option<std::path::PathBuf>,
     /// Explicit config file (`kettle --config FILE`); `None` = default path.
     pub config: Option<std::path::PathBuf>,
+    /// Cycle 291: named-layout session profile. When set, kettle saves
+    /// and restores from `<config-dir>/layouts/<NAME>.json` instead of
+    /// the default `<config-dir>/session.json`. Lets a user persist
+    /// multiple distinct workspaces ("dev", "ops", "docs") and snap
+    /// between them via `kettle --layout dev`. Terminator parity.
+    pub layout: Option<String>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

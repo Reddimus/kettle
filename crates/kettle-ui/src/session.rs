@@ -49,8 +49,43 @@ impl Session {
             .and_then(|p| p.parent().map(|d| d.join("session.json")))
     }
 
+    /// Cycle 291 named-layout path: returns
+    /// `<config-dir>/layouts/<sanitized>.json`. The name is sanitized
+    /// to `[A-Za-z0-9._-]` so a user can't traverse out of the
+    /// layouts directory via `--layout ../../etc/passwd`. Returns
+    /// `None` if the config dir isn't resolvable.
+    pub fn path_for_layout(name: &str) -> Option<PathBuf> {
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if safe.is_empty() {
+            return None;
+        }
+        kettle_config::Config::default_path().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("layouts").join(format!("{safe}.json")))
+        })
+    }
+
     pub fn load() -> Option<Session> {
         let p = Self::path()?;
+        load_from_path(&p)
+    }
+
+    /// Cycle 291: load from the named-layout path instead of the default
+    /// `session.json`. Used when the user launched with `kettle --layout
+    /// <NAME>`. Returns `None` if the layout file doesn't exist yet —
+    /// kettle just starts with a default first tab, exactly the same
+    /// shape as a fresh install would.
+    pub fn load_layout(name: &str) -> Option<Session> {
+        let p = Self::path_for_layout(name)?;
         load_from_path(&p)
     }
 
@@ -60,6 +95,22 @@ impl Session {
         };
         if let Err(e) = save_to_path(self, &p) {
             log::warn!("could not save session to {}: {e}", p.display());
+        }
+    }
+
+    /// Cycle 291: save to the named-layout path. Creates the parent
+    /// directory if it doesn't exist (a first-time
+    /// `kettle --layout dev` from a fresh install needs to create
+    /// `<config-dir>/layouts/` itself).
+    pub fn save_layout(&self, name: &str) {
+        let Some(p) = Self::path_for_layout(name) else {
+            return;
+        };
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = save_to_path(self, &p) {
+            log::warn!("could not save layout {name:?} to {}: {e}", p.display());
         }
     }
 

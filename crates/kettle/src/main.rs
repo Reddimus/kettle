@@ -138,6 +138,19 @@ struct Cli {
     #[arg(long = "working-directory", short = 'd', value_name = "DIR")]
     working_directory: Option<std::path::PathBuf>,
 
+    /// Launch into a named layout (Terminator parity). Saves +
+    /// restores from `<config-dir>/layouts/<NAME>.json` so a user
+    /// can maintain distinct workspaces ("dev", "ops", "docs")
+    /// without each one clobbering the others on close. Example:
+    ///
+    ///   kettle --layout dev
+    ///
+    /// The name is sanitized to `[A-Za-z0-9._-]` at the session
+    /// layer so a `--layout ../../etc/passwd` can't traverse out
+    /// of the layouts directory.
+    #[arg(long, value_name = "NAME", verbatim_doc_comment)]
+    layout: Option<String>,
+
     /// Run this command in the first tab instead of the shell, e.g.
     /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
     /// arguments (hyphenated flags for the program are passed through).
@@ -617,6 +630,7 @@ fn main() -> anyhow::Result<()> {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
         config: cli.config,
+        layout: cli.layout,
     })
 }
 
