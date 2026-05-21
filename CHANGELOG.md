@@ -6,6 +6,52 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-05-21
+
+Feature-bump release — adds remote-control IPC (kitty `@ send-text`
+parity).
+
+### Added — remote-control IPC
+
+`kettle --remote-send TEXT [--remote-file PATH]` writes a command
+line to a file watched by every running kettle window with a
+matching `--remote-file`. The receiving window writes TEXT to its
+focused pane's PTY. Used by external scripts to drive an already-
+open kettle without launching a new window.
+
+  # default path:
+  kettle &
+  kettle --remote-send 'cargo test\n'
+
+  # explicit per-workspace channel:
+  kettle --remote-file /tmp/dev.cmd &
+  kettle --remote-send 'top\n' --remote-file /tmp/dev.cmd
+
+Architecture: file-based IPC over the existing notify-watcher
+(cycle 151), not a Unix-domain socket. Cross-platform free,
+reuses existing patterns, no daemon thread. Multi-window
+arbitration is "last writer wins" for now; per-window socket
+addressing is planned.
+
+CLI surface:
+  --remote-send TEXT    write command + exit (sender mode)
+  --remote-file PATH    command file path (default
+                        `<config-dir>/kettle/remote.cmd`)
+
+Library surface:
+  kettle_ui::Options::remote_file: Option<PathBuf>
+  kettle_ui::UserEvent::RemoteCommand
+
+Protocol v1 (one command per line):
+  send-text TEXT        write TEXT (with `\n` → newline) to PTY
+  # ...                 comments + empty lines skipped
+
+Future verbs reserved: `set-tab-title TEXT`, `focus-tab N`, `ls`,
+`new-tab`, `close-tab N`. Unknown verbs log warn + continue, so
+configs written for a forward kettle don't error today.
+
+Workspace tests 267 stay green.
+
 ## [1.5.0] — 2026-05-21
 
 Feature-bump release — adds full Alacritty-parity vi-mode for the
