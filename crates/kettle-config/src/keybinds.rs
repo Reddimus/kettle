@@ -187,6 +187,13 @@ pub enum Action {
     ScrollToBottom,
     JumpPrevPrompt,
     JumpNextPrompt,
+    /// Toggle vi-mode for the focused pane's scrollback (Alacritty
+    /// parity). When on, kettle intercepts keyboard input for
+    /// vi-style navigation (h/j/k/l + 0/$ + g/G + visual + yank).
+    /// Foundation cycle ships the entry + visible block cursor +
+    /// Esc exit; movement + visual / yank come in follow-up
+    /// sub-cycles.
+    ToggleViMode,
     OpenSsh,
     ReloadConfig,
     CommandPalette,
@@ -304,6 +311,10 @@ pub fn action_names() -> Vec<&'static str> {
         "next_prompt",
         "new_ssh",
         "ssh",
+        "toggle_vi_mode",
+        "vi_mode",
+        "vi",
+        "scrollback_vi",
         "command_palette",
         "palette",
         "hint_mode",
@@ -381,6 +392,7 @@ impl Action {
             "scroll_to_bottom" => ScrollToBottom,
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
+            "toggle_vi_mode" | "vi_mode" | "vi" | "scrollback_vi" => ToggleViMode,
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
@@ -586,6 +598,11 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('s'), OpenSsh);
     bind(cs, Char('k'), CommandPalette);
     bind(cs, Char('h'), HintMode);
+    // Ctrl+Shift+Space toggles vi-mode (Alacritty default). Foundation
+    // sub-cycle ships the entry + visible block cursor + Esc exit;
+    // h/j/k/l movement + visual selection + yank come in follow-up
+    // sub-cycles.
+    bind(cs, Char(' '), ToggleViMode);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
     // Ctrl+Shift+Up/Down for line-by-line scrollback. Matches Alacritty's

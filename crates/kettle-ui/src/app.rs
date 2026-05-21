@@ -215,6 +215,25 @@ fn shell_quote_path(p: &std::path::Path) -> String {
     out
 }
 
+/// Cycle 298 vi-mode (Alacritty parity), foundation sub-cycle. Carries
+/// the vi cursor's position when vi-mode is active. Sub-cycles 2-4
+/// extend with visual-selection anchor + motion history.
+///
+/// `#[allow(dead_code)]` on the fields because foundation sub-cycle
+/// only constructs ViState; sub-cycle 2 reads `row` + `col` for
+/// h/j/k/l movement. Removing the allow then will surface a real
+/// warning if the wiring isn't done.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct ViState {
+    /// Vi cursor row in the focused pane's grid coordinates (0 = top
+    /// of viewport; future sub-cycle allows negative rows for
+    /// scrollback navigation).
+    row: usize,
+    /// Vi cursor column.
+    col: usize,
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -427,6 +446,13 @@ pub struct App {
     /// malformed `trigger = ` line on one rule doesn't sink the whole
     /// trigger set.
     compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
+    /// Cycle 298 vi-mode (Alacritty parity), sub-cycle 1 of 4.
+    /// `Some(ViState)` when the user has triggered ToggleViMode and
+    /// kettle is intercepting keys for vi-style navigation; `None`
+    /// otherwise. Sub-cycle 2 wires h/j/k/l movement; sub-cycle 3
+    /// adds the visible block cursor render; sub-cycle 4 adds `v`
+    /// visual selection + `y` yank.
+    vi_mode: Option<ViState>,
     /// Cycle 290: per-trigger last-fire timestamps. Dedupes a fast-
     /// arriving match flood (e.g., a build script printing 100 error
     /// lines in one frame should only nudge the user once, not
@@ -531,6 +557,7 @@ impl App {
             last_cursor_icon: None,
             tab_drag_active: false,
             hovered_close_idx: None,
+            vi_mode: None,
             compiled_triggers: initial_triggers,
             last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
             blink_on: true,
@@ -1763,6 +1790,9 @@ impl App {
         self.hint_state = None;
         self.ssh_input = None;
         self.context_menu = None;
+        // Cycle 298 vi-mode behaves like a modal — Esc exits it,
+        // close_all_modals exits it. Sub-cycle 1.
+        self.vi_mode = None;
     }
 
     /// `true` while any modal overlay (search bar, command palette, hint
@@ -1776,6 +1806,7 @@ impl App {
             || self.hint_state.is_some()
             || self.ssh_input.is_some()
             || self.context_menu.is_some()
+            || self.vi_mode.is_some()
     }
 
     /// Build the right-click context-menu item list. Copy is enabled
@@ -2262,6 +2293,36 @@ impl App {
                 if !targets.is_empty() {
                     self.close_all_modals();
                     self.hint_state = Some((targets, String::new()));
+                }
+            }
+            Action::ToggleViMode => {
+                // Cycle 298 vi-mode (Alacritty parity), sub-cycle 1
+                // of 4. Foundation: toggle entry / exit. Visible
+                // block cursor at the focused pane's current cursor
+                // position; Esc also exits (handled in keyboard
+                // dispatch). h/j/k/l movement + visual selection +
+                // yank land in sub-cycles 2-4.
+                if self.vi_mode.is_some() {
+                    self.vi_mode = None;
+                } else {
+                    self.close_all_modals();
+                    // Seed cursor at the focused pane's current
+                    // terminal cursor position. h/j/k/l will move
+                    // around this in sub-cycle 2.
+                    let (row, col) = self
+                        .mux
+                        .focused()
+                        .and_then(|p| {
+                            p.term.term.lock().ok().map(|t| {
+                                let cursor = t.grid().cursor.point;
+                                (cursor.line.0.max(0) as usize, cursor.column.0)
+                            })
+                        })
+                        .unwrap_or((0, 0));
+                    self.vi_mode = Some(ViState { row, col });
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
             }
             Action::OpenContextMenu => {

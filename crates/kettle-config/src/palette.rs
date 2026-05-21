@@ -49,6 +49,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll to bottom", ScrollToBottom),
         ("Jump to previous prompt", JumpPrevPrompt),
         ("Jump to next prompt", JumpNextPrompt),
+        ("Toggle vi-mode (scrollback)", ToggleViMode),
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
         ("Reset terminal", Reset),
@@ -160,6 +161,7 @@ mod tests {
             ScrollToBottom,
             JumpPrevPrompt,
             JumpNextPrompt,
+            ToggleViMode,
             OpenSsh,
             ReloadConfig,
             CommandPalette,
@@ -186,7 +188,8 @@ mod tests {
                 | ClearHistory | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown
                 | ScrollToTop | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh
                 | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme
-                | OpenContextMenu | UndoCloseTab | DuplicateTab | DuplicatePane | GotoTab(_) => {}
+                | OpenContextMenu | UndoCloseTab | DuplicateTab | DuplicatePane | ToggleViMode
+                | GotoTab(_) => {}
             }
         }
         let missing: Vec<&Action> = every_action
