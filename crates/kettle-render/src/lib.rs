@@ -2005,6 +2005,31 @@ pub fn capture_png_with(
     out: &std::path::Path,
     scene: DebugScene,
 ) -> Result<(u32, u32)> {
+    capture_png_with_annotation(cfg, cols, rows, out, scene, None)
+}
+
+/// Cycle 294: extended `capture_png_with` variant that adds an
+/// optional bottom-left caption overlay (an "annotated screenshot" —
+/// useful for docs, README hero images, and bug reports that want
+/// to caption a screenshot with a version / repro / env note).
+///
+/// When `annotation` is `Some(text)`, after every existing render
+/// pass kettle paints a translucent dark rect across the bottom 24px
+/// of the image plus the text rendered in `theme.foreground`. When
+/// `None`, this is identical to `capture_png_with`.
+///
+/// Hooked into the `--screenshot --annotate TEXT` CLI surface.
+/// iTerm2's *persistent* annotations (in-terminal sticky notes
+/// attached to scrollback positions) are a separate, multi-cycle
+/// feature; this is just the screenshot caption.
+pub fn capture_png_with_annotation(
+    cfg: &Config,
+    cols: u32,
+    rows: u32,
+    out: &std::path::Path,
+    scene: DebugScene,
+    annotation: Option<&str>,
+) -> Result<(u32, u32)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -2223,7 +2248,31 @@ pub fn capture_png_with(
         );
         right.shape_until_scroll(&mut font_system, false);
 
-        let areas = vec![
+        // Cycle 294: optional caption overlay at the bottom of the
+        // image. When `annotation` is Some, paint a translucent dark
+        // strip across the bottom 24px + render the caption text in
+        // theme.foreground. Useful for docs, README hero images, and
+        // bug reports that want to caption a screenshot with a
+        // version / repro / env note.
+        let mut annotate_buf = TextBuffer::new(&mut font_system, metrics);
+        let annotate_h = (ch + 8.0).max(24.0);
+        if let Some(text) = annotation {
+            annotate_buf.set_size(&mut font_system, Some(wf - 16.0), Some(annotate_h));
+            annotate_buf.set_text(&mut font_system, text, &base, Shaping::Advanced, None);
+            annotate_buf.shape_until_scroll(&mut font_system, false);
+            // Translucent panel + one-px top border.
+            q.push(rect(
+                0.0,
+                hf - annotate_h,
+                wf,
+                annotate_h,
+                theme.background,
+                0.92,
+            ));
+            q.push(rect(0.0, hf - annotate_h, wf, 1.0, theme.palette[8], 1.0));
+        }
+
+        let mut areas = vec![
             TextArea {
                 buffer: &tab_buf,
                 left: 8.0,
@@ -2267,6 +2316,25 @@ pub fn capture_png_with(
                 custom_glyphs: &[],
             },
         ];
+        // Cycle 294: append the annotation TextArea if set. Bottom-
+        // anchored — left margin 8 px, text baseline ~4 px above
+        // the bottom edge so the descenders don't clip.
+        if annotation.is_some() {
+            areas.push(TextArea {
+                buffer: &annotate_buf,
+                left: 8.0,
+                top: hf - annotate_h + 4.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: (hf - annotate_h) as i32,
+                    right: w as i32,
+                    bottom: h as i32,
+                },
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            });
+        }
 
         let mut vp = viewport;
         vp.update(

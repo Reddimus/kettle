@@ -114,6 +114,16 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     screenshot_menu: Option<std::path::PathBuf>,
 
+    /// Caption text to overlay at the bottom of `--screenshot` /
+    /// `--screenshot-menu` output (iTerm2 "annotated screenshot"
+    /// parity). Useful for docs / README hero images / bug
+    /// reports that want a version / repro / env note baked into
+    /// the PNG. Example:
+    ///
+    ///   kettle --screenshot doc.png --annotate "kettle v1.3.x — TokyoNight Night"
+    #[arg(long, value_name = "TEXT", verbatim_doc_comment)]
+    annotate: Option<String>,
+
     /// Columns for `--screenshot` (default 96).
     #[arg(long, default_value_t = 96)]
     cols: u32,
@@ -649,8 +659,14 @@ fn main() -> anyhow::Result<()> {
         // was actually rendered, with a hint when it differs from the
         // request so the user notices their cli args didn't fully
         // apply.
-        let (actual_cols, actual_rows) =
-            kettle_render::capture_png_with(&cfg, cols, rows, out, scene)?;
+        let (actual_cols, actual_rows) = kettle_render::capture_png_with_annotation(
+            &cfg,
+            cols,
+            rows,
+            out,
+            scene,
+            cli.annotate.as_deref(),
+        )?;
         if actual_cols == cols && actual_rows == rows {
             println!("wrote {} ({cols}×{rows} cells)", out.display());
         } else {
