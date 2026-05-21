@@ -228,4 +228,28 @@ jobs:
           if cargo run -q -p kettle -- --print-completions tcsh 2>/dev/null; then
             echo "expected --print-completions tcsh to error"; exit 1
           fi
+          # Cycle 241: pin the cycle-106 / cycle-107 hard-fail surface
+          # on a real CI run (the unit tests in main.rs cover the parse
+          # but never reach the exit-code path the CLI smoke does). A
+          # regression that returns Ok + falls back to defaults here is
+          # exactly the silent-failure class cycle 106/107 were written
+          # against. Use a path we just removed so the test is
+          # self-contained, and use --config-path (a no-GUI, no-PTY
+          # introspection command) so the assertion is the exit code,
+          # not whatever windowed-run side effects might happen on each
+          # OS. Same trick for --working-directory (paired with
+          # --config-path because -d needs a windowed run otherwise).
+          typo=/tmp/kettle-ci-definitely-no-such-path-$RANDOM
+          rm -rf "$typo"
+          if cargo run -q -p kettle -- --config "$typo" --config-path 2>/dev/null; then
+            echo "expected --config $typo to exit nonzero"; exit 1
+          fi
+          if cargo run -q -p kettle -- --working-directory "$typo" --config-path 2>/dev/null; then
+            echo "expected --working-directory $typo to exit nonzero"; exit 1
+          fi
+          # And the happy path: passing the bootstrap config we just
+          # wrote should round-trip through --config-path without
+          # error (printable path on stdout).
+          cargo run -q -p kettle -- --config /tmp/k.cfg --config-path \
+            | grep -q "/tmp/k.cfg"
         shell: bash
