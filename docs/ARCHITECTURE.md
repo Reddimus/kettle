@@ -69,6 +69,34 @@ graph LR
     place & ph & rt & clk --> draw["render_frame: image pipeline"]
 ```
 
+## Render pass order
+
+Each frame the renderer issues six passes against the same wgpu
+render-pass encoder, in this order. The order matters: a quad pass
+paints over text drawn before it, and text drawn after a quad covers
+that quad's pixels.
+
+```mermaid
+flowchart LR
+    clear["Clear color<br/>(theme bg + opacity)"] --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads"]
+    quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>image overlays"]
+    imgs --> text["3. text_renderer.render<br/>pane text + tab text<br/>(NOT menu rows)"]
+    text --> overlay["4. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
+    overlay --> menuq["5. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
+    menuq --> menut["6. menu_text_renderer.render<br/>context menu<br/>row labels"]
+```
+
+Steps 5–6 own the right-click context menu so its labels land **on
+top of** the panel background. Splitting them out fixed the v1.3.0 /
+v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
+step 4 (`overlay_quads`), painting over the menu text that had
+already been rendered in step 3.
+
+The 5–6 passes are cheap no-ops while the menu is closed (empty
+buffer uploads). The two `TextRenderer` instances share the same
+`TextAtlas` and `Viewport` — glyphon batches glyphs by atlas, not by
+renderer, so the menu pass reuses already-cached glyphs.
+
 ## Threading model
 
 - **Main thread** — winit event loop, *all* GPU work, the tab/split tree,
