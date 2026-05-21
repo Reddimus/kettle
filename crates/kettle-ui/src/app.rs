@@ -677,7 +677,23 @@ impl App {
         }
     }
 
-    /// Content area for panes (excludes the tab bar), in physical pixels.
+    /// Cycle 296: status-bar height (0 when off, cell_h + 6 px when
+    /// enabled). Pair with `cfg.status_bar` (StatusBarMode) for
+    /// position. Slightly shorter than the tab bar so the two strips
+    /// read as distinct horizontal bands.
+    fn status_bar_h(&self) -> f32 {
+        match self.cfg.status_bar {
+            kettle_config::StatusBarMode::Off => 0.0,
+            _ => self
+                .renderer
+                .as_ref()
+                .map(|r| r.cell_h + 6.0)
+                .unwrap_or(22.0),
+        }
+    }
+
+    /// Content area for panes (excludes both the tab bar and the
+    /// cycle-296 status bar), in physical pixels.
     fn area(&self) -> Rect {
         let (w, h) = self
             .renderer
@@ -685,10 +701,33 @@ impl App {
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
         let tb = self.tab_bar_h();
-        match self.cfg.tab_bar_pos {
-            TabBarPos::Top => (0.0, tb, w as f32, (h as f32 - tb).max(1.0)),
-            TabBarPos::Bottom => (0.0, 0.0, w as f32, (h as f32 - tb).max(1.0)),
-        }
+        let sb = self.status_bar_h();
+        // Vertical layout (top to bottom). Tab bar + status bar each
+        // claim space at their configured edge; pane content gets
+        // what's left. Both can sit at top or bottom independently;
+        // four total combinations are handled here.
+        let surface_h = h as f32;
+        let top_offset = (if self.cfg.tab_bar_pos == TabBarPos::Top {
+            tb
+        } else {
+            0.0
+        }) + (if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Top) {
+            sb
+        } else {
+            0.0
+        });
+        let bot_offset =
+            (if self.cfg.tab_bar_pos == TabBarPos::Bottom {
+                tb
+            } else {
+                0.0
+            }) + (if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
+                sb
+            } else {
+                0.0
+            });
+        let content_h = (surface_h - top_offset - bot_offset).max(1.0);
+        (0.0, top_offset, w as f32, content_h)
     }
 
     /// Tab-bar geometry — the single source of truth shared by the renderer
@@ -1607,6 +1646,10 @@ impl App {
         let overlay = self.overlay();
         let area = self.area();
         let tabbar = self.tab_bar();
+        // Cycle 296: build status bar BEFORE the &mut renderer borrow
+        // since `build_status_bar` reads self.mux / self.cfg
+        // immutably.
+        let status = self.build_status_bar();
         let active = self.mux.active;
         let layout = self.mux.layout(active, area);
         let focus = self.mux.active_focus();
@@ -1636,9 +1679,58 @@ impl App {
                 images: imgs.clone(),
             })
             .collect();
-        if let Err(e) = renderer.render_frame(&panes, &tabbar, &self.cfg, &overlay) {
+        // Cycle 296: status bar built BEFORE the &mut renderer borrow
+        // (the helper reads `self.mux` immutably). Cheap when off.
+        if let Err(e) =
+            renderer.render_frame_with_status(&panes, &tabbar, &self.cfg, &overlay, &status)
+        {
             log::warn!("render error: {e}");
         }
+    }
+
+    /// Cycle 296: compose the status-bar contents (HH:MM:SS · theme ·
+    /// focused-pane title). Returns `StatusBar::hidden` when the
+    /// config has it off. The renderer's draw is a no-op on a
+    /// hidden status bar so this is cheap even when never visible.
+    /// Takes `&mut self` only because `Mux::focused` does — no state
+    /// is actually mutated here.
+    fn build_status_bar(&mut self) -> kettle_render::StatusBar {
+        if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Off) {
+            return kettle_render::StatusBar::hidden();
+        }
+        let h = self.status_bar_h();
+        let surface_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size().1 as f32)
+            .unwrap_or(600.0);
+        let y = match self.cfg.status_bar {
+            kettle_config::StatusBarMode::Top => 0.0,
+            kettle_config::StatusBarMode::Bottom => surface_h - h,
+            kettle_config::StatusBarMode::Off => 0.0,
+        };
+        // Compose text: HH:MM:SS · theme · focused pane title.
+        // SystemTime → seconds since UNIX → HH:MM:SS via div/mod, no
+        // dep on chrono. The displayed time is UTC by design (a
+        // future cycle could honor $TZ — std::time has no built-in
+        // local-tz conversion, would need chrono or time crate).
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let day = secs % 86400;
+        let (hh, mm, ss) = (day / 3600, (day % 3600) / 60, day % 60);
+        let title = self
+            .mux
+            .focused()
+            .map(|p| p.title.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "kettle".to_string());
+        let text = format!(
+            "{hh:02}:{mm:02}:{ss:02} UTC  ·  {}  ·  {title}",
+            self.cfg.theme_name
+        );
+        kettle_render::StatusBar { height: h, y, text }
     }
 
     /// Snapshot the focused `(tab, leaf)` pair. Paired with

@@ -190,6 +190,34 @@ pub struct TabSeg {
 
 /// The tab bar geometry — computed once in the UI, used for both drawing
 /// (here) and click hit-testing (app), so there is a single source of truth.
+/// Cycle 296: thin status-bar strip at the top or bottom of the
+/// surface. Disabled by default; when on, the App sets `height` > 0
+/// and supplies a pre-formatted single-line string.
+///
+/// Content is a free-form `String` so the App can compose whatever
+/// it wants (the cycle-295 default: "HH:MM:SS · theme · pane title").
+/// Renderer just draws background + text; layout / refresh / content
+/// composition all live in the App.
+pub struct StatusBar {
+    /// Height in px (0 = hidden).
+    pub height: f32,
+    /// Top-left y of the strip. 0 for top position, `surface_h - h`
+    /// for bottom.
+    pub y: f32,
+    /// Pre-formatted content (single line).
+    pub text: String,
+}
+
+impl StatusBar {
+    pub fn hidden() -> Self {
+        StatusBar {
+            height: 0.0,
+            y: 0.0,
+            text: String::new(),
+        }
+    }
+}
+
 pub struct TabBar {
     /// Bar height in px (0 = hidden).
     pub height: f32,
@@ -273,6 +301,10 @@ pub struct Renderer {
     /// One buffer, N positions via per-tab `TextArea` instances.
     tab_close_buffer: TextBuffer,
     search_buffer: TextBuffer,
+    /// Cycle 296: status-bar text. Single line, reused every frame
+    /// via `set_text` — same one-buffer pattern `tabbar_buffer` uses
+    /// for tab labels. Stays at length 0 when the status bar is off.
+    status_bar_buffer: TextBuffer,
 
     quads: QuadPipeline,
     /// Second quad pass drawn *after* text (pane dimming, scrollbar).
@@ -403,6 +435,7 @@ impl Renderer {
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let search_buffer = TextBuffer::new(&mut font_system, metrics);
+        let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
 
@@ -430,6 +463,7 @@ impl Renderer {
             tabbar_buffer,
             tab_close_buffer,
             search_buffer,
+            status_bar_buffer,
             quads,
             overlay_quads,
             menu_quads,
@@ -508,6 +542,21 @@ impl Renderer {
         cfg: &Config,
         overlay: &Overlay,
     ) -> Result<()> {
+        self.render_frame_with_status(panes, tabbar, cfg, overlay, &StatusBar::hidden())
+    }
+
+    /// Cycle 296: extended `render_frame` variant that also draws the
+    /// status-bar strip. The bare `render_frame` shim passes a hidden
+    /// status bar, so existing call sites that don't yet know about
+    /// the new feature still compile.
+    pub fn render_frame_with_status(
+        &mut self,
+        panes: &[PaneView<'_>],
+        tabbar: &TabBar,
+        cfg: &Config,
+        overlay: &Overlay,
+        status: &StatusBar,
+    ) -> Result<()> {
         let theme = &cfg.theme;
         // OSC 11 (set default background) override from the focused pane.
         // The engine stores it in `Colors[257]`; the renderer needs it for
@@ -548,6 +597,31 @@ impl Renderer {
         let mut over: Vec<QuadInstance> = Vec::new();
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        // Cycle 296: status-bar background. The text is uploaded
+        // alongside `tabbar_buffer.set_text` further down so the same
+        // text-renderer pass handles both. Just a chrome-dim panel
+        // here (1 quad).
+        if status.height > 0.0 {
+            quads.push(rect(
+                0.0,
+                status.y,
+                sw,
+                status.height,
+                theme.palette[8],
+                1.0,
+            ));
+            // One-px line on the side facing the pane grid so the
+            // strip reads as distinct chrome, not as terminal output.
+            // The line goes on the BOTTOM of a top-positioned status
+            // bar and the TOP of a bottom-positioned one.
+            let line_y = if status.y < 1.0 {
+                status.height - 1.0
+            } else {
+                status.y
+            };
+            quads.push(rect(0.0, line_y, sw, 1.0, theme.background, 0.7));
+        }
 
         // Tab bar background + per-segment chrome (text added later).
         if tabbar.height > 0.0 {
@@ -1011,6 +1085,28 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        // Cycle 296: upload status-bar text. Single buffer, single
+        // line; sized to surface width so cosmic-text doesn't wrap
+        // an overlong status string.
+        if status.height > 0.0 && !status.text.is_empty() {
+            self.status_bar_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.status_bar_buffer.set_size(
+                &mut self.font_system,
+                Some(sw - 16.0),
+                Some(status.height),
+            );
+            self.status_bar_buffer.set_text(
+                &mut self.font_system,
+                &status.text,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.status_bar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+
         // Context-menu row labels (one buffer per row, separators skipped).
         if let Some(menu) = &overlay.context_menu {
             while self.context_menu_buffers.len() < menu.rows.len() {
@@ -1200,6 +1296,24 @@ impl Renderer {
                     top: 0,
                     right: self.config.width as i32,
                     bottom: self.config.height as i32,
+                },
+                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                custom_glyphs: &[],
+            });
+        }
+        // Cycle 296: status-bar text area. Left-padded 8 px, baseline
+        // nudged 3 px below the strip top so descenders don't clip.
+        if status.height > 0.0 && !status.text.is_empty() {
+            areas.push(TextArea {
+                buffer: &self.status_bar_buffer,
+                left: 8.0,
+                top: status.y + 3.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: status.y as i32,
+                    right: self.config.width as i32,
+                    bottom: (status.y + status.height) as i32,
                 },
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
