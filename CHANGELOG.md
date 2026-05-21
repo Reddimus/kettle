@@ -6,6 +6,47 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-05-21
+
+Patch release. Theme: **production-grade supply-chain + governance
+hygiene**. No code-behavior changes from v1.3.3; the binary is
+byte-identical except for the embedded build SHA. The release
+*surface* gains real integrity guarantees.
+
+### Security / supply chain
+- **Per-artifact SHA-256 sidecars on every release.** Every
+  `release.yml` matrix row now generates a `.sha256` file alongside
+  the artifact and uploads both. Linux uses `sha256sum`; macOS
+  `shasum -a 256`; Windows emits the `sha256sum`-compatible
+  `<hex>  <filename>` layout via `Get-FileHash` so cross-platform
+  verification doesn't need a parser per OS. The release page now
+  exposes:
+    kettle-linux-x86_64.tar.gz
+    kettle-linux-x86_64.tar.gz.sha256
+    kettle-macos-universal.zip
+    kettle-macos-universal.zip.sha256
+    kettle-windows-x86_64.zip
+    kettle-windows-x86_64.zip.sha256
+- **`install-online.sh` verifies SHA-256 before extracting.**
+  Downloads the sidecar alongside the tarball, runs `sha256sum -c`
+  (or `shasum -a 256 -c` on BusyBox / Alpine where `sha256sum`
+  isn't present). Verification failure aborts before `tar -xzf`.
+  Backward-compat fallback: releases ≤ v1.3.3 don't ship sidecars,
+  so a 404 on `.sha256` is a soft warning rather than a hard
+  error — the one-liner keeps working with `KETTLE_VERSION=v1.3.3`.
+- **`docs/INSTALL.md` documents manual verification.** New
+  "Verifying a download (SHA-256)" subsection with platform-
+  specific one-liners (sha256sum / shasum / Get-FileHash).
+
+### Governance
+- **README badges** — five shields.io badges at the top of the
+  README: CI status, Audit (RustSec) status, latest release, MSRV
+  (1.89), and license (MIT). Sourced from the existing workflows
+  so badge color tracks real CI conclusion.
+- **`CODE_OF_CONDUCT.md` adopting Contributor Covenant 2.1 by
+  reference.** GitHub auto-detects + surfaces in the community-
+  standards tab. Linked from CONTRIBUTING.md.
+
 ## [1.3.3] — 2026-05-21
 
 Patch release. Two additions:
