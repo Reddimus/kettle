@@ -77,7 +77,12 @@ GitHub runners for every platform:
 
 - **Linux** — `kettle-linux-x86_64.tar.gz` (binary + `kettle.desktop` + icon
   + `install.sh`). Extract and run `./install.sh` for the easy-install
-  path above, or copy the files manually.
+  path above, or copy the files manually. Arch / Manjaro / EndeavourOS
+  users: a ready-to-use AUR `PKGBUILD` lives at
+  [`packaging/arch/PKGBUILD`](../packaging/arch/PKGBUILD); see
+  [`packaging/arch/README.md`](../packaging/arch/README.md) for the
+  one-time AUR submission walkthrough that lets users install via
+  `yay -S kettle-bin`.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Unzip and
   drag `kettle.app` to `/Applications`. First launch: right-click → Open
   (unsigned build). A ready-to-use Homebrew formula lives at
