@@ -309,6 +309,52 @@ pub struct Config {
     pub shell: Option<String>,
     /// Named SSH targets: `ssh-host = name=user@host` (repeatable).
     pub ssh_hosts: Vec<(String, String)>,
+    /// Cycle 289 triggers (iTerm2 parity). Each entry is a regex
+    /// pattern matched against PTY output; when it fires while the
+    /// pane is unfocused, the action runs. Repeatable via
+    /// `trigger = REGEX` config lines (default action: Urgency).
+    /// Stored as strings; kettle-core compiles them to
+    /// `regex::Regex` at pane-spawn time so a malformed regex on
+    /// one trigger doesn't sink the whole config load — invalid
+    /// patterns are logged via `log::warn!` and dropped.
+    pub triggers: Vec<OutputTrigger>,
+}
+
+/// Cycle 289: one configured output-trigger rule. Plain-string
+/// `pattern` (compiled to `Regex` by kettle-core) + an action describing
+/// what should happen when output matches.
+///
+/// Named `OutputTrigger` (not just `Trigger`) to disambiguate from the
+/// existing `keybinds::Trigger`, which is a modifier+key combo — a
+/// different concept entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputTrigger {
+    /// Rust-`regex`-syntax pattern, matched against PTY-printable
+    /// bytes (escape sequences stripped). E.g.
+    ///
+    /// ```text
+    /// trigger = error.*panic
+    /// trigger = (BUILD SUCCESSFUL|FAILED)
+    /// ```
+    pub pattern: String,
+    /// What kettle does on a match. v1 ships `Urgency` only — the
+    /// window taskbar/dock entry pulses to alert the user. Future
+    /// additions: `Bell`, `TabTitle(template)`, `Notify(text)`.
+    pub action: TriggerAction,
+}
+
+/// Cycle 289 trigger action. One enum so the config parser can grow
+/// new variants without rippling through every call site. v1 ships
+/// the minimum:
+///
+/// - `Urgency` — `window.request_user_attention(Critical)`. The OS
+///   handles the rest (Wayland: foot animation, GNOME notification
+///   counter; X11: WM_HINTS urgency; macOS: dock bounce; Windows:
+///   taskbar flash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriggerAction {
+    #[default]
+    Urgency,
 }
 
 impl Default for Config {
@@ -353,6 +399,7 @@ impl Default for Config {
             keybinds: keybinds::defaults(),
             shell: None,
             ssh_hosts: Vec::new(),
+            triggers: Vec::new(),
         }
     }
 }
@@ -1022,6 +1069,24 @@ impl Config {
                         if !n.is_empty() && !t.is_empty() {
                             cfg.ssh_hosts.push((n.to_string(), t.to_string()));
                         }
+                    }
+                }
+                "trigger" => {
+                    // Cycle 289: `trigger = REGEX` adds a regex pattern
+                    // that fires `Urgency` on a PTY-output match. v1
+                    // only ships the one action so the value is the
+                    // whole pattern — no separator parsing. A future
+                    // multi-action syntax must NOT use `|` as the
+                    // separator: pipe is a regex metacharacter, and
+                    // patterns like `(BUILD SUCCESSFUL|FAILED)` would
+                    // split mid-alternation. A `→` or two-step
+                    // `trigger-action = …` would be safer.
+                    let pattern = e.value.trim().to_string();
+                    if !pattern.is_empty() {
+                        cfg.triggers.push(OutputTrigger {
+                            pattern,
+                            action: TriggerAction::Urgency,
+                        });
                     }
                 }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
@@ -2730,5 +2795,34 @@ mod config_tests {
         assert_eq!(cfg.font_size, 14.0);
         // Typo'd / unknown keys collected, sorted + deduped.
         assert_eq!(unknown, vec!["bogus".to_string(), "font-szie".to_string()]);
+    }
+
+    #[test]
+    fn trigger_parses_pattern_and_repeats() {
+        // Cycle 289 drift guard. `trigger = REGEX` accumulates into
+        // `Config::triggers` with action defaulting to Urgency. The
+        // whole value is the pattern — no in-band action separator
+        // (pipe `|` is a regex metacharacter, so alternation patterns
+        // like `(BUILD SUCCESSFUL|FAILED)` need to be passed through
+        // intact). v1 only ships the Urgency action; future syntax
+        // for multi-action would use a separate `trigger-action = …`
+        // key or a non-regex-meta delimiter.
+        let cfg = Config::parse_text(
+            "trigger = error.*panic\n\
+             trigger = (BUILD SUCCESSFUL|FAILED)\n\
+             trigger = stack overflow\n",
+        );
+        assert_eq!(cfg.triggers.len(), 3);
+        assert_eq!(cfg.triggers[0].pattern, "error.*panic");
+        assert_eq!(cfg.triggers[0].action, TriggerAction::Urgency);
+        // Regex alternation passes through intact — load-bearing.
+        assert_eq!(cfg.triggers[1].pattern, "(BUILD SUCCESSFUL|FAILED)");
+        assert_eq!(cfg.triggers[2].pattern, "stack overflow");
+        // Default config has no triggers.
+        assert!(Config::default().triggers.is_empty());
+        // Empty / whitespace patterns are dropped at parse time so a
+        // typo'd line doesn't fire on every byte.
+        assert!(Config::parse_text("trigger =\n").triggers.is_empty());
+        assert!(Config::parse_text("trigger =   \n").triggers.is_empty());
     }
 }
