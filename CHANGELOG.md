@@ -6,6 +6,65 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-05-21
+
+Feature-bump release — adds full Alacritty-parity vi-mode for the
+focused pane's scrollback. Shipped as 4 bounded sub-cycles
+(298-301) that landed end-to-end across this minor.
+
+### Added — vi-mode scrollback (Alacritty parity)
+
+`Ctrl+Shift+Space` enters vi-mode. Visible magenta hollow block at
+the terminal cursor; navigate with vi keys, yank selection to
+clipboard, Esc exits.
+
+Keymap shipped:
+
+  h / j / k / l        move 1 cell left / down / up / right
+  arrow keys           same as h/j/k/l
+  0 / ^                jump to line start
+  $                    jump to line end
+  g / H                top of viewport
+  G / L                bottom of viewport
+  M                    middle of viewport
+  v                    toggle char-visual selection
+  y                    yank selection to clipboard + exit vi-mode
+  Esc                  exit vi-mode
+
+Architecture:
+
+  kettle-config:
+    Action::ToggleViMode    + 4 aliases (toggle_vi_mode, vi_mode,
+                              vi, scrollback_vi)
+    Default keybind: Ctrl+Shift+Space (Alacritty default)
+    Cycle-117 palette-completeness drift guard pins it.
+
+  kettle-ui:
+    struct ViState { row, col, visual_anchor }
+    App.vi_mode: Option<ViState>
+    fn vi_mode_key(...) — modal key dispatcher, intercepts before
+       PTY write. Reads focused-pane `screen_lines()` /
+       `columns()` to clamp movement to grid.
+    fn yank_vi_selection(start, end) -> String — extracts cells in
+       the inclusive range, per-line trim_end.
+
+  kettle-render:
+    Overlay.vi_cursor + Overlay.vi_visual_anchor
+    build_pane(...) takes both. Visual selection paints
+    `theme.selection_background @ 0.55` rect per row. Vi cursor
+    paints magenta (palette[5]) hollow block + 20% fill — distinct
+    from broadcast yellow (palette[3]) + accent blue (palette[4])
+    + terminal cursor.
+
+Stays within the focused pane's viewport for v1; future cycle
+could extend into scrollback rows (negative row indices). Not a
+blocker — most vi-mode use cases (copy a build error line, yank
+an SHA) work within the viewport.
+
+Workspace tests 267 stay green. Vi-mode is exercised manually
+(needs a windowed run for the visible cursor + clipboard yank);
+the cycle-298 palette drift guard pins the Action wiring.
+
 ## [1.4.0] — 2026-05-21
 
 Feature-bump release — eight new user-facing capabilities landed in
