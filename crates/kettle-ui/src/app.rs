@@ -77,6 +77,34 @@ fn chrome_cursor_icon(in_tab_bar: bool, modal_open: bool) -> Option<CursorIcon> 
     }
 }
 
+/// Pure: when the cursor is over a tab's `✕` close-button zone, override the
+/// chrome `Default` with `Pointer` — the same "hand" icon every browser
+/// (Chrome / Firefox / Safari) uses to telegraph "this glyph is clickable."
+/// Composes with `chrome_cursor_icon`: close-hover wins over the bar's
+/// `Default` so the affordance is visible the moment the cursor lands on
+/// the close zone. Returns `None` when not over a close button so the
+/// content-area decision still gets a chance.
+fn tab_close_hover_icon(over_close: bool) -> Option<CursorIcon> {
+    if over_close {
+        Some(CursorIcon::Pointer)
+    } else {
+        None
+    }
+}
+
+/// Pure: which tab segment's close-button (`✕`) rect contains the cursor,
+/// if any. Walks `segments` once and returns the first hit (segments don't
+/// overlap in the tab bar layout; cycle-tab-bar invariant). Used both to
+/// drive the OS pointer-cursor swap and the renderer's hover-background
+/// quad — the visual affordance that makes the `✕` read as a button rather
+/// than a trailing character in the title text.
+fn hovered_close_button(segments: &[kettle_render::TabSeg], px: f32, py: f32) -> Option<usize> {
+    let in_rect = |(rx, ry, rw, rh): (f32, f32, f32, f32)| {
+        px >= rx && px < rx + rw && py >= ry && py < ry + rh
+    };
+    segments.iter().find(|s| in_rect(s.close)).map(|s| s.idx)
+}
+
 /// Pure geometry: is the mouse y-coordinate inside the tab bar's vertical
 /// band? `bar_h` is the bar height in pixels, `surface_h` is total window
 /// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
@@ -239,6 +267,13 @@ pub struct App {
     /// `None` until the first call, which guarantees the initial state
     /// gets pushed exactly once.
     last_cursor_icon: Option<CursorIcon>,
+    /// Index of the tab whose close-button (`✕`) zone the mouse cursor
+    /// is currently over. Drives both the OS pointer-cursor swap and
+    /// the renderer's hover-background quad so the trailing `✕` reads
+    /// as a clickable button rather than part of the title text.
+    /// Updated in `sync_cursor_icon` on `CursorMoved`; cleared when
+    /// the cursor leaves the bar or the bar is hidden.
+    hovered_close_idx: Option<usize>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -319,6 +354,7 @@ impl App {
             window_focused: true,
             mouse_hidden: false,
             last_cursor_icon: None,
+            hovered_close_idx: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -405,8 +441,20 @@ impl App {
         // Chrome surfaces (tab bar, open modal overlays) override that —
         // they're clickable, not selectable, so the I-beam there is
         // visually misleading. `chrome_cursor_icon` is the pure decision.
+        //
+        // Tab close-buttons (`✕`) override the chrome `Default` with
+        // `Pointer` so the trailing glyph reads as a clickable
+        // affordance rather than a character in the title. Recomputed
+        // here every cursor-move so the chip-hover state in the
+        // renderer stays in sync (the renderer reads
+        // `tabbar.hovered_close_idx`, which we pass through in
+        // `tab_bar()`).
+        let bar = self.tab_bar();
+        self.hovered_close_idx =
+            hovered_close_button(&bar.segments, self.cursor.x as f32, self.cursor.y as f32);
+        let close_hover = tab_close_hover_icon(self.hovered_close_idx.is_some());
         let chrome = chrome_cursor_icon(self.cursor_in_tab_bar(), self.any_modal_open());
-        let want = chrome.unwrap_or_else(|| {
+        let want = close_hover.or(chrome).unwrap_or_else(|| {
             let want_pointer = (self.mods.control_key() || self.mods.super_key())
                 && self.link_at_cursor().is_some();
             if want_pointer {
@@ -510,6 +558,10 @@ impl App {
             new_tab: (sw - plus_w, y, plus_w, height),
             // Cycle 178: broadcast indicator on the active tab.
             broadcast: self.mux.broadcast,
+            // Hover-on-✕ chip: renderer paints a red highlight behind
+            // the close glyph; UI's `sync_cursor_icon` flips the OS
+            // cursor to Pointer at the same time.
+            hovered_close_idx: self.hovered_close_idx,
         }
     }
 
@@ -2704,6 +2756,63 @@ mod tests {
         // Both at once (modal opened while pointer happened to be over the
         // tab bar) → still Default.
         assert_eq!(chrome_cursor_icon(true, true), Some(CursorIcon::Default));
+    }
+
+    #[test]
+    fn hovered_close_button_finds_only_the_close_rect_hits() {
+        use super::hovered_close_button;
+        use kettle_render::TabSeg;
+        // Two tab segments side-by-side, each 100×24 with a trailing
+        // 24-px close-button zone at x=76..100 (segment 0) and
+        // x=176..200 (segment 1) — mirrors the cycle-241 tab_bar()
+        // builder's `(x + seg_w - height)` formula.
+        let segs = vec![
+            TabSeg {
+                idx: 0,
+                rect: (0.0, 0.0, 100.0, 24.0),
+                close: (76.0, 0.0, 24.0, 24.0),
+                title: "one".into(),
+                active: true,
+            },
+            TabSeg {
+                idx: 1,
+                rect: (100.0, 0.0, 100.0, 24.0),
+                close: (176.0, 0.0, 24.0, 24.0),
+                title: "two".into(),
+                active: false,
+            },
+        ];
+        // Cursor over title area of segment 0 → no close hit.
+        assert_eq!(hovered_close_button(&segs, 20.0, 12.0), None);
+        // Cursor over segment 0's close button → hit on idx 0.
+        assert_eq!(hovered_close_button(&segs, 88.0, 12.0), Some(0));
+        // Cursor over segment 1's close button → hit on idx 1.
+        assert_eq!(hovered_close_button(&segs, 188.0, 12.0), Some(1));
+        // Cursor outside the bar entirely → no hit.
+        assert_eq!(hovered_close_button(&segs, 88.0, 100.0), None);
+        // Edge: cursor exactly at the bar bottom (24.0) is outside
+        // because `py < ry + rh` is strict.
+        assert_eq!(hovered_close_button(&segs, 88.0, 24.0), None);
+        // Empty bar (single-pane, tabs hidden) → no hit ever.
+        assert_eq!(hovered_close_button(&[], 50.0, 10.0), None);
+    }
+
+    #[test]
+    fn tab_close_hover_icon_overrides_chrome_default() {
+        use super::{chrome_cursor_icon, tab_close_hover_icon};
+        use winit::window::CursorIcon;
+        // Not over a close button → no override; chrome decision wins.
+        assert_eq!(tab_close_hover_icon(false), None);
+        let chrome = chrome_cursor_icon(true, false);
+        // Hover a close ✕ → Pointer (the browser-tab convention).
+        assert_eq!(tab_close_hover_icon(true), Some(CursorIcon::Pointer));
+        // Compose: close-hover wins over the chrome Default — once
+        // the cursor lands on a clickable affordance we want the
+        // hand, not the arrow.
+        assert_eq!(
+            tab_close_hover_icon(true).or(chrome),
+            Some(CursorIcon::Pointer)
+        );
     }
 
     #[test]

@@ -146,6 +146,13 @@ pub struct TabBar {
     /// tints the active tab segment with a warning accent when set;
     /// inactive tabs (which aren't affected by broadcast) stay normal.
     pub broadcast: bool,
+    /// Index of the segment whose `✕` close button is currently
+    /// hovered by the mouse — used to draw a hover background so the
+    /// user can tell the trailing glyph is a real button. Browser /
+    /// Chrome / Firefox convention: the ✕ shows on every tab but the
+    /// background only appears on hover. Computed in the UI's cursor-
+    /// sync path so the renderer has zero geometry knowledge.
+    pub hovered_close_idx: Option<usize>,
 }
 
 impl TabBar {
@@ -156,6 +163,7 @@ impl TabBar {
             segments: Vec::new(),
             new_tab: (0.0, 0.0, 0.0, 0.0),
             broadcast: false,
+            hovered_close_idx: None,
         }
     }
 }
@@ -465,6 +473,29 @@ impl Renderer {
                     theme.background,
                     0.5,
                 ));
+                // Hover background behind the `✕` close button so the
+                // user can tell the trailing glyph is a clickable
+                // affordance, not part of the title text. Drawn only
+                // for the segment whose close-rect the cursor is over
+                // — Chrome / Firefox / GNOME-Shell tab convention.
+                // The OS pointer-cursor flip happens in the UI's
+                // `sync_cursor_icon` path; this is the corresponding
+                // visual cue.
+                if tabbar.hovered_close_idx == Some(s.idx) {
+                    let (cx, cy, cw, ch) = s.close;
+                    // Pad a couple of px so the highlight reads as a
+                    // chip behind the glyph rather than a full-height
+                    // bar that swallows the bar/segment boundary.
+                    let pad = 3.0_f32;
+                    quads.push(rect(
+                        cx + pad,
+                        cy + pad,
+                        (cw - pad * 2.0).max(0.0),
+                        (ch - pad * 2.0).max(0.0),
+                        theme.palette[1],
+                        0.85,
+                    ));
+                }
             }
             // New-tab (+) button background.
             let (nx, _, nw, _) = tabbar.new_tab;
