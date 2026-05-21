@@ -184,6 +184,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 - [docs/INSTALL.md](docs/INSTALL.md) — install per-OS / from source
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
 - [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) — OSC 133 prompt-mark hooks for bash / zsh / fish
