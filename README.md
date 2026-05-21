@@ -132,6 +132,7 @@ kettle --list-actions       # list every action name accepted by `keybind = trig
 kettle --list-ssh-hosts     # print configured `ssh-host = name=target` entries
 kettle --config-path        # show where the config file is read from
 kettle --check-config       # validate config: resolved settings + unknown-key / malformed-value diagnostics
+kettle --gpu-info           # print the wgpu adapter / backend / driver / texture limits (for bug reports)
 kettle --config FILE        # use a specific config file (live-reloaded; error if it doesn't exist)
 kettle -d /path/to/dir      # open the first tab in this directory
 kettle -e htop              # run a command instead of the shell

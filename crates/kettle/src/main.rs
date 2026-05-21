@@ -41,6 +41,13 @@ struct Cli {
     #[arg(long)]
     config_path: bool,
 
+    /// Print the wgpu adapter / backend / driver / texture-limit
+    /// details kettle would use on this machine, then exit. Useful
+    /// for filing a "blank window" / "no GPU adapter" bug report
+    /// without a windowed run.
+    #[arg(long)]
+    gpu_info: bool,
+
     /// Validate the config (resolved settings + unknown-key warnings).
     #[arg(long)]
     check_config: bool,
@@ -345,6 +352,14 @@ fn main() -> anyhow::Result<()> {
             Some(p) => println!("{}", p.display()),
             None => println!("(no config path resolvable)"),
         }
+        return Ok(());
+    }
+    if cli.gpu_info {
+        // Resolves the same adapter / backend the live renderer +
+        // --screenshot path would pick, so the output is faithful
+        // to what the windowed run would see. No GUI / PTY needed.
+        let info = kettle_render::gpu_info()?;
+        println!("{info}");
         return Ok(());
     }
     if cli.check_config {

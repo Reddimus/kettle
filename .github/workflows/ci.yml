@@ -97,6 +97,21 @@ jobs:
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
             echo "headless run OK (exit $rc)"'
+      - name: --gpu-info diagnostic smoke (Linux)
+        # Cycle 268: pin that the cycle-267 `--gpu-info` flag resolves
+        # an adapter + prints the expected key:value layout under the
+        # software-Vulkan adapter the CI runner has. Same env as the
+        # other GPU-touching smokes. Floor on the "Backend:" prefix
+        # so a regression that flips the output format (e.g. JSON-
+        # ification later) catches here, not in a user bug report.
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          ./target/release/kettle --gpu-info | tee /tmp/gpu-info.txt
+          grep -qE '^Backend:[[:space:]]+' /tmp/gpu-info.txt
+          grep -qE '^Adapter:[[:space:]]+' /tmp/gpu-info.txt
+          grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' /tmp/gpu-info.txt
       - name: --screenshot-menu visual regression (Linux)
         # Cycle 251: the v1.3.0/v1.3.1 blank-menu bug shipped because
         # nothing in CI exercised the context menu's render path —

@@ -1917,6 +1917,68 @@ pub fn capture_png(
     capture_png_with(cfg, cols, rows, out, DebugScene::Default)
 }
 
+/// Resolve the wgpu adapter kettle would use on this machine and
+/// return a human-readable diagnostic string. Same setup as
+/// [`capture_png_with`] — `wgpu::Instance::default()` + a default
+/// `RequestAdapterOptions` — so the reported adapter is what the
+/// live renderer / `--screenshot` / `--screenshot-menu` paths would
+/// pick on this host.
+///
+/// Used by `kettle --gpu-info` so a user filing a "blank window" /
+/// "no GPU adapter" bug report can attach the adapter / backend /
+/// driver / texture-limit details without a windowed run. The same
+/// answer would otherwise require launching the binary, hitting the
+/// failure mode, and digging through `RUST_LOG=info` output.
+pub fn gpu_info() -> Result<String> {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::None,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|e| anyhow!("no GPU adapter: {e:?}"))?;
+        let info = adapter.get_info();
+        let limits = adapter.limits();
+        Ok(format!(
+            "Backend:        {:?}\n\
+             Adapter:        {}\n\
+             Adapter type:   {:?}\n\
+             Driver:         {}\n\
+             Driver info:    {}\n\
+             Vendor (PCI):   0x{:04x}\n\
+             Device (PCI):   0x{:04x}\n\
+             Max texture:    {} px / side\n\
+             Max buffer:     {} bytes\n\
+             Max bind groups: {}",
+            info.backend,
+            if info.name.is_empty() {
+                "<unnamed>".to_string()
+            } else {
+                info.name
+            },
+            info.device_type,
+            if info.driver.is_empty() {
+                "<unknown>".to_string()
+            } else {
+                info.driver
+            },
+            if info.driver_info.is_empty() {
+                "<unknown>".to_string()
+            } else {
+                info.driver_info
+            },
+            info.vendor,
+            info.device,
+            limits.max_texture_dimension_2d,
+            limits.max_buffer_size,
+            limits.max_bind_groups,
+        ))
+    })
+}
+
 /// Render a screenshot PNG; returns the **actual** (cols, rows) used after
 /// the cycle-119 texture-limit cap so the CLI can report what was rendered
 /// rather than what was requested (which can differ when the user asks for
