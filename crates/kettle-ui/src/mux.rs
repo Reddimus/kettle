@@ -342,17 +342,33 @@ pub enum TabActivity {
     /// a yellow dot, overrides `Output` because a bell is a stronger
     /// signal (the focused program explicitly asked for attention).
     Bell,
+    /// Tab had unseen output but no further bytes for ≥ the
+    /// configured `tab-silence-threshold-ms`. Terminator's "Silence
+    /// Watcher" affordance — useful for tail-following long jobs
+    /// (`tail -f`, build watchers, network monitors) where the
+    /// *absence* of recent output is the signal the user wants.
+    /// Drawn as a dim chrome-gray dot to read as a state distinct
+    /// from `Output` (cyan) and `Bell` (yellow).
+    Silent,
 }
 
 /// Pure: classify an inactive tab's activity from its state. Active
 /// tabs short-circuit to `Normal` because the focused-pane border and
 /// the tab-bar accent already convey focus — adding a dot there would
 /// be redundant.
+///
+/// `now` and `silence_threshold` drive the cycle-252 Silent variant
+/// — when an inactive tab had unseen output that's been quiet for at
+/// least the threshold, the indicator transitions Output → Silent.
+/// Passing the wall clock in (rather than calling `Instant::now()`
+/// internally) keeps the function pure and unit-testable.
 pub fn classify_tab_activity(
     is_active: bool,
     bell: bool,
     last_output_at: Option<std::time::Instant>,
     last_seen_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+    silence_threshold: std::time::Duration,
 ) -> TabActivity {
     if is_active {
         return TabActivity::Normal;
@@ -360,15 +376,24 @@ pub fn classify_tab_activity(
     if bell {
         return TabActivity::Bell;
     }
-    let output_after_seen = match (last_output_at, last_seen_at) {
+    let unseen_output = match (last_output_at, last_seen_at) {
         (Some(o), Some(s)) => o > s,
         (Some(_), None) => true,
         _ => false,
     };
-    if output_after_seen {
-        TabActivity::Output
+    if !unseen_output {
+        return TabActivity::Normal;
+    }
+    // Unwrap-safe: `unseen_output` is true only when `last_output_at`
+    // is Some.
+    let last_out = last_output_at.unwrap();
+    // `saturating_duration_since` so a tab whose `last_output_at` is
+    // (somehow) in the future doesn't flip Silent — that'd be a
+    // monotonic-clock bug, not a tab actually going quiet.
+    if now.saturating_duration_since(last_out) >= silence_threshold {
+        TabActivity::Silent
     } else {
-        TabActivity::Normal
+        TabActivity::Output
     }
 }
 
@@ -1560,16 +1585,19 @@ mod node_tests {
         let now = Instant::now();
         let earlier = now - Duration::from_secs(5);
         let later = now + Duration::from_secs(5);
+        // Default 10 s silence threshold matches the config default;
+        // the existing transitions still fire under it.
+        let silence = Duration::from_secs(10);
 
         // Active tab → always Normal, regardless of output / bell. The
         // focused-tab accent + window-title already telegraph "you're
         // here" so adding a dot would be redundant.
         assert_eq!(
-            classify_tab_activity(true, true, Some(later), Some(earlier)),
+            classify_tab_activity(true, true, Some(later), Some(earlier), now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(true, false, Some(later), Some(earlier)),
+            classify_tab_activity(true, false, Some(later), Some(earlier), now, silence),
             TabActivity::Normal
         );
 
@@ -1577,42 +1605,130 @@ mod node_tests {
         // Bell is the stronger signal (the focused program explicitly
         // asked for attention) so it wins over plain output activity.
         assert_eq!(
-            classify_tab_activity(false, true, None, None),
+            classify_tab_activity(false, true, None, None, now, silence),
             TabActivity::Bell
         );
         assert_eq!(
-            classify_tab_activity(false, true, Some(later), Some(earlier)),
+            classify_tab_activity(false, true, Some(later), Some(earlier), now, silence),
             TabActivity::Bell
         );
 
-        // Inactive tab + output after last-seen → Output.
+        // Inactive tab + output after last-seen → Output (fresh, hasn't
+        // exceeded silence threshold yet).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), Some(earlier)),
+            classify_tab_activity(false, false, Some(later), Some(earlier), now, silence),
             TabActivity::Output
         );
 
         // Inactive tab + output BEFORE the user last looked → Normal.
         // The user already saw this output; no need to nudge again.
         assert_eq!(
-            classify_tab_activity(false, false, Some(earlier), Some(later)),
+            classify_tab_activity(false, false, Some(earlier), Some(later), now, silence),
             TabActivity::Normal
         );
 
         // First-output edge: no last_seen_at yet → Output (the user
         // has never been on this tab and something happened on it).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), None),
+            classify_tab_activity(false, false, Some(later), None, now, silence),
             TabActivity::Output
         );
 
         // No activity recorded at all → Normal.
         assert_eq!(
-            classify_tab_activity(false, false, None, None),
+            classify_tab_activity(false, false, None, None, now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(false, false, None, Some(earlier)),
+            classify_tab_activity(false, false, None, Some(earlier), now, silence),
             TabActivity::Normal
+        );
+    }
+
+    #[test]
+    fn classify_tab_activity_transitions_to_silent_after_threshold() {
+        // Cycle 252: Output → Silent transition once the last unseen
+        // output is older than the silence threshold. The test fakes
+        // a clock by passing `now` explicitly — same trick the
+        // primary classifier test uses, keeping the function pure.
+        use std::time::{Duration, Instant};
+        let base = Instant::now();
+        let silence = Duration::from_secs(10);
+        // Tab last looked at 60 s ago; output arrived at 30 s ago
+        // (so unseen — output > seen).
+        let last_seen = base - Duration::from_secs(60);
+        let last_out = base - Duration::from_secs(30);
+        // Just-after-output: 5 s elapsed since output, below the 10 s
+        // threshold → Output.
+        let now_fresh = last_out + Duration::from_secs(5);
+        assert_eq!(
+            classify_tab_activity(
+                false,
+                false,
+                Some(last_out),
+                Some(last_seen),
+                now_fresh,
+                silence
+            ),
+            TabActivity::Output,
+            "5 s after output should still be Output (threshold = 10 s)"
+        );
+        // Exactly at threshold: 10 s elapsed → Silent (the `>=` arm).
+        let now_at_threshold = last_out + silence;
+        assert_eq!(
+            classify_tab_activity(
+                false,
+                false,
+                Some(last_out),
+                Some(last_seen),
+                now_at_threshold,
+                silence
+            ),
+            TabActivity::Silent,
+            "elapsed = threshold should be Silent (inclusive boundary)"
+        );
+        // Well past threshold: 30 s elapsed → Silent.
+        let now_late = last_out + Duration::from_secs(30);
+        assert_eq!(
+            classify_tab_activity(
+                false,
+                false,
+                Some(last_out),
+                Some(last_seen),
+                now_late,
+                silence
+            ),
+            TabActivity::Silent
+        );
+        // Bell still beats Silent — explicit attention wins over
+        // implicit "things stopped" signal.
+        assert_eq!(
+            classify_tab_activity(
+                false,
+                true,
+                Some(last_out),
+                Some(last_seen),
+                now_late,
+                silence
+            ),
+            TabActivity::Bell
+        );
+        // Backward clock (now < last_out — should only happen with a
+        // bug or clock-skew adjustment between calls): treat as fresh
+        // Output rather than triggering Silent on a saturating-zero
+        // duration.
+        let now_before = last_out - Duration::from_secs(1);
+        assert_eq!(
+            classify_tab_activity(
+                false,
+                false,
+                Some(last_out),
+                Some(last_seen),
+                now_before,
+                silence
+            ),
+            TabActivity::Output,
+            "backward clock should NOT trigger Silent"
         );
     }
 

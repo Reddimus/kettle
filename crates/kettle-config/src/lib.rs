@@ -268,6 +268,14 @@ pub struct Config {
     pub focused_split_color: Option<Rgb>,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
+    /// Cycle 252: an inactive tab whose unseen output went quiet for
+    /// at least this many milliseconds transitions from the
+    /// `Output` indicator (cyan) to `Silent` (dim chrome). Default
+    /// 10 s — long enough that a slow `cargo build` doesn't oscillate
+    /// the indicator between strokes, short enough that a `tail -f`
+    /// going quiet is noticed before the user switches tabs. Clamped
+    /// `[1000, 600_000]` (1 s..10 min) at parse time.
+    pub tab_silence_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
     /// When the user types while scrolled back in scrollback, jump back to
@@ -332,6 +340,7 @@ impl Default for Config {
             split_divider_color: None,
             focused_split_color: None,
             cursor_blink_interval: 530,
+            tab_silence_threshold_ms: 10_000,
             copy_on_select: true,
             scroll_on_keystroke: true,
             scroll_on_output: false,
@@ -947,6 +956,11 @@ impl Config {
                 "cursor-blink-interval" => {
                     if let Ok(v) = e.value.parse::<u64>() {
                         cfg.cursor_blink_interval = v.clamp(50, 5000);
+                    }
+                }
+                "tab-silence-threshold-ms" | "tab-silence-threshold" => {
+                    if let Ok(v) = e.value.parse::<u64>() {
+                        cfg.tab_silence_threshold_ms = v.clamp(1_000, 600_000);
                     }
                 }
                 "copy-on-select" => {

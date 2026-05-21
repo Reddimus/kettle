@@ -164,6 +164,13 @@ pub enum TabActivity {
     Normal,
     Output,
     Bell,
+    /// Cycle 252: inactive tab had unseen output but went quiet for
+    /// at least `tab-silence-threshold-ms`. Terminator's "Silence
+    /// Watcher" affordance — useful for tail-following long jobs
+    /// (`tail -f`, build watchers) where the *absence* of output is
+    /// the signal the user wants. Drawn as a dim chrome-gray dot,
+    /// distinct from `Output` (cyan) and `Bell` (yellow).
+    Silent,
 }
 
 /// One tab segment in the tab bar.
@@ -578,6 +585,12 @@ impl Renderer {
                 let dot_color = match s.activity {
                     TabActivity::Bell => Some(theme.palette[3]),
                     TabActivity::Output => Some(theme.palette[6]),
+                    // Cycle 252: Silent is the "your watched output
+                    // stopped" state. Dim palette[8] — same color
+                    // the inactive-pane border + chrome surfaces use,
+                    // so it reads as "low-urgency, FYI" rather than
+                    // the Output-arrived nudge.
+                    TabActivity::Silent => Some(theme.palette[8]),
                     TabActivity::Normal => None,
                 };
                 if let Some(c) = dot_color {

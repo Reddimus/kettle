@@ -642,6 +642,8 @@ impl App {
                 // the renderer can draw the indicator dot. Active tabs
                 // short-circuit to Normal (the focused-tab accent
                 // already signals "you are here").
+                let now = std::time::Instant::now();
+                let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
                 let activity = self
                     .mux
                     .tabs
@@ -652,10 +654,13 @@ impl App {
                             tab.bell,
                             tab.last_output_at,
                             tab.last_seen_at,
+                            now,
+                            silence,
                         ) {
                             crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
                             crate::mux::TabActivity::Output => RenderTabActivity::Output,
                             crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
+                            crate::mux::TabActivity::Silent => RenderTabActivity::Silent,
                         }
                     })
                     .unwrap_or(RenderTabActivity::Normal);
