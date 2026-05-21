@@ -956,6 +956,61 @@ impl Mux {
         self.tabs.is_empty()
     }
 
+    /// Open a new tab that duplicates the focused pane's argv + OSC-7
+    /// cwd (iTerm2's "Duplicate Tab" affordance, cycle 248). Falls
+    /// back to the configured shell when the focused pane has empty
+    /// argv (`new_tab_with` semantics — empty argv ≡ shell). Returns
+    /// `Ok(())` even if there's no focused tab to duplicate; the
+    /// chrome layer treats that as a no-op the same way it treats
+    /// `new_tab` on an empty mux.
+    #[allow(clippy::too_many_arguments)]
+    pub fn duplicate_focused_tab(
+        &mut self,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+    ) -> Result<()> {
+        let (argv, cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
+            Some(pane) => (pane.argv.clone(), usable_cwd(pane.term.current_dir())),
+            None => return self.new_tab(cfg, cols, rows, cw, ch, waker),
+        };
+        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
+    }
+
+    /// Split the focused pane and run the *same* program in the new
+    /// half (iTerm2's "Duplicate Pane" affordance). Mirrors `split`
+    /// but reads the focused pane's argv instead of the configured
+    /// shell — so a `kettle -e vim file` pane duplicates into a
+    /// second vim instance in the same cwd.
+    #[allow(clippy::too_many_arguments)]
+    pub fn duplicate_focused_pane(
+        &mut self,
+        dir: Dir,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+    ) -> Result<()> {
+        if self.tabs.is_empty() {
+            return self.new_tab(cfg, cols, rows, cw, ch, waker);
+        }
+        let (argv, cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
+            Some(pane) => (pane.argv.clone(), usable_cwd(pane.term.current_dir())),
+            None => return Ok(()),
+        };
+        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        let a = self.active;
+        if let Some(tab) = self.tabs.get_mut(a) {
+            insert_split(tab, new_id, dir);
+        }
+        Ok(())
+    }
+
     /// Restore the most-recently-closed tab. Returns `true` if a tab
     /// was actually restored. Inserts at the original index (clamped
     /// to the current tab count); the new tab becomes active.

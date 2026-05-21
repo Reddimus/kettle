@@ -2021,6 +2021,34 @@ impl App {
                     Err(e) => log::error!("undo_close_tab failed: {e}"),
                 }
             }
+            Action::DuplicateTab => {
+                let waker = self.waker();
+                if let Err(e) = self
+                    .mux
+                    .duplicate_focused_tab(&self.cfg, cols, rows, cw, ch, waker)
+                {
+                    log::error!("duplicate_tab failed: {e}");
+                } else {
+                    self.resize_all();
+                    self.save_session();
+                }
+            }
+            Action::DuplicatePane => {
+                let waker = self.waker();
+                if let Err(e) = self.mux.duplicate_focused_pane(
+                    crate::mux::Dir::Horizontal,
+                    &self.cfg,
+                    cols,
+                    rows,
+                    cw,
+                    ch,
+                    waker,
+                ) {
+                    log::error!("duplicate_pane failed: {e}");
+                } else {
+                    self.resize_all();
+                }
+            }
             Action::NextTheme | Action::PrevTheme => {
                 let fwd = matches!(action, Action::NextTheme);
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);

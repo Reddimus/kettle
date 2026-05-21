@@ -206,6 +206,15 @@ pub enum Action {
     /// empty. Bound to `Ctrl+Shift+T` by default — same chord
     /// WezTerm / Chrome / Firefox use for "reopen closed tab."
     UndoCloseTab,
+    /// Cycle 248: clone the focused pane's argv + OSC-7 cwd into a
+    /// new tab (iTerm2's "Duplicate Tab"). An `ssh box` tab clones to
+    /// another `ssh box` tab; a `kettle -e vim file` tab clones to a
+    /// second vim. Empty argv falls back to the configured shell.
+    DuplicateTab,
+    /// Cycle 248: clone the focused pane's argv + OSC-7 cwd into a
+    /// right-side split of itself. Same logic as `DuplicateTab` but
+    /// the new program lives in the same tab.
+    DuplicatePane,
     GotoTab(u8),
 }
 
@@ -305,6 +314,8 @@ pub fn action_names() -> Vec<&'static str> {
         "undo_close_tab",
         "reopen_tab",
         "restore_tab",
+        "duplicate_tab",
+        "duplicate_pane",
         "next_theme",
         "prev_theme",
         "previous_theme",
@@ -375,6 +386,8 @@ impl Action {
             "hint_mode" | "hints" | "quick_select" => HintMode,
             "context_menu" | "open_context_menu" => OpenContextMenu,
             "undo_close_tab" | "reopen_tab" | "restore_tab" => UndoCloseTab,
+            "duplicate_tab" => DuplicateTab,
+            "duplicate_pane" => DuplicatePane,
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,
