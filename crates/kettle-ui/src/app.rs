@@ -25,6 +25,11 @@ use crate::mux::{Dir, Mux, Rect};
 pub enum UserEvent {
     Wakeup,
     ReloadConfig,
+    /// Cycle 302 remote control: the remote-command file changed and
+    /// the watcher needs the main thread to read + process new lines.
+    /// One event per change (notify coalesces consecutive writes), so
+    /// the main thread can batch-read all pending lines at once.
+    RemoteCommand,
 }
 
 /// Translate a winit `MouseScrollDelta` into terminal lines, scaled by the
@@ -467,6 +472,10 @@ pub struct App {
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Cycle 302: drop guard for the remote-control watcher. Stays
+    /// alive for the whole App lifetime; dropping the watcher would
+    /// kill the notify thread without warning.
+    _remote_watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl App {
@@ -508,6 +517,33 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
                 watcher = Some(w);
+            }
+        }
+
+        // Cycle 302 remote-control watcher. Same notify pattern as the
+        // config-reload watcher above. When startup.remote_file is
+        // Some, watch its parent directory; on a change to the file
+        // itself, send UserEvent::RemoteCommand so the main thread
+        // reads + dispatches lines.
+        let mut remote_watcher = None;
+        if let Some(path) = startup.remote_file.clone()
+            && let Some(dir) = path.parent().map(|p| p.to_path_buf())
+        {
+            let p = proxy.clone();
+            let watched = path.clone();
+            use notify::Watcher;
+            if let Ok(mut w) =
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(ev) = res
+                        && ev.paths.iter().any(|p| p == &watched)
+                    {
+                        let _ = p.send_event(UserEvent::RemoteCommand);
+                    }
+                })
+            {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
+                remote_watcher = Some(w);
             }
         }
 
@@ -565,6 +601,7 @@ impl App {
             config_path: startup.config.clone(),
             startup,
             _watcher: watcher,
+            _remote_watcher: remote_watcher,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -2505,6 +2542,46 @@ impl App {
     /// / WM_HINTS urgency) — but only if the window isn't focused,
     /// AND throttle to one fire per 2 seconds so a build script
     /// printing 100 error lines doesn't pulse the taskbar 100×.
+    /// Cycle 302: drain pending lines from the remote-command file
+    /// and dispatch each. Atomic-truncate after read so a fast-firing
+    /// `kettle --remote-send` storm doesn't re-process the same lines
+    /// every notify event. v1 commands:
+    ///
+    ///   send-text TEXT     write TEXT (with `\n` decoded back to
+    ///                      newline) to the focused pane's PTY.
+    ///
+    /// Unknown commands log a `warn!` and continue. Empty file or
+    /// missing file is a no-op (notify-watcher can fire on the
+    /// initial create event before the writer's content is visible;
+    /// next event will catch it).
+    fn drain_remote_commands(&mut self) {
+        let Some(path) = self.startup.remote_file.clone() else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return,
+        };
+        let _ = std::fs::write(&path, "");
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(payload) = line.strip_prefix("send-text ") {
+                let decoded = payload.replace("\\n", "\n");
+                if let Some(p) = self.mux.focused() {
+                    p.term.write(decoded.as_bytes());
+                }
+            } else {
+                log::warn!("remote command not recognized: {line:?}");
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn run_triggers(&mut self) {
         if self.compiled_triggers.is_empty() {
             return;
@@ -3105,6 +3182,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ReloadConfig => self.reload_config(),
+            UserEvent::RemoteCommand => self.drain_remote_commands(),
         }
     }
 

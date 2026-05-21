@@ -47,6 +47,14 @@ pub struct Options {
     /// the `--accent COLOR` CLI flag. `None` = use whatever the
     /// resolved config says.
     pub accent_override: Option<kettle_config::Rgb>,
+    /// Cycle 302 remote control. When set, App watches this path for
+    /// command lines and dispatches them to the focused pane. Format:
+    /// one command per line, e.g. `send-text echo hello\n`. The
+    /// `kettle --remote-send TEXT` CLI flag writes to this same file
+    /// so external scripts can drive kettle without launching a new
+    /// window. Cross-platform via the existing notify watcher (no
+    /// platform-specific socket code yet).
+    pub remote_file: Option<std::path::PathBuf>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

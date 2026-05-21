@@ -192,6 +192,30 @@ struct Cli {
     #[arg(long, value_name = "COLOR", verbatim_doc_comment)]
     accent: Option<String>,
 
+    /// Send TEXT to a running kettle via the remote-command file
+    /// (default `<config-dir>/kettle/remote.cmd`) and exit. Used by
+    /// external scripts to drive an already-open kettle without
+    /// launching a new window (kitty `@ send-text` parity). Example:
+    ///
+    ///   kettle --remote-send 'ls -la\n'
+    ///
+    /// The receiving kettle window must have been launched with
+    /// the same `--remote-file PATH` (or both omit it to use the
+    /// default path). The text is written to the focused pane of
+    /// the most-recently-launched kettle that's watching the file.
+    /// Multi-window arbitration is "last writer wins" for now;
+    /// per-window socket addressing is a planned follow-up.
+    #[arg(long, value_name = "TEXT", verbatim_doc_comment)]
+    remote_send: Option<String>,
+
+    /// Remote-command file path. Default
+    /// `<config-dir>/kettle/remote.cmd`. Honored by both the
+    /// `--remote-send` sender side and the kettle window's
+    /// notify-watcher receiver side; both must agree on the path.
+    /// See `--remote-send` above for the usage example.
+    #[arg(long, value_name = "PATH")]
+    remote_file: Option<std::path::PathBuf>,
+
     /// Run this command in the first tab instead of the shell, e.g.
     /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
     /// arguments (hyphenated flags for the program are passed through).
@@ -680,6 +704,35 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Cycle 302 remote-control SENDER side. When `--remote-send TEXT`
+    // is set, append TEXT (with trailing newline if missing) to the
+    // remote-command file and exit without launching a window. The
+    // running kettle that's watching the file picks up the line and
+    // dispatches `send-text <REST>` to its focused pane.
+    if let Some(text) = cli.remote_send.as_deref() {
+        let path = cli
+            .remote_file
+            .clone()
+            .or_else(default_remote_file)
+            .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Each line is one command: `send-text <TEXT>\n`. Escape any
+        // embedded newlines as `\\n` so a multi-line payload doesn't
+        // get re-parsed as multiple commands. The receiver decodes
+        // `\\n` back to `\n` before writing to the PTY.
+        let encoded = text.replace('\n', "\\n");
+        let line = format!("send-text {encoded}\n");
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        return Ok(());
+    }
+
     // Resolve --profile if --config didn't override it. --config wins
     // when both are given so a user can quickly debug a profile
     // against an explicit config file.
@@ -694,13 +747,25 @@ fn main() -> anyhow::Result<()> {
     // falls through to the config's accent-color (or palette[4]) —
     // same shape as the config parse arm, no hard fail.
     let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
+    let remote_file = cli.remote_file.clone().or_else(default_remote_file);
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
         config: config_path,
         layout: cli.layout,
         accent_override,
+        remote_file,
     })
+}
+
+/// Cycle 302: default remote-command file path. Lives under the
+/// kettle config directory so `--remote-send` / `--remote-file`
+/// callers and the kettle window's watcher agree without explicit
+/// paths on either side. None when the config dir isn't resolvable
+/// (no $HOME / $XDG_CONFIG_HOME) — same shape as
+/// `Config::default_path`.
+fn default_remote_file() -> Option<std::path::PathBuf> {
+    kettle_config::Config::default_path().and_then(|p| p.parent().map(|d| d.join("remote.cmd")))
 }
 
 /// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
