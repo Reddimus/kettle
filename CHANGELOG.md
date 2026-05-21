@@ -6,6 +6,74 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-05-21
+
+Patch release. Direct response to user feedback on v1.3.1: *"The
+right click menu still does not work. It is just blank. Think of a
+better way to test this and fix this."* Both addressed.
+
+### Fixed
+- **Right-click context menu was blank.** The kettle render pass
+  order is `quads → imgs → text → overlay_quads`. v1.3.0/v1.3.1 put
+  the menu's panel-bg quad in `overlay_quads` (the last pass), which
+  drew on top of the menu text that had already been rendered in the
+  text pass. v1.3.0 used opacity 0.97 ("looks awful" — text bled
+  through at 3%); v1.3.1 bumped to 1.0 ("just blank" — text fully
+  covered).
+
+  Fixed by adding a third quad pass + second TextRenderer:
+
+  ```
+  1. quads.draw           (panes, tabs)
+  2. imgs.draw            (sixel / kitty)
+  3. text_renderer.render (pane + tab text — NOT menu)
+  4. overlay_quads.draw   (dim + scrollbar — NOT menu chrome)
+  5. menu_quads.draw      (menu shadow + bg + border + highlight)
+  6. menu_text_renderer.render (menu row labels)
+  ```
+
+  All v1.3.1 design choices (drop shadow, theme.background panel,
+  palette[8] border, palette[4]@0.18 highlight + 2-px accent strip,
+  comfortable padding) carry over verbatim — the colors were right,
+  only the pass was wrong.
+
+  Menu chrome quads extracted into a pure `menu_chrome_quads(menu,
+  theme, cw, ch) -> Vec<QuadInstance>` helper so the live renderer
+  and the new headless screenshot path produce identical pixels.
+
+### Added
+- **`kettle --screenshot-menu PATH`** CLI flag: mirrors
+  `--screenshot` but renders with a synthetic right-click context
+  menu open over the pane. Useful for verifying the menu's render
+  path without opening the windowed app — exactly the gap that let
+  v1.3.0/v1.3.1 ship the blank-menu bug. Honors `--cols` / `--rows`
+  / `--config` the same way.
+- **`DebugScene` enum + `capture_png_with(cfg, cols, rows, out,
+  scene)`** public API in `kettle-render`. `capture_png(..)` is
+  kept as a thin back-compat shim that calls `..., Default`.
+
+### Tests + CI
+- **New `crates/kettle-render/tests/menu_visual.rs`** integration
+  test that renders both scenes via `capture_png_with`, loads both
+  PNGs, and asserts:
+  - ≥ 1000 pixels differ between the no-menu baseline and the
+    context-menu render. v1.3.0/v1.3.1 produced 0 different pixels
+    inside the panel area; this floor catches exactly that
+    regression.
+  - ≥ 200 foreground-leaning pixels appear inside the menu's
+    bounding box, ruling out a blank-menu render where only chrome
+    pixels show.
+
+  Combined into one `cargo test` invocation so we only spin up one
+  pair of wgpu adapters per run (parallel offscreen software-Vulkan
+  devices have segfaulted on shared CI runners).
+- **`--screenshot-menu visual regression (Linux)` CI step** runs
+  the binary under `LIBGL_ALWAYS_SOFTWARE=1` and asserts PNG magic
+  bytes + file size ≥ 40 KB. Catches a wgpu-version drift the unit
+  test wouldn't see.
+
+Workspace tests: 259 → 260.
+
 ## [1.3.1] — 2026-05-21
 
 Patch release. Direct response to user feedback on v1.3.0:
