@@ -126,14 +126,40 @@ jobs:
           Copy-Item -Recurse shell-integration dist/kettle/
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 
+      # Generate a SHA-256 sidecar for the artifact so users (and the
+      # cycle-253 `install-online.sh` one-liner) can verify a download
+      # before extracting. Output format matches `sha256sum` / `shasum
+      # -a 256` so the standard verification incantation works as-is:
+      #     sha256sum -c kettle-linux-x86_64.tar.gz.sha256
+      # Each runner uses the native tool — `sha256sum` on Linux,
+      # `shasum -a 256` on macOS, `Get-FileHash` on Windows.
+      - name: Generate SHA-256 (Linux)
+        if: runner.os == 'Linux'
+        run: sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - name: Generate SHA-256 (macOS)
+        if: runner.os == 'macOS'
+        run: shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - name: Generate SHA-256 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Emit the same `<hex>  <filename>` layout `sha256sum` does so
+          # cross-platform verification doesn't need a parser per OS.
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.artifact }}").Hash.ToLower()
+          Set-Content -NoNewline -Path "${{ matrix.artifact }}.sha256" -Value "$hash  ${{ matrix.artifact }}`n"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
+          files: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
           generate_release_notes: true

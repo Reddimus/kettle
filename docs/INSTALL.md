@@ -72,6 +72,37 @@ GitHub runners for every platform:
 - **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`. Unzip
   anywhere and run; uses ConPTY + your default shell (PowerShell/cmd).
 
+### Verifying a download (SHA-256)
+
+Every release from **v1.3.4** onward ships a `.sha256` sidecar
+generated on the same CI runner as the artifact. Verify a tarball
+before extracting it:
+
+```sh
+# Linux / WSL
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.3.4/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.3.4/kettle-linux-x86_64.tar.gz.sha256
+sha256sum -c kettle-linux-x86_64.tar.gz.sha256
+# → kettle-linux-x86_64.tar.gz: OK
+```
+
+```sh
+# macOS (shasum is preinstalled)
+shasum -a 256 -c kettle-macos-universal.zip.sha256
+```
+
+```powershell
+# Windows (PowerShell)
+$expected = (Get-Content kettle-windows-x86_64.zip.sha256).Split()[0]
+$actual   = (Get-FileHash kettle-windows-x86_64.zip).Hash.ToLower()
+if ($expected -eq $actual) { "OK" } else { "MISMATCH" }
+```
+
+The one-line installer
+([`scripts/install-online.sh`](../scripts/install-online.sh))
+performs this check automatically. A failed verification aborts the
+install with a clear error.
+
 ## From source (all platforms)
 
 ```sh

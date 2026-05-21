@@ -120,6 +120,38 @@ if [ "$MAGIC" != "1f8b" ]; then
   exit 1
 fi
 
+# --- SHA-256 verification ------------------------------------------
+# Releases since v1.3.4 ship a `<artifact>.sha256` sidecar generated
+# on the same CI runner as the artifact. Download it and check —
+# guards against a tampered tarball from a compromised mirror or a
+# MITM. Older releases (≤ v1.3.3) didn't publish a sidecar, so a
+# missing .sha256 is a soft failure (warn + continue) rather than a
+# hard error. Once the older releases age out of the supported set,
+# tighten this to a hard requirement.
+SHA_URL="${URL}.sha256"
+SHA_FILE="${TMP}/${ASSET}.sha256"
+if curl -fL -o "$SHA_FILE" "$SHA_URL" 2>/dev/null; then
+  # sha256sum reads `<hex>  <filename>` and looks for the file relative
+  # to the cwd. Run it in $TMP so the bare filename matches.
+  if (cd "$TMP" && sha256sum -c "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
+    echo "kettle: SHA-256 verified."
+  elif command -v shasum >/dev/null 2>&1 \
+       && (cd "$TMP" && shasum -a 256 -c "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
+    # Some BusyBox / Alpine environments ship shasum but not sha256sum.
+    echo "kettle: SHA-256 verified (via shasum)."
+  else
+    echo "kettle install-online.sh: SHA-256 verification FAILED for ${ASSET}." >&2
+    echo "The downloaded tarball does not match the hash published on the release." >&2
+    echo "Refusing to extract a potentially-tampered archive. Aborting." >&2
+    exit 1
+  fi
+else
+  # No sidecar — older release predating the cycle-254 sha256 publish.
+  # Warn but continue so the one-liner still installs v1.3.0..v1.3.3.
+  echo "kettle install-online.sh: no .sha256 sidecar found for ${VERSION} — skipping verification." >&2
+  echo "Releases from v1.3.4 onward publish checksums; pin to a newer version with KETTLE_VERSION." >&2
+fi
+
 # --- Extract + run the bundled install.sh --------------------------
 tar -C "$TMP" -xzf "$TAR"
 if [ ! -x "$TMP/kettle/install.sh" ]; then
