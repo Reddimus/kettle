@@ -78,18 +78,54 @@ A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
 flagged by `kettle --check-config` — it doesn't silently degrade
 into a bare-key binding.
 
-`action` is one of: `copy`, `paste`, `new_tab`, `close_tab`, `next_tab`,
-`previous_tab`, `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based,
-N is the tab number — `goto_tab:1` is the first tab), `new_split:right`,
-`new_split:down`, `split_auto`, `close_pane`, `close_window`, `new_window`,
-`focus_next`, `focus_prev`, `goto_split:{up,down,left,right}`,
-`increase_font_size`, `decrease_font_size`, `reset_font_size`,
-`start_search`, `broadcast_all`, `broadcast_off`, `toggle_fullscreen`,
-`reset`, `clear_history` (also `clear_scrollback` / `clear_buffer` —
-wipes scrollback only; keep the visible screen unlike `reset`),
-`scroll_page_up`, `scroll_page_down`, `scroll_to_top`,
-`scroll_to_bottom`, `prev_prompt`, `next_prompt`, `new_ssh`,
-`command_palette`, `hint_mode`, `next_theme`, `prev_theme`,
+`action` is one of:
+
+**Tabs**: `new_tab`, `close_tab`, `next_tab`, `previous_tab`,
+`move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based, N is the tab
+number — `goto_tab:1` is the first tab), `undo_close_tab` (also
+`reopen_tab` / `restore_tab` — restore the most recently-closed tab
+from a bounded LIFO ring of 10), `duplicate_tab` (clone the focused
+pane's argv + cwd into a new tab — `ssh prod` clones to a second
+`ssh prod`).
+
+**Splits**: `new_split:right` (also `split_right` / `split_vert`),
+`new_split:down` (also `split_down` / `split_horiz`), `split_auto`
+(pick by aspect ratio), `close_pane` (also `close_surface` /
+`close_term`), `duplicate_pane` (clone the focused pane's argv + cwd
+into a right-side split).
+
+**Focus + resize**: `focus_next`, `focus_prev`,
+`goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
+`toggle_zoom` (also `toggle_split_zoom`).
+
+**Window**: `new_window`, `close_window`, `toggle_fullscreen`.
+
+**Editing**: `copy` (`copy_to_clipboard`), `paste`
+(`paste_from_clipboard`).
+
+**Search + jump**: `start_search` (`search`), `prev_prompt`
+(`jump_to_prompt_prev`), `next_prompt` (`jump_to_prompt_next`).
+
+**Scrollback**: `scroll_line_up`, `scroll_line_down`, `scroll_page_up`,
+`scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
+`clear_history` (also `clear_scrollback` / `clear_buffer` — wipes
+scrollback only; keep the visible screen unlike `reset`).
+
+**Broadcast / group input**: `broadcast_all` (`group_all`),
+`broadcast_off` (`ungroup_all`).
+
+**Font**: `increase_font_size` (`zoom_in`), `decrease_font_size`
+(`zoom_out`), `reset_font_size` (`zoom_normal`).
+
+**Themes**: `next_theme`, `prev_theme` (`previous_theme`).
+
+**Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
+`quick_select`), `new_ssh` (`ssh`), `context_menu`
+(`open_context_menu` — the right-click menu — mouse-only by default
+but bindable to a keyboard trigger if you want the menu opened at the
+cursor position).
+
+**Misc**: `reset` (RIS — full terminal reset including engine state),
 `reload_config`.
 
 The action `unbind` (also `none`, `null`, `false`, or an empty string) removes

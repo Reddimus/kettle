@@ -1127,11 +1127,102 @@
       Pointer/Text branch runs only when chrome doesn't override.
       Test: all four (in_tab_bar × modal_open) states pinned. +1 test.
 
+- [x] **`Ctrl+Shift+W` on a split closes the pane, not the whole tab.**
+      `Mux::close_focused` used to `match Err(_)` and treat every error
+      variant the same — `Err(None)` (only-leaf, close-tab) was
+      conflated with `Err(Some(sibling))` (promote sibling, keep tab).
+      Split the arm; merge promote-sibling with the regular `Ok(n)`
+      path (both have identical post-conditions). New drift guard
+      `close_focused_promotes_sibling_in_two_pane_split`. v1.3.0.
+- [x] **Tab `✕` hover affordance** — red chip background +
+      `CursorIcon::Pointer` on hover. Click handler was already
+      correct (cycle 134 hit-tests `seg.close`); the bug was purely
+      visual. Two pure helpers (`hovered_close_button`,
+      `tab_close_hover_icon`) keep the geometry + cursor decision
+      unit-testable. v1.3.0.
+- [x] **Right-click opens a context menu** (Terminator / GNOME /
+      iTerm2 parity). Replaces the cycle-49 silent no-op with a
+      floating panel (Copy / Paste / sep / Split Right / Split Down /
+      Close Pane / sep / New Tab). Reuses the cycle-111 modal-overlay
+      infrastructure. Keyboard nav `↑↓ Tab` / `Enter Space` / `Esc`;
+      mouse click on row dispatches; click outside dismisses. Pure
+      `clamp_context_menu_anchor` so right-click near the bottom-
+      right corner flips the panel up-and-left. Shift+right-click
+      preserves the cycle-49 extend-selection muscle memory. v1.3.0.
+- [x] **Tab-bar activity / bell dots** (Terminator's Activity / Urgent
+      Watcher). Per-`Tab` `last_output_at` / `last_seen_at` / `bell`
+      fields + pure `classify_tab_activity` decision (active tab
+      short-circuits to Normal — focused accent is enough). The
+      cycle-165 per-pane history detector also latches the tab's
+      output state; `TermEvent::Bell` latches the bell flag. Renderer
+      paints a 6-px square in the lower-left of inactive segments:
+      palette[3] yellow for Bell, palette[6] cyan for Output. v1.3.0.
+- [x] **Undo-close-tab** (WezTerm / browser convention).
+      `Mux::closed_tabs: VecDeque<ClosedTab>` bounded LIFO ring of 10.
+      `close_tab_at` snapshots the first leaf's argv + OSC-7 cwd
+      before drop. New `Pane::argv` field — load-bearing so an SSH
+      tab undoes back to the same SSH connection, an `-e PROG` tab
+      undoes back to the same program. `Action::UndoCloseTab` (aliases
+      `reopen_tab` / `restore_tab`); palette entry "Undo close tab";
+      no default keybind (kettle's Terminator-inherited
+      `Ctrl+Shift+T = NewTab` muscle memory takes priority). v1.3.0.
+- [x] **Duplicate tab + duplicate pane** (iTerm2 parity). New
+      `Action::DuplicateTab` / `Action::DuplicatePane` read the
+      focused pane's argv (via the v1.3.0 `Pane::argv` field) + OSC-7
+      cwd and clone into a new tab / horizontal split. Empty argv
+      falls back to the configured shell. Palette entries; no default
+      keybinds. v1.3.0.
+- [x] **Mouse-drag tab reorder** (kitty / iTerm2 / Ghostty parity).
+      Pure `tab_drag_target_index(cursor_x, n, strip_w) -> usize`
+      helper + a tiny `tab_drag_active: bool` flag on App. Press in a
+      tab segment (not ✕, not +) arms the drag; `CursorMoved` events
+      compute the target index and call `Mux::move_active_tab`;
+      release disarms. No ghost-render of the dragged segment — kept
+      out of scope; bar snaps to the new order at each boundary
+      crossing. v1.3.0.
+
+- [x] **Coordinated-disclosure policy + supply-chain automation.**
+      `SECURITY.md` points security reports at GitHub's private
+      vulnerability-reporting form and enumerates in-scope classes
+      (PTY-to-host escape, OSC 52 read-leak, URI scheme abuse past
+      `links::is_safe_url`, bracketed-paste injection, resource
+      exhaustion past the cycle-47/118 caps). Dependabot weekly Cargo
+      + Actions update PRs (patch/minor grouped per ecosystem); new
+      `audit.yml` runs `rustsec/audit-check` on every Cargo.lock
+      change + daily 06:00 UTC cron with the upstream-transitive
+      `paste` advisory (RUSTSEC-2024-0436) on the ignore list. v1.2.1.
+- [x] **GitHub issue + PR templates aligned with the cycle pattern.**
+      `.github/ISSUE_TEMPLATE/{config,bug_report,feature_request}.yml`
+      + `.github/PULL_REQUEST_TEMPLATE.md`. `config.yml` disables blank
+      issues, routes security at SECURITY.md, routes Q&A at
+      Discussions. v1.2.1.
+- [x] **`--config` / `--working-directory` hard-fail smoke (all OSes).**
+      Cycle 106/107 had unit tests but no CI exit-code coverage —
+      a regression that silently fell back to defaults would have
+      passed the unit tests and reached users. CLI smoke now asserts
+      both typo'd flags exit nonzero plus the happy-path round-trip
+      `--config /tmp/k.cfg --config-path`. Windows-parity smoke (basename
+      match on `k\.cfg$` rather than full path) lands in the same
+      cycle. v1.2.1.
+- [x] **`--help` indented examples render verbatim.** The cycle 227
+      / 229 / 237 doc-comments contain indented `  kettle … > …`
+      example lines; without `verbatim_doc_comment` clap collapsed
+      the leading spaces, flattening the examples into prose. New
+      `cli_help_preserves_indented_code_examples` drift guard pins
+      all three flags via clap's `CommandFactory`. Same cycle fixes
+      the zsh placement (the doc wrote to `~/.config/kettle/_kettle`,
+      not on `$fpath`; now `"${fpath[1]}/_kettle"`). v1.2.1.
+
 ## Next (in priority order)
 - [ ] Detachable mux server (remote attach)
 - [ ] Native macOS menu bar
 - [ ] Code-signed/notarized macOS build; Windows MSI installer
 - [ ] Broader `vttest` conformance sweep
+- [ ] Ghost-render of the dragged tab segment during reorder
+- [ ] Per-tab silence-watcher (output stopped for ≥ N seconds —
+      complement to the v1.3.0 output-watcher dot)
+- [ ] Vi-mode for the scrollback (Alacritty parity)
+- [ ] tmux passthrough (`-CC` mode, iTerm2 parity)
 
 ## Quality bar each cycle
 
