@@ -249,6 +249,14 @@ pub struct Renderer {
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
+    /// Single shared `✕` glyph buffer reused for every tab's close
+    /// button. Rendered separately from the title text so we can:
+    /// 1. Color it independently (dim at rest, bright red on hover).
+    /// 2. Position it precisely inside `seg.close` rather than letting
+    ///    the title's last character drift across segment widths.
+    ///
+    /// One buffer, N positions via per-tab `TextArea` instances.
+    tab_close_buffer: TextBuffer,
     search_buffer: TextBuffer,
 
     quads: QuadPipeline,
@@ -362,6 +370,7 @@ impl Renderer {
         let metrics = Metrics::new(font_size, font_size * 1.25);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let search_buffer = TextBuffer::new(&mut font_system, metrics);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
@@ -385,6 +394,7 @@ impl Renderer {
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             tabbar_buffer,
+            tab_close_buffer,
             search_buffer,
             quads,
             overlay_quads,
@@ -554,27 +564,40 @@ impl Renderer {
                     // same in their text-only inactive-tab indicators).
                     quads.push(rect(dx, dy, r * 2.0, r * 2.0, c, 1.0));
                 }
-                // Hover background behind the `✕` close button so the
-                // user can tell the trailing glyph is a clickable
-                // affordance, not part of the title text. Drawn only
-                // for the segment whose close-rect the cursor is over
-                // — Chrome / Firefox / GNOME-Shell tab convention.
-                // The OS pointer-cursor flip happens in the UI's
-                // `sync_cursor_icon` path; this is the corresponding
-                // visual cue.
-                if tabbar.hovered_close_idx == Some(s.idx) {
-                    let (cx, cy, cw, ch) = s.close;
-                    // Pad a couple of px so the highlight reads as a
-                    // chip behind the glyph rather than a full-height
-                    // bar that swallows the bar/segment boundary.
-                    let pad = 3.0_f32;
+                // Close-button chip — drawn at *all* times so the user
+                // can see the close zone is a button without having to
+                // hover-discover it. Chrome / Firefox / Safari tab
+                // convention: the `✕` always has a subtle background
+                // chip, and hover bumps it to the destructive-action
+                // color (red). The chip is a small rounded-feeling
+                // square (no shader for actual rounded corners; we get
+                // the chip feel from the pad + opacity choice).
+                let (cx, cy, ccw, cch) = s.close;
+                let pad = 5.0_f32;
+                let inner_w = (ccw - pad * 2.0).max(0.0);
+                let inner_h = (cch - pad * 2.0).max(0.0);
+                let hovered = tabbar.hovered_close_idx == Some(s.idx);
+                let (chip_color, chip_alpha) = if hovered {
+                    // Hover: bright destructive-action red.
+                    (theme.palette[1], 0.85)
+                } else if s.active {
+                    // Inactive close on the *active* tab — slightly
+                    // more visible since the active tab has a brighter
+                    // surface and the chip needs more contrast.
+                    (theme.palette[8], 0.55)
+                } else {
+                    // Inactive tab: very subtle chip, just enough to
+                    // distinguish the close button from the title text.
+                    (theme.foreground, 0.12)
+                };
+                if inner_w > 0.0 && inner_h > 0.0 {
                     quads.push(rect(
                         cx + pad,
                         cy + pad,
-                        (cw - pad * 2.0).max(0.0),
-                        (ch - pad * 2.0).max(0.0),
-                        theme.palette[1],
-                        0.85,
+                        inner_w,
+                        inner_h,
+                        chip_color,
+                        chip_alpha,
                     ));
                 }
             }
@@ -828,7 +851,10 @@ impl Renderer {
                 let title = truncate(&s.title, maxc);
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
-                let label = format!(" {body}  ✕");
+                // Title only — the ✕ is rendered separately below so we
+                // can color it independently from the title text and
+                // give it a real button chip background.
+                let label = format!(" {body}");
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(w), Some(tabbar.height));
@@ -841,6 +867,24 @@ impl Renderer {
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
+            // Shared `✕` glyph buffer for every tab's close button.
+            // Sized once; positioned per-tab via TextArea below.
+            self.tab_close_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.tab_close_buffer.set_size(
+                &mut self.font_system,
+                Some(tabbar.height),
+                Some(tabbar.height),
+            );
+            self.tab_close_buffer.set_text(
+                &mut self.font_system,
+                "✕",
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.tab_close_buffer
+                .shape_until_scroll(&mut self.font_system, false);
             // `+` button glyph.
             self.tabbar_buffer
                 .set_metrics(&mut self.font_system, metrics);
@@ -876,8 +920,16 @@ impl Renderer {
                 .map(|r| r.label.chars().count())
                 .max()
                 .unwrap_or(0) as f32;
-            let panel_w = (max_chars * cw + 32.0).max(140.0);
-            let row_h = ch + 6.0;
+            // Panel sizing — more generous than v1.3.0's tight box so
+            // the menu reads as a polished surface rather than a wall
+            // of text. Horizontal pad 40 px (was 32), min width 180 px
+            // (was 140) so even a single-character action label gives
+            // the panel real presence.
+            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            // Row height matches a comfortable click target (~28-32 px
+            // on default cell metrics) — was 6 px of pad which gave a
+            // cramped 18-19 px row.
+            let row_h = ch + 12.0;
             for (i, row) in menu.rows.iter().enumerate() {
                 if row.separator {
                     continue;
@@ -976,6 +1028,33 @@ impl Renderer {
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
+                // `✕` close glyph — separate text area so we can color
+                // it independently of the title. Bright on hover, dim
+                // at rest (still readable, but visually subordinate to
+                // the title text). Centered inside `seg.close`.
+                let (cx, _, ccw, _) = s.close;
+                let hovered = tabbar.hovered_close_idx == Some(s.idx);
+                let close_fg = if hovered {
+                    // Hover: white-ish for contrast on the red chip.
+                    Rgb::new(0xff, 0xff, 0xff)
+                } else {
+                    // Rest: dim chrome — readable but secondary.
+                    theme.palette[8]
+                };
+                areas.push(TextArea {
+                    buffer: &self.tab_close_buffer,
+                    left: cx + (ccw - cw) * 0.5,
+                    top: tabbar.y + 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: cx as i32,
+                        top: ty,
+                        right: (cx + ccw) as i32,
+                        bottom: tb,
+                    },
+                    default_color: GColor::rgb(close_fg.r, close_fg.g, close_fg.b),
+                    custom_glyphs: &[],
+                });
             }
             let (nx, _, nw, _) = tabbar.new_tab;
             areas.push(TextArea {
@@ -1045,67 +1124,117 @@ impl Renderer {
                 .map(|r| r.label.chars().count())
                 .max()
                 .unwrap_or(0) as f32;
-            let panel_w = (max_chars * cw + 32.0).max(140.0);
-            let row_h = ch + 6.0;
-            let sep_h = 6.0_f32;
+            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            // Match the row_h chosen in the prep loop above so the
+            // label rect inside each row stays inside its background
+            // chip — easy to silently desync, easy to verify visually.
+            let row_h = ch + 12.0;
+            let sep_h = 8.0_f32;
             let panel_h: f32 = menu
                 .rows
                 .iter()
                 .map(|r| if r.separator { sep_h } else { row_h })
                 .sum();
             let (ax, ay) = menu.anchor;
-            // 1-px outline so the panel reads as a distinct surface
-            // even when the underlying pane bg matches palette[8].
+            // Soft shadow under the panel — a single offset quad in
+            // near-black at low opacity. Gives the menu depth so it
+            // reads as floating *above* the pane content rather than
+            // pasted on. 4-px offset is the GTK / iTerm2 convention.
             over.push(rect(
-                ax - 1.0,
-                ay - 1.0,
-                panel_w + 2.0,
-                panel_h + 2.0,
-                theme.palette[4],
-                1.0,
+                ax + 4.0,
+                ay + 4.0,
+                panel_w,
+                panel_h,
+                Rgb::new(0, 0, 0),
+                0.35,
             ));
-            // Panel background — use the chrome bar color so the menu
-            // visually belongs to the same chrome family as the tab bar.
-            over.push(rect(ax, ay, panel_w, panel_h, theme.palette[8], 0.97));
-            // Row contents: highlight + separator lines + text. Keep a
-            // running y so separators take less vertical space than rows.
+            // Panel background — theme.background opaque. Matches the
+            // pane bg color the user is already calibrated for, so the
+            // menu reads as part of kettle's visual language rather
+            // than a system widget. Replaces the v1.3.0 palette[8]
+            // (chrome dim gray) which clashed with the pane underneath
+            // on themes that put the chrome and the pane bg at very
+            // different brightnesses.
+            over.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
+            // Subtle 1-px border in dim chrome — was palette[4] (full-
+            // opacity blue) in v1.3.0 which fought every other accent
+            // on screen. palette[8] at 0.65 gives the surface
+            // definition without yelling for attention.
+            // Top edge.
+            over.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
+            // Bottom edge.
+            over.push(rect(
+                ax,
+                ay + panel_h - 1.0,
+                panel_w,
+                1.0,
+                theme.palette[8],
+                0.65,
+            ));
+            // Left edge.
+            over.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
+            // Right edge.
+            over.push(rect(
+                ax + panel_w - 1.0,
+                ay,
+                1.0,
+                panel_h,
+                theme.palette[8],
+                0.65,
+            ));
+            // Row contents: highlight + separator lines + text. Keep
+            // a running y so separators take less vertical space.
             let mut row_y = ay;
             for (i, row) in menu.rows.iter().enumerate() {
                 if row.separator {
-                    // Centered 1-px line, inset horizontally so it reads
-                    // as a divider rather than a top/bottom edge.
+                    // Centered 1-px line, inset more horizontally so
+                    // it reads as a divider rather than a panel edge.
                     over.push(rect(
-                        ax + 8.0,
+                        ax + 12.0,
                         row_y + sep_h * 0.5 - 0.5,
-                        panel_w - 16.0,
+                        panel_w - 24.0,
                         1.0,
-                        theme.foreground,
-                        0.25,
+                        theme.palette[8],
+                        0.55,
                     ));
                     row_y += sep_h;
                     continue;
                 }
                 if i == menu.highlight && row.enabled {
-                    // Highlight chip on the active row — same accent as
-                    // the focused-pane border (cycle 184 invariant: the
-                    // accent is the user's "you are here" signal).
-                    over.push(rect(ax, row_y, panel_w, row_h, theme.palette[4], 0.85));
+                    // Subtle blue tint on the highlighted row — was
+                    // palette[4] at 0.85 in v1.3.0 (Saturday-cartoon
+                    // bright). Now palette[4] at 0.18 — visible "you
+                    // are here" without overwhelming the label text.
+                    over.push(rect(
+                        ax + 1.0,
+                        row_y,
+                        panel_w - 2.0,
+                        row_h,
+                        theme.palette[4],
+                        0.18,
+                    ));
+                    // 2-px accent strip on the left of the highlighted
+                    // row — same shape as the cycle-178 active-tab
+                    // accent and the cycle-184 focused-pane border, so
+                    // "you are here" reads consistently across kettle's
+                    // chrome surfaces.
+                    over.push(rect(ax + 1.0, row_y, 2.0, row_h, theme.palette[4], 1.0));
                 }
-                // Label text. Disabled rows render at half opacity via
-                // a custom color blend toward the bg.
+                // Label text. Disabled rows render at ~55% opacity via
+                // a custom color blend toward the panel bg.
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
                     Rgb::new(
-                        ((theme.foreground.r as u16 + theme.palette[8].r as u16) / 2) as u8,
-                        ((theme.foreground.g as u16 + theme.palette[8].g as u16) / 2) as u8,
-                        ((theme.foreground.b as u16 + theme.palette[8].b as u16) / 2) as u8,
+                        ((theme.foreground.r as u16 + theme.background.r as u16 * 5) / 6) as u8,
+                        ((theme.foreground.g as u16 + theme.background.g as u16 * 5) / 6) as u8,
+                        ((theme.foreground.b as u16 + theme.background.b as u16 * 5) / 6) as u8,
                     )
                 };
                 areas.push(TextArea {
                     buffer: &self.context_menu_buffers[i],
-                    left: ax + 12.0,
-                    top: row_y + 3.0,
+                    left: ax + 16.0,
+                    top: row_y + 6.0,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: ax as i32,

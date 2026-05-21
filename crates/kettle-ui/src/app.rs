@@ -1597,8 +1597,8 @@ impl App {
             .unwrap_or(0);
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
-        let row_h = ch + 6.0;
-        let sep_h = 6.0_f32;
+        let row_h = ch + 12.0;
+        let sep_h = 8.0_f32;
         let panel_h: f32 = items
             .iter()
             .map(|it| match it {
@@ -1614,7 +1614,7 @@ impl App {
             })
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + 32.0).max(140.0);
+        let panel_w = (max_chars * cw + 40.0).max(180.0);
         let (sw, sh) = self
             .renderer
             .as_ref()
@@ -1670,8 +1670,8 @@ impl App {
             return None;
         }
         let (_, ch) = self.cell_px();
-        let row_h = ch as f32 + 6.0;
-        let sep_h = 6.0_f32;
+        let row_h = ch as f32 + 12.0;
+        let sep_h = 8.0_f32;
         let mut row_y = ay;
         for item in &menu.items {
             let h = match item {
@@ -1701,8 +1701,8 @@ impl App {
         let menu = self.context_menu.as_ref()?;
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
-        let row_h = ch + 6.0;
-        let sep_h = 6.0_f32;
+        let row_h = ch + 12.0;
+        let sep_h = 8.0_f32;
         let panel_h: f32 = menu
             .items
             .iter()
@@ -1720,7 +1720,7 @@ impl App {
             })
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + 32.0).max(140.0);
+        let panel_w = (max_chars * cw + 40.0).max(180.0);
         Some((menu.anchor, (panel_w, panel_h)))
     }
 
