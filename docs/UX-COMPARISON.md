@@ -38,16 +38,27 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Area | kettle | Ghostty | kitty | WezTerm | Terminator | Alacritty |
 |---|---|---|---|---|---|---|
 | **Tabs** | ✅ tree of splits per tab | ✅ | ✅ | ✅ | ✅ | ⛔ (no tabs) |
-| Per-tab close `✕` | ✅ click / middle-click | 🟡 | ✅ | ✅ `show_close_tab_button_in_tabs` | ✅ notebook close btn | — |
+| Per-tab close `✕` | ✅ always-on chip + hover red + pointer cursor (v1.3.2) | 🟡 | ✅ | ✅ `show_close_tab_button_in_tabs` | ✅ notebook close btn | — |
 | New-tab `+` button | ✅ trailing segment | ✅ | ✅ | ✅ `show_new_tab_button_in_tab_bar` | ✅ | — |
 | Tab bar position | ✅ `tab-bar-position=top\|bottom` | ✅ | ✅ | ✅ `tab_bar_at_bottom` | ✅ `tab_position` | — |
 | Tab title eliding | ✅ `truncate()` | ✅ | ✅ | ✅ `tab_max_width` | ✅ | — |
+| **Drag-to-reorder tabs** | ✅ + ghost segment (v1.3.0 / v1.3.5) | ✅ | ✅ | ✅ | ✅ (GTK) | — |
+| **Activity / bell tab dots** | ✅ palette[6] / palette[3] (v1.3.0) | ⛔ | 🟡 | ✅ `tab_bar.bell` | ✅ (Activity / Urgent Watcher) | — |
+| **Silence-watcher dot** | ✅ palette[8] dim, `tab-silence-threshold-ms` (v1.3.3) | ⛔ | ⛔ | ⛔ | ✅ (Silence Watcher origin) | — |
+| **Undo-close tab** | ✅ ring-of-10, `undo_close_tab` (v1.3.0) | ⛔ | 🟡 | ✅ origin | ⛔ | — |
+| **Duplicate tab / pane** | ✅ clone argv + cwd (v1.3.0) | ⛔ | ⛔ | ✅ | ⛔ | — |
 | **Splits/panes** | ✅ binary tree | ✅ | ✅ (layouts) | ✅ | ✅ | ⛔ |
 | Split keybinds | ✅ Terminator-exact | ✅ | ✅ | ✅ | ✅ (origin) | — |
 | Unfocused-pane dimming | ✅ `unfocused-split-opacity` 0.7 | ✅ (origin) | 🟡 | 🟡 | ⛔ | — |
 | Pane zoom/maximize | ✅ `Ctrl+Shift+X` | ✅ | ✅ | ✅ `is_zoomed` | ✅ | — |
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
 | Broadcast / group input | ✅ `Super+G` (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
+| **Right-click context menu** | ✅ floating panel, 8 entries (v1.3.0/v1.3.2) | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
+| **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
+| **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
+| **Search overlay** | ✅ `Ctrl+Shift+F`, regex + smart-case + reveal-into-scrollback | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
+| **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Hollow when unfocused | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ (origin) |
 | Blink interval config | ✅ `cursor-blink-interval` ms | ✅ | ✅ | ✅ | ✅ | ✅ (origin, 750) |
@@ -135,32 +146,60 @@ tab. Closing the last tab exits the app.
 
 ## Backlog status
 
-**Done this cycle** (commits on `main`, behind the full gate):
+**Shipped through v1.3.5** (the chronological list of "moved from
+Future → Done since the v1.0 cut of this matrix"):
 
-1. Split-key Terminator parity (`Ctrl+Shift+O`/`E`).
-2. Tab bar redesign: per-tab `✕`, `+`, middle-click close, always-show,
-   `tab-bar`/`tab-bar-position` config, active accent, title eliding.
-3. Unfocused-pane dimming (`unfocused-split-opacity`, default 0.7).
-4. Pane zoom/maximize (`Ctrl+Shift+X`, `Tab.zoomed` + `Mux::toggle_zoom`).
-5. Per-pane scrollbar (`scrollbar = never|auto|always`).
-6. Configurable split-divider color (`split-divider-color`).
-7. Cursor-blink interval config (`cursor-blink-interval`, ms).
-8. Copy-on-select toggle (`copy-on-select`).
-9. Tab-bar position (`tab-bar-position = top|bottom`).
-10. `kettle --screenshot` offscreen capture (this document's images).
+- Split-key Terminator parity (`Ctrl+Shift+O`/`E`), tab bar redesign,
+  unfocused-pane dimming, pane zoom, per-pane scrollbar, split-
+  divider color, cursor-blink interval, copy-on-select, tab-bar
+  position, `--screenshot` offscreen capture — the original v1.0
+  cycle.
+- Command palette (`Ctrl+Shift+K`) — Ghostty/kitty parity.
+- Quick-select hint mode (`Ctrl+Shift+H`) — kitty / WezTerm parity.
+- SSH launcher (`Ctrl+Shift+S`) — kettle-original fuzzy launcher.
+- Search overlay (`Ctrl+Shift+F`) with regex + smart-case +
+  reveal-into-scrollback.
+- Tab-bar mouse-wheel cycling (cycle ~135).
+- Minimum-contrast adjustment (`minimum-contrast`, WezTerm parity).
+- Background opacity + transparent rendering (cycle 148/149).
+- Shell integration / OSC 133 jump-to-prompt (`Ctrl+Up`/`Down`) +
+  bundled `kettle --shell-integration <bash|zsh|fish>` snippets.
+- Drag-and-drop file paths (shell-quoted, bracketed-paste-safe,
+  broadcast-aware) — kitty/WezTerm/iTerm2 parity.
+- Block (rectangular) selection — iTerm2/Alacritty/WezTerm parity.
+- v1.3.0 batch (UX cycle): `Ctrl+Shift+W` close-pane fix, tab `✕`
+  hover affordance, right-click context menu (Terminator/GNOME/
+  iTerm2), tab-bar activity / bell dots (Terminator), undo-close-
+  tab (WezTerm), duplicate tab / pane (iTerm2), mouse-drag tab
+  reorder (kitty/iTerm2/Ghostty).
+- v1.3.3+ refinements: per-tab silence watcher (Terminator
+  Silence Watcher), ghost-render of the dragged tab during reorder
+  (v1.3.5), Homebrew formula template + AUR PKGBUILD + Nix flake
+  for the install paths, SHA-256 sidecars on every release artifact
+  for supply-chain integrity.
 
-**Already shipped earlier** (verified, not re-built): hollow unfocused
-cursor, selection colors, double/triple-click word/line select with
-auto-copy, visual bell.
+**Future** (intentionally deferred — large or out-of-scope):
 
-**Future** (documented, intentionally deferred — not built now):
-
-- Command palette / fuzzy action launcher (Ghostty, kitty).
-- Quick-select / URL hint mode (kitty `kitten hints`, WezTerm `QuickSelect`).
-- Background blur / translucency tuning (Ghostty, kitty).
-- Minimum-contrast adjustment (WezTerm `minimum_contrast`).
-- Tab-bar mouse-wheel cycling; drag-to-reorder tabs.
-- Detachable mux server / remote attach (WezTerm, tmux-style).
+- **Detachable mux server / remote attach** (WezTerm, tmux-style).
+  Multi-week scope; touches the PTY abstraction, the session
+  protocol, and the auth surface.
+- **Vi-mode for the scrollback** (Alacritty parity). Bounded but
+  multi-cycle — needs a keymap stage + a vi-cursor state +
+  visual-selection rendering.
+- **tmux `-CC` passthrough** (iTerm2 parity). Large; embeds the
+  tmux control protocol inside kettle.
+- **Native macOS menu bar**. Needs macOS to test interactively;
+  separate cycle once a maintainer with macOS commits to drive it.
+- **Code-signed / notarized macOS build; Windows MSI installer.**
+  Needs Apple Developer / Windows code-signing certificates; not
+  doable from the public CI matrix.
+- **Background blur / translucency on macOS / Windows** — kettle
+  already honors `background-opacity` on Linux (cycle 148/149);
+  the per-OS Vibrancy / DWM blur extension is desktop-shell-
+  specific and not yet wired through winit.
+- **Source-build AUR companion** (`kettle`, no `-bin` suffix) and
+  upstream nixpkgs submission (so `nix-env -iA nixpkgs.kettle`
+  works without the flake-input dance).
 
 ## Reproducing the captures
 
