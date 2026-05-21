@@ -6,6 +6,55 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.11] — 2026-05-21
+
+Patch release.
+
+### Fixed
+- **`man kettle` keybind documentation now matches reality.** The
+  cycle-279 hand-written man page had four wrong entries that drifted
+  from the actual default keybinds:
+  - `Ctrl+Shift+arrow` was documented as "focus pane in direction"
+    — that's actually the scroll binding. Focus is **`Alt+arrow`**.
+  - `Ctrl+Shift+Z` was documented as undo close tab,
+    `Ctrl+Shift+D` as duplicate tab, and `Ctrl+Shift+Alt+D` as
+    duplicate pane. Those actions exist (cycles 247/248) but are
+    NOT default-bound — they're available via the command palette
+    (`Ctrl+Shift+K`). Documented as such in a new
+    "Additional actions via command palette" paragraph.
+  - `Ctrl+Shift+,` / `Ctrl+Shift+.` for move tab were wrong —
+    actually `Ctrl+Shift+PgUp` / `Ctrl+Shift+PgDn`.
+
+  Also added bindings the original man page omitted: NewWindow
+  (`Ctrl+Shift+I`), CloseWindow (`Ctrl+Shift+Q`), SplitAuto
+  (`Ctrl+Shift+A`), FocusNext / FocusPrev (`Ctrl+Shift+N/P`),
+  ScrollLineUp / Down (`Ctrl+Shift+Up/Down`),
+  IncreaseFontSize / DecreaseFontSize (`Ctrl+Shift+Plus/-`),
+  ToggleBroadcastOff (`Shift+Super+G`).
+
+### Added — drift guards
+- **`man_page_documents_load_bearing_default_keybinds`** test in
+  `crates/kettle/src/main.rs`. Pins 16 load-bearing default-keybind
+  triggers against the man page text via `include_str!`. If a
+  future default-keybind set changes (or the man page text gets
+  edited carelessly), CI fails instead of a user trying
+  `man kettle` + the documented hotkey getting a different
+  action. Caught the `Ctrl+PgDn` substring gap on its first run
+  (the slashed `PgUp/PgDn` form didn't satisfy the check) — the
+  man page now uses per-binding `.TP` lines so each entry has
+  its own grep'able row.
+- **`--help` output shape** pinned in CI (cycle 282). The
+  all-OS CLI smoke now grep's `^Usage: kettle` + six load-bearing
+  flag names (`--config`, `--screenshot`, `--gpu-info`,
+  `--shell-integration`, `--print-completions`,
+  `--print-default-config`). A clap-derive regression that
+  silently dropped or renamed a flag would surface here, not
+  in a user bug report.
+
+Workspace tests: 261 → 262.
+
+No code-behavior changes from v1.3.10.
+
 ## [1.3.10] — 2026-05-21
 
 Patch release. One user-visible addition + two CI hardenings.
