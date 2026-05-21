@@ -6,6 +6,103 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.6] — 2026-05-21
+
+Patch release. Theme: **post-v1.3.5 tooling + governance + supply-
+chain hygiene**. No user-visible behavior change; the binary is
+identical to v1.3.5 except the cycle-263 unwrap → expect refactor
+upgrades five provably-safe `.unwrap()` calls to `.expect("invariant:
+…")` so a future refactor that breaks one fails with a pinpointed
+panic message rather than a bare `unwrap on None`.
+
+### Added — install paths
+- **Homebrew formula template** (`packaging/homebrew/kettle.rb`)
+  with `packaging/homebrew/README.md` for the one-time tap-repo
+  setup. Macros + Linuxbrew users get `brew install kettle` in
+  two commands once the tap repo is live.
+- **AUR PKGBUILD template** (`packaging/arch/PKGBUILD`) with
+  `packaging/arch/README.md` for the one-time AUR submission.
+  Arch / Manjaro / EndeavourOS users install with `yay -S
+  kettle-bin` / `paru -S kettle-bin`.
+- **Nix flake** (`flake.nix` at repo root + `packaging/nix/
+  README.md`). NixOS users get `nix run github:reddimus/kettle`,
+  `nix profile install`, dev-shell with the workspace MSRV, and
+  flake-input usage for home-manager / NixOS configs. Rust
+  toolchain pinned to 1.89 via `oxalica/rust-overlay`; rpath
+  patched to find the wgpu / wayland / xkb runtime libs that
+  dlopen would otherwise miss.
+
+Each template pins exact SHA-256s tied to the release (via the
+cycle-254 `.sha256` sidecars), so bumping happens in the same PR
+as `Cargo.toml`.
+
+### Added — dev tooling
+- **`Justfile`** for common dev workflows. `just gauntlet` is the
+  CI-equivalent gate (`fmt --check` + `clippy -D warnings` +
+  `build` + `test` + `doc -D warnings`); recipes for every
+  daily-loop task (`just fmt` / `just test` / `just screenshot`
+  / `just menu` / `just bench` / `just install`). CONTRIBUTING.md
+  cross-links so the cycle pattern's "Run the gate locally" step
+  can use the one-liner.
+- **`scripts/bench.sh`** + **`docs/PERFORMANCE.md`** — measured
+  startup / memory / render baselines for the v1.3.5 binary,
+  plus a POSIX-bash script that reproduces every measurement
+  five times on `/usr/bin/time -f '%e %M'`. macOS users on
+  coreutils' `gtime` are supported automatically.
+- **`.editorconfig`** at the repo root — codifies indent +
+  charset + line-ending rules across VS Code / JetBrains /
+  neovim / emacs / Sublime / Helix so a save-on-format doesn't
+  fight cargo fmt or the existing scripts.
+
+### Added — supply-chain
+- **`cargo-deny` config** (`deny.toml`) + dedicated workflow
+  (`.github/workflows/deny.yml`) covering the supply-chain
+  surface the cycle-244 `audit.yml` doesn't touch: explicit SPDX
+  license allow-list, `unknown-registry = "deny"` + `unknown-git
+  = "deny"` for source restrictions, wildcards-banned + warn on
+  duplicate versions. Runs on every Cargo.lock change + weekly
+  Sunday cron.
+
+### Docs refresh
+- **CONTRIBUTING.md** gains a first-class **Drift guards**
+  subsection with three concrete kinds from the codebase
+  (exhaustive-match guards, drift-against-source guards, pixel /
+  output guards). Lead-in updated from "150+" to "250+" cycles.
+  CI gate listed with all current workflows (audit, MSRV,
+  visual regression, --screenshot-menu).
+- **TESTING.md** refreshed against the current 261-test workspace:
+  per-crate counts updated to current values; new drift guards
+  listed explicitly (menu_visual, close_focused_promotes_sibling,
+  classify_tab_activity_*, closed_tab_ring_bounded_and_lifo,
+  tab_drag_target_index_clamps_to_strip, hovered_close_button_*,
+  cli_help_preserves_indented_code_examples); CI section
+  rewritten to list every workflow + smoke step on every OS.
+- **UX-COMPARISON.md** matrix gains 8 v1.3.x parity rows
+  (drag-reorder, activity / silence dots, undo-close, duplicate,
+  right-click menu, command palette, hint mode, search overlay,
+  shell integration, SSH launcher). Backlog list now distinguishes
+  shipped-since-v1.0 (chronological) from deferred-on-purpose
+  (with one-sentence rationale per item).
+- **README** gains a `docs/PERFORMANCE.md` link in the
+  Documentation section.
+- **docs/INSTALL.md** documents all four install paths
+  (curl|sh + KETTLE_PREFIX, Homebrew, AUR, Nix flake) + the
+  manual SHA-256 verification path (sha256sum / shasum /
+  Get-FileHash one-liners).
+
+### Refactor
+- **5 provably-safe `.unwrap()` → `.expect("invariant: …")`**
+  (`kettle-vt/src/kitty.rs:current_frame` ×3,
+  `kettle-vt/src/kitty.rs:feed`, `kettle-core/src/term.rs:placeholder_runs`).
+  Each carries an inline invariant comment so a future refactor
+  that breaks the safety property fails with a pinpointed
+  message. Code-quality audit also confirmed:
+  - Zero `TODO` / `FIXME` / `HACK` markers in production code.
+  - Only one `unsafe` block (cycle 199 `SIGPIPE → SIG_DFL` with
+    existing SAFETY comment).
+
+Workspace tests stay at 261 green.
+
 ## [1.3.5] — 2026-05-21
 
 Patch release.
