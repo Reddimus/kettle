@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.9] — 2026-05-21
+
+Patch release. **~20% binary size reduction.**
+
+### Perf
+- **Release binary 30.7 MB → 24.7 MB** via the cycle-277 `image`-features
+  narrowing. cargo-bloat audit found three unused image-format
+  decoders dominating the binary: `rav1e` (AVIF, 1.6 MB), `exr`
+  (OpenEXR), `image_webp`, plus the full `zune_jpeg`. Root cause:
+  `arboard`'s default `image_data` feature pulled `image` with
+  default features (= every format) and unified with kettle-vt's
+  default-feature `image` declaration.
+
+  Fix:
+  - `kettle-vt`: `image = { ..., default-features = false,
+    features = ["png", "jpeg", "gif"] }`. Matches iTerm2's inline-
+    image protocol spec (the only path that decodes user-supplied
+    image bytes).
+  - `kettle-ui`: `arboard = { ..., default-features = false }`.
+    Drops the `image_data` feature; kettle's clipboard surface is
+    text-only, no image-to-clipboard path exists.
+
+  Result: AVIF / EXR / WebP / HDR / TIFF / BMP / QOI / DDS / ICO /
+  PNM decoders all dropped. PNG / JPEG / GIF retained. Workspace
+  tests 261/261 still green.
+
+  The cycle-274 cargo-machete CI + cycle-264 cargo-deny CI prevent
+  this class of accumulation from recurring; the cut is durable.
+
+### Docs
+- `docs/PERFORMANCE.md` baseline bumped to the new 24.7 MB
+  measurement with a footnote explaining the cycle-277 cut.
+
+No code-behavior changes elsewhere from v1.3.8.
+
 ## [1.3.8] — 2026-05-21
 
 Patch release.
