@@ -60,6 +60,14 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Search overlay** | ✅ `Ctrl+Shift+F`, regex + smart-case + reveal-into-scrollback | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
+| **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` (cycles 298-301) | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
+| **Remote-control IPC** | ✅ `kettle --remote-send TEXT` (cycle 302) | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
+| **Quake / dropdown toggle** | ✅ `kettle --toggle` (cycle 303) | ✅ quick-terminal origin | ⛔ | ⛔ | ⛔ | ⛔ |
+| **Triggers (regex → urgency)** | ✅ `trigger = REGEX` (cycles 289-290) | ⛔ | ⛔ | 🟡 (Lua) | ⛔ | ⛔ (iTerm2 origin) |
+| **Named layout / profile** | ✅ `--layout NAME` + `--profile NAME` (291-292) | 🟡 | 🟡 | 🟡 (workspace via Lua) | ✅ (origin) | ⛔ |
+| **Peacock accent-color** | ✅ `accent-color` + `--accent` (cycle 293) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ (Peacock-for-VSC origin) |
+| **Annotated screenshots** | ✅ `--annotate TEXT` (cycle 294, caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
+| **Status bar widget** | ✅ `status-bar = top\|bottom` (cycles 295-296) | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Hollow when unfocused | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ (origin) |
 | Blink interval config | ✅ `cursor-blink-interval` ms | ✅ | ✅ | ✅ | ✅ | ✅ (origin, 750) |
@@ -179,16 +187,45 @@ Future → Done since the v1.0 cut of this matrix"):
   for the install paths, SHA-256 sidecars on every release artifact
   for supply-chain integrity.
 
+**Shipped in v1.4.0 → v1.7.0** (cycles 288–303, all in `main`):
+
+- **Smart selection** (iTerm2 parity, cycle 288) — double-click
+  expands to URL / file path / IPv4 / git SHA.
+- **Triggers** (iTerm2 parity, cycles 289–290) — `trigger = REGEX`
+  fires `window.request_user_attention(Critical)`.
+- **`--layout NAME`** (Terminator parity, cycle 291) — named-
+  workspace session restore.
+- **`--profile NAME`** (Terminator + iTerm2 parity, cycle 292) —
+  named-config split.
+- **`accent-color`** (Peacock-for-VS-Code parity, cycle 293) —
+  multi-window visual ID via one config knob.
+- **`--annotate TEXT`** (iTerm2 caption variant, cycle 294) —
+  bottom-strip overlay on `--screenshot` output.
+- **Status bar** (iTerm2 / kitty parity, cycles 295–296) — clock ·
+  theme · pane title.
+- **Vi-mode for the scrollback** (Alacritty parity, cycles
+  298–301) — `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L +
+  arrows; `v` visual selection; `y` yank; Esc exit.
+- **Remote-control IPC** (kitty `@` parity, cycle 302) —
+  `kettle --remote-send TEXT` via notify-watched command file.
+- **Quake dropdown** (Yakuake / Tilda / Ghostty quick-terminal
+  parity, cycle 303) — `kettle --toggle` flips window visibility
+  via the cycle-302 IPC; users bind their OS / DE / compositor
+  global hotkey.
+
 **Future** (intentionally deferred — large or out-of-scope):
 
 - **Detachable mux server / remote attach** (WezTerm, tmux-style).
   Multi-week scope; touches the PTY abstraction, the session
   protocol, and the auth surface.
-- **Vi-mode for the scrollback** (Alacritty parity). Bounded but
-  multi-cycle — needs a keymap stage + a vi-cursor state +
-  visual-selection rendering.
 - **tmux `-CC` passthrough** (iTerm2 parity). Large; embeds the
-  tmux control protocol inside kettle.
+  tmux control protocol inside kettle. ~5 cycles.
+- **Lua scripting** (WezTerm parity). Embed `mlua`, expose a
+  `kettle` API table (`send_text`, `set_tab_title`, event hooks).
+  ~4-6 cycles.
+- **Persistent in-terminal annotations** (iTerm2 — distinct from
+  the v1.4.0 screenshot caption). Scrollback-position metadata +
+  sticky-note overlay + search-jump-to. ~4 cycles.
 - **Native macOS menu bar**. Needs macOS to test interactively;
   separate cycle once a maintainer with macOS commits to drive it.
 - **Code-signed / notarized macOS build; Windows MSI installer.**
