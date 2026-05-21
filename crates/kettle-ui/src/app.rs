@@ -228,6 +228,25 @@ fn selection_kind(clicks: u8, alt: bool) -> kettle_core::SelectionType {
     }
 }
 
+/// Cycle 288 smart selection (iTerm2 parity). When a double-click
+/// lands inside a `kettle_core::hints::detect` match (URL, file path,
+/// IPv4, git SHA), return the match's `[start_col, end_col]` inclusive
+/// range so the caller can build a `Simple` selection spanning the
+/// whole match instead of the alacritty_terminal `Semantic` word that
+/// usually under- or over-shoots a structured token.
+///
+/// Pure helper: takes the single line of text the click landed on
+/// plus the click's column, returns `Some((start, end))` if any hint
+/// match contains the cursor, or `None` to fall through to the
+/// existing word-boundary semantic selection.
+fn smart_selection_at(line: &str, col: usize) -> Option<(usize, usize)> {
+    let spans = kettle_core::hints::detect(&[line]);
+    spans
+        .into_iter()
+        .find(|s| s.start <= col && col <= s.end)
+        .map(|s| (s.start, s.end))
+}
+
 /// One on-screen quick-select target: where its label sits and what it is.
 #[derive(Clone)]
 struct HintTarget {
@@ -773,6 +792,62 @@ impl App {
         let col = ((px - rx - self.cfg.padding_x) / cw).floor().max(0.0) as usize;
         let line = ((py - ry - self.cfg.padding_y) / ch).floor().max(0.0) as i32;
         kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col))
+    }
+
+    /// Cycle 288: pull the on-screen text of `row` (viewport-relative)
+    /// from the focused pane's grid so `smart_selection_at` can run its
+    /// regex against the actual cells the user clicked on. Returns
+    /// `None` if there's no focused pane, the lock can't be acquired,
+    /// or the row is out of range.
+    fn line_text_for_smart_select(&mut self, row: usize) -> Option<String> {
+        use kettle_core::Dimensions;
+        let pane = self.mux.focused()?;
+        let t = pane.term.term.lock().ok()?;
+        let cols = t.columns();
+        let rows = t.screen_lines();
+        if row >= rows {
+            return None;
+        }
+        let mut out = String::with_capacity(cols);
+        for c in 0..cols {
+            let p = kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(c));
+            out.push(t.grid()[p].c);
+        }
+        // Trim trailing spaces so the regex doesn't try to match across
+        // padding.
+        Some(out.trim_end().to_string())
+    }
+
+    /// Cycle 288: install a `Simple` selection from `(row, start)` to
+    /// `(row, end)` inclusive in the focused pane. Returns true if the
+    /// selection was set, false if there's no focused pane or the lock
+    /// failed (in which case the caller falls through to its normal
+    /// `begin_selection` path).
+    fn apply_smart_selection(&mut self, area: Rect, row: usize, start: usize, end: usize) -> bool {
+        // The `_area` is unused but kept in the signature to mirror
+        // `begin_selection`'s API — future viewport-aware variants may
+        // need it for clamping.
+        let _ = area;
+        let Some(pane) = self.mux.focused() else {
+            return false;
+        };
+        let Ok(mut t) = pane.term.term.lock() else {
+            return false;
+        };
+        let line = kettle_core::Line(row as i32);
+        let anchor = kettle_core::Point::new(line, kettle_core::Column(start));
+        let end_pt = kettle_core::Point::new(line, kettle_core::Column(end));
+        let mut sel = kettle_core::Selection::new(
+            kettle_core::SelectionType::Simple,
+            anchor,
+            kettle_core::Side::Left,
+        );
+        sel.update(end_pt, kettle_core::Side::Right);
+        t.selection = Some(sel);
+        // Like Semantic, a smart selection resolves on press; the
+        // caller treats `selecting=false` so motion doesn't extend it.
+        self.selecting = false;
+        true
     }
 
     fn begin_selection(&mut self, area: Rect, ty: kettle_core::SelectionType) {
@@ -2864,20 +2939,43 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         return;
                     }
-                    let clicks = self
-                        .cursor_cell()
-                        .map(|(r, c)| self.click_count(r, c))
-                        .unwrap_or(1);
+                    let cell = self.cursor_cell();
+                    let clicks = cell.map(|(r, c)| self.click_count(r, c)).unwrap_or(1);
                     let kind = selection_kind(clicks, self.mods.alt_key());
-                    self.begin_selection(area, kind);
+                    // Cycle 288 smart selection (iTerm2 parity): on a
+                    // double-click that lands inside a hint match
+                    // (URL / path / IPv4 / git SHA), select the whole
+                    // match as a Simple range instead of the alacritty
+                    // Semantic word, which usually under- or over-shoots
+                    // structured tokens. Falls through to begin_selection
+                    // when no hint matches, preserving existing behavior.
+                    let mut smart_selected = false;
+                    if clicks == 2
+                        && !self.mods.alt_key()
+                        && let Some((row, col)) = cell
+                        && let Some((start, end)) = self
+                            .line_text_for_smart_select(row)
+                            .as_deref()
+                            .and_then(|line| smart_selection_at(line, col))
+                        && self.apply_smart_selection(area, row, start, end)
+                    {
+                        smart_selected = true;
+                    }
+                    if !smart_selected {
+                        self.begin_selection(area, kind);
+                    }
                     // Word/line selections resolve on press; copy them now.
                     // Simple/Block are drags — copied on button release.
+                    // Cycle 288: smart-selected count as resolved-on-press
+                    // for copy_on_select purposes too — the whole match
+                    // is the selection, no drag follow-up expected.
                     if self.cfg.copy_on_select
-                        && matches!(
-                            kind,
-                            kettle_core::SelectionType::Semantic
-                                | kettle_core::SelectionType::Lines
-                        )
+                        && (smart_selected
+                            || matches!(
+                                kind,
+                                kettle_core::SelectionType::Semantic
+                                    | kettle_core::SelectionType::Lines
+                            ))
                     {
                         self.copy_selection();
                     }
@@ -3556,5 +3654,38 @@ mod tests {
         // A 0 click-count (no cell) still behaves like a single click.
         assert!(matches!(selection_kind(0, false), SelectionType::Simple));
         assert!(matches!(selection_kind(0, true), SelectionType::Block));
+    }
+
+    #[test]
+    fn smart_selection_at_returns_full_token_range() {
+        use super::smart_selection_at;
+        // Cycle 288 drift guard. The function should pick up every hint
+        // kettle-core::hints::detect knows about (URL / path / IPv4 /
+        // git SHA), return the inclusive `[start, end]` of the match
+        // when the cursor lands inside it, and None otherwise.
+        let url_line = "see https://example.com/path?x=1 for more";
+        // cursor anywhere inside the URL gets the whole URL.
+        let (s, e) = smart_selection_at(url_line, 10).unwrap();
+        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
+        let (s, e) = smart_selection_at(url_line, 31).unwrap();
+        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
+        // Cursor outside the URL returns None — the caller falls back to
+        // the alacritty Semantic word.
+        assert!(smart_selection_at(url_line, 0).is_none());
+        assert!(smart_selection_at(url_line, 39).is_none());
+
+        // IPv4 — dots aren't word chars so the alacritty Semantic word
+        // would under-select; smart selection grabs the whole thing.
+        let ip_line = "connect to 192.168.1.100 now";
+        let (s, e) = smart_selection_at(ip_line, 15).unwrap();
+        assert_eq!(&ip_line[s..=e], "192.168.1.100");
+
+        // git SHA.
+        let sha_line = "commit a1b2c3d4e5f6 landed";
+        let (s, e) = smart_selection_at(sha_line, 10).unwrap();
+        assert_eq!(&sha_line[s..=e], "a1b2c3d4e5f6");
+
+        // No hint at all — None.
+        assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
     }
 }
