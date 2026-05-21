@@ -248,8 +248,12 @@ jobs:
             echo "expected --working-directory $typo to exit nonzero"; exit 1
           fi
           # And the happy path: passing the bootstrap config we just
-          # wrote should round-trip through --config-path without
-          # error (printable path on stdout).
+          # wrote should round-trip through --config-path. Match on the
+          # basename only — Git-Bash on Windows translates the bash-side
+          # `/tmp/k.cfg` arg into a Windows path (`C:\Users\runneradmin
+          # \AppData\Local\Temp\k.cfg`) before kettle sees it, so
+          # `--config-path` echoes the Windows form. The basename is
+          # invariant across all three OSes.
           cargo run -q -p kettle -- --config /tmp/k.cfg --config-path \
-            | grep -q "/tmp/k.cfg"
+            | grep -qE 'k\.cfg$'
         shell: bash
