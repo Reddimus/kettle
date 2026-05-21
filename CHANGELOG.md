@@ -6,6 +6,61 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-05-21
+
+Patch release. Direct response to user feedback on v1.3.0:
+*"Tab x's are still just characters and not close buttons. Also the
+right click actions look awful."*
+
+### Fixed
+- **Tab `✕` reads as a button at all times.** v1.3.0 added a *hover-
+  only* red chip; the glyph itself was the last character of the tab-
+  title text buffer, so at rest it read as plain text in the title.
+  Two changes:
+  - Always-on background chip behind every tab's close zone — dim
+    `theme.foreground` at 0.12 opacity at rest (palette[8] at 0.55 on
+    the active tab where the surface is brighter), bright palette[1]
+    red at 0.85 on hover. The close button visibly exists before the
+    user ever hovers.
+  - Dedicated `✕` glyph buffer (`Renderer::tab_close_buffer`, single
+    shared across all tabs, positioned per-segment via N TextAreas).
+    Removed `✕` from the per-tab title text buffer. The glyph gets
+    its own color: theme.palette[8] dim at rest, pure white on hover
+    so the contrast against the red chip reads clearly.
+- **Right-click context menu redesigned.** v1.3.0 used palette[4]
+  (bright accent blue) for the panel *outline*, palette[8] (dim
+  chrome) for the bg, and palette[4] again at 0.85 opacity for the
+  highlight row — every chrome element was competing for attention.
+  Five changes:
+  - **Drop shadow** — a near-black quad offset 4px down-right at 0.35
+    opacity so the menu reads as floating above the pane rather than
+    pasted on (GTK / iTerm2 convention).
+  - **Theme-bg panel** — `theme.background` opaque so the menu
+    inherits the pane bg the user is calibrated for instead of
+    clashing with a chrome-color box.
+  - **Subtle border** — 1-px palette[8] at 0.65 on each edge (was
+    palette[4] full opacity).
+  - **Soft highlight** — active row gets palette[4] at 0.18 (was
+    0.85) plus a 2-px palette[4] left-edge accent strip, matching the
+    cycle-178 active-tab and cycle-184 focused-pane border pattern.
+    "You are here" now reads consistently across every chrome surface.
+  - **Breathing room** — row height `ch+12` (was `ch+6`), horizontal
+    pad 16px (was 12), min panel width 180px (was 140), separator
+    height 8px (was 6) and inset 12px (was 8). Comfortable click
+    targets, polished surface.
+
+### CI
+- **MSRV verification job.** Cargo.toml declared `rust-version =
+  "1.88"` since cycle 225, but nothing in CI actually checked the
+  workspace + its transitive deps still build on that toolchain.
+  Adding `dtolnay/rust-toolchain@1.89` to ci.yml immediately surfaced
+  the real bug: `cosmic-text@0.18.2` and `smol_str@0.3.6` had both
+  bumped their own floors to 1.89, so `cargo install kettle` on
+  Rust 1.88 used to land in a confusing transitive-dep error instead
+  of cargo's clean "package requires rustc 1.89" gate. Declared
+  `rust-version` bumped 1.88 → 1.89 to match reality; the new MSRV
+  job catches the next regression at PR time, not release time.
+
 ## [1.3.0] — 2026-05-21
 
 Minor release. Theme: **production-grade UX cycle — tabs, splits,
