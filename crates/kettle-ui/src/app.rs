@@ -122,6 +122,31 @@ fn hovered_close_button(segments: &[kettle_render::TabSeg], px: f32, py: f32) ->
 /// band? `bar_h` is the bar height in pixels, `surface_h` is total window
 /// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
 /// on-wheel-over-tab-bar decision is fully unit-tested.
+/// Cycle 393 (Terminator parity, titlebar Bucket-D sub-cycle 10):
+/// pure geometry helper for per-pane titlebar hit-testing. Returns
+/// Some(idx) when the click landed inside the titlebar y-band of
+/// pane idx; None otherwise. Pulled out of App::pane_at_titlebar_click
+/// so it can be drift-guarded.
+pub(crate) fn pane_titlebar_hit(
+    px: f32,
+    py: f32,
+    pane_rects: &[(u64, (f32, f32, f32, f32))],
+    title_at_bottom: bool,
+    bar_h: f32,
+) -> Option<u64> {
+    for (id, (rx, ry, rw, rh)) in pane_rects {
+        let (bar_top, bar_bot) = if title_at_bottom {
+            (*ry + *rh - bar_h, *ry + *rh)
+        } else {
+            (*ry + 1.0, *ry + 1.0 + bar_h)
+        };
+        if px >= *rx && px < *rx + *rw && py >= bar_top && py < bar_bot {
+            return Some(*id);
+        }
+    }
+    None
+}
+
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
     if bar_h <= 0.0 {
         return false;
@@ -1043,17 +1068,7 @@ impl App {
             .as_ref()
             .map(|r| r.cell_h + 6.0)
             .unwrap_or(20.0);
-        for (id, (rx, ry, rw, rh)) in &rects {
-            let (bar_top, bar_bot) = if self.cfg.title_at_bottom {
-                (*ry + *rh - bar_h, *ry + *rh)
-            } else {
-                (*ry + 1.0, *ry + 1.0 + bar_h)
-            };
-            if px >= *rx && px < *rx + *rw && py >= bar_top && py < bar_bot {
-                return Some(*id);
-            }
-        }
-        None
+        pane_titlebar_hit(px, py, &rects, self.cfg.title_at_bottom, bar_h)
     }
 
     fn area(&self) -> Rect {
@@ -5232,6 +5247,34 @@ mod tests {
         assert_eq!(selection_autoscroll_lines(205.0, 100.0, 200.0), -1);
         assert_eq!(selection_autoscroll_lines(220.0, 100.0, 200.0), -2);
         assert_eq!(selection_autoscroll_lines(280.0, 100.0, 200.0), -3);
+    }
+
+    #[test]
+    fn pane_titlebar_hit_geometry() {
+        use super::pane_titlebar_hit;
+        // 800x600 surface with 2 panes side-by-side, 24px titlebar.
+        // Left pane:  (0, 0, 400, 600)
+        // Right pane: (400, 0, 400, 600)
+        let rects = vec![
+            (1u64, (0.0_f32, 0.0_f32, 400.0_f32, 600.0_f32)),
+            (2u64, (400.0_f32, 0.0_f32, 400.0_f32, 600.0_f32)),
+        ];
+        // Top titlebar: y-band [1, 25).
+        // Click inside left pane's titlebar:
+        assert_eq!(pane_titlebar_hit(50.0, 12.0, &rects, false, 24.0), Some(1));
+        // Click inside right pane's titlebar:
+        assert_eq!(pane_titlebar_hit(500.0, 12.0, &rects, false, 24.0), Some(2));
+        // Click below the titlebar (in cell content) → no hit.
+        assert_eq!(pane_titlebar_hit(50.0, 100.0, &rects, false, 24.0), None);
+        // Click ABOVE the bar (y < 1) → no hit.
+        assert_eq!(pane_titlebar_hit(50.0, 0.5, &rects, false, 24.0), None);
+        // Bottom titlebar: y-band [576, 600).
+        assert_eq!(pane_titlebar_hit(50.0, 580.0, &rects, true, 24.0), Some(1));
+        assert_eq!(pane_titlebar_hit(500.0, 580.0, &rects, true, 24.0), Some(2));
+        // Click at top-of-pane with title_at_bottom=true → no hit.
+        assert_eq!(pane_titlebar_hit(50.0, 12.0, &rects, true, 24.0), None);
+        // Click in cell content with title_at_bottom=true → no hit.
+        assert_eq!(pane_titlebar_hit(50.0, 300.0, &rects, true, 24.0), None);
     }
 
     #[test]
