@@ -4766,43 +4766,16 @@ impl ApplicationHandler<UserEvent> for App {
                         ContextMenuClick::LuaMenuItem(idx) => {
                             // Cycle 375: invoke the Lua callback +
                             // drain any LuaCommands it queued.
+                            // Cycle 433: drain through the canonical
+                            // helper to match the other 5 LuaEvent
+                            // hook drains (Startup / TabAdd / TabClose
+                            // / Bell / Output). Menu-item click is
+                            // NOT a LuaEvent emission but it consumes
+                            // the same LuaCommand queue.
                             if let Some(eng) = &self.lua_engine {
                                 eng.invoke_menu_item(idx);
-                                for cmd in eng.drain_commands() {
-                                    match cmd {
-                                        crate::LuaCommand::SendText(s) => {
-                                            self.pending_lua_send.extend_from_slice(s.as_bytes());
-                                        }
-                                        crate::LuaCommand::ExecAction(name) => {
-                                            if let Some(a) = kettle_config::Action::from_name(&name)
-                                            {
-                                                self.pending_lua_actions.push(a);
-                                            } else {
-                                                log::warn!(
-                                                    "lua kettle.exec_action (from menu-item): \
-                                                     unknown action name {name:?}"
-                                                );
-                                            }
-                                        }
-                                        crate::LuaCommand::Notify { title, body } => {
-                                            fire_notify(&title, &body);
-                                        }
-                                        crate::LuaCommand::SetTheme(name) => {
-                                            if let Some(canonical) =
-                                                kettle_config::Theme::find_name(&name)
-                                            {
-                                                self.cfg.theme_name = canonical.to_string();
-                                                self.cfg.theme =
-                                                    kettle_config::Theme::by_name(canonical);
-                                            } else {
-                                                log::warn!(
-                                                    "lua kettle.set_theme: unknown theme {name:?}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
                             }
+                            self.drain_lua_hook_commands("lua menu-item");
                         }
                     }
                     return;
