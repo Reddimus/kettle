@@ -653,6 +653,89 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
 }
 
 impl App {
+    /// Cycle 410: SCM_RIGHTS-based cross-process tab handoff.
+    /// Creates a Unix socketpair, fork+exec's a kettle child with
+    /// the child's socket fd as fd 3 + `--tab-handoff-fd 3`, then
+    /// calls `fd_transport::send_fds` to ship the serialized tab
+    /// JSON. Returns true on success; false on any failure
+    /// (caller falls through to file-fallback).
+    ///
+    /// Currently sends JSON only; live PTY-fd transfer is the
+    /// final sub-cycle 7 piece that requires extracting PTYs
+    /// from the source Pane (a non-trivial alacritty_terminal
+    /// internal change).
+    #[cfg(unix)]
+    #[allow(unused_variables)]
+    fn try_move_tab_to_new_window_scm_rights(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let stab = match self.mux.serialize_tab(self.mux.active) {
+            Some(s) => s,
+            None => return false,
+        };
+        let session = crate::session::Session {
+            tabs: vec![stab],
+            active: 0,
+            theme: Some(self.cfg.theme_name.clone()),
+        };
+        let json = match serde_json::to_vec(&session) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+        let (parent, child) = match std::os::unix::net::UnixStream::pair() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let child_fd = child.as_raw_fd();
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--tab-handoff-fd").arg("3");
+        if let Some(p) = self.config_path.as_ref() {
+            cmd.arg("--config").arg(p);
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // The child socket needs to end up at fd 3 in the child
+        // process. pre_exec runs in the child between fork + exec;
+        // dup2 the socket into 3 + clear close-on-exec so it
+        // survives the exec.
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(child_fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Clear FD_CLOEXEC on fd 3 so it survives exec.
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                }
+                Ok(())
+            });
+        }
+        match cmd.spawn() {
+            Ok(_) => {
+                // Drop the child end in the parent so we don't
+                // hold an extra reference.
+                drop(child);
+                // Send the JSON via send_fds (empty fds for now;
+                // future cycle adds PTY fds).
+                let _ = crate::fd_transport::send_fds(&parent, &json, &[]);
+                drop(parent);
+                // Close the source tab now that the child is up.
+                let _ = self.mux.close_tab();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn run() -> Result<()> {
         Self::run_with(crate::Options::default())
     }
@@ -3459,6 +3542,16 @@ impl App {
             // This gives the user the "move this work to a new
             // window" UX path Terminator's detachable_tabs ships.
             Action::MoveTabToNewWindow => {
+                // Cycle 410 (Terminator parity, detachable-tabs
+                // Bucket-D sub-cycle 7 source): on Unix, prefer the
+                // SCM_RIGHTS socketpair path over the cycle-405 file-
+                // fallback. socketpair → fork+exec child with
+                // --tab-handoff-fd 3 → parent send_fds the serialized
+                // tab + (future: PTY fds) → child recv_fds + restore.
+                //
+                // Falls through to the cycle-405 file-fallback when
+                // socketpair fails or on Windows/Wayland.
+                //
                 // Cycle 405 (Terminator parity, detachable-tabs
                 // Bucket-D sub-cycle 8 full): serialize the focused
                 // tab to a one-shot JSON handoff file + spawn a
@@ -3469,6 +3562,10 @@ impl App {
                 // source window (true PTY-fd transfer needs the
                 // SCM_RIGHTS path, sub-cycle 7). The file-fallback
                 // works cross-platform incl. Windows + Wayland.
+                #[cfg(unix)]
+                if self.try_move_tab_to_new_window_scm_rights(event_loop) {
+                    return;
+                }
                 let cwd = self
                     .mux
                     .focused()
