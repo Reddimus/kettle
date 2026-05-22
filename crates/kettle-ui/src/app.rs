@@ -675,7 +675,20 @@ impl App {
             cfg: initial_cfg,
             window: None,
             renderer: None,
-            mux: Mux::new(),
+            mux: {
+                let mut m = Mux::new();
+                // Cycle 357 (Terminator parity, terminatorlib/config.py:71
+                // `broadcast_default`): seed the mux's broadcast flag
+                // from config. `All` and `Group` both flip kettle's
+                // per-tab broadcast on; `Off` leaves it off (kettle
+                // default). Distinction between All vs Group lands
+                // with named groups (Bucket D).
+                m.broadcast = !matches!(
+                    initial_cfg.broadcast_default,
+                    kettle_config::BroadcastDefault::Off
+                );
+                m
+            },
             mods: ModifiersState::empty(),
             proxy,
             clipboard: arboard::Clipboard::new().ok(),
@@ -1468,7 +1481,30 @@ impl App {
                         bell_panes.push(pane_id);
                     }
                     TermEvent::Bell => {}
-                    TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
+                    // Cycle 357 (Terminator parity, terminatorlib/config.py:118
+                    // `exit_action`): when the shell exits, choose
+                    // whether to close the pane, restart the shell,
+                    // or hold the dead shell visible (so the user can
+                    // read final output / scrollback before closing
+                    // manually).
+                    //
+                    // Hold: don't mark closed; pane shows the last
+                    // output until user explicitly closes via
+                    // Ctrl+Shift+W.
+                    // Restart: TODO — needs re-spawn with same argv +
+                    // cwd; logs warn for now, falls back to close.
+                    // Close (default): unchanged kettle behavior.
+                    TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
+                        kettle_config::ExitAction::Hold => {}
+                        kettle_config::ExitAction::Restart => {
+                            log::warn!(
+                                "exit-action = restart not yet implemented; \
+                                     falling through to close (pane id {pane_id})"
+                            );
+                            pane.closed = true;
+                        }
+                        kettle_config::ExitAction::Close => pane.closed = true,
+                    },
                     _ => {}
                 }
             }
