@@ -754,19 +754,41 @@ impl Renderer {
                         }
                     }
                     "center" => {
-                        let x = ((sw - img_w) * 0.5).max(0.0);
-                        let y = ((sh - img_h) * 0.5).max(0.0);
+                        // Cycle 391: align_horiz/vert nudge the
+                        // centered position. left/top → 0, right/
+                        // bottom → max-edge, center/middle (default)
+                        // → centered.
                         let w = img_w.min(sw);
                         let h = img_h.min(sh);
+                        let x = match cfg.background_image_align_horiz.as_str() {
+                            "left" => 0.0,
+                            "right" => (sw - w).max(0.0),
+                            _ => ((sw - w) * 0.5).max(0.0),
+                        };
+                        let y = match cfg.background_image_align_vert.as_str() {
+                            "top" => 0.0,
+                            "bottom" => (sh - h).max(0.0),
+                            _ => ((sh - h) * 0.5).max(0.0),
+                        };
                         img_items.push((x, y, w, h, data.clone()));
                     }
                     "scale" => {
-                        // Aspect-preserving fit within the surface.
+                        // Cycle 391: aspect-preserving fit within
+                        // the surface; align_horiz/vert position
+                        // the scaled image.
                         let scale = (sw / img_w).min(sh / img_h);
                         let w = img_w * scale;
                         let h = img_h * scale;
-                        let x = ((sw - w) * 0.5).max(0.0);
-                        let y = ((sh - h) * 0.5).max(0.0);
+                        let x = match cfg.background_image_align_horiz.as_str() {
+                            "left" => 0.0,
+                            "right" => (sw - w).max(0.0),
+                            _ => ((sw - w) * 0.5).max(0.0),
+                        };
+                        let y = match cfg.background_image_align_vert.as_str() {
+                            "top" => 0.0,
+                            "bottom" => (sh - h).max(0.0),
+                            _ => ((sh - h) * 0.5).max(0.0),
+                        };
                         img_items.push((x, y, w, h, data.clone()));
                     }
                     _ => {
