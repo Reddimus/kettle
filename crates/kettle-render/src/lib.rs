@@ -610,6 +610,15 @@ impl Renderer {
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
 
+        // Cycle 379+382 (Terminator parity, per-pane-titlebar):
+        // hoisted alongside buffer allocation so the cycle-382
+        // text-setting block can reference it. Same condition as
+        // the cycle-379 quad render (cfg.show_titlebar && >1 pane).
+        let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
+            ch + 6.0
+        } else {
+            0.0
+        };
         // Ensure one text buffer per pane.
         while self.pane_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -619,6 +628,31 @@ impl Renderer {
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_titlebar_buffers.push(b);
+        }
+        // Cycle 382: write each pane's title into its titlebar
+        // buffer NOW (before the later loops borrow self
+        // immutably). pane_titlebar_h was computed earlier as
+        // either 0.0 or ch+6.0; only do the mutation when active.
+        if pane_titlebar_h > 0.0 {
+            for (i, pv) in panes.iter().enumerate() {
+                let (_, _, rw, _) = pv.rect;
+                let label = if pv.title.trim().is_empty() {
+                    "kettle".to_string()
+                } else {
+                    pv.title.clone()
+                };
+                let buf = &mut self.pane_titlebar_buffers[i];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    &format!("  {label}"),
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Basic,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
@@ -822,18 +856,6 @@ impl Renderer {
         }
 
         // Per-pane grid + dividers/border.
-        // Cycle 379 (Terminator parity, per-pane-titlebar Bucket-D sub-cycles
-        // 2+3+4 collapsed): per-pane titlebar height. When cfg.show_titlebar
-        // is true + there's more than 1 pane in this tab (titlebars on a
-        // single pane is mostly redundant since the OS window title +
-        // tab-bar already show the same info), reserve a thin strip at the
-        // top of each pane for the title + size text. Color cycles through
-        // the cfg.title_*_bg/fg variants by focused vs unfocused state.
-        let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
-            ch + 6.0
-        } else {
-            0.0
-        };
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -1340,9 +1362,10 @@ impl Renderer {
             });
         }
         // Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
-        // sub-cycle 3): write each pane's title to its titlebar
-        // buffer + push the matching TextArea. Recomputes only when
-        // the title rendering is enabled (`pane_titlebar_h > 0.0`).
+        // sub-cycle 3): per-pane title text. Push the TextAreas
+        // referencing the cycle-382 buffers (already populated
+        // during the cycle-379 build_pane pass — see
+        // build_pane_titlebar_text).
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, _rh) = pv.rect;
@@ -1353,22 +1376,6 @@ impl Renderer {
                     cfg.title_inactive_fg_color
                         .unwrap_or(Rgb::new(0x00, 0x00, 0x00))
                 };
-                let label = if pv.title.trim().is_empty() {
-                    "kettle".to_string()
-                } else {
-                    pv.title.clone()
-                };
-                let buf = &mut self.pane_titlebar_buffers[i];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
-                buf.set_text(
-                    &mut self.font_system,
-                    &format!("  {label}"),
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Basic,
-                    None,
-                );
-                buf.shape_until_scroll(&mut self.font_system, false);
                 areas.push(TextArea {
                     buffer: &self.pane_titlebar_buffers[i],
                     left: rx,
