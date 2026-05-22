@@ -6,6 +6,68 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.36.0] — 2026-05-22
+
+Production-hygiene release. One real bug fix (`KETTLE_GIT_SHA`
+freshness), one supply-chain hygiene fix (stale `cargo-deny`
+ignore), one drift guard, and a sweep of stale-snapshot fixes
+across the docs.
+
+  cycle 438 — README + INSTALL.md version pins bumped to v1.35.0.
+
+  cycle 439 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md`
+              post-sweep summaries updated to include v1.35.0
+              (4 releases across 28 cycles, 308 → 318 tests).
+
+  cycle 440 — `packaging/linux/kettle.1` documents 6 more default
+              chords: Alt+1..9 (Goto tab N), F11 (Fullscreen),
+              Ctrl+0 (ResetFontSize), Shift+Arrow (Resize),
+              Shift+PgUp/Dn (page scroll), Shift+Home/End
+              (scroll-to-edge). Coverage 27 → 33 of 59.
+
+  cycle 441 — TESTING.md headline (267 → 318 tests, v1.7.0 →
+              v1.35.0) + INSTALL.md verify-build example
+              (240+ → 318+).
+
+  cycle 442 — ROADMAP "19-test harness" claim → 318; ARCHITECTURE
+              "v1.8.0 → v1.32.0 sweep" → consistent v1.8.0 →
+              v1.31.0 sweep (cycles 330-410) + v1.32.0 → v1.35.0
+              polish (cycles 411-438) split.
+
+  cycle 443 — CONTRIBUTING.md cycle + test-count snapshots
+              (300+ → 440+ cycles, 267+ → 318+ tests).
+
+  cycle 444 — **Real hygiene fix.** Dropped the stale
+              `RUSTSEC-2024-0436` ignore from `deny.toml` +
+              `.github/workflows/audit.yml`. The `paste → rav1e
+              → image` chain that justified it is no longer in
+              Cargo.lock (verified with `cargo tree -i paste`).
+              `cargo deny check` now warning-free.
+
+  cycle 445 — **Real bug fix.** `crates/kettle/build.rs` was
+              capturing `KETTLE_GIT_SHA` once and not refreshing
+              when only other workspace crates changed (Cargo's
+              default rerun-policy only scans the build script's
+              own package). `kettle --version` showed stale SHAs.
+              Added `cargo:rerun-if-changed=NONEXISTENT_FORCE_
+              RERUN_FOR_KETTLE_GIT_SHA` to force every-build
+              re-execution; the ~10ms git-subprocess cost is
+              well under build-time noise. Restores the cycle-195
+              "+dirty marker refreshes on every source edit"
+              contract.
+
+  cycle 446 — Drift guard for `kettle.config_path()` return-type
+              contract (must be `string | nil`, never anything
+              else). 318 → 319 tests.
+
+  cycle 447 — `SECURITY.md` "What's in scope" list gained two
+              bullets covering the v1.8.0+ Lua-plugin sandbox-
+              escape surface and the cycles 403/408 detachable-
+              tabs handoff payload-abuse surface.
+
+  cycle 448 — `Justfile` `just test` recipe doc bumped 261+ →
+              319+.
+
 ## [1.35.0] — 2026-05-22
 
 Post-v1.34.0 polish. Plugin-contract refactor finished off, drift
