@@ -6,6 +6,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.28.0] — 2026-05-22
+
+  cycle 401 — Drag FSM cancel path + cursor-leave/reenter
+              transitions + end-to-end walkthrough drift guard.
+
+              New transitions:
+                on_cursor_leave_window(session_id):
+                  DraggingInside → DraggingOutside
+                on_cursor_reenter_window(x, y):
+                  DraggingOutside → DraggingInside
+                cancel() -> (Self, Option<usize>):
+                  Any → Idle; returns tab_idx that was being
+                  dragged so the caller can restore visuals.
+
+              The end_to_end_drag_walkthrough drift guard
+              exercises the full FSM path: Idle → Armed →
+              DraggingInside → DraggingOutside → cancel → Idle.
+
+              Closes detachable-tabs Bucket-D sub-cycle 9
+              (cancel) in full + sub-cycle 11 (e2e test) for
+              the FSM portion. Full sub-cycle 11 needs a
+              cross-process integration test which spans
+              multiple sessions per the design doc.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 — sub-cycles 2-7, 9, 10
+                                   E — sub-cycle 8 (group-name
+                                       edit) Bucket-E
+bg-image (12 sub-cycles):         ✅ 11/12 effectively COMPLETE
+Detachable tabs (11 sub-cycles):  ✅ 7 — sub-cycles 1 (design),
+                                       2 (serialize), 3 (SCM_RIGHTS),
+                                       4 (extract/insert), 5 (FSM),
+                                       9 (cancel), 10 (Wayland
+                                       fallback), 11 partial
+                                       (FSM e2e test)
+                                   ⌛ 4 — sub-cycles 6 (cursor
+                                       detection winit-side), 7
+                                       (cross-process IPC + fd
+                                       transfer), 8 (new-window-
+                                       on-drop), 11 full (cross-
+                                       process integration test)
+
+41 of 46 Bucket-D sub-cycles end-to-end (89%).
+
+Workspace tests stay at 308.
+
+The 4 remaining detachable-tabs sub-cycles are all CROSS-
+PROCESS integration: they compose every foundation now shipped
+(FSM, SCM_RIGHTS, serialize/extract/insert, cancel path,
+Wayland-fallback) into the workflow where two kettle
+processes coordinate. Per the design doc, integration spans
+multiple sessions because the test fixture (two concurrent
+kettle processes) is inherently a multi-process problem.
+
 ## [1.27.0] — 2026-05-22
 
 Two more detachable-tabs Bucket-D foundations.
