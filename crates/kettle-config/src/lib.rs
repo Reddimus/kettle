@@ -625,6 +625,9 @@ pub struct Config {
     /// style` is true, also source from the system clipboard
     /// (not just the X11 primary).
     pub putty_paste_style_source_clipboard: bool,
+    /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12):
+    /// Lua sandbox level.
+    pub lua_sandbox: LuaSandbox,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -835,6 +838,7 @@ impl Default for Config {
             cell_width: 1.0,
             detachable_tabs: true,
             putty_paste_style_source_clipboard: false,
+            lua_sandbox: LuaSandbox::Safe,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1839,6 +1843,12 @@ impl Config {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.putty_paste_style_source_clipboard = b;
                     }
+                }
+                "lua-sandbox" | "lua_sandbox" => {
+                    cfg.lua_sandbox = match e.value.to_ascii_lowercase().as_str() {
+                        "trusted" | "unsafe" => LuaSandbox::Trusted,
+                        _ => LuaSandbox::Safe,
+                    };
                 }
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {

@@ -105,7 +105,56 @@ impl LuaEngine {
     /// not normally seen). Adding entries to the namespace is the
     /// happy path for subsequent sub-cycles — extend this function.
     pub fn new(theme_name: &str) -> Result<Self> {
+        Self::new_with_sandbox(theme_name, true)
+    }
+
+    /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12):
+    /// build a VM with the configured sandbox level. `safe = true`
+    /// nil's the Lua stdlib functions that can execute external
+    /// processes or open arbitrary files: `os.execute`, `os.exit`,
+    /// `os.remove`, `os.rename`, `io.open`, `io.popen`,
+    /// `io.lines`, `io.input`, `io.output`, `package.loadlib`,
+    /// `loadfile`, `dofile`. The rest of the stdlib (string, table,
+    /// math, os.date/os.time/os.getenv/os.difftime, io.read, ...)
+    /// stays usable.
+    ///
+    /// Errors from setting these to nil are bubbled up — a Lua VM
+    /// where the standard globals can't be removed isn't safe to
+    /// proceed with.
+    pub fn new_with_sandbox(theme_name: &str, safe: bool) -> Result<Self> {
         let lua = Lua::new();
+        if safe {
+            // Block dangerous APIs. Setting to nil is the canonical
+            // sandbox pattern in mlua / WezTerm / Neovim plugins.
+            let globals = lua.globals();
+            if let Ok(os_tbl) = globals.get::<mlua::Table>("os") {
+                for k in [
+                    "execute",
+                    "exit",
+                    "remove",
+                    "rename",
+                    "tmpname",
+                    "setlocale",
+                ] {
+                    let _ = os_tbl.set(k, mlua::Value::Nil);
+                }
+            }
+            if let Ok(io_tbl) = globals.get::<mlua::Table>("io") {
+                for k in [
+                    "open", "popen", "lines", "input", "output", "stdin", "stdout", "stderr",
+                ] {
+                    let _ = io_tbl.set(k, mlua::Value::Nil);
+                }
+            }
+            // loadfile / dofile read arbitrary files; deny.
+            let _ = globals.set("loadfile", mlua::Value::Nil);
+            let _ = globals.set("dofile", mlua::Value::Nil);
+            // package.loadlib loads native shared libraries → can
+            // execute arbitrary code. Always nil in safe mode.
+            if let Ok(pkg) = globals.get::<mlua::Table>("package") {
+                let _ = pkg.set("loadlib", mlua::Value::Nil);
+            }
+        }
         let pending: Arc<Mutex<Vec<LuaCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
         // Expose values as callable functions (not bare strings) so

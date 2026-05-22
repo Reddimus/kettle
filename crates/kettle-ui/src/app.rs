@@ -741,7 +741,8 @@ impl App {
         });
         let mut lua_engine: Option<crate::LuaEngine> = None;
         if let Some(script) = &init_lua_path {
-            match crate::LuaEngine::new(&initial_cfg.theme_name) {
+            let safe_sandbox = matches!(initial_cfg.lua_sandbox, kettle_config::LuaSandbox::Safe);
+            match crate::LuaEngine::new_with_sandbox(&initial_cfg.theme_name, safe_sandbox) {
                 Ok(eng) => {
                     if let Err(e) = eng.exec_file(script) {
                         log::warn!("lua script {}: {e:#}", script.display());
