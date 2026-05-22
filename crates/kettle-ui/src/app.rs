@@ -3165,7 +3165,14 @@ impl App {
             Key::Named(NamedKey::Enter) => {
                 let s = &mut self.mux.search;
                 if !s.matches.is_empty() {
-                    s.index = if self.mods.shift_key() {
+                    // Cycle 358 (Terminator parity, terminatorlib/config.py:93
+                    // `invert_search`): flip the default-direction.
+                    // - Default: Enter → next match, Shift+Enter → previous.
+                    // - With invert_search = true: Enter → previous match,
+                    //   Shift+Enter → next. Matches Terminator's "search
+                    //   reverse" toggle.
+                    let go_back = self.mods.shift_key() ^ self.cfg.invert_search;
+                    s.index = if go_back {
                         (s.index + s.matches.len() - 1) % s.matches.len()
                     } else {
                         (s.index + 1) % s.matches.len()
