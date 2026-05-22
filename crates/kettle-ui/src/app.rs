@@ -1892,15 +1892,19 @@ impl App {
                             // handler spawns a fresh shell with
                             // the same argv + cwd in a new tab.
                             //
-                            // Cycle 452: alacritty fires BOTH
-                            // TermEvent::Exit (PTY-side EOF) and
-                            // TermEvent::ChildExit(code) (child
-                            // reaper) for the same shell exit on
-                            // some platforms. Without the dedup
-                            // contains-check, exit-action=restart
-                            // spawned two new tabs per dead shell.
-                            // pane.closed = true is idempotent so
-                            // the second event just no-ops on it.
+                            // Cycle 452: alacritty_terminal v0.26
+                            // fires BOTH `Event::ChildExit(status)`
+                            // (event_loop.rs:263, only when status
+                            // is Some) and `Event::Exit` (term/
+                            // mod.rs:810, unconditionally via
+                            // terminal.lock().exit()) for the same
+                            // shell exit. Normal exits hit both;
+                            // signal exits hit only the second.
+                            // Without the dedup contains-check,
+                            // normal exits spawned TWO new tabs
+                            // per dead shell. pane.closed = true
+                            // is idempotent so the second event
+                            // just no-ops on it.
                             if !pending_restarts_local.contains(&pane_id) {
                                 pending_restarts_local.push(pane_id);
                                 log::info!(
