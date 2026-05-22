@@ -4280,7 +4280,33 @@ impl ApplicationHandler<UserEvent> for App {
                     .focused()
                     .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
                     .unwrap_or(kettle_core::TermMode::empty());
-                if let Some(bytes) = input::encode(&event.logical_key, text, self.mods, mode) {
+                if let Some(mut bytes) = input::encode(&event.logical_key, text, self.mods, mode) {
+                    // Cycle 352 (Terminator parity, terminatorlib/config.py:107-108
+                    // `backspace_binding` + `delete_binding`): remap the
+                    // encoded bytes when the user picked a non-default
+                    // binding. Same as VTE's per-profile override.
+                    if let winit::keyboard::Key::Named(named) = &event.logical_key {
+                        use kettle_config::{BackspaceBinding, DeleteBinding};
+                        use winit::keyboard::NamedKey;
+                        if *named == NamedKey::Backspace
+                            && !self.mods.control_key()
+                            && !self.mods.alt_key()
+                        {
+                            bytes = match self.cfg.backspace_binding {
+                                BackspaceBinding::AsciiDel => vec![0x7f],
+                                BackspaceBinding::ControlH => vec![0x08],
+                                BackspaceBinding::EscapeSequence => b"\x1b[3~".to_vec(),
+                                BackspaceBinding::Automatic => bytes,
+                            };
+                        } else if *named == NamedKey::Delete {
+                            bytes = match self.cfg.delete_binding {
+                                DeleteBinding::AsciiDel => vec![0x7f],
+                                DeleteBinding::ControlH => vec![0x08],
+                                DeleteBinding::EscapeSequence => b"\x1b[3~".to_vec(),
+                                DeleteBinding::Automatic => bytes,
+                            };
+                        }
+                    }
                     // Any keystroke that produces PTY bytes also dismisses
                     // an active selection — alacritty/iTerm2/WezTerm all do
                     // this so typing after a select doesn't leave a stale
