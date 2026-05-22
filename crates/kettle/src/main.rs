@@ -646,6 +646,15 @@ fn main() -> anyhow::Result<()> {
         if cfg.lua_sandbox != kettle_config::LuaSandbox::Safe {
             println!("lua:     sandbox={:?}", cfg.lua_sandbox);
         }
+        if !cfg.background_image.is_empty() {
+            println!(
+                "bg-image: {} (mode={}, blur={}, darkness={})",
+                cfg.background_image,
+                cfg.background_image_mode,
+                cfg.background_blur,
+                cfg.background_darkness
+            );
+        }
         // Cycle 201: count and display I/O errors (cycle 196's read
         // failures) as their own category rather than reusing the
         // "malformed value:" prefix — a permission-denied file isn't
