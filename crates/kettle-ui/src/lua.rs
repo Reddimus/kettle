@@ -67,6 +67,13 @@ pub enum LuaEvent {
     TabClose(usize),
     /// Emitted when a bell rings in a pane. Payload: pane id.
     Bell(u64),
+    /// Cycle 377 (Terminator plugin parity, plugin sub-cycle 3):
+    /// emitted on each batch of PTY output drained from a pane.
+    /// Payload: pane id + bytes since last emission. Throttled
+    /// at the dispatch site (App level) — Lua callbacks see a
+    /// coalesced byte chunk, not every individual chunk from a
+    /// busy build.
+    Output(u64, Vec<u8>),
 }
 
 impl LuaEvent {
@@ -78,6 +85,7 @@ impl LuaEvent {
             LuaEvent::TabAdd(_) => "tab_add",
             LuaEvent::TabClose(_) => "tab_close",
             LuaEvent::Bell(_) => "bell",
+            LuaEvent::Output(_, _) => "output",
         }
     }
 }
@@ -446,6 +454,12 @@ impl LuaEngine {
                         LuaEvent::Startup => cb.call(()),
                         LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
                         LuaEvent::Bell(pane_id) => cb.call(*pane_id),
+                        LuaEvent::Output(pane_id, bytes) => {
+                            // Send bytes as a Lua string (UTF-8 not
+                            // assumed — raw bytes are fine, callbacks
+                            // can string.byte / string.sub them).
+                            cb.call((*pane_id, bytes.as_slice()))
+                        }
                     };
                     if let Err(e) = call_result {
                         log::warn!("lua event {name} callback {i}: {e}");
