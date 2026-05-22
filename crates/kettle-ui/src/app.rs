@@ -527,6 +527,11 @@ pub struct App {
     /// existed. Drained + written to the first focused pane's
     /// PTY once that pane is ready.
     pending_lua_send: Vec<u8>,
+    /// Cycle 326 Lua scripting: Actions the user's `--lua-script`
+    /// queued via `kettle.exec_action(name)`. Drained + dispatched
+    /// after the first pane spawns (some actions like
+    /// `toggle_vi_mode` need a focused pane to operate on).
+    pending_lua_actions: Vec<kettle_config::Action>,
 }
 
 impl App {
@@ -635,6 +640,7 @@ impl App {
         // gets them written to its PTY once it's ready (the pane
         // doesn't exist yet at this point in App::new).
         let mut pending_lua_send: Vec<u8> = Vec::new();
+        let mut pending_lua_actions: Vec<kettle_config::Action> = Vec::new();
         if let Some(script) = &startup.lua_script {
             match crate::LuaEngine::new(&initial_cfg.theme_name) {
                 Ok(eng) => {
@@ -647,6 +653,15 @@ impl App {
                         match cmd {
                             crate::LuaCommand::SendText(s) => {
                                 pending_lua_send.extend_from_slice(s.as_bytes());
+                            }
+                            crate::LuaCommand::ExecAction(name) => {
+                                if let Some(a) = kettle_config::Action::from_name(&name) {
+                                    pending_lua_actions.push(a);
+                                } else {
+                                    log::warn!(
+                                        "lua kettle.exec_action: unknown action name {name:?}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -693,6 +708,7 @@ impl App {
             _watcher: watcher,
             _remote_watcher: remote_watcher,
             pending_lua_send,
+            pending_lua_actions,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -3366,6 +3382,18 @@ impl ApplicationHandler<UserEvent> for App {
         {
             let bytes = std::mem::take(&mut self.pending_lua_send);
             p.term.write(&bytes);
+        }
+        // Cycle 326 Lua scripting: drain any `kettle.exec_action(name)`
+        // dispatches the startup script queued. Done after the
+        // send_text drain so scripts that mix both produce a
+        // deterministic order. Actions go through the existing
+        // dispatch helper so they hit every cycle-specific hook
+        // (focus tracking, palette/menu closing, blink reset).
+        if !self.pending_lua_actions.is_empty() {
+            let actions = std::mem::take(&mut self.pending_lua_actions);
+            for a in actions {
+                self.handle_action(a, event_loop);
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();

@@ -32,6 +32,11 @@ use std::sync::{Arc, Mutex};
 pub enum LuaCommand {
     /// `kettle.send_text(s)` → write s to the focused pane's PTY.
     SendText(String),
+    /// `kettle.exec_action(name)` → dispatch a named kettle action
+    /// (parsed via `Action::from_name`). The name is whatever the
+    /// keybind grammar accepts: `new_tab`, `split_right`,
+    /// `toggle_vi_mode`, etc.
+    ExecAction(String),
 }
 
 /// Owned Lua VM with kettle's namespace registered. Single-threaded
@@ -104,6 +109,23 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.send_text")?;
+        // Cycle 326: kettle.exec_action(name) dispatches a kettle
+        // Action by its keybind-grammar name. Lua scripts get the
+        // same dispatch power as the keymap — `new_tab`,
+        // `split_right`, `toggle_vi_mode`, etc.
+        let pending_for_action = Arc::clone(&pending);
+        kettle_tbl
+            .set(
+                "exec_action",
+                lua.create_function(move |_, name: String| {
+                    pending_for_action
+                        .lock()
+                        .map(|mut v| v.push(LuaCommand::ExecAction(name)))
+                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.exec_action")?;
         lua.globals()
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
@@ -201,9 +223,30 @@ mod tests {
                 assert_eq!(a, "echo hello\n");
                 assert_eq!(b, "ls -la\n");
             }
+            other => panic!("unexpected commands: {other:?}"),
         }
         // Drain is destructive — second drain returns empty.
         assert_eq!(eng.drain_commands().len(), 0);
+    }
+
+    #[test]
+    fn exec_action_queues_named_action() {
+        // Cycle 326 drift guard. `kettle.exec_action(name)` queues
+        // the name string; App turns it into an Action via
+        // `Action::from_name` at drain time.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str("kettle.exec_action('new_tab')").expect("eval");
+        eng.eval_str("kettle.exec_action('toggle_vi_mode')")
+            .expect("eval");
+        let cmds = eng.drain_commands();
+        assert_eq!(cmds.len(), 2);
+        match (&cmds[0], &cmds[1]) {
+            (LuaCommand::ExecAction(a), LuaCommand::ExecAction(b)) => {
+                assert_eq!(a, "new_tab");
+                assert_eq!(b, "toggle_vi_mode");
+            }
+            other => panic!("unexpected commands: {other:?}"),
+        }
     }
 
     #[test]

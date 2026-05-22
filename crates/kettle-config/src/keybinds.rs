@@ -337,7 +337,11 @@ pub fn action_names() -> Vec<&'static str> {
 }
 
 impl Action {
-    pub(crate) fn from_name(s: &str) -> Option<Action> {
+    /// Cycle 326: opened to `pub` so kettle-ui's Lua engine can
+    /// translate `kettle.exec_action(name)` strings into Action
+    /// variants at drain time. The set of accepted names + their
+    /// aliases is the same as the keybind grammar.
+    pub fn from_name(s: &str) -> Option<Action> {
         use Action::*;
         // Cycle 147: lowercase before matching so `keybind =
         // ctrl+shift+c = Copy` resolves the same as `... = copy`.
