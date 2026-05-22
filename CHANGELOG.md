@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.36.0 polish.
+
+  cycle 450 — README + INSTALL.md version pins bumped to v1.36.0.
+
+  cycle 451 — `scripts/install-online.sh` example pin bumped
+              v1.3.4 → v1.36.0. Users copying the snippet land
+              on a current binary instead of the cycle-150-era
+              pre-SHA-256-sidecar release.
+
+  cycle 452 — **Real UX bug fix.** `exit-action = restart` could
+              spawn TWO new tabs per dead shell on platforms
+              where alacritty fires both `TermEvent::Exit`
+              (PTY-side EOF) and `TermEvent::ChildExit(code)`
+              (child reaper) for the same exit. Added a
+              `Vec::contains` dedup check in `drain_events` so
+              only one respawn happens regardless of how many
+              TermEvent variants the engine emits per child
+              death.
+
 ## [1.36.0] — 2026-05-22
 
 Production-hygiene release. One real bug fix (`KETTLE_GIT_SHA`
