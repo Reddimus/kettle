@@ -2306,6 +2306,13 @@ impl App {
             let pane_ids: Vec<u64> = std::mem::take(&mut self.pending_pane_restarts);
             let (cw, ch) = self.cell_px();
             let waker = self.waker();
+            // Cycle 420: use the live grid (matches the existing surface)
+            // for the new tab. cycle-418 hardcoded 80×24 which mismatched
+            // any non-default kettle window size — the new shell would
+            // start with a tiny grid then grow on next resize. Pulling
+            // from the current area means the restart shell starts at
+            // the size the user is actually using.
+            let (cols, rows) = self.grid_of(self.area());
             for pane_id in pane_ids {
                 let restart_info: Option<(Vec<String>, Option<String>)> = self
                     .mux
@@ -2315,8 +2322,8 @@ impl App {
                 if let Some((argv, cwd)) = restart_info
                     && let Err(e) = self.mux.new_tab_with(
                         &self.cfg,
-                        80,
-                        24,
+                        cols,
+                        rows,
                         cw,
                         ch,
                         waker.clone(),
