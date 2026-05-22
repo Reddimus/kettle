@@ -127,6 +127,7 @@ fn hovered_close_button(segments: &[kettle_render::TabSeg], px: f32, py: f32) ->
 /// Some(idx) when the click landed inside the titlebar y-band of
 /// pane idx; None otherwise. Pulled out of App::pane_at_titlebar_click
 /// so it can be drift-guarded.
+#[allow(clippy::type_complexity)]
 pub(crate) fn pane_titlebar_hit(
     px: f32,
     py: f32,
