@@ -6,6 +6,80 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-05-22
+
+Minor-bump release — Terminator-parity behavior wiring (cycles 343-348).
+Builds on v1.9.0's config + Action-registration surface; this release
+wires the actual behaviors for 15 of 17 stubbed actions + several
+config keys.
+
+### Behavior wirings shipped
+
+  cycle 343 — PTY spawn now honors:
+                cfg.term         → TERM env override
+                cfg.colorterm    → COLORTERM env override
+                cfg.login_shell  → prepends `-l` to shell argv
+
+  cycle 344 — Window state at creation + focus:
+                cfg.window_state     → with_maximized / with_fullscreen /
+                                        with_visible(false) at startup
+                cfg.hide_on_lose_focus → set_visible(false) on focus-loss
+                                          (Quake-style; reappears via
+                                          cycle-303 --toggle)
+
+  cycle 345 — 9 actions wired end-to-end:
+                ZoomInAll / ZoomOutAll / ZoomNormalAll  (broadcast zoom)
+                InsertPaneNumber / InsertPanePadded     (pane index to PTY)
+                ScrollPageUpHalf / ScrollPageDownHalf   (half-page scroll)
+                PastePrimary                            (X11 primary)
+                ToggleWindowVisibility                  (in-process toggle)
+
+  cycle 346 — ToggleScrollbar: tri-state cycle of cfg.scrollbar
+              (Never → Always → Auto → Never).
+
+  cycle 347 — RotateCw / RotateCcw: split-tree rotation via new
+              `Mux::rotate_focused_split(clockwise: bool)`. Cw
+              flips dir + swaps children (Terminator semantics);
+              Ccw flips dir only.
+
+  cycle 348 — NextProfile / PrevProfile: runtime profile cycle
+              enumerating <config-dir>/profiles/*.config and
+              calling existing reload_config helper (cycle 151
+              infrastructure).
+
+### New API
+
+  Terminal::new_with_env(...)              — cycle 343
+  Mux::focused_pane_index_in_tab()         — cycle 345
+  Mux::rotate_focused_split(clockwise)     — cycle 347
+
+`Terminal::new` is now a thin shim over `new_with_env` for
+backward compat (no caller change).
+
+### Still stubbed (3 of 18)
+
+These actions need a new overlay state + key dispatcher (same
+shape as the cycle-X palette overlay):
+
+  EditWindowTitle
+  EditTabTitle
+  EditPaneTitle
+
+Each is bounded but multi-file (App state + overlay render +
+key dispatcher). Tracked as cycle 349+ in audit doc.
+
+### Bucket D items still deferred
+
+Plugin system, per-pane titlebar, detachable tabs, background
+image rendering. Each is documented in docs/TERMINATOR-AUDIT.md
+with a roadmap pointer; each warrants its own multi-cycle
+thread (~3-6 sub-cycles).
+
+Workspace tests stay at 300 (no new drift guards this batch —
+the existing config-key drift guards + the Action::from_name
+registry test cover the parsing surface; behavior wirings are
+exercised by a windowed run).
+
 ## [1.9.0] — 2026-05-22
 
 Feature-bump release — Terminator-parity audit + sweep (cycles 330-342).
