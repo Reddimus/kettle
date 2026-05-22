@@ -3596,6 +3596,17 @@ impl ApplicationHandler<UserEvent> for App {
                 attrs = attrs.with_visible(false);
             }
         }
+        // Cycle 359 (Terminator parity, terminatorlib/config.py:74
+        // `geometry_hinting`): when true, request that the WM resize
+        // the window in font-cell increments (so a drag-resize lands
+        // on exact column/row boundaries vs sub-cell sliver). Uses
+        // an approximate cell size — actual font metrics aren't
+        // available yet at attrs-build time, so we use 8x16 px as a
+        // typical Mono baseline. Honored best-effort per OS (X11
+        // honors via WM_SIZE_HINTS; Wayland varies; macOS doesn't).
+        if self.cfg.geometry_hinting {
+            attrs = attrs.with_resize_increments(winit::dpi::LogicalSize::new(8.0_f64, 16.0_f64));
+        }
         // Set WM_CLASS / Wayland app_id explicitly so GNOME / KDE
         // task switchers, dock pins, and the `StartupWMClass=kettle`
         // line in `packaging/linux/kettle.desktop` all line up. Without
