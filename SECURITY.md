@@ -44,6 +44,20 @@ Reports that fit any of these are welcome:
 - **Session/config tampering** — a config file or `session.json` that
   causes RCE, file-write outside the documented config/session paths,
   or persistent privilege escalation across launches.
+- **Lua plugin sandbox escape** — `lua-sandbox = safe` (default since
+  cycle 376) nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
+  `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a
+  user-supplied `init.lua` (or a `kettle.add_url_handler` /
+  `kettle.add_menu_item` callback) reach an external process, the
+  filesystem, or a native library despite the sandbox flag is in
+  scope. `lua-sandbox = trusted` is opt-in and explicitly carries
+  the same surface as native Lua — out of scope.
+- **Detachable-tabs handoff** — `--tab-handoff PATH` (cycle 403) and
+  `--tab-handoff-fd FD` (cycle 408) restore a JSON payload from
+  another kettle process. A handoff payload that bypasses path
+  validation, escapes the JSON schema, or causes the receiving
+  kettle to spawn a shell outside the documented argv / cwd
+  bounds is in scope.
 - **Build / supply-chain** — anything that lets a malicious dependency
   or build script reach the released binary.
 
