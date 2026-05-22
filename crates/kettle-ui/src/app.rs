@@ -2642,15 +2642,57 @@ impl App {
             //   ToggleScrollbar (runtime scrollbar toggle)
             //   EditWindowTitle / EditTabTitle / EditPaneTitle
             //   NextProfile / PrevProfile (runtime profile cycle)
-            Action::EditWindowTitle
-            | Action::EditTabTitle
-            | Action::EditPaneTitle
-            | Action::NextProfile
-            | Action::PrevProfile => {
+            Action::EditWindowTitle | Action::EditTabTitle | Action::EditPaneTitle => {
                 log::info!(
                     "Action {action:?} dispatched but behavior wiring is a \
                      follow-up sub-cycle (docs/TERMINATOR-AUDIT.md)"
                 );
+            }
+            // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
+            // key_next_profile + key_previous_profile): runtime cycle
+            // through profile files at <config-dir>/profiles/.
+            //
+            // Enumerates the profiles directory each dispatch (cheap;
+            // typically <10 entries), sorts deterministically, finds
+            // the current entry by basename match against the loaded
+            // config-path, and loads the next/prev. Falls back to
+            // log::info when no profiles directory or no entries.
+            Action::NextProfile | Action::PrevProfile => {
+                let cycle_dir = kettle_config::Config::default_path()
+                    .and_then(|p| p.parent().map(|d| d.join("profiles")));
+                let entries: Vec<std::path::PathBuf> = cycle_dir
+                    .as_deref()
+                    .and_then(|d| std::fs::read_dir(d).ok())
+                    .map(|rd| {
+                        let mut v: Vec<_> = rd
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("config"))
+                            .collect();
+                        v.sort();
+                        v
+                    })
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    log::info!(
+                        "{action:?}: no profiles in <config-dir>/profiles/ — \
+                         create one with `kettle --print-default-config > \
+                         ~/.config/kettle/profiles/dev.config`"
+                    );
+                } else {
+                    let cur_idx = self
+                        .config_path
+                        .as_ref()
+                        .and_then(|p| entries.iter().position(|e| e == p))
+                        .unwrap_or(0);
+                    let next_idx = if matches!(action, Action::NextProfile) {
+                        (cur_idx + 1) % entries.len()
+                    } else {
+                        (cur_idx + entries.len() - 1) % entries.len()
+                    };
+                    self.config_path = Some(entries[next_idx].clone());
+                    self.reload_config();
+                }
             }
             // Cycle 347: split-tree rotation. RotateCw flips dir +
             // swaps children (Terminator's clockwise semantics);
