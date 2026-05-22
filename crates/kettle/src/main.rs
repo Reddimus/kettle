@@ -1070,6 +1070,10 @@ mod tests {
         // future contributor strips the section, this test catches it
         // before users see a stripped-down `--print-default-config`
         // output.
+        //
+        // Cycle 459: extended with accent-color (cycle 309 peacock
+        // parity), force-no-bell (cycle 349 Terminator force_no_bell
+        // parity), and trigger (cycle 290 regex-on-output → action).
         for key in &[
             "window-state",
             "borderless",
@@ -1080,11 +1084,14 @@ mod tests {
             "background-image-mode",
             "exit-action",
             "lua-sandbox",
+            "accent-color",
+            "force-no-bell",
+            "trigger",
         ] {
             assert!(
                 embedded.contains(key),
                 "embedded example config missing Terminator-parity key {key:?}; \
-                 cycles 331-410 documented it"
+                 cycles 290/309/331-410 documented it"
             );
         }
     }
