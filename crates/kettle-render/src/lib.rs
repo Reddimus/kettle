@@ -290,6 +290,11 @@ pub struct PaneView<'a> {
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
     pub images: Vec<kettle_core::Placement>,
+    /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
+    /// sub-cycle 3 follow-up): the pane's title — rendered into
+    /// the cycle-379 titlebar background quad when
+    /// cfg.show_titlebar = true.
+    pub title: String,
 }
 
 pub struct Renderer {
@@ -304,6 +309,11 @@ pub struct Renderer {
     viewport: Viewport,
     text_renderer: TextRenderer,
     pane_buffers: Vec<TextBuffer>,
+    /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
+    /// sub-cycle 3): one TextBuffer per pane for the title text
+    /// drawn in the cycle-379 titlebar quad. Reused across redraws
+    /// to amortize allocation; trimmed/grown alongside pane_buffers.
+    pane_titlebar_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
@@ -476,6 +486,7 @@ impl Renderer {
             viewport,
             text_renderer,
             pane_buffers: Vec::new(),
+            pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
@@ -603,6 +614,11 @@ impl Renderer {
         while self.pane_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_buffers.push(b);
+        }
+        // Cycle 382: parallel grow for per-pane titlebar buffers.
+        while self.pane_titlebar_buffers.len() < panes.len() {
+            let b = TextBuffer::new(&mut self.font_system, metrics);
+            self.pane_titlebar_buffers.push(b);
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
@@ -1322,6 +1338,52 @@ impl Renderer {
                 default_color: GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b),
                 custom_glyphs: &[],
             });
+        }
+        // Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
+        // sub-cycle 3): write each pane's title to its titlebar
+        // buffer + push the matching TextArea. Recomputes only when
+        // the title rendering is enabled (`pane_titlebar_h > 0.0`).
+        if pane_titlebar_h > 0.0 {
+            for (i, pv) in panes.iter().enumerate() {
+                let (rx, ry, rw, _rh) = pv.rect;
+                let fg = if pv.focused {
+                    cfg.title_transmit_fg_color
+                        .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
+                } else {
+                    cfg.title_inactive_fg_color
+                        .unwrap_or(Rgb::new(0x00, 0x00, 0x00))
+                };
+                let label = if pv.title.trim().is_empty() {
+                    "kettle".to_string()
+                } else {
+                    pv.title.clone()
+                };
+                let buf = &mut self.pane_titlebar_buffers[i];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    &format!("  {label}"),
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Basic,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                areas.push(TextArea {
+                    buffer: &self.pane_titlebar_buffers[i],
+                    left: rx,
+                    top: ry + 2.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: rx as i32,
+                        top: ry as i32,
+                        right: (rx + rw) as i32,
+                        bottom: (ry + pane_titlebar_h) as i32,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
         }
         if have_tabs {
             let ty = tabbar.y as i32;

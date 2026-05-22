@@ -2207,6 +2207,8 @@ impl App {
         };
 
         // Lock every visible pane, then hand references to the renderer.
+        // Cycle 382: also pass the pane's title so the cycle-379
+        // titlebar can render the text.
         let mut guards = Vec::with_capacity(layout.len());
         for (id, r) in &layout {
             if let Some(p) = self.mux.panes.get(id) {
@@ -2214,17 +2216,18 @@ impl App {
                 imgs.extend(p.term.placeholder_tiles());
                 imgs.extend(p.term.relative_tiles());
                 if let Ok(g) = p.term.term.lock() {
-                    guards.push((*r, g, Some(*id) == focus, imgs));
+                    guards.push((*r, g, Some(*id) == focus, imgs, p.title.clone()));
                 }
             }
         }
         let panes: Vec<PaneView> = guards
             .iter()
-            .map(|(r, g, f, imgs)| PaneView {
+            .map(|(r, g, f, imgs, title)| PaneView {
                 rect: *r,
                 term: g,
                 focused: *f,
                 images: imgs.clone(),
+                title: title.clone(),
             })
             .collect();
         // Cycle 296: status bar built BEFORE the &mut renderer borrow
