@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.8] — 2026-05-21
+
+Patch release. Cosmetic UX catch on the cycle-295 status bar.
+
+### Fixed
+- **Status bar cursor icon (cycles 320 + 321).** Hovering on the
+  cycle-295 status strip showed the terminal I-beam cursor (text-
+  input style) instead of the OS arrow. Cosmetic — the click
+  wouldn't have actually started a selection because the strip
+  isn't inside any pane's rect — but inconsistent with the
+  tab-bar chrome which already used the arrow.
+
+  Fix: new pure helper `cursor_in_status_bar_band` (sibling of the
+  cycle-264 `cursor_in_tab_bar_band`), new
+  `cursor_in_chrome_band` accessor that ORs both bars, `chrome_
+  cursor_icon` arg renamed `in_tab_bar` → `in_chrome_band`.
+  Drift guard `cursor_in_status_bar_band_geometry` pins the
+  Off / Top / Bottom + bar_h=0 boundary semantics same shape as
+  cycle-264's pinning.
+
+Workspace tests 269 → 270.
+
 ## [1.7.7] — 2026-05-21
 
 Patch release. Real UX catch on the cycle-303 Quake toggle +
