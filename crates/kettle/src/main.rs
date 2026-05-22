@@ -626,6 +626,26 @@ fn main() -> anyhow::Result<()> {
                 styles_set.join(", ")
             );
         }
+        // Cycle 461: echo the Terminator-parity opt-in keys when the
+        // user has actually set them. Without this, a user who set
+        // `accent-color = #00d4ff` couldn't verify it parsed — the
+        // summary silently dropped it like font-features did before
+        // its echo line was added. Symmetric with the lines above.
+        if let Some(c) = cfg.accent_color {
+            println!("accent:  #{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        }
+        if cfg.force_no_bell {
+            println!("bell:    force-no-bell=true (silences every bell flavor)");
+        }
+        if !cfg.triggers.is_empty() {
+            println!(
+                "triggers: {} pattern(s) configured (cycle-289 Urgency action)",
+                cfg.triggers.len()
+            );
+        }
+        if cfg.lua_sandbox != kettle_config::LuaSandbox::Safe {
+            println!("lua:     sandbox={:?}", cfg.lua_sandbox);
+        }
         // Cycle 201: count and display I/O errors (cycle 196's read
         // failures) as their own category rather than reusing the
         // "malformed value:" prefix — a permission-denied file isn't
