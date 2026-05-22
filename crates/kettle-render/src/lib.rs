@@ -836,10 +836,20 @@ impl Renderer {
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
             };
-            quads.push(rect(rx, ry, rw, 1.0, border, 1.0));
-            quads.push(rect(rx, ry + rh - 1.0, rw, 1.0, border, 1.0));
-            quads.push(rect(rx, ry, 1.0, rh, border, 1.0));
-            quads.push(rect(rx + rw - 1.0, ry, 1.0, rh, border, 1.0));
+            // Cycle 353 (Terminator parity, terminatorlib/config.py:74
+            // `handle_size`): split-divider width in px. -1 means
+            // "use theme default" (1.0 here); positive values 0-20 are
+            // honored directly. Clamping was already done at parse
+            // time (cycle 339).
+            let bw = if cfg.handle_size < 0 {
+                1.0
+            } else {
+                cfg.handle_size as f32
+            };
+            quads.push(rect(rx, ry, rw, bw, border, 1.0));
+            quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
+            quads.push(rect(rx, ry, bw, rh, border, 1.0));
+            quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
 
             self.build_pane(
                 i,
