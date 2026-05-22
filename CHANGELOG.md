@@ -6,6 +6,70 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.38.0] — 2026-05-22
+
+Doc-durability release. One more `--check-config` echo (status-bar),
+one helper extraction + 3 new drift guards on the cycle-461-470 echo
+contract, and a sweep removing internal cycle refs from every user-
+facing doc surface (man page + example config + drift-guard scan
+list extension so the pattern can't reintroduce).
+
+  cycle 466 — ROADMAP + TERMINATOR-AUDIT + ARCHITECTURE post-sweep
+              summaries extended to v1.37.0 (cycles 411-463, 6
+              releases, 53 cycles).
+
+  cycle 467 — `docs/CONFIG.md` gained a row for `force-no-bell`
+              (was undocumented despite being a real parser arm)
+              + `exit-action` row cites the cycle-452 dedup fix.
+              (Cycle-179 drift guard caught the user-facing
+              cycle ref in cycle 471's test run; reworded.)
+
+  cycle 468 — `CONTRIBUTING.md` inline recipe list documents
+              `just deny` + `just machete` (cycle 456 added the
+              recipes; this closes the discoverability gap).
+
+  cycle 469 — `docs/kettle.example.config` gained a commented-out
+              `status-bar = off` entry. Users running
+              `kettle --print-default-config` now discover the
+              status-bar feature.
+
+  cycle 470 — `--check-config` echoes `status-bar: Top|Bottom`
+              when non-default. Symmetric with the cycle-461-463
+              opt-in echoes.
+
+  cycle 471 — **Refactor + drift guards.** Extracted the cycles-
+              461-470 inline echo blocks into
+              `extra_check_config_lines(cfg) -> Vec<String>`
+              pure helper. Added 2 unit tests pinning the
+              empty-for-default + per-opt-in-branch contract.
+              Drive-by fix for the cycle-467 user-facing cycle
+              ref the drift guard caught.
+
+  cycle 472 — 7th in-isolation test covering the `triggers`
+              branch of `extra_check_config_lines`. All 7 echo
+              branches now have dedicated test coverage.
+
+  cycle 473 — Exact-numeric test count claims in
+              `docs/TERMINATOR-AUDIT.md` + `docs/TESTING.md`
+              bumped to 321 / +13 / post-v1.37.0. Loose-bound
+              snapshots stay accurate without churn.
+
+  cycle 474 — **Real durability fix.** The example config (user-
+              facing via `kettle --print-default-config`) had
+              picked up 5 "(cycle N)" / "cycle-N" internal refs
+              across cycles 459/460/469/470. Every user's
+              bootstrap file would have inherited them. Scrubbed
+              all 5 + extended the cycle-179 drift guard's scan
+              list to include `docs/kettle.example.config` so a
+              future reintroduction fails at test time.
+
+  cycle 475 — Same drift-guard reasoning applied to the man
+              page: scrubbed 3 internal cycle refs from
+              `packaging/linux/kettle.1` (cycle 436 had added
+              them) + extended the cycle-179 scan list to
+              `packaging/linux/kettle.1`. `man kettle` is
+              user-facing.
+
 ## [1.37.0] — 2026-05-22
 
 UX + observability release. One real exit-action=restart bug fix,
