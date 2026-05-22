@@ -17,7 +17,7 @@ alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.11.0"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 kettle-config = { version = "1.2.0", path = "../kettle-config" }
 kettle-core = { version = "1.2.0", path = "../kettle-core" }
 pollster = "0.4.0"

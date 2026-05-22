@@ -38,9 +38,12 @@
 //! pipeline without ever creating a Surface, so CI can validate the GPU
 //! path under Xvfb without a real display.
 
+mod bg_image;
 mod color;
 mod imgpipe;
 mod quad;
+
+pub use bg_image::{BgImage, decode_bg_image};
 
 use std::sync::Arc;
 
