@@ -154,6 +154,19 @@ pub enum StatusBarMode {
     Bottom,
 }
 
+/// Cycle 341 (Terminator parity, terminatorlib/config.py:118
+/// `background_type`): background style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundType {
+    /// Solid color (Terminator + kettle default).
+    #[default]
+    Solid,
+    /// Use the `background_image` file.
+    Image,
+    /// Transparent (uses `background_darkness` to dim).
+    Transparent,
+}
+
 /// Cycle 339 (Terminator parity, terminatorlib/config.py:73
 /// `focus`): focus mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -571,6 +584,47 @@ pub struct Config {
     /// `http_proxy`): HTTP proxy URL for plugin HTTP requests.
     /// No-op until the plugin Bucket-D lands.
     pub http_proxy: String,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:118
+    /// `background_type`): background style.
+    pub background_type: BackgroundType,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:117
+    /// `background_image`): path to background image. No-op
+    /// until Bucket-D bg-image render lands.
+    pub background_image: String,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:119
+    /// `background_image_mode`): tiling mode.
+    pub background_image_mode: String,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:120
+    /// `background_image_align_horiz`): horizontal alignment.
+    pub background_image_align_horiz: String,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:121
+    /// `background_image_align_vert`): vertical alignment.
+    pub background_image_align_vert: String,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:122
+    /// `background_blur`): blur the background image.
+    pub background_blur: bool,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:106
+    /// `background_darkness`): background image opacity (0.0 fully
+    /// dark .. 1.0 untinted).
+    pub background_darkness: f32,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:93
+    /// `cell_height`): vertical cell scaling (default 1.0).
+    /// kettle's font metrics derive from glyph rendering; this
+    /// is a no-op stub for config compatibility (Bucket E in
+    /// audit doc — VTE-specific behavior).
+    pub cell_height: f32,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:94
+    /// `cell_width`): horizontal cell scaling. No-op stub.
+    pub cell_width: f32,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:124
+    /// `detachable_tabs`): allow dragging tabs between windows.
+    /// No-op until Bucket-D detachable-tabs lands.
+    pub detachable_tabs: bool,
+    /// Cycle 341 (Terminator parity, terminatorlib/config.py:96
+    /// `putty_paste_style_source_clipboard`): when `putty_paste_
+    /// style` is true, also source from the system clipboard
+    /// (not just the X11 primary).
+    pub putty_paste_style_source_clipboard: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -770,6 +824,17 @@ impl Default for Config {
             use_system_font: true,
             use_theme_colors: false,
             http_proxy: String::new(),
+            background_type: BackgroundType::Solid,
+            background_image: String::new(),
+            background_image_mode: "stretch_and_fill".to_string(),
+            background_image_align_horiz: "center".to_string(),
+            background_image_align_vert: "middle".to_string(),
+            background_blur: false,
+            background_darkness: 0.5,
+            cell_height: 1.0,
+            cell_width: 1.0,
+            detachable_tabs: true,
+            putty_paste_style_source_clipboard: false,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1716,6 +1781,64 @@ impl Config {
                 }
                 "http-proxy" | "http_proxy" => {
                     cfg.http_proxy = e.value.trim().to_string();
+                }
+                "background-type" | "background_type" => {
+                    cfg.background_type = match e.value.to_ascii_lowercase().as_str() {
+                        "image" => BackgroundType::Image,
+                        "transparent" => BackgroundType::Transparent,
+                        _ => BackgroundType::Solid,
+                    };
+                }
+                "background-image" | "background_image" => {
+                    cfg.background_image = e.value.trim().to_string();
+                }
+                "background-image-mode" | "background_image_mode" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.background_image_mode = v.to_string();
+                    }
+                }
+                "background-image-align-horiz" | "background_image_align_horiz" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.background_image_align_horiz = v.to_string();
+                    }
+                }
+                "background-image-align-vert" | "background_image_align_vert" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.background_image_align_vert = v.to_string();
+                    }
+                }
+                "background-blur" | "background_blur" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.background_blur = b;
+                    }
+                }
+                "background-darkness" | "background_darkness" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.background_darkness = v.clamp(0.0, 1.0);
+                    }
+                }
+                "cell-height" | "cell_height" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.cell_height = v.clamp(0.5, 3.0);
+                    }
+                }
+                "cell-width" | "cell_width" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.cell_width = v.clamp(0.5, 3.0);
+                    }
+                }
+                "detachable-tabs" | "detachable_tabs" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.detachable_tabs = b;
+                    }
+                }
+                "putty-paste-style-source-clipboard" | "putty_paste_style_source_clipboard" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.putty_paste_style_source_clipboard = b;
+                    }
                 }
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {
@@ -2868,6 +2991,57 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn background_cell_detachable_parse() {
+        // Cycle 341 drift guard. Closes the remaining config-key
+        // surface (background image + cell metrics + detachable
+        // tabs + putty source).
+        let d = Config::default();
+        assert_eq!(d.background_type, BackgroundType::Solid);
+        assert_eq!(d.background_image, "");
+        assert_eq!(d.background_image_mode, "stretch_and_fill");
+        assert_eq!(d.background_image_align_horiz, "center");
+        assert_eq!(d.background_image_align_vert, "middle");
+        assert!(!d.background_blur);
+        assert!((d.background_darkness - 0.5).abs() < 1e-6);
+        assert!((d.cell_height - 1.0).abs() < 1e-6);
+        assert!((d.cell_width - 1.0).abs() < 1e-6);
+        assert!(d.detachable_tabs);
+        assert!(!d.putty_paste_style_source_clipboard);
+        // Enum parsing.
+        assert_eq!(
+            Config::parse_text("background-type = image").background_type,
+            BackgroundType::Image
+        );
+        assert_eq!(
+            Config::parse_text("background_type = transparent").background_type,
+            BackgroundType::Transparent
+        );
+        // String paths.
+        assert_eq!(
+            Config::parse_text("background-image = /tmp/wp.jpg").background_image,
+            "/tmp/wp.jpg"
+        );
+        // Floats clamp.
+        assert!(
+            (Config::parse_text("background-darkness = 0.75").background_darkness - 0.75).abs()
+                < 1e-6
+        );
+        assert!((Config::parse_text("cell-height = 1.5").cell_height - 1.5).abs() < 1e-6);
+        assert!((Config::parse_text("cell-width = 99.0").cell_width - 3.0).abs() < 1e-6);
+        // Bools.
+        assert!(!Config::parse_text("detachable-tabs = false").detachable_tabs);
+        assert!(!Config::parse_text("detachable_tabs = false").detachable_tabs);
+        assert!(
+            Config::parse_text("putty-paste-style-source-clipboard = true")
+                .putty_paste_style_source_clipboard
+        );
+        assert!(
+            Config::parse_text("putty_paste_style_source_clipboard = true")
+                .putty_paste_style_source_clipboard
+        );
     }
 
     #[test]
