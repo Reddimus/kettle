@@ -1507,6 +1507,7 @@ dependencies = [
  "image",
  "kettle-config",
  "kettle-core",
+ "log",
  "pollster",
  "raw-window-handle",
  "tempfile",
