@@ -77,8 +77,13 @@ const LOCAL_PASTE_MAX: usize = 4 << 20;
 /// clickable, not selectable, so the I-beam is visually misleading there.
 /// Returns `Some(Default)` for chrome, `None` to let the content-area
 /// caller decide between `Pointer` (URL-hover) and `Text`.
-fn chrome_cursor_icon(in_tab_bar: bool, modal_open: bool) -> Option<CursorIcon> {
-    if in_tab_bar || modal_open {
+///
+/// Cycle 320: `in_chrome_band` extended to also be true when the
+/// cursor is over the cycle-295 status bar. Same logic — over any
+/// kettle-chrome strip, show the OS arrow cursor rather than the
+/// I-beam terminal text-input style.
+fn chrome_cursor_icon(in_chrome_band: bool, modal_open: bool) -> Option<CursorIcon> {
+    if in_chrome_band || modal_open {
         Some(CursorIcon::Default)
     } else {
         None
@@ -124,6 +129,28 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     match pos {
         TabBarPos::Top => y >= 0.0 && y < bar_h,
         TabBarPos::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
+    }
+}
+
+/// Cycle 320: sibling of `cursor_in_tab_bar_band` for the cycle-295
+/// status bar. Without this, hovering on the status strip showed
+/// the terminal I-beam cursor (because the strip isn't part of any
+/// pane's rect but isn't part of the tab-bar band either, so it
+/// falls through to the "over a pane" branch by default). Now the
+/// chrome-cursor logic can treat both bars uniformly.
+fn cursor_in_status_bar_band(
+    y: f32,
+    bar_h: f32,
+    surface_h: f32,
+    pos: kettle_config::StatusBarMode,
+) -> bool {
+    if bar_h <= 0.0 {
+        return false;
+    }
+    match pos {
+        kettle_config::StatusBarMode::Off => false,
+        kettle_config::StatusBarMode::Top => y >= 0.0 && y < bar_h,
+        kettle_config::StatusBarMode::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
     }
 }
 
@@ -678,6 +705,29 @@ impl App {
     /// wheel over the tab bar cycles tabs (kitty / iTerm2 / Ghostty
     /// parity). When the tab bar is hidden (`tab-bar = off` or
     /// `auto` with one tab) this returns `false`.
+    /// Cycle 320: cursor is over the cycle-295 status bar. Used
+    /// by `cursor_in_chrome_band` so the OS arrow icon overrides
+    /// the terminal I-beam over the status strip too.
+    fn cursor_in_status_bar(&self) -> bool {
+        let h = self.status_bar_h();
+        if h <= 0.0 {
+            return false;
+        }
+        let (_, sh) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        cursor_in_status_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
+    }
+
+    /// Cycle 320: combined chrome-band hit-test. True when the
+    /// cursor is over either the tab bar or the status bar — both
+    /// belong in the "OS arrow cursor" group.
+    fn cursor_in_chrome_band(&self) -> bool {
+        self.cursor_in_tab_bar() || self.cursor_in_status_bar()
+    }
+
     fn cursor_in_tab_bar(&self) -> bool {
         let h = self.tab_bar_h();
         if h <= 0.0 {
@@ -719,7 +769,7 @@ impl App {
         self.hovered_close_idx =
             hovered_close_button(&bar.segments, self.cursor.x as f32, self.cursor.y as f32);
         let close_hover = tab_close_hover_icon(self.hovered_close_idx.is_some());
-        let chrome = chrome_cursor_icon(self.cursor_in_tab_bar(), self.any_modal_open());
+        let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(), self.any_modal_open());
         let want = close_hover.or(chrome).unwrap_or_else(|| {
             let want_pointer = (self.mods.control_key() || self.mods.super_key())
                 && self.link_at_cursor().is_some();
