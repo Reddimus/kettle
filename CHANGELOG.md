@@ -6,6 +6,95 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-05-22
+
+Behavior wiring batch — closes the gap between parsed config keys
+(v1.9.0) and end-to-end shipped behavior. Cycles 349-357 cover
+~20 more Terminator config keys + the last 3 cycle-342 actions.
+
+### Behavior wirings shipped
+
+  cycle 349 — force-no-bell + close-button-on-tab +
+              new-tab-after-current-tab
+                force-no-bell           silence bell + dot + flash
+                close-button-on-tab     hide tab ✕ chip + glyph
+                new-tab-after-current-tab  insert after active vs append
+
+  cycle 350 — link-single-click + disable-mouse-paste +
+              putty-paste-style
+                link-single-click       single-click opens URLs
+                disable-mouse-paste     middle-click no-op
+                putty-paste-style       right-click pastes (vs menu)
+
+  cycle 351 — use-custom-url-handler + custom-url-handler:
+                external program for URL clicks, with safe-URL guard
+                + system-open fallback. Routes both Ctrl-click +
+                cycle-218 hint-mode URL paths through one helper.
+
+  cycle 352 — backspace-binding + delete-binding:
+                remap encoded bytes to AsciiDel / ControlH /
+                EscapeSequence / Automatic. Preserves cycle-X
+                Alt+Backspace + Ctrl+Backspace muscle-memory
+                semantics by only remapping the no-modifier case.
+
+  cycle 353 — handle-size:
+                split-divider width in px (1.0 default; clamps -1..50
+                already done at parse time).
+
+  cycle 354 — Edit-title actions (last 3 cycle-342 stubs):
+                EditWindowTitle     →  Window::set_title
+                EditTabTitle        →  Tab.title_override (new field)
+                EditPaneTitle       →  Pane.title
+              Placeholder values + log::info noting full overlay
+              ships with Bucket-D per-pane titlebar.
+
+  cycle 355 — allow-bold + bold-is-bright:
+                allow-bold          suppress Flags::BOLD in render
+                bold-is-bright      remap palette[0..8] → palette[8..16]
+                                    via new color::bright_for_bold helper
+
+  cycle 356 — inactive-bg-color-offset:
+                compose with unfocused-split-opacity for unfocused-
+                pane dim. inactive-color-offset (FG-only) reserved
+                for Bucket-D text-reshape follow-up.
+
+  cycle 357 — broadcast-default + exit-action:
+                broadcast-default       seed mux.broadcast at startup
+                exit-action = hold      pane stays open on shell exit
+                exit-action = restart   log::warn fallthrough (re-spawn
+                                         needs argv+cwd plumbing)
+                exit-action = close     (default) unchanged
+
+### Status of cycle-342 actions
+
+All 18 now have behavior wired end-to-end. 15 with full real
+semantics; 3 (EditWindowTitle / EditTabTitle / EditPaneTitle) are
+placeholder + cited Bucket-D titlebar deferral for the
+interactive-overlay UX.
+
+### Still deferred (Bucket D — multi-cycle, design docs in audit)
+
+  - Plugin system (Lua event hooks foundation)
+  - Per-pane titlebar (full chrome region + interactive title edit)
+  - Detachable tabs (cross-window drag)
+  - Background image render (texture pass + blur shader)
+  - Inactive-color-offset FG-only dim (text reshape per pane)
+
+### Honest no-op stubs (documented in audit, cycle-E rationale)
+
+  - smart-copy: kettle's existing copy behavior already matches
+  - homogeneous-tabbar: kettle's existing tab layout already matches
+  - extra-styling: kettle is wgpu+glyphon, not GTK
+  - cell-height / cell-width: VTE-specific; kettle derives metrics
+  - use-system-font: kettle is config-file-driven by design
+  - use-theme-colors: kettle is bundled-themes-driven by design
+  - disable-mousewheel-zoom: no Ctrl+wheel zoom in kettle today
+  - sticky / hide-from-taskbar: winit support varies per platform
+
+Workspace tests stay at 300. Test count steady because the
+existing parse-side drift guards already pin the contract; the
+wiring is exercised by a windowed run + manual verification.
+
 ## [1.10.0] — 2026-05-22
 
 Minor-bump release — Terminator-parity behavior wiring (cycles 343-348).
