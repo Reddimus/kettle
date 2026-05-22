@@ -1615,9 +1615,21 @@ impl Renderer {
             if cfg.minimum_contrast > 1.0 {
                 fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
             }
-            let bold = flags.contains(Flags::BOLD);
+            // Cycle 355 (Terminator parity, terminatorlib/config.py:111
+            // `allow_bold`): when false, suppress bold attr entirely.
+            // Useful on fonts without a bold companion.
+            let bold = cfg.allow_bold && flags.contains(Flags::BOLD);
             let italic = flags.contains(Flags::ITALIC);
             let hidden = flags.contains(Flags::HIDDEN);
+            // Cycle 355 (Terminator parity, terminatorlib/config.py:130
+            // `bold_is_bright`): when true + bold + fg comes from
+            // palette[0..8], remap to palette[8..16] (the xterm
+            // bright variant). Color::bright_for_bold returns the
+            // mapped color or the original if it's not a low-palette
+            // index. No-op when bold isn't set.
+            if bold && cfg.bold_is_bright {
+                fg = color::bright_for_bold(fg, theme);
+            }
 
             if bg != default_bg {
                 quads.push(rect(

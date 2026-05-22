@@ -129,6 +129,23 @@ pub fn reply_for_text_area_size(
     })
 }
 
+/// Cycle 355 (Terminator parity, terminatorlib/config.py:130
+/// `bold_is_bright`): when bold is set + the foreground is one of
+/// the low palette indices (0..8), remap to the bright variant
+/// (8..16). xterm convention; many programs (e.g. neovim's
+/// `:Termguicolors` off, ls --color) depend on it.
+///
+/// Returns the original color if it doesn't match any low-palette
+/// index — caller (the render loop) doesn't need to branch.
+pub fn bright_for_bold(fg: Rgb, theme: &Theme) -> Rgb {
+    for low in 0..8 {
+        if theme.palette[low] == fg {
+            return theme.palette[low + 8];
+        }
+    }
+    fg
+}
+
 /// Resolve a cell color. `term_colors` carries runtime OSC 4/10/11 overrides.
 pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
     match c {
