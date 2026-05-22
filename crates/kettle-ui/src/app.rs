@@ -620,6 +620,12 @@ pub struct App {
     /// after the first pane spawns (some actions like
     /// `toggle_vi_mode` need a focused pane to operate on).
     pending_lua_actions: Vec<kettle_config::Action>,
+    /// Cycle 412 (Terminator parity, exit-action = restart impl):
+    /// pane ids whose shell exited + cfg.exit_action requested
+    /// restart. Drained AFTER drain_events (so we don't borrow
+    /// self.mux mutably twice in one tick), respawns the shell
+    /// with the same argv into the same pane id slot.
+    pending_pane_restarts: Vec<u64>,
     /// Cycle 366 (Terminator plugin parity, plugin Bucket-D
     /// sub-cycle 3): the live LuaEngine persisted across the App's
     /// lifetime so `kettle.on(event, callback)` registrations stay
@@ -963,6 +969,7 @@ impl App {
             _remote_watcher: remote_watcher,
             pending_lua_send,
             pending_lua_actions,
+            pending_pane_restarts: Vec::new(),
             lua_engine,
             lua_startup_fired: false,
         };
@@ -1668,6 +1675,11 @@ impl App {
         // this drain pass. Fired as LuaEvent::Output after the
         // values_mut iteration completes (to avoid borrow conflicts).
         let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+        // Cycle 412: pane ids whose shell exited with cfg.exit_action
+        // = Restart. Queued during the drain; appended to
+        // self.pending_pane_restarts after the iteration so the
+        // post-drain handler can process them with a fresh borrow.
+        let mut pending_restarts_local: Vec<u64> = Vec::new();
         // Cell size is renderer-owned and uniform across panes, so resolve it
         // once per drain rather than per event (a sixel/kitty app polling CSI
         // 14 t doesn't need a renderer lookup per CSI).
@@ -1786,12 +1798,19 @@ impl App {
                     // Hold: don't mark closed; pane shows the last
                     // output until user explicitly closes via
                     // Ctrl+Shift+W.
-                    // Restart: TODO — needs re-spawn with same argv +
-                    // cwd; logs warn for now, falls back to close.
+                    // Restart (cycle 412): queue the pane id for
+                    // post-drain respawn so we don't double-borrow
+                    // self.mux during this iteration. Close the
+                    // current PTY (pane.closed = true) — the
+                    // post-drain handler resurrects with the same
+                    // argv via Mux::spawn_pane.
                     // Close (default): unchanged kettle behavior.
                     TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
                         kettle_config::ExitAction::Hold => {}
                         kettle_config::ExitAction::Restart => {
+                            pending_restarts_local.push(pane_id);
+                            pane.closed = true;
+                            log::info!("exit-action = restart: queued pane {pane_id} for respawn");
                             log::warn!(
                                 "exit-action = restart not yet implemented; \
                                      falling through to close (pane id {pane_id})"
@@ -1898,6 +1917,14 @@ impl App {
                     }
                 }
             }
+        }
+        // Cycle 412: stash the per-tick restart list on App so the
+        // post-drain handler can process it with a fresh
+        // &mut self.mux borrow (the drain_events loop above held a
+        // &mut iter into self.mux.panes, so spawn_pane couldn't run
+        // there).
+        if !pending_restarts_local.is_empty() {
+            self.pending_pane_restarts.extend(pending_restarts_local);
         }
     }
 
