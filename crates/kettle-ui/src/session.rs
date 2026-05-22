@@ -89,6 +89,21 @@ impl Session {
         load_from_path(&p)
     }
 
+    /// Cycle 404 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 8 file-fallback): load a one-shot tab-handoff
+    /// JSON file written by another kettle process (cycle 384's
+    /// Action::MoveTabToNewWindow). Reads the path + deletes it
+    /// after read (one-shot handoff — avoids accidental re-use
+    /// across launches).
+    pub fn load_tab_handoff(path: &std::path::Path) -> Option<Session> {
+        let session = load_from_path(path)?;
+        // One-shot: delete after read so a subsequent kettle
+        // launch with the same args doesn't accidentally
+        // re-restore stale handoff state.
+        let _ = std::fs::remove_file(path);
+        Some(session)
+    }
+
     pub fn save(&self) {
         let Some(p) = Self::path() else {
             return;

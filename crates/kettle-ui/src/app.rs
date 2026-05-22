@@ -4213,9 +4213,20 @@ impl ApplicationHandler<UserEvent> for App {
             // Cycle 291: load the named layout if `--layout NAME` was
             // passed; otherwise fall through to the default session
             // (which is the per-install last-state file).
-            let loaded = match self.startup.layout.as_deref() {
-                Some(name) => crate::session::Session::load_layout(name),
-                None => crate::session::Session::load(),
+            //
+            // Cycle 404 (Terminator parity, detachable-tabs Bucket-D
+            // sub-cycle 8): --tab-handoff PATH wins over both. Used
+            // by Action::MoveTabToNewWindow (cycle 384) when spawning
+            // the target kettle process; passes the source tab's
+            // serialized state via a one-shot JSON file. The handoff
+            // file is deleted after read.
+            let loaded = if let Some(path) = self.startup.tab_handoff.as_deref() {
+                crate::session::Session::load_tab_handoff(path)
+            } else {
+                match self.startup.layout.as_deref() {
+                    Some(name) => crate::session::Session::load_layout(name),
+                    None => crate::session::Session::load(),
+                }
             };
             match loaded {
                 Some(s) if !s.is_empty() => {
