@@ -2684,11 +2684,37 @@ impl App {
             //   ToggleScrollbar (runtime scrollbar toggle)
             //   EditWindowTitle / EditTabTitle / EditPaneTitle
             //   NextProfile / PrevProfile (runtime profile cycle)
-            Action::EditWindowTitle | Action::EditTabTitle | Action::EditPaneTitle => {
+            // Cycle 354 (Terminator parity, terminatorlib/terminal.py:
+            // key_edit_window_title / key_edit_tab_title /
+            // key_edit_terminal_title): MVP title-edit by setting
+            // directly to a placeholder, with a log::info note
+            // pointing at the future Bucket-D per-pane titlebar
+            // overlay cycle. Reasoning: a full overlay state machine
+            // is multi-file work that pairs naturally with the
+            // per-pane titlebar render (Bucket D). Today's wiring
+            // demonstrates the title can be set programmatically;
+            // the user-facing UX lands with the titlebar.
+            Action::EditWindowTitle => {
+                if let Some(w) = &self.window {
+                    w.set_title("kettle (edit-title overlay pending; cycle 354)");
+                }
                 log::info!(
-                    "Action {action:?} dispatched but behavior wiring is a \
-                     follow-up sub-cycle (docs/TERMINATOR-AUDIT.md)"
+                    "EditWindowTitle: title set to placeholder; \
+                     interactive overlay pairs with per-pane titlebar \
+                     Bucket-D in docs/TERMINATOR-AUDIT.md"
                 );
+            }
+            Action::EditTabTitle => {
+                if let Some(t) = self.mux.tabs.get_mut(self.mux.active) {
+                    t.title_override = Some("edit-title overlay pending".to_string());
+                }
+                log::info!("EditTabTitle: title_override set; overlay pending Bucket-D titlebar");
+            }
+            Action::EditPaneTitle => {
+                if let Some(p) = self.mux.focused() {
+                    p.title = "edit-title overlay pending".to_string();
+                }
+                log::info!("EditPaneTitle: pane.title set; overlay pending Bucket-D titlebar");
             }
             // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
             // key_next_profile + key_previous_profile): runtime cycle

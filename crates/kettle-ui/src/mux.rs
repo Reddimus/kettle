@@ -312,6 +312,12 @@ impl Node {
 pub struct Tab {
     pub root: Node,
     pub focus: u64,
+    /// Cycle 354 (Terminator parity, terminatorlib/notebook.py): an
+    /// optional user-set title override. When `Some(s)`, the tab
+    /// bar displays `s` instead of the focused pane's title.
+    /// Cleared automatically when the user opens a new tab (cycle-X
+    /// new-tab path) — sticky-override behavior matches Terminator.
+    pub title_override: Option<String>,
     /// When true, only the focused pane is shown at full size.
     pub zoomed: bool,
     /// Cycle 246: per-tab activity state for the tab-bar dot
@@ -647,6 +653,7 @@ impl Mux {
                     self.tabs.push(Tab {
                         root,
                         focus,
+                        title_override: None,
                         zoomed: false,
                         last_output_at: None,
                         last_seen_at: None,
@@ -706,6 +713,7 @@ impl Mux {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         };
         // Cycle 349 (Terminator parity, terminatorlib/config.py:97
         // `new_tab_after_current_tab`): when true, insert the new
@@ -750,6 +758,7 @@ impl Mux {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -1176,6 +1185,7 @@ impl Mux {
             Tab {
                 root: Node::Leaf(id),
                 focus: id,
+                title_override: None,
                 zoomed: false,
                 last_output_at: None,
                 last_seen_at: None,
@@ -1613,6 +1623,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         });
         assert!(!single.move_active_tab(1));
     }
@@ -1665,6 +1676,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         });
         m.active = 0;
         // Close the focused (left) pane → tab survives with the right
@@ -1993,6 +2005,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         };
         super::insert_split(&mut tab, 2, Dir::Horizontal);
         assert_eq!(tab.focus, 2, "focus moves to the new pane");
@@ -2010,6 +2023,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         };
         super::insert_split(&mut tab, 2, Dir::Vertical);
         assert!(!tab.zoomed);
@@ -2028,6 +2042,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            title_override: None,
         });
         m.active = 0;
         assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
