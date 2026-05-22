@@ -596,6 +596,21 @@ impl Mux {
         }
     }
 
+    /// Cycle 397 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 2): serialize ONE tab (by index) to the same
+    /// STab wire format that session.json uses. Returns None when
+    /// the index is out-of-range. Used by the future detachable-
+    /// tabs path (cycle-363 design doc sub-cycles 7+8) to wire
+    /// up cross-process tab handoff via JSON-over-Unix-socket.
+    /// For now: pure-data utility callable from drift guards.
+    pub fn serialize_tab(&self, idx: usize) -> Option<STab> {
+        let t = self.tabs.get(idx)?;
+        Some(STab {
+            root: self.snap(&t.root),
+            focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
+        })
+    }
+
     /// Capture the full tab/split tree + per-pane cwd.
     pub fn snapshot(&self) -> Session {
         Session {
