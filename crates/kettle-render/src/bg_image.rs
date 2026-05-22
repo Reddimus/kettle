@@ -98,4 +98,40 @@ mod tests {
         // Should log a warning but not panic.
         assert!(decode_bg_image("/nonexistent/path/does-not-exist.png").is_none());
     }
+
+    #[test]
+    fn real_png_roundtrip() {
+        // Cycle 392 (Terminator parity, bg-image Bucket-D sub-cycle 12):
+        // acceptance test. Generate a known 8x4 RGBA PNG in-memory,
+        // write to a temp file, decode via decode_bg_image, assert
+        // the round-trip yields the expected dimensions + a
+        // non-empty rgba buffer. Doesn't pixel-compare (PNG encoders
+        // can vary on the precise byte layout); just confirms the
+        // full path works.
+        let dir = std::env::temp_dir();
+        let path = dir.join("kettle-bg-image-cycle392-smoke.png");
+        // Encode a small RGBA PNG using the image crate directly
+        // (writer feature is on for kettle-render's image dep).
+        let w = 8;
+        let h = 4;
+        let mut buf = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                buf.push((x * 32) as u8); // R
+                buf.push((y * 64) as u8); // G
+                buf.push(255); // B
+                buf.push(255); // A
+            }
+        }
+        let img = image::RgbaImage::from_raw(w as u32, h as u32, buf).expect("rgba buffer");
+        img.save(&path).expect("write png");
+        let decoded = decode_bg_image(path.to_str().unwrap()).expect("decode");
+        assert_eq!(decoded.width, 8);
+        assert_eq!(decoded.height, 4);
+        assert_eq!(decoded.rgba.len(), 8 * 4 * 4);
+        // Spot-check: first pixel should be (0, 0, 255, 255) per
+        // the encoding formula above.
+        assert_eq!(&decoded.rgba[..4], &[0, 0, 255, 255]);
+        let _ = std::fs::remove_file(&path);
+    }
 }
