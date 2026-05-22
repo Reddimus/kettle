@@ -1340,6 +1340,43 @@ deliverables table. Highlights:
 - [x] 20 new `Action::*` variants fully wired end-to-end (cycles 342,
       384, 407).
 
+## v1.32.0 → v1.34.0 — post-sweep production polish (cycles 411-431, shipped)
+
+Twenty-one cycles + three releases hardening the plugin contract +
+ergonomics that landed in the v1.8.0 → v1.31.0 sweep. See
+`docs/TERMINATOR-AUDIT.md`'s post-sweep section for the full breakdown.
+
+- [x] **Plugin-contract bug fixes** — six silent event-bypass sites
+      across `new_tab` and `close_tab` paths now fire the canonical
+      `LuaEvent`. Remote-control IPC new-tab → `TabAdd` (cycle 423),
+      three `close_tab` paths → `TabClose` (cycle 424: SCM_RIGHTS
+      source, file-fallback source, ✕-click), two `new_tab` paths →
+      `TabAdd` (cycle 425: NewWindow fallback, exit-action=restart
+      respawn). Plugins listening for tab-spawn / tab-close now see
+      every trigger source.
+- [x] **exit-action = restart** fully end-to-end (cycles 418, 420).
+      Closes the cycle-357 "not yet implemented" warn; respawn uses
+      live grid (`self.grid_of(self.area())`) not hardcoded 80×24.
+- [x] **Helper unification** (cycles 426-428). `fire_tab_add_event`,
+      `fire_tab_close_event`, `drain_lua_hook_commands` centralize
+      ~170 lines of inline `LuaCommand`-variant matching. All 5
+      `LuaEvent` variants (Startup / TabAdd / TabClose / Bell /
+      Output) now share one canonical drain path; adding a sixth
+      event is one `fire_event` call.
+- [x] **Docs as code** — ARCHITECTURE.md detachable-tabs + plugin +
+      bg-image flows upgraded ASCII → mermaid (cycles 421-422);
+      CONFIG.md gained a Terminator-parity-keys table covering ~30
+      cycles-331-410 keys (cycle 415); INSTALL.md SHA-256 pin
+      example bumped v1.3.4 → v1.34.0 (cycles 417, 429); audit-doc
+      tail extended with cycles 411-430 post-sweep summary (cycle 431).
+- [x] **Drift guards** — cycle 413 pinned 9 load-bearing Terminator-
+      parity config keys in `print_default_config_round_trip`;
+      cycle 430 pinned the `kettle.notify` + `kettle.set_theme`
+      queue/drain contract. Workspace tests 308 → 316.
+- [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
+      -D warnings` passes on `kettle-render` and `kettle-vt` after
+      fixing 3 intra-doc link + bare-URL warnings.
+
 ## Next (in priority order)
 
 The Terminator-parity sweep effectively closes the major missing-
