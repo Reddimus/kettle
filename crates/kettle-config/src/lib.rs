@@ -260,6 +260,16 @@ pub struct Config {
     pub tab_bar_pos: TabBarPos,
     /// Cycle 295: status-bar mode. See [`StatusBarMode`].
     pub status_bar: StatusBarMode,
+    /// Cycle 332 (Terminator parity, terminatorlib/config.py:75
+    /// `borderless`): hide OS window decorations. Useful for tiling
+    /// window managers + Quake-style dropdown setups where the host
+    /// chrome is redundant.
+    pub borderless: bool,
+    /// Cycle 332 (Terminator parity, terminatorlib/config.py:78
+    /// `always_on_top`): keep the kettle window above other
+    /// windows. Best-effort per OS (Wayland respects compositor
+    /// rules; X11 + macOS + Windows mostly honor it).
+    pub always_on_top: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -404,6 +414,8 @@ impl Default for Config {
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             status_bar: StatusBarMode::Off,
+            borderless: false,
+            always_on_top: false,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1068,6 +1080,18 @@ impl Config {
                         "top" => StatusBarMode::Top,
                         "bottom" | "true" | "on" => StatusBarMode::Bottom,
                         _ => StatusBarMode::Off,
+                    }
+                }
+                "borderless" => {
+                    // Cycle 332 (Terminator parity).
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.borderless = b;
+                    }
+                }
+                "always-on-top" | "always_on_top" => {
+                    // Cycle 332 (Terminator parity).
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.always_on_top = b;
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2188,6 +2212,20 @@ mod config_tests {
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
         );
+    }
+
+    #[test]
+    fn borderless_and_always_on_top_parse(){
+        // Cycle 332 drift guard. Terminator's `borderless` +
+        // `always_on_top` config keys (terminatorlib/config.py:75
+        // + 78). kettle accepts both true/false + the standard
+        // `parse_bool` truthy/falsy aliases.
+        assert!(!Config::default().borderless);
+        assert!(!Config::default().always_on_top);
+        assert!(Config::parse_text("borderless = true").borderless);
+        assert!(!Config::parse_text("borderless = false").borderless);
+        assert!(Config::parse_text("always-on-top = true").always_on_top);
+        assert!(Config::parse_text("always_on_top = true").always_on_top);
     }
 
     #[test]

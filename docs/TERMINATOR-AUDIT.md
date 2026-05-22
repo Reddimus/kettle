@@ -353,8 +353,8 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `scroll_tabbar` (scrollable tab bar) | config.py | ❌ | new config key for many-tab handling |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ kettle already does fixed-width | document |
 | `close_button_on_tab` (toggle ✕ on tabs) | config.py | 🟡 always shown | new config key |
-| `borderless` (hide window decorations) | config.py | ❌ | new config key (winit `Window::set_decorations`) |
-| `always_on_top` | config.py | ❌ | new config key (winit `set_window_level`) |
+| ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |
+| ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |
 | `sticky` (on all workspaces) | config.py | ❌ | new config key (Linux-only; winit hint) |
 | `hide_from_taskbar` | config.py | ❌ | new config key (winit hint) |
 | `ask_before_closing = always/multiple_terminals/never` | config.py | ❌ | new config key + close-confirm dialog |

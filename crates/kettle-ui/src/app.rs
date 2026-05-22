@@ -3240,7 +3240,18 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("kettle");
+        let mut attrs = Window::default_attributes().with_title("kettle");
+        // Cycle 332 (Terminator parity, terminatorlib/config.py:75 +
+        // 78). `borderless` removes OS chrome; `always-on-top` keeps
+        // the window above other windows. Best-effort per OS; failure
+        // modes degrade silently (e.g. Wayland respects compositor
+        // rules over our hint).
+        if self.cfg.borderless {
+            attrs = attrs.with_decorations(false);
+        }
+        if self.cfg.always_on_top {
+            attrs = attrs.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        }
         // Set WM_CLASS / Wayland app_id explicitly so GNOME / KDE
         // task switchers, dock pins, and the `StartupWMClass=kettle`
         // line in `packaging/linux/kettle.desktop` all line up. Without
