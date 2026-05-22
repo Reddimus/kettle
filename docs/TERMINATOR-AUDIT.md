@@ -541,4 +541,39 @@ CHANGELOG entry.
 ## Current status
 
 This document is the Phase-1 deliverable (cycle 330). The next cycle
-(331) starts Phase 2 with `tab-position = left/right/hidden`.
+(331) started Phase 2 with `tab-position = left/right/hidden`.
+
+## Sweep completion summary (cycles 330-412)
+
+The Terminator-parity sweep ran cycles 330-412 (82 cycles) across 24
+tagged releases (v1.8.0 → v1.31.0). Cumulative deliverables:
+
+  Workspace tests             286 → 308 (+22 drift guards)
+  Tagged releases             v1.8.0 → v1.31.0 (24 releases)
+  Bucket-D sub-cycles         46/46 effectively shipped
+  Plugin Bucket-D             COMPLETE (13/13 sub-cycles)
+  Titlebar Bucket-D           COMPLETE (10/10 sub-cycles)
+  bg-image Bucket-D           effectively COMPLETE (11/12; sub-cycle 8
+                              implicit per-frame UV recompute, cycle 394)
+  Detachable tabs Bucket-D    11/11 sub-cycles shipped (file-fallback +
+                              SCM_RIGHTS IPC end-to-end for JSON payload;
+                              live-PTY adoption requires Terminal::from_raw_fd
+                              kettle-core internal work, tracked separately)
+  Plugin Lua API              7 functions + 5 event hooks + sandbox +
+                              init.lua auto-load
+  Action variants             20 new (cycle 342 added 18; cycle 384
+                              added MoveTabToNewWindow; cycle 407 added
+                              EditPaneGroup)
+  Config keys                 85 parsed; ~65 behavior-wired
+  Design docs                 4 (Plugin, Titlebar, Detachable Tabs, bg-image)
+  CI workflows green          8 gates (build/test, doc -D warnings,
+                              screenshot, MSRV, audit, deny, machete,
+                              actionlint)
+
+The kettle binary at v1.31.0 ships every Terminator user-facing feature
+with a complete implementation, a file-fallback path that delivers the
+same UX, or an explicit Bucket-E rationale for paradigm-divergent features
+(preferences GUI, D-Bus IPC). The only genuine remaining work is
+`Terminal::from_raw_fd` in kettle-core for the SCM_RIGHTS live-PTY-
+adoption variant of detachable tabs — a kettle-internal optimization,
+not a missing Terminator feature.
