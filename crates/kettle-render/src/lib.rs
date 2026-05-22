@@ -803,6 +803,18 @@ impl Renderer {
         }
 
         // Per-pane grid + dividers/border.
+        // Cycle 379 (Terminator parity, per-pane-titlebar Bucket-D sub-cycles
+        // 2+3+4 collapsed): per-pane titlebar height. When cfg.show_titlebar
+        // is true + there's more than 1 pane in this tab (titlebars on a
+        // single pane is mostly redundant since the OS window title +
+        // tab-bar already show the same info), reserve a thin strip at the
+        // top of each pane for the title + size text. Color cycles through
+        // the cfg.title_*_bg/fg variants by focused vs unfocused state.
+        let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
+            ch + 6.0
+        } else {
+            0.0
+        };
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -855,6 +867,28 @@ impl Renderer {
             quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
             quads.push(rect(rx, ry, bw, rh, border, 1.0));
             quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
+
+            // Cycle 379: per-pane titlebar background quad. Drawn
+            // ABOVE the pane's border + BELOW the pane's content.
+            // Color picks from the cfg.title_*_bg_color variants
+            // based on focus + broadcast group state.
+            if pane_titlebar_h > 0.0 {
+                let bar_bg = if pv.focused {
+                    cfg.title_transmit_bg_color
+                        .unwrap_or(Rgb::new(0xc8, 0x00, 0x03))
+                } else {
+                    cfg.title_inactive_bg_color
+                        .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
+                };
+                quads.push(rect(
+                    rx + bw,
+                    ry + bw,
+                    rw - 2.0 * bw,
+                    pane_titlebar_h,
+                    bar_bg,
+                    1.0,
+                ));
+            }
 
             self.build_pane(
                 i,
