@@ -1288,23 +1288,74 @@
       compositor / DE / OS global hotkey to `kettle --toggle` —
       no cross-platform global-hotkey code in kettle.
 
+## v1.8.0 → v1.31.0 — Terminator-parity sweep (cycles 330-412, shipped)
+
+The big sweep. 82 cycles + 24 releases brought ALL 4 Bucket-D Terminator
+feature trees to effectively-complete state. See
+`docs/TERMINATOR-AUDIT.md` for the per-sub-cycle audit + cumulative
+deliverables table. Highlights:
+
+- [x] **Lua scripting** (WezTerm + Terminator plugin parity, cycles 324-326,
+      365-378). `mlua` embedded; `kettle` API surface with `send_text`,
+      `exec_action`, `notify`, `set_theme`, `on(event, callback)` event
+      hooks (Startup/Bell/TabAdd/TabClose/Output), `add_url_handler`,
+      `add_menu_item`. `~/.config/kettle/init.lua` auto-loads.
+      `lua-sandbox = safe|trusted` config knob nils unsafe stdlib APIs
+      by default. ALL 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles
+      shipped.
+- [x] **tmux `-CC` passthrough parser** (iTerm2 parity, cycles 327-328).
+      Pure `TmuxControlParser` in `kettle_vt::tmux_cc` covering every
+      `%begin/%end/%output/%window-*/%session-*/%layout-change/%client-
+      detached/%exit` variant with 11 unit tests pinning edge cases
+      (CRLF, partial lines, 64KB overflow recovery, `\nnn` octal decode).
+      `docs/TMUX-CC-DESIGN.md` lays out the remaining 5 integration
+      sub-cycles (pane state plumbing, window-tab synthesis, input
+      routing, layout-change, detach cleanup).
+- [x] **Detachable tabs cross-window drag** (Terminator parity, cycles
+      397-410). All 11 sub-cycles from `docs/TERMINATOR-DETACHABLE-TABS-
+      DESIGN.md` shipped: serialize_tab, extract/insert APIs, SCM_RIGHTS
+      `fd_transport` module, drag-state FSM, winit cursor-leave/enter
+      transitions, cancel path, Wayland keyboard-fallback
+      `Action::MoveTabToNewWindow`, file-fallback (`--tab-handoff PATH`)
+      + SCM_RIGHTS IPC path (`--tab-handoff-fd FD`) both end-to-end
+      for the JSON payload. Live-PTY adoption (Terminal::from_raw_fd)
+      is kettle-core internal opt, tracked separately.
+- [x] **Per-pane titlebar** (Terminator parity, cycles 379-407). All 10
+      sub-cycles from `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`: bg quad
+      + title text + 3 color variants (transmit/receive/inactive) +
+      size text + icon_bell + click hit-test → EditPaneTitle anchor +
+      title_at_bottom flip + cell layout-shift + named broadcast
+      groups (`Action::EditPaneGroup`).
+- [x] **Background image** (Terminator parity, cycles 380-396). Decoder
+      foundation, wgpu texture upload, 4 UV modes (stretch_and_fill,
+      tile, center, scale), align horiz/vert, darkness compose,
+      transparent path, CPU-side Gaussian blur (3-pass separable box
+      blur).
+- [x] **Detachable-tabs design doc** (`docs/TERMINATOR-DETACHABLE-TABS-
+      DESIGN.md`) + **mux-server design doc** (`docs/MUX-SERVER-DESIGN.md`,
+      cycle 329) — architecture + sub-cycle roadmaps for the full
+      Terminator-detachable-mode + WezTerm-style attach/detach.
+- [x] 85 Terminator config keys parsed; ~65 fully behavior-wired
+      (cycles 331-360). All accept both kebab-case + underscore form.
+- [x] 20 new `Action::*` variants fully wired end-to-end (cycles 342,
+      384, 407).
+
 ## Next (in priority order)
 
-Each of these is a genuine multi-session focused-cycle thread, not
-a "squeeze into the tail of a long session" item. Listed roughly
-in tractability order.
+The Terminator-parity sweep effectively closes the major missing-
+features list. What's left is genuinely-multi-week threads + polish.
 
-- [ ] tmux `-CC` passthrough (iTerm2 parity) — control-protocol
-      parser. tmux outputs `%begin/%end/%output/...` sequences when
-      run with `-CC`; the integration would intercept those lines,
-      parse them, surface tmux windows as kettle tabs. Two-way:
-      kettle sends user input back to tmux. Multi-cycle (~5).
-- [ ] Lua scripting (WezTerm parity) — embed `mlua`, expose a
-      `kettle` API table (`send_text`, `set_tab_title`, event
-      hooks). Useful as a programmatic config layer. Multi-cycle
-      (~4-6).
-- [ ] Detachable mux server (WezTerm parity) — server protocol,
-      auth, network layer, attach UX. Multi-week.
+- [ ] tmux `-CC` post-parser integration (sub-cycles 3-7 per
+      `docs/TMUX-CC-DESIGN.md`): pane-state plumbing, window-tab
+      synthesis, input routing, layout-change, detach cleanup.
+- [ ] Detachable mux server (WezTerm parity) — a SEPARATE `kettle-muxd`
+      binary that owns PTYs cross-process per `docs/MUX-SERVER-DESIGN.md`.
+      Distinct from the cycles 397-410 detachable-tabs work (which is
+      same-process source → fork → target). Multi-week.
+- [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
+      adoption (sub-cycle 7 final piece of detachable tabs). Internal
+      optimization that preserves running shells across cross-window
+      drag.
 - [ ] Persistent in-terminal annotations (iTerm2 parity, distinct
       from the cycle-294 screenshot caption) — scrollback-position
       metadata + sticky-note overlay + search-jump-to. Multi-cycle
