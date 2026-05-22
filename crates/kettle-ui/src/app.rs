@@ -2316,22 +2316,26 @@ impl App {
                         cols,
                         rows,
                         false,
+                        p.group_name.clone(),
                     ));
                 }
             }
         }
         let panes: Vec<PaneView> = guards
             .iter()
-            .map(|(r, g, f, imgs, title, cols, rows, bell)| PaneView {
-                rect: *r,
-                term: g,
-                focused: *f,
-                images: imgs.clone(),
-                title: title.clone(),
-                size_cols: *cols,
-                size_rows: *rows,
-                bell: *bell,
-            })
+            .map(
+                |(r, g, f, imgs, title, cols, rows, bell, group_name)| PaneView {
+                    rect: *r,
+                    term: g,
+                    focused: *f,
+                    images: imgs.clone(),
+                    title: title.clone(),
+                    size_cols: *cols,
+                    size_rows: *rows,
+                    bell: *bell,
+                    group_name: group_name.clone(),
+                },
+            )
             .collect();
         // Cycle 296: status bar built BEFORE the &mut renderer borrow
         // (the helper reads `self.mux` immutably). Cheap when off.

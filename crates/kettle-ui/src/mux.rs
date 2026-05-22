@@ -116,6 +116,17 @@ pub struct Pane {
     /// fires LuaEvent::Output(pane_id, bytes).
     pub output_rx: Option<Receiver<Vec<u8>>>,
     pub title: String,
+    /// Cycle 406 (Terminator parity, named broadcast groups
+    /// foundation): per-pane group name. When set, the pane is
+    /// part of a named broadcast group; keyboard input to any
+    /// member of the group broadcasts to every member. None
+    /// means the pane has no group (Terminator default).
+    ///
+    /// Distinct from the cycle-178 per-tab broadcast (which is
+    /// scope=tab, no name): named groups can span multiple tabs +
+    /// be selectively enabled. Per-tab broadcast remains the
+    /// quick-toggle path.
+    pub group_name: Option<String>,
     pub closed: bool,
     /// Scrollback `history_size()` observed at the *previous* redraw — used
     /// to detect new output for `scroll-on-output`. `None` while no frame
@@ -569,6 +580,7 @@ impl Mux {
                 rx,
                 output_rx,
                 title: initial_title,
+                group_name: None,
                 closed: false,
                 last_history: None,
                 argv: argv.to_vec(),
