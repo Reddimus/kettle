@@ -6,6 +6,59 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.26.0] — 2026-05-22
+
+Detachable-tabs Bucket-D foundation APIs.
+
+  cycle 397 — `Mux::serialize_tab(idx)` returns the same STab
+              wire format that session.json uses. Pure-data
+              utility that future cross-process IPC consumes.
+              Closes detachable-tabs Bucket-D sub-cycle 2.
+
+  cycle 398 — `Mux::extract_tab(idx)` + `Mux::insert_tab(at, Tab)`
+              — in-process tab handoff primitives. extract_tab
+              removes a tab from the tabs list WITHOUT touching
+              its panes (the panes stay in self.panes; the
+              caller is responsible for transferring or dropping
+              them). insert_tab inserts a Tab at the given idx
+              + sets active so the moved tab is focused
+              immediately. Closes detachable-tabs Bucket-D
+              sub-cycle 4.
+
+Both APIs are #[allow(dead_code)] until the cross-process IPC
+caller lands (sub-cycles 7+8); the in-process foundation
+ships now so the IPC cycle composes cleanly with proven
+primitives.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 — sub-cycles 2-7, 9, 10 +
+                                       layout-shift
+                                   E — sub-cycle 8 (group-name
+                                       edit) — Bucket-E until
+                                       named broadcast groups
+                                       infra lands
+bg-image (12 sub-cycles):         ✅ 11 — all sub-cycles
+                                       implemented + 1 implicit
+                                       per-frame UV recompute
+Detachable tabs (11 sub-cycles):  ✅ 4 — sub-cycles 1 (design
+                                       doc), 2 (serialize_tab),
+                                       4 (extract/insert), 10
+                                       (Wayland fallback)
+                                   ⌛ 7 — sub-cycles 3
+                                       (SCM_RIGHTS wrapper), 5
+                                       (drag state machine), 6
+                                       (cursor detection), 7
+                                       (cross-process IPC + fd
+                                       transfer), 8 (new-window
+                                       on-drop), 9 (cancel
+                                       path), 11 (e2e test)
+
+37 of 46 Bucket-D sub-cycles end-to-end (80%).
+
+Workspace tests 306 → 308 (+2 drift guards).
+
 ## [1.25.0] — 2026-05-22
 
   cycle 395 — Per-pane Edit-title overlay anchors near clicked
