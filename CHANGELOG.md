@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.7] — 2026-05-21
+
+Patch release. Real UX catch on the cycle-303 Quake toggle +
+CI smoke for the cycle-313 --profile contract.
+
+### Fixed
+- **Tri-state Quake toggle (cycle 319).** The cycle-303 binary
+  "hide if visible, show if hidden" toggle had a UX failure mode:
+  user has kettle visible, clicks to another window (kettle is now
+  visible-but-unfocused), presses the global hotkey expecting
+  kettle to come BACK INTO FOCUS — instead kettle HIDES. Two
+  presses required to refocus. Wrong shape for
+  Quake / Yakuake / Tilda muscle memory.
+
+  Fix: tri-state.
+
+    hidden            → show + raise + focus
+    visible + focused → hide
+    visible + !focused → raise + focus (don't hide)
+
+### CI hardening
+- **Cycle-313 --profile + --check-config contract smoke (cycles
+  317 + 318).** Adds an end-to-end test in `.github/workflows/
+  ci.yml`'s introspection-smoke block that writes a profile file
+  with a deliberately malformed `font-size = not_a_number` line,
+  runs `kettle --profile cibad --check-config`, and asserts the
+  exit code is non-zero (the cycle-194 --check-config contract
+  fires non-zero when issues are present). Cycle 317 used a
+  flaky `if grep -q ...` pipe-into-if that didn't work on Windows
+  Git Bash; cycle 318 pivoted to the cleaner exit-code contract.
+
+Workspace tests stay at 269 green.
+
 ## [1.7.6] — 2026-05-21
 
 Patch release. Three real durability + UX catches from post-v1.7.5
