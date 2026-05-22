@@ -204,6 +204,32 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.set_theme")?;
+        // Cycle 375 (plugin sub-cycle 8): kettle.add_menu_item(
+        //   label, callback). Lua-supplied entries that render BELOW
+        // the built-in context-menu items (cycle-245). Callback is
+        // a Lua function invoked when the item is clicked.
+        //
+        // Storage: kettle_menu_items registry table; each entry is
+        // a {label, callback} table.
+        let menu_items_tbl = lua
+            .create_table()
+            .context("create kettle_menu_items table")?;
+        lua.set_named_registry_value("kettle_menu_items", menu_items_tbl)
+            .context("register kettle_menu_items")?;
+        kettle_tbl
+            .set(
+                "add_menu_item",
+                lua.create_function(|lua, (label, cb): (String, mlua::Function)| {
+                    let items: mlua::Table = lua.named_registry_value("kettle_menu_items")?;
+                    let entry = lua.create_table()?;
+                    entry.set("label", label)?;
+                    entry.set("callback", cb)?;
+                    let n = items.len()?;
+                    items.set(n + 1, entry)?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.add_menu_item")?;
         // Cycle 374 (plugin sub-cycle 9): kettle.add_url_handler(
         //   name, pattern, callback). Lua-supplied URL handlers that
         // run when a URL matches the pattern, BEFORE kettle's default
@@ -271,6 +297,41 @@ impl LuaEngine {
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
         Ok(Self { lua, pending })
+    }
+
+    /// Cycle 375: list the labels of every Lua-registered context
+    /// menu item, in registration order. Used by App to extend the
+    /// cycle-245 context menu with kettle.add_menu_item entries.
+    pub fn list_menu_item_labels(&self) -> mlua::Result<Vec<String>> {
+        let items: mlua::Table = self.lua.named_registry_value("kettle_menu_items")?;
+        let n = items.len()?;
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 1..=n {
+            let entry: mlua::Table = items.get(i)?;
+            let label: String = entry.get("label")?;
+            out.push(label);
+        }
+        Ok(out)
+    }
+
+    /// Cycle 375: invoke the Lua callback for menu-item index
+    /// `idx` (0-based; the App walks the registered list in the
+    /// same order `list_menu_item_labels` returned). Errors
+    /// log::warn + don't propagate.
+    pub fn invoke_menu_item(&self, idx: usize) {
+        let result: mlua::Result<()> = (|| {
+            let items: mlua::Table = self.lua.named_registry_value("kettle_menu_items")?;
+            let entry: mlua::Table = items.get(idx + 1)?;
+            let cb: mlua::Function = entry.get("callback")?;
+            let r: mlua::Result<()> = cb.call(());
+            if let Err(e) = r {
+                log::warn!("lua menu-item {idx} callback: {e}");
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            log::warn!("lua invoke_menu_item({idx}): {e}");
+        }
     }
 
     /// Cycle 374: invoke the first registered URL handler whose

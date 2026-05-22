@@ -360,6 +360,15 @@ struct HintTarget {
 
 /// One entry in the right-click context menu. `Separator` rows render
 /// as a thin divider in the menu and are skipped during keyboard nav
+/// Cycle 375: a context-menu click resolves to either a kettle
+/// Action (built-in items) or a Lua callback index (kettle.add_menu_item
+/// entries).
+#[derive(Clone)]
+enum ContextMenuClick {
+    Action(Action),
+    LuaMenuItem(usize),
+}
+
 /// and click dispatch; `Item` rows carry the action to fire.
 #[derive(Clone)]
 enum ContextMenuItem {
@@ -369,6 +378,15 @@ enum ContextMenuItem {
         enabled: bool,
     },
     Separator,
+    /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
+    /// menu item supplied by a Lua plugin via `kettle.add_menu_item(
+    /// label, callback)`. Dispatch invokes the registered Lua
+    /// callback (looked up by `lua_idx` in the kettle_menu_items
+    /// table) instead of an Action.
+    LuaItem {
+        label: String,
+        lua_idx: usize,
+    },
 }
 
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
@@ -425,6 +443,13 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 /// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
 /// unchanged if no enabled rows exist at all (defensive — the menu
 /// shouldn't have been opened with zero actionable rows).
+fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
+    matches!(
+        item,
+        ContextMenuItem::Item { enabled: true, .. } | ContextMenuItem::LuaItem { .. }
+    )
+}
+
 fn next_context_menu_highlight(items: &[ContextMenuItem], current: usize, delta: isize) -> usize {
     if items.is_empty() {
         return current;
@@ -434,7 +459,7 @@ fn next_context_menu_highlight(items: &[ContextMenuItem], current: usize, delta:
     let mut i = current as isize;
     for _ in 0..len {
         i = (i + step).rem_euclid(len);
-        if let ContextMenuItem::Item { enabled: true, .. } = items[i as usize] {
+        if item_is_dispatchable(&items[i as usize]) {
             return i as usize;
         }
     }
@@ -2327,6 +2352,27 @@ impl App {
         ]
     }
 
+    /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
+    /// append every Lua-registered menu item to the context-menu
+    /// item list. Called by `open_context_menu` after the built-in
+    /// items so Lua items always render below the kettle defaults.
+    /// Each entry's label is shown; clicking dispatches the
+    /// registered Lua callback (via `LuaEngine::invoke_menu_item`).
+    fn append_lua_menu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        if let Some(eng) = &self.lua_engine
+            && let Ok(labels) = eng.list_menu_item_labels()
+            && !labels.is_empty()
+        {
+            items.push(ContextMenuItem::Separator);
+            for (idx, label) in labels.into_iter().enumerate() {
+                items.push(ContextMenuItem::LuaItem {
+                    label,
+                    lua_idx: idx,
+                });
+            }
+        }
+    }
+
     /// Open the right-click context menu at `(px, py)`. Closes any other
     /// open modal first so we don't render two overlays at once
     /// (cycle 156 close_all_modals discipline), then computes the panel
@@ -2335,12 +2381,11 @@ impl App {
     /// and-left rather than rendering off-screen).
     fn open_context_menu(&mut self, px: f32, py: f32) {
         self.close_all_modals();
-        let items = self.context_menu_items();
+        let mut items = self.context_menu_items();
+        // Cycle 375: append Lua-supplied items (if any).
+        self.append_lua_menu_items(&mut items);
         // Highlight the first enabled non-separator item.
-        let highlight = items
-            .iter()
-            .position(|it| matches!(it, ContextMenuItem::Item { enabled: true, .. }))
-            .unwrap_or(0);
+        let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
         let row_h = ch + 12.0;
@@ -2349,13 +2394,14 @@ impl App {
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } => row_h,
+                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
             })
             .sum();
         let max_chars = items
             .iter()
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -2405,7 +2451,7 @@ impl App {
     /// disabled row; the caller then either dismisses (left-click
     /// outside) or falls through to the regular click handling
     /// (right-click → re-open at the new point).
-    fn context_menu_click_action(&self, bcode: u8) -> Option<Action> {
+    fn context_menu_click_action(&self, bcode: u8) -> Option<ContextMenuClick> {
         if bcode != 0 {
             return None;
         }
@@ -2422,18 +2468,20 @@ impl App {
         for item in &menu.items {
             let h = match item {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } => row_h,
+                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
-                if let ContextMenuItem::Item {
-                    action,
-                    enabled: true,
-                    ..
-                } = item
-                {
-                    return Some(action.clone());
+                match item {
+                    ContextMenuItem::Item {
+                        action,
+                        enabled: true,
+                        ..
+                    } => return Some(ContextMenuClick::Action(action.clone())),
+                    ContextMenuItem::LuaItem { lua_idx, .. } => {
+                        return Some(ContextMenuClick::LuaMenuItem(*lua_idx));
+                    }
+                    _ => return None,
                 }
-                return None;
             }
             row_y += h;
         }
@@ -2454,7 +2502,7 @@ impl App {
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } => row_h,
+                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
             })
             .sum();
         let max_chars = menu
@@ -2462,6 +2510,7 @@ impl App {
             .iter()
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -2488,6 +2537,11 @@ impl App {
                     label: String::new(),
                     separator: true,
                     enabled: false,
+                },
+                ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: true,
                 },
             })
             .collect();
@@ -4221,10 +4275,55 @@ impl ApplicationHandler<UserEvent> for App {
                 // location is handled as a re-open after this close
                 // because the right-click handler runs the open path).
                 if self.context_menu.is_some()
-                    && let Some(action) = self.context_menu_click_action(bcode)
+                    && let Some(click) = self.context_menu_click_action(bcode)
                 {
                     self.context_menu = None;
-                    self.handle_action(action, event_loop);
+                    match click {
+                        ContextMenuClick::Action(action) => {
+                            self.handle_action(action, event_loop);
+                        }
+                        ContextMenuClick::LuaMenuItem(idx) => {
+                            // Cycle 375: invoke the Lua callback +
+                            // drain any LuaCommands it queued.
+                            if let Some(eng) = &self.lua_engine {
+                                eng.invoke_menu_item(idx);
+                                for cmd in eng.drain_commands() {
+                                    match cmd {
+                                        crate::LuaCommand::SendText(s) => {
+                                            self.pending_lua_send.extend_from_slice(s.as_bytes());
+                                        }
+                                        crate::LuaCommand::ExecAction(name) => {
+                                            if let Some(a) = kettle_config::Action::from_name(&name)
+                                            {
+                                                self.pending_lua_actions.push(a);
+                                            } else {
+                                                log::warn!(
+                                                    "lua kettle.exec_action (from menu-item): \
+                                                     unknown action name {name:?}"
+                                                );
+                                            }
+                                        }
+                                        crate::LuaCommand::Notify { title, body } => {
+                                            fire_notify(&title, &body);
+                                        }
+                                        crate::LuaCommand::SetTheme(name) => {
+                                            if let Some(canonical) =
+                                                kettle_config::Theme::find_name(&name)
+                                            {
+                                                self.cfg.theme_name = canonical.to_string();
+                                                self.cfg.theme =
+                                                    kettle_config::Theme::by_name(canonical);
+                                            } else {
+                                                log::warn!(
+                                                    "lua kettle.set_theme: unknown theme {name:?}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     return;
                 }
                 if self.context_menu.is_some() && bcode == 0 {
