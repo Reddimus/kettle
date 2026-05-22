@@ -3303,6 +3303,20 @@ impl ApplicationHandler<UserEvent> for App {
         if self.cfg.always_on_top {
             attrs = attrs.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
         }
+        // Cycle 344 (Terminator parity, terminatorlib/config.py:75
+        // `window_state`). Apply initial window state at creation.
+        match self.cfg.window_state {
+            kettle_config::WindowState::Normal => {}
+            kettle_config::WindowState::Maximise => {
+                attrs = attrs.with_maximized(true);
+            }
+            kettle_config::WindowState::Fullscreen => {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+            kettle_config::WindowState::Hidden => {
+                attrs = attrs.with_visible(false);
+            }
+        }
         // Set WM_CLASS / Wayland app_id explicitly so GNOME / KDE
         // task switchers, dock pins, and the `StartupWMClass=kettle`
         // line in `packaging/linux/kettle.desktop` all line up. Without
@@ -3917,6 +3931,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 self.window_focused = f;
+                // Cycle 344 (Terminator parity, terminatorlib/config.py:77
+                // `hide_on_lose_focus`): Quake-style auto-hide. When
+                // the user clicks away to another window, hide the
+                // kettle window. Reappears via `kettle --toggle`
+                // (cycle 303) or whatever global hotkey the user
+                // bound. Honors only on focus-LOSS (f == false).
+                if !f
+                    && self.cfg.hide_on_lose_focus
+                    && let Some(w) = &self.window
+                {
+                    w.set_visible(false);
+                }
                 // Cycle 171: route through the shared helper so all
                 // user-driven blink-reset paths share one implementation
                 // (cycles 134-141 + 144 + 150 audit). The
