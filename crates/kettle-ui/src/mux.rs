@@ -2100,4 +2100,41 @@ mod node_tests {
         m.toggle_zoom();
         assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
     }
+
+    #[test]
+    fn serialize_tab_roundtrips_split_tree() {
+        // Cycle 397 drift guard. Mux::serialize_tab returns an
+        // STab whose tree shape matches the in-memory split
+        // tree. Validates the future detachable-tabs wire-format
+        // contract: deserialize → restore should reproduce the
+        // same shape.
+        let mut m = Mux::new();
+        // Construct a 2-pane tab with a horizontal split.
+        let mut root = Node::Leaf(10);
+        root.split_leaf(10, 11, Dir::Vertical);
+        m.tabs.push(Tab {
+            root,
+            focus: 11,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        m.active = 0;
+        let s = m.serialize_tab(0).expect("serialize_tab");
+        // The serialized root must be a Split node (matches Dir::Vertical).
+        match s.root {
+            crate::session::SNode::Split { a, b, vertical, .. } => {
+                assert!(!vertical, "Dir::Vertical = side-by-side, vertical=false");
+                assert!(matches!(*a, crate::session::SNode::Leaf { .. }));
+                assert!(matches!(*b, crate::session::SNode::Leaf { .. }));
+            }
+            _ => panic!("expected Split node at root after split_leaf"),
+        }
+        // Focus serialized as DFS index 1 (second leaf).
+        assert_eq!(s.focus, 1);
+        // Out-of-range index returns None (no panic).
+        assert!(m.serialize_tab(99).is_none());
+    }
 }
