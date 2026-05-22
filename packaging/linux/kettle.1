@@ -261,11 +261,17 @@ move tab left
 .B Ctrl+Shift+PgDn
 move tab right
 .TP
+.B Alt+1 ... Alt+9
+jump to tab N by number
+.TP
 .B Ctrl+Shift+I
 new window
 .TP
 .B Ctrl+Shift+Q
 close window
+.TP
+.B F11
+toggle fullscreen
 .SS Splits / panes
 .TP
 .B Ctrl+Shift+O
@@ -389,6 +395,25 @@ increase font size
 .TP
 .B Ctrl+Shift+Minus
 decrease font size
+.TP
+.B Ctrl+0
+reset font size to the configured default
+.SS Pane resize
+.TP
+.B Shift+Arrow
+resize the focused split (up / down / left / right). Composes
+with split-tree weights so adjacent panes grow proportionally.
+.SS Scroll
+.TP
+.B Shift+PgUp
+.TQ
+.B Shift+PgDn
+scroll one page up / down through scrollback
+.TP
+.B Shift+Home
+.TQ
+.B Shift+End
+jump to scrollback top / bottom
 .SS Right-click
 A right click anywhere in a pane opens a context menu with:
 Copy / Paste / Split Right / Split Down / Close Pane / New Tab.
