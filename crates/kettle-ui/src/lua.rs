@@ -537,6 +537,29 @@ mod tests {
     }
 
     #[test]
+    fn kettle_config_path_returns_a_string_or_nil() {
+        // Cycle 446 drift guard. `kettle.config_path()` (cycle 324)
+        // returns either the resolved XDG-style config path as a
+        // string or nil. Plugins inspecting their environment
+        // (e.g. `kettle.notify("config: " .. (kettle.config_path() or
+        // "default"))`) need both branches to behave consistently.
+        // Without this test a future refactor of Config::default_path
+        // could silently degrade the API.
+        let eng = LuaEngine::new("Default").expect("init");
+        // type(kettle.config_path()) is 'string' on every supported
+        // host that exposes XDG_CONFIG_HOME / %APPDATA% / $HOME, and
+        // 'nil' otherwise. Either is fine — the contract is one or
+        // the other (no error, no number, no table).
+        let kind = eng
+            .eval_str("return type(kettle.config_path())")
+            .expect("eval");
+        assert!(
+            kind == "string" || kind == "nil",
+            "kettle.config_path() returned unexpected type {kind:?}"
+        );
+    }
+
+    #[test]
     fn kettle_namespace_arithmetic_still_works() {
         // Sanity: the standard library functions in mlua's Lua VM
         // are usable. Without this, a user script calling
