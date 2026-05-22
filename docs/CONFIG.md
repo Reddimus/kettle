@@ -64,6 +64,41 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value — no `\|action` split, so alternation patterns like `(BUILD SUCCESSFUL\|FAILED)` survive intact |
 
+### Terminator-parity keys (cycles 331-410)
+
+Both kebab-case (kettle convention) and underscore form (Terminator's
+own form, e.g. `show_titlebar`) are accepted for every key in this
+table. See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the
+per-key audit against Terminator's source.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
+| `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
+| `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
+| `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |
+| `show-titlebar` | bool | `true` | Per-pane titlebar; renders only when a tab has >1 pane (a single-pane tab uses the OS window title instead) |
+| `title-at-bottom` | bool | `false` | Per-pane titlebar position |
+| `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
+| `icon-bell` | bool | `false` | Render a bell glyph in the titlebar when the pane ringed BEL |
+| `title-transmit-bg-color` / `-fg-color` | color | `#c80003` / `#ffffff` | Focused-pane (broadcast-source) titlebar colors |
+| `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
+| `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |
+| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` |
+| `background-image` | path | — | Wallpaper image. Supports PNG/JPEG/WebP/BMP/GIF. Tilde expansion supported |
+| `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
+| `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
+| `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
+| `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
+| `background-darkness` | float 0..1 | `1.0` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark) |
+| `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell) |
+| `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
+| `disable-mouse-paste` | bool | `false` | Block middle-click paste |
+| `putty-paste-style` | bool | `false` | Right-click pastes (PuTTY convention) |
+| `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
+| `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
+| `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib |
+
 ## Keybind grammar
 
 `trigger` = `+`-joined modifiers and one key. Recognized modifier names:
