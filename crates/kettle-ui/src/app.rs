@@ -2625,21 +2625,33 @@ impl App {
                     p.term.write(decoded.as_bytes());
                 }
             } else if line == "toggle-window" {
-                // Cycle 303 Quake dropdown: minimize/restore the
-                // window. Users bind their compositor / DE / OS
-                // global hotkey to `kettle --toggle` (which sends
-                // this command via remote-control). Sidesteps the
-                // cross-platform global-hotkey problem entirely —
-                // each user picks the binding their setup already
-                // honors.
+                // Cycle 303 + 319: tri-state Quake dropdown toggle.
+                // The naive binary toggle (hide-when-visible / show-
+                // when-hidden) had a real UX problem: when kettle was
+                // visible but the user had clicked away to another
+                // window, pressing the hotkey HID kettle — but the
+                // user usually wanted to bring it BACK INTO FOCUS.
+                // The Quake / Yakuake / Tilda tradition is tri-state:
+                //
+                //   hidden            → show + raise + focus
+                //   visible + focused → hide
+                //   visible + !focused → raise + focus (don't hide)
+                //
+                // winit's has_focus / is_visible / focus_window /
+                // set_visible all support this; the helper landed in
+                // cycle 319.
                 if let Some(w) = &self.window {
                     let visible = w.is_visible().unwrap_or(true);
-                    w.set_visible(!visible);
+                    let focused = w.has_focus();
                     if !visible {
-                        // Returning to visible: also focus + raise so
-                        // it pops above other windows (the typical
-                        // Quake / Yakuake / Tilda behavior). winit's
-                        // focus_window is best-effort per OS.
+                        w.set_visible(true);
+                        w.focus_window();
+                    } else if focused {
+                        w.set_visible(false);
+                    } else {
+                        // Visible but unfocused — bring to front +
+                        // focus, don't hide. The common "I clicked
+                        // away" case.
                         w.focus_window();
                     }
                 }
