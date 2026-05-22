@@ -1065,6 +1065,28 @@ mod tests {
             diags.is_empty(),
             "embedded example config emits diagnostics: {diags:?}"
         );
+        // Cycle 413 drift guard: the example config MUST document the
+        // Terminator-parity surface that cycles 331-410 added. If a
+        // future contributor strips the section, this test catches it
+        // before users see a stripped-down `--print-default-config`
+        // output.
+        for key in &[
+            "window-state",
+            "borderless",
+            "always-on-top",
+            "show-titlebar",
+            "title-at-bottom",
+            "background-image",
+            "background-image-mode",
+            "exit-action",
+            "lua-sandbox",
+        ] {
+            assert!(
+                embedded.contains(key),
+                "embedded example config missing Terminator-parity key {key:?}; \
+                 cycles 331-410 documented it"
+            );
+        }
     }
 
     #[test]
