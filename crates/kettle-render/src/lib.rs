@@ -942,15 +942,21 @@ impl Renderer {
             }
 
             // Post-text overlay: dim unfocused panes; per-pane scrollbar.
-            if !pv.focused && panes.len() > 1 && cfg.unfocused_split_opacity < 1.0 {
-                over.push(rect(
-                    rx,
-                    ry,
-                    rw,
-                    rh,
-                    theme.background,
-                    1.0 - cfg.unfocused_split_opacity,
-                ));
+            //
+            // Cycle 356 (Terminator parity, terminatorlib/config.py:84-85
+            // `inactive_color_offset` + `inactive_bg_color_offset`):
+            // when EITHER offset is < 1.0, layer a dim over the
+            // unfocused pane. Uses the BG offset for the overlay
+            // alpha (since the visible effect on the bg is most of
+            // the dim). The FG offset is kept reserved for the
+            // glyph-level desaturation that's a Bucket-D follow-up
+            // (would need to recolor each glyph's fg, which means
+            // re-running the text-shaper for unfocused panes).
+            let inactive_bg_dim = (1.0 - cfg.inactive_bg_color_offset).clamp(0.0, 0.95);
+            let split_opacity_dim = (1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95);
+            let composed_dim = inactive_bg_dim.max(split_opacity_dim);
+            if !pv.focused && panes.len() > 1 && composed_dim > 0.0 {
+                over.push(rect(rx, ry, rw, rh, theme.background, composed_dim));
             }
             if cfg.scrollbar != ScrollbarMode::Never {
                 let g = pv.term.grid();
