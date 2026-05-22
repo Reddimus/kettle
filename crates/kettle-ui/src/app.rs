@@ -532,6 +532,17 @@ pub struct App {
     /// after the first pane spawns (some actions like
     /// `toggle_vi_mode` need a focused pane to operate on).
     pending_lua_actions: Vec<kettle_config::Action>,
+    /// Cycle 366 (Terminator plugin parity, plugin Bucket-D
+    /// sub-cycle 3): the live LuaEngine persisted across the App's
+    /// lifetime so `kettle.on(event, callback)` registrations stay
+    /// in scope + LuaEngine::fire_event(...) can invoke them from
+    /// emission sites (App::resumed for Startup, Mux mutations for
+    /// TabAdd/Close, TermEvent::Bell handler for Bell).
+    lua_engine: Option<crate::LuaEngine>,
+    /// Cycle 366: set to true after we've fired LuaEvent::Startup
+    /// once. Guards against re-firing on subsequent resumed()
+    /// invocations (winit may re-emit resumed on Wayland).
+    lua_startup_fired: bool,
 }
 
 impl App {
@@ -641,6 +652,11 @@ impl App {
         // doesn't exist yet at this point in App::new).
         let mut pending_lua_send: Vec<u8> = Vec::new();
         let mut pending_lua_actions: Vec<kettle_config::Action> = Vec::new();
+        // Cycle 366: keep the LuaEngine alive on App so kettle.on(...)
+        // registrations survive past App::new + can be fire_event'd
+        // from emission sites. If no --lua-script was passed, skip
+        // engine init entirely so non-Lua kettle runs stay zero-cost.
+        let mut lua_engine: Option<crate::LuaEngine> = None;
         if let Some(script) = &startup.lua_script {
             match crate::LuaEngine::new(&initial_cfg.theme_name) {
                 Ok(eng) => {
@@ -665,6 +681,7 @@ impl App {
                             }
                         }
                     }
+                    lua_engine = Some(eng);
                 }
                 Err(e) => {
                     log::warn!("lua engine init failed: {e:#}");
@@ -720,6 +737,8 @@ impl App {
             _remote_watcher: remote_watcher,
             pending_lua_send,
             pending_lua_actions,
+            lua_engine,
+            lua_startup_fired: false,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -3760,6 +3779,38 @@ impl ApplicationHandler<UserEvent> for App {
             for a in actions {
                 self.handle_action(a, event_loop);
             }
+        }
+        // Cycle 366 (Terminator plugin parity, sub-cycle 3): fire
+        // LuaEvent::Startup the first time we have an alive window
+        // + at least one pane. Subsequent resumed() calls (Wayland
+        // can re-emit) get short-circuited by lua_startup_fired.
+        // Drains any LuaCommand the callbacks queued so a
+        // `kettle.on('startup', function() kettle.send_text(...) end)`
+        // takes effect immediately.
+        if !self.lua_startup_fired && self.lua_engine.is_some() && self.mux.focused().is_some() {
+            if let Some(eng) = &self.lua_engine {
+                eng.fire_event(&crate::LuaEvent::Startup);
+                // Inline drain (the helper lives in App's inherent
+                // impl, NOT this ApplicationHandler trait impl).
+                for cmd in eng.drain_commands() {
+                    match cmd {
+                        crate::LuaCommand::SendText(s) => {
+                            self.pending_lua_send.extend_from_slice(s.as_bytes());
+                        }
+                        crate::LuaCommand::ExecAction(name) => {
+                            if let Some(a) = kettle_config::Action::from_name(&name) {
+                                self.pending_lua_actions.push(a);
+                            } else {
+                                log::warn!(
+                                    "lua kettle.exec_action (from startup hook): \
+                                     unknown action name {name:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            self.lua_startup_fired = true;
         }
         if let Some(w) = &self.window {
             w.request_redraw();
