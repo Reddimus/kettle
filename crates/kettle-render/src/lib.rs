@@ -295,6 +295,16 @@ pub struct PaneView<'a> {
     /// the cycle-379 titlebar background quad when
     /// cfg.show_titlebar = true.
     pub title: String,
+    /// Cycle 386 (Terminator parity, per-pane-titlebar Bucket-D
+    /// sub-cycle 6): pane terminal size in cols × rows. Appended
+    /// to the titlebar title text as `WxH` unless
+    /// cfg.title_hide_sizetext is true.
+    pub size_cols: u16,
+    pub size_rows: u16,
+    /// Cycle 386 (Terminator parity, sub-cycle 6): bell-state
+    /// indicator for the pane. When true and cfg.icon_bell is
+    /// also true, a small dot renders in the titlebar.
+    pub bell: bool,
 }
 
 pub struct Renderer {
@@ -636,17 +646,28 @@ impl Renderer {
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (_, _, rw, _) = pv.rect;
-                let label = if pv.title.trim().is_empty() {
+                let title = if pv.title.trim().is_empty() {
                     "kettle".to_string()
                 } else {
                     pv.title.clone()
                 };
+                // Cycle 386: titlebar text = "  TITLE [WxH] [●]"
+                // where:
+                //   - [WxH] is shown unless cfg.title_hide_sizetext
+                //   - [●] is shown when cfg.icon_bell && pv.bell
+                let mut label = format!("  {title}");
+                if !cfg.title_hide_sizetext {
+                    label.push_str(&format!("  {}x{}", pv.size_cols, pv.size_rows));
+                }
+                if cfg.icon_bell && pv.bell {
+                    label.push_str("  \u{1F514}");
+                }
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
                 buf.set_text(
                     &mut self.font_system,
-                    &format!("  {label}"),
+                    &label,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Basic,
                     None,
