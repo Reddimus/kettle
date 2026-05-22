@@ -2115,6 +2115,11 @@ mod config_tests {
             // bootstrap file — same drift-guard reasoning as the
             // markdown docs above.
             "docs/kettle.example.config",
+            // Cycle 475: the man page is user-facing via `man kettle`
+            // (cycle 282 + cycle 414 + cycle 436 land entries). Same
+            // reasoning — internal cycle refs leak into user-visible
+            // documentation.
+            "packaging/linux/kettle.1",
         ] {
             let path = repo_root.join(rel);
             let text = std::fs::read_to_string(&path)
