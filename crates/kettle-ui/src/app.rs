@@ -4570,37 +4570,12 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.lua_startup_fired && self.lua_engine.is_some() && self.mux.focused().is_some() {
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Startup);
-                // Inline drain (the helper lives in App's inherent
-                // impl, NOT this ApplicationHandler trait impl).
-                for cmd in eng.drain_commands() {
-                    match cmd {
-                        crate::LuaCommand::SendText(s) => {
-                            self.pending_lua_send.extend_from_slice(s.as_bytes());
-                        }
-                        crate::LuaCommand::ExecAction(name) => {
-                            if let Some(a) = kettle_config::Action::from_name(&name) {
-                                self.pending_lua_actions.push(a);
-                            } else {
-                                log::warn!(
-                                    "lua kettle.exec_action (from startup hook): \
-                                     unknown action name {name:?}"
-                                );
-                            }
-                        }
-                        crate::LuaCommand::Notify { title, body } => {
-                            fire_notify(&title, &body);
-                        }
-                        crate::LuaCommand::SetTheme(name) => {
-                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                self.cfg.theme_name = canonical.to_string();
-                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                            } else {
-                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                            }
-                        }
-                    }
-                }
             }
+            // Cycle 428: route through the same helper as TabAdd /
+            // TabClose / Bell / Output so all 5 event hooks share
+            // one canonical command-drain path. Inherent methods are
+            // callable from a trait impl as long as `self: &mut App`.
+            self.drain_lua_hook_commands("startup hook");
             self.lua_startup_fired = true;
         }
         if let Some(w) = &self.window {
