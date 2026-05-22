@@ -1543,8 +1543,35 @@ impl App {
         // already handled visually (`last_bell` above triggers the
         // visual-bell flash); the latching helper skips the active
         // tab so we don't double-signal.
+        //
+        // Cycle 367 (Terminator plugin parity, plugin sub-cycle 5):
+        // fire LuaEvent::Bell(pane_id) for every belled pane after
+        // the kettle-side bell handling is done. Callbacks may queue
+        // LuaCommands (kettle.notify, kettle.send_text); they get
+        // drained at the next App tick — same as the cycle-366
+        // startup flow.
         for id in bell_panes {
             self.mux.touch_tab_bell(id);
+            if let Some(eng) = &self.lua_engine {
+                eng.fire_event(&crate::LuaEvent::Bell(id));
+                for cmd in eng.drain_commands() {
+                    match cmd {
+                        crate::LuaCommand::SendText(s) => {
+                            self.pending_lua_send.extend_from_slice(s.as_bytes());
+                        }
+                        crate::LuaCommand::ExecAction(name) => {
+                            if let Some(a) = kettle_config::Action::from_name(&name) {
+                                self.pending_lua_actions.push(a);
+                            } else {
+                                log::warn!(
+                                    "lua kettle.exec_action (from bell hook): \
+                                     unknown action name {name:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
