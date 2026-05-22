@@ -740,6 +740,17 @@ impl App {
                             crate::LuaCommand::Notify { title, body } => {
                                 fire_notify(&title, &body);
                             }
+                            crate::LuaCommand::SetTheme(name) => {
+                                // Cycle 373: in App::new, mutate
+                                // initial_cfg directly because
+                                // self.cfg doesn't exist yet.
+                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                    initial_cfg.theme_name = canonical.to_string();
+                                    initial_cfg.theme = kettle_config::Theme::by_name(canonical);
+                                } else {
+                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                                }
+                            }
                         }
                     }
                     lua_engine = Some(eng);
@@ -1634,6 +1645,14 @@ impl App {
                         crate::LuaCommand::Notify { title, body } => {
                             fire_notify(&title, &body);
                         }
+                        crate::LuaCommand::SetTheme(name) => {
+                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                self.cfg.theme_name = canonical.to_string();
+                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                            } else {
+                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                            }
+                        }
                     }
                 }
             }
@@ -2517,6 +2536,14 @@ impl App {
                             crate::LuaCommand::Notify { title, body } => {
                                 fire_notify(&title, &body);
                             }
+                            crate::LuaCommand::SetTheme(name) => {
+                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                    self.cfg.theme_name = canonical.to_string();
+                                    self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                                } else {
+                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                                }
+                            }
                         }
                     }
                 }
@@ -2597,6 +2624,14 @@ impl App {
                             }
                             crate::LuaCommand::Notify { title, body } => {
                                 fire_notify(&title, &body);
+                            }
+                            crate::LuaCommand::SetTheme(name) => {
+                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                    self.cfg.theme_name = canonical.to_string();
+                                    self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                                } else {
+                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                                }
                             }
                         }
                     }
@@ -4010,6 +4045,14 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         crate::LuaCommand::Notify { title, body } => {
                             fire_notify(&title, &body);
+                        }
+                        crate::LuaCommand::SetTheme(name) => {
+                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                self.cfg.theme_name = canonical.to_string();
+                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                            } else {
+                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                            }
                         }
                     }
                 }

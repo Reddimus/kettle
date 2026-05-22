@@ -183,6 +183,22 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.notify")?;
+        // Cycle 373 (plugin sub-cycle 10): kettle.set_theme(name)
+        // queues a SetTheme command; the App drains + applies via
+        // the existing NextTheme infrastructure.
+        let pending_for_theme = Arc::clone(&pending);
+        kettle_tbl
+            .set(
+                "set_theme",
+                lua.create_function(move |_, name: String| {
+                    pending_for_theme
+                        .lock()
+                        .map(|mut v| v.push(LuaCommand::SetTheme(name)))
+                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.set_theme")?;
         // Cycle 365 (Terminator plugin parity foundation):
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table
