@@ -7,8 +7,10 @@
 //!
 //!   cycle 324 (this one): kettle.version() / config_path() / theme()
 //!   cycle 325+:           kettle.send_text(s), set_tab_title(s)
-//!   cycle 326+:           kettle.notify(title, body)
-//!   cycle 327+:           kettle.on(event, callback) event hooks
+//!   cycle 326+:           kettle.exec_action(name)
+//!   cycle 365+:           kettle.on(event, callback) event hooks
+//!                         (foundation; see docs/TERMINATOR-PLUGIN-DESIGN.md
+//!                         for the full sub-cycle roadmap)
 //!
 //! Why read-only first: hooking Lua into the live App requires
 //! threading an Arc<Mutex<...>> handle through, which is the kind
@@ -37,6 +39,37 @@ pub enum LuaCommand {
     /// keybind grammar accepts: `new_tab`, `split_right`,
     /// `toggle_vi_mode`, etc.
     ExecAction(String),
+}
+
+/// Cycle 365 (Terminator plugin parity, design doc:
+/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. Foundation sub-cycle
+/// ships the registry + dispatch surface; subsequent sub-cycles wire
+/// each variant to the actual emission site in App.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LuaEvent {
+    /// Emitted once after kettle's first window + first pane are
+    /// alive. Use for one-time init: set theme, apply argv-style
+    /// modifications.
+    Startup,
+    /// Emitted on each tab insertion. Payload: tab index.
+    TabAdd(usize),
+    /// Emitted on each tab close. Payload: tab index that was closed.
+    TabClose(usize),
+    /// Emitted when a bell rings in a pane. Payload: pane id.
+    Bell(u64),
+}
+
+impl LuaEvent {
+    /// String name used by user scripts: `kettle.on('startup', ...)`,
+    /// `kettle.on('tab_add', ...)`, etc.
+    pub fn name(&self) -> &'static str {
+        match self {
+            LuaEvent::Startup => "startup",
+            LuaEvent::TabAdd(_) => "tab_add",
+            LuaEvent::TabClose(_) => "tab_close",
+            LuaEvent::Bell(_) => "bell",
+        }
+    }
 }
 
 /// Owned Lua VM with kettle's namespace registered. Single-threaded
@@ -126,10 +159,74 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.exec_action")?;
+        // Cycle 365 (Terminator plugin parity foundation):
+        // `kettle.on(event_name, callback)` registers a Lua function to
+        // fire when the named event occurs. Stored as a registry-table
+        // entry keyed by event name; callbacks accumulate in a list
+        // (multiple subscribers per event).
+        //
+        // Today's wiring: registry installed + drift-guarded. App-side
+        // emission per LuaEvent variant lands in subsequent sub-cycles
+        // (see docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycle 3+).
+        let event_table = lua.create_table().context("create event-hooks table")?;
+        lua.set_named_registry_value("kettle_events", event_table)
+            .context("register kettle_events table")?;
+        kettle_tbl
+            .set(
+                "on",
+                lua.create_function(|lua, (name, cb): (String, mlua::Function)| {
+                    let events: mlua::Table = lua.named_registry_value("kettle_events")?;
+                    let list: mlua::Table = match events.get::<mlua::Value>(name.clone())? {
+                        mlua::Value::Table(t) => t,
+                        _ => {
+                            let t = lua.create_table()?;
+                            events.set(name.clone(), t.clone())?;
+                            t
+                        }
+                    };
+                    let n = list.len()?;
+                    list.set(n + 1, cb)?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.on")?;
         lua.globals()
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
         Ok(Self { lua, pending })
+    }
+
+    /// Cycle 365: fire a named event to every Lua callback registered
+    /// for it. Args are converted from `&str` for simplicity (every
+    /// current event payload fits as a single string; future events
+    /// can extend with a richer arg type).
+    ///
+    /// Errors from individual callbacks log::warn but DON'T abort
+    /// kettle — one broken plugin can't take down the terminal.
+    pub fn fire_event(&self, event: &LuaEvent) {
+        let result: mlua::Result<()> = (|| {
+            let events: mlua::Table = self.lua.named_registry_value("kettle_events")?;
+            let name = event.name();
+            let list: mlua::Value = events.get(name)?;
+            if let mlua::Value::Table(callbacks) = list {
+                let n = callbacks.len()?;
+                for i in 1..=n {
+                    let cb: mlua::Function = callbacks.get(i)?;
+                    let call_result: mlua::Result<()> = match event {
+                        LuaEvent::Startup => cb.call(()),
+                        LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
+                        LuaEvent::Bell(pane_id) => cb.call(*pane_id),
+                    };
+                    if let Err(e) = call_result {
+                        log::warn!("lua event {name} callback {i}: {e}");
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            log::warn!("lua fire_event({:?}): {e}", event.name());
+        }
     }
 
     /// Cycle 325: drain pending side-effect commands queued by Lua
@@ -247,6 +344,61 @@ mod tests {
             }
             other => panic!("unexpected commands: {other:?}"),
         }
+    }
+
+    #[test]
+    fn on_event_hook_registers_and_fires() {
+        // Cycle 365 drift guard. kettle.on('startup', fn) registers
+        // a callback; fire_event(Startup) invokes it. Errors from
+        // individual callbacks DON'T propagate (logged + skipped),
+        // so a broken plugin can't take down kettle.
+        let eng = LuaEngine::new("Default").expect("init");
+        // Multiple subscribers + one writes to a global as a side
+        // effect we can check.
+        eng.eval_str(
+            "fired = 0
+             kettle.on('startup', function() fired = fired + 10 end)
+             kettle.on('startup', function() fired = fired + 1 end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::Startup);
+        assert_eq!(eng.eval_str("return fired").unwrap(), "11");
+        // Re-firing accumulates again.
+        eng.fire_event(&LuaEvent::Startup);
+        assert_eq!(eng.eval_str("return fired").unwrap(), "22");
+        // Event variants with payload pass the payload to the callback.
+        eng.eval_str(
+            "tabs_seen = {}
+             kettle.on('tab_add', function(i)
+                tabs_seen[#tabs_seen + 1] = i
+             end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::TabAdd(0));
+        eng.fire_event(&LuaEvent::TabAdd(2));
+        assert_eq!(eng.eval_str("return #tabs_seen").unwrap(), "2");
+        assert_eq!(eng.eval_str("return tabs_seen[1]").unwrap(), "0");
+        assert_eq!(eng.eval_str("return tabs_seen[2]").unwrap(), "2");
+        // Firing an event with no subscribers is a no-op.
+        eng.fire_event(&LuaEvent::Bell(7));
+    }
+
+    #[test]
+    fn on_event_hook_isolates_callback_errors() {
+        // Cycle 365: a callback that raises a Lua error doesn't
+        // propagate — logged + skipped + sibling callbacks still
+        // run. This is the "broken plugin doesn't take down
+        // kettle" contract.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "ok_count = 0
+             kettle.on('startup', function() error('intentional') end)
+             kettle.on('startup', function() ok_count = ok_count + 1 end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::Startup);
+        // Sibling callback ran despite the first one erroring.
+        assert_eq!(eng.eval_str("return ok_count").unwrap(), "1");
     }
 
     #[test]
