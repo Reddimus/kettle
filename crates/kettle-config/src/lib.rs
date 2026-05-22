@@ -2316,6 +2316,44 @@ mod config_tests {
     }
 
     #[test]
+    fn render_and_copy_bools_parse() {
+        // Cycle 333 drift guard. allow_bold defaults true (Terminator
+        // default), others default false.
+        let d = Config::default();
+        assert!(d.allow_bold);
+        assert!(!d.bold_is_bright);
+        assert!(!d.link_single_click);
+        assert!(!d.clear_select_on_copy);
+        assert!(!Config::parse_text("allow-bold = false").allow_bold);
+        assert!(!Config::parse_text("allow_bold = false").allow_bold);
+        assert!(Config::parse_text("bold-is-bright = true").bold_is_bright);
+        assert!(Config::parse_text("bold_is_bright = true").bold_is_bright);
+        assert!(Config::parse_text("link-single-click = true").link_single_click);
+        assert!(Config::parse_text("link_single_click = true").link_single_click);
+        assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
+        assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn mouse_and_paste_bools_parse() {
+        // Cycle 334 drift guard. smart_copy defaults true (Terminator
+        // default); others default false.
+        let d = Config::default();
+        assert!(!d.disable_mousewheel_zoom);
+        assert!(!d.disable_mouse_paste);
+        assert!(!d.putty_paste_style);
+        assert!(d.smart_copy);
+        assert!(Config::parse_text("disable-mousewheel-zoom = true").disable_mousewheel_zoom);
+        assert!(Config::parse_text("disable_mousewheel_zoom = true").disable_mousewheel_zoom);
+        assert!(Config::parse_text("disable-mouse-paste = true").disable_mouse_paste);
+        assert!(Config::parse_text("disable_mouse_paste = true").disable_mouse_paste);
+        assert!(Config::parse_text("putty-paste-style = true").putty_paste_style);
+        assert!(Config::parse_text("putty_paste_style = true").putty_paste_style);
+        assert!(!Config::parse_text("smart-copy = false").smart_copy);
+        assert!(!Config::parse_text("smart_copy = false").smart_copy);
+    }
+
+    #[test]
     fn tab_bar_position_terminator_aliases() {
         // Cycle 331 drift guard. Terminator's `tab_position` accepts
         // top/left/right/bottom/hidden; kettle maps them as:
