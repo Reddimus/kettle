@@ -1221,6 +1221,41 @@ impl App {
     /// Copy the focused pane's selection to the clipboard (call on release).
     /// Paste the clipboard into the focused pane, bracketed-paste-safe.
     /// Shared by `Action::Paste` and middle-click.
+    /// Cycle 351 (Terminator parity, terminatorlib/config.py:86-87
+    /// `use_custom_url_handler` + `custom_url_handler`): open a URL
+    /// either via the custom external program (if configured + non-
+    /// empty) or fall through to the cross-platform `open` crate.
+    /// The custom program is invoked as
+    ///   <custom_url_handler> <uri>
+    /// detached, so kettle doesn't block on the handler exiting.
+    /// Errors log::warn.
+    fn open_url(&self, uri: &str) {
+        if !kettle_core::links::is_safe_url(uri) {
+            log::warn!("refused to open unsafe URL: {uri}");
+            return;
+        }
+        if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
+            // Custom handler — spawn detached so a long-running
+            // browser launch doesn't freeze kettle.
+            let cmd = self.cfg.custom_url_handler.clone();
+            let uri = uri.to_string();
+            match std::process::Command::new(&cmd)
+                .arg(&uri)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => {}
+                Err(e) => log::warn!("custom-url-handler {cmd:?}: {e}; falling through to system"),
+            }
+            return;
+        }
+        if let Err(e) = open::that_detached(uri) {
+            log::warn!("failed to open {uri}: {e}");
+        }
+    }
+
     fn paste_clipboard(&mut self) {
         let text = self
             .clipboard
@@ -3246,11 +3281,10 @@ impl App {
 
     fn act_hint(&mut self, h: &HintTarget) {
         if h.kind == kettle_core::hints::Kind::Url {
-            if !kettle_core::links::is_safe_url(&h.text) {
-                log::warn!("refused to open unsafe URL: {}", h.text);
-            } else if let Err(e) = open::that_detached(&h.text) {
-                log::warn!("failed to open {}: {e}", h.text);
-            }
+            // Cycle 351: route through open_url helper so the
+            // hint-mode URL-open path also honors the custom URL
+            // handler config.
+            self.open_url(&h.text);
         } else if let Some(cb) = self.clipboard.as_mut() {
             let _ = cb.set_text(h.text.clone());
         }
@@ -3877,11 +3911,9 @@ impl ApplicationHandler<UserEvent> for App {
                     && url_modifier
                     && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
                 {
-                    if !kettle_core::links::is_safe_url(&uri) {
-                        log::warn!("refused to open unsafe URL: {uri}");
-                    } else if let Err(e) = open::that_detached(&uri) {
-                        log::warn!("failed to open {uri}: {e}");
-                    }
+                    // Cycle 351: route through helper so custom URL
+                    // handler config is honored.
+                    self.open_url(&uri);
                     return;
                 }
                 let pre = self.focus_key();
