@@ -6,6 +6,44 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.6] — 2026-05-21
+
+Patch release. Three real durability + UX catches from post-v1.7.5
+audit.
+
+### Fixed
+- **Remote-control IPC: unbounded read (cycle 315).** The cycle-302
+  receiver's `drain_remote_commands` used `std::fs::read_to_string`
+  with no size cap. A runaway script (or an accidental `some-cmd
+  >> $REMOTE_FILE` instead of `kettle --remote-send "$(some-cmd)"`)
+  could push GBs of data and kettle would allocate the whole
+  thing before processing. Now: stat the file first; if > 1 MB
+  (10× safety margin over realistic command-stream sizes),
+  truncate + log::warn + return without processing.
+- **Vi-mode yank silently dropped when clipboard unavailable
+  (cycle 316).** The cycle-301 y-key handler called
+  `clip.set_text(yanked)` with the result ignored via
+  `let _ = ...`. When clipboard was None (SSH without X11 /
+  Wayland forwarding, missing `$DISPLAY`, arboard init failure
+  at startup), the yank silently dropped: visual highlight
+  cleared, vi-mode exited, user assumed copy worked, then hit
+  paste elsewhere and got their PREVIOUS clipboard contents.
+  Now: log::warn! with the byte count + "try a kettle window
+  with DISPLAY / Wayland set" hint.
+
+### release.sh
+- **'Next steps' race-condition fix (cycle 314).** The previous
+  hint suggested
+  `gh run watch $(gh run list --workflow=release.yml --limit 1 ...)`
+  which races: the `run list` may resolve BEFORE the just-pushed
+  tag triggers a new release workflow run on GitHub's side, so
+  the watch attaches to the PREVIOUS release run (already done)
+  and exits 0 immediately. Now: `--branch "v$VERSION"` filter +
+  `--exit-status` so the watch errors on real failure + a brief
+  `sleep 5` to let GitHub register the push.
+
+Workspace tests stay at 269 green.
+
 ## [1.7.5] — 2026-05-21
 
 Patch release. Real subtle audit catch + structural refactor.
