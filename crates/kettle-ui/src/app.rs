@@ -3819,6 +3819,24 @@ impl ApplicationHandler<UserEvent> for App {
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor();
                 self.sync_cursor_icon();
+                // Cycle 360 (Terminator parity, terminatorlib/config.py:73
+                // `focus = sloppy`): focus-follows-mouse. The pane
+                // under the cursor becomes focused on every cursor
+                // movement (vs default `click` mode where click is
+                // required). `system` is treated like `click` for
+                // kettle — winit doesn't expose the OS-level focus
+                // policy.
+                if matches!(self.cfg.focus, kettle_config::FocusMode::Sloppy)
+                    && !self.tab_drag_active
+                    && !self.selecting
+                    && !self.dragging_scrollbar
+                {
+                    let area = self.area();
+                    let pre = self.focus_key();
+                    self.mux
+                        .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
+                    self.note_focus_change(pre);
+                }
                 // Cycle 249: drag-to-reorder tabs (kitty / iTerm2 /
                 // Ghostty parity). When a left-button press in the tab
                 // bar armed `tab_drag_active`, walk the bar geometry,
