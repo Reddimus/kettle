@@ -6,6 +6,42 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.33.0] — 2026-05-22
+
+Real feature work — `exit-action = restart` is now end-to-end, and
+the remote-control IPC `new-tab` verb is wired.
+
+  cycle 416 — `docs/ARCHITECTURE.md` documents the cycles 330-415
+              Terminator-parity subsystems with ASCII flow
+              diagrams + integration narratives for Plugin
+              (Lua), Per-pane titlebar, Background image, and
+              Detachable tabs. Cross-references each design doc.
+
+  cycle 417 — `docs/INSTALL.md` version refs bumped v1.3.4 →
+              v1.32.0 (KETTLE_VERSION pin example + SHA-256
+              verify URLs). Users following the recommended pin
+              now get a recent kettle.
+
+  cycle 418 — `exit-action = restart` fully implemented end-to-
+              end. Closes cycle-357's "not yet implemented"
+              warn-and-fallback. On shell-exit with
+              `cfg.exit_action = restart`, the dead pane queues
+              to `pending_pane_restarts`; the post-drain handler
+              in `redraw` calls `Mux::new_tab_with` with the
+              same argv + cwd, spawning a fresh shell. Matches
+              Terminator's documented behavior.
+
+  cycle 419 — Remote-control IPC `new-tab` verb wired. Was
+              logging "not yet implemented" since cycle 302
+              (the verb was recognized but no-op'd). Today:
+              calls `Mux::new_tab` with current cell grid +
+              waker. Completes the remote surface alongside
+              `send-text` + `toggle-window`.
+
+After cycle 419: zero "TODO" + zero "not yet implemented" markers
+remain in the codebase (verified via grep). Workspace tests
+stay at 308. End-to-end binary smoke green.
+
 ## [1.32.0] — 2026-05-22
 
 Production-readiness polish — docs sync + drift guards + foundation
