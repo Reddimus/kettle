@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-05-22
+
+  cycle 391 — bg-image align_horiz + align_vert wired. The
+              cycle-390 center + scale image modes now honor
+              the position-anchor config keys. Closes bg-image
+              Bucket-D sub-cycle 6 in full.
+  cycle 392 — bg-image acceptance test. Generates a known 8x4
+              RGBA PNG via the image crate, decodes via
+              decode_bg_image, asserts dimensions + spot-checks
+              the first pixel. Closes bg-image Bucket-D
+              sub-cycle 12.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 8 — sub-cycles 2/3/4/5/6/9 +
+                                       layout-shift + size-text
+                                   ⌛ 2 — 7 per-pane edit anchor,
+                                       8 group-name edit (needs
+                                       named-groups infra),
+                                       10 pixel acceptance test
+bg-image (12 sub-cycles):         ✅ 9 — sub-cycles 2/3/4/5/6/7/10/12
+                                       + 11 (implicit path-cache)
+                                   ⌛ 3 — 8 resize (implicit per-frame
+                                       UV recompute), 9 blur shader
+Detachable tabs (11 sub-cycles):  ✅ 1 — sub-cycle 10
+                                       Wayland-fallback
+                                   ⌛ 10 — cursor drag + IPC +
+                                       SCM_RIGHTS + auth + reattach
+
+31 of 46 Bucket-D sub-cycles shipped end-to-end (67%).
+
+Workspace tests 304 → 305.
+
 ## [1.21.0] — 2026-05-22
 
   cycle 389 — Per-pane titlebar click → EditPaneTitle. Hit-test
