@@ -110,6 +110,11 @@ pub struct SearchState {
 pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
+    /// Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
+    /// optional output sidechannel. `Some` when the LuaEngine
+    /// subscribed at App startup; the App drains it each tick and
+    /// fires LuaEvent::Output(pane_id, bytes).
+    pub output_rx: Option<Receiver<Vec<u8>>>,
     pub title: String,
     pub closed: bool,
     /// Scrollback `history_size()` observed at the *previous* redraw — used
@@ -432,6 +437,10 @@ pub struct Mux {
     pub active: usize,
     pub search: SearchState,
     pub broadcast: bool,
+    /// Cycle 378: set when a LuaEngine subscribes at App startup.
+    /// Controls whether spawn_pane attaches the output sidechannel
+    /// to new PTYs (zero-cost when false: no per-PTY-read alloc).
+    pub lua_output_subscribed: bool,
     /// Ring buffer of recently-closed tab snapshots (cycle 247).
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
@@ -447,6 +456,7 @@ impl Mux {
             active: 0,
             search: SearchState::default(),
             broadcast: false,
+            lua_output_subscribed: false,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
             next_id: 1,
         }
@@ -511,11 +521,22 @@ impl Mux {
         argv: &[String],
     ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
+        // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
+        // optional output sidechannel for LuaEvent::Output emission.
+        // The Mux's output_tx is set when a LuaEngine subscribes
+        // (App configures it post-construction); None when no
+        // plugin is listening so the alloc-per-PTY-read is skipped.
+        let (out_tx, out_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(64);
+        let output_tx = if self.lua_output_subscribed {
+            Some(out_tx)
+        } else {
+            None
+        };
         // Cycle 343 Terminator parity: route through new_with_env so
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let term = Terminal::new_with_env(
+        let term = Terminal::new_with_env_and_output(
             argv,
             cwd,
             cfg.scrollback,
@@ -531,15 +552,22 @@ impl Mux {
             cfg.login_shell,
             tx,
             waker,
+            output_tx,
         )?;
         let id = self.next_id;
         self.next_id += 1;
         let initial_title = initial_pane_title(argv);
+        let output_rx = if self.lua_output_subscribed {
+            Some(out_rx)
+        } else {
+            None
+        };
         self.panes.insert(
             id,
             Pane {
                 term,
                 rx,
+                output_rx,
                 title: initial_title,
                 closed: false,
                 last_history: None,

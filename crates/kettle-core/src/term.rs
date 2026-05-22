@@ -146,6 +146,7 @@ impl Terminal {
     /// kettle's existing default — same shape as the parse-side
     /// fall-through (cycle 335).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_env(
         argv: &[String],
         cwd: Option<&str>,
@@ -162,6 +163,50 @@ impl Terminal {
         login_shell: bool,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
+    ) -> Result<Terminal> {
+        Self::new_with_env_and_output(
+            argv,
+            cwd,
+            scrollback,
+            cols,
+            rows,
+            cell_w,
+            cell_h,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            login_shell,
+            event_tx,
+            waker,
+            None,
+        )
+    }
+
+    /// Cycle 378 (Terminator plugin parity, plugin sub-cycle 3): same
+    /// as `new_with_env` plus an optional sidechannel that ships raw
+    /// PTY-output bytes to the App for `LuaEvent::Output` dispatch.
+    /// `None` keeps the zero-cost path for non-Lua kettle runs;
+    /// `Some(tx)` lets a plugin-runtime caller subscribe.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_env_and_output(
+        argv: &[String],
+        cwd: Option<&str>,
+        scrollback: usize,
+        cols: usize,
+        rows: usize,
+        cell_w: u16,
+        cell_h: u16,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        login_shell: bool,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<crossbeam_channel::Sender<Vec<u8>>>,
     ) -> Result<Terminal> {
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize {
@@ -328,6 +373,19 @@ impl Terminal {
                                 break;
                             }
                             Ok(n) => {
+                                // Cycle 378: ship raw PTY bytes to the
+                                // App via the output_tx sidechannel
+                                // (if any plugin subscriber is listening).
+                                // Skips the alloc entirely when no
+                                // subscriber. send-or-drop on a full
+                                // channel — slow plugins shouldn't
+                                // back-pressure the PTY reader.
+                                if let Some(tx) = &output_tx {
+                                    // Drop on full channel — slow
+                                    // plugins shouldn't back-pressure
+                                    // the PTY reader.
+                                    let _ = tx.try_send(buf[..n].to_vec());
+                                }
                                 for chunk in extractor.feed(&buf[..n]) {
                                     match chunk {
                                         Chunk::Pass(bytes) => {

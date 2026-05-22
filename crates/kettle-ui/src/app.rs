@@ -786,6 +786,11 @@ impl App {
                 }
             }
         }
+        // Cycle 378 (plugin sub-cycle 3): if a LuaEngine is active,
+        // the Mux must subscribe to per-PTY output bytes so the
+        // App can fire LuaEvent::Output. Set before the Mux moves
+        // into the struct.
+        let lua_output_subscribed = lua_engine.is_some();
         // Cycle 357 (Terminator parity, terminatorlib/config.py:71
         // `broadcast_default`): seed the mux's broadcast flag from
         // config BEFORE the cfg moves into the struct.
@@ -800,6 +805,7 @@ impl App {
             mux: {
                 let mut m = Mux::new();
                 m.broadcast = initial_broadcast;
+                m.lua_output_subscribed = lua_output_subscribed;
                 m
             },
             mods: ModifiersState::empty(),
@@ -1511,11 +1517,27 @@ impl App {
         // pass — latched onto their containing tabs *after* the
         // values_mut() iteration so we don't double-borrow mux.panes.
         let mut bell_panes: Vec<u64> = Vec::new();
+        // Cycle 378: pane ids + raw-output bytes accumulated during
+        // this drain pass. Fired as LuaEvent::Output after the
+        // values_mut iteration completes (to avoid borrow conflicts).
+        let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
         // Cell size is renderer-owned and uniform across panes, so resolve it
         // once per drain rather than per event (a sixel/kitty app polling CSI
         // 14 t doesn't need a renderer lookup per CSI).
         let (cell_w, cell_h) = self.cell_px();
         for (&pane_id, pane) in self.mux.panes.iter_mut() {
+            // Cycle 378: drain the optional output sidechannel
+            // BEFORE the regular event channel. Coalesces multiple
+            // chunks into a single Vec per pane per drain pass.
+            if let Some(out_rx) = &pane.output_rx {
+                let mut combined: Vec<u8> = Vec::new();
+                while let Ok(chunk) = out_rx.try_recv() {
+                    combined.extend_from_slice(&chunk);
+                }
+                if !combined.is_empty() {
+                    output_chunks.push((pane_id, combined));
+                }
+            }
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
                     TermEvent::Title(t) => {
@@ -1674,6 +1696,43 @@ impl App {
                             } else {
                                 log::warn!(
                                     "lua kettle.exec_action (from bell hook): \
+                                     unknown action name {name:?}"
+                                );
+                            }
+                        }
+                        crate::LuaCommand::Notify { title, body } => {
+                            fire_notify(&title, &body);
+                        }
+                        crate::LuaCommand::SetTheme(name) => {
+                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                                self.cfg.theme_name = canonical.to_string();
+                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                            } else {
+                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
+        // fire LuaEvent::Output(pane_id, bytes) for each pane that
+        // accumulated PTY-output chunks this drain pass. Drain any
+        // queued LuaCommands.
+        for (pane_id, bytes) in output_chunks {
+            if let Some(eng) = &self.lua_engine {
+                eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
+                for cmd in eng.drain_commands() {
+                    match cmd {
+                        crate::LuaCommand::SendText(s) => {
+                            self.pending_lua_send.extend_from_slice(s.as_bytes());
+                        }
+                        crate::LuaCommand::ExecAction(name) => {
+                            if let Some(a) = kettle_config::Action::from_name(&name) {
+                                self.pending_lua_actions.push(a);
+                            } else {
+                                log::warn!(
+                                    "lua kettle.exec_action (from output hook): \
                                      unknown action name {name:?}"
                                 );
                             }
