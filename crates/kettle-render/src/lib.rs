@@ -365,6 +365,11 @@ pub struct Renderer {
     /// pass so menu labels sit above the panel bg.
     menu_text_renderer: TextRenderer,
     imgs: imgpipe::ImagePipeline,
+    /// Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
+    /// 3+4): decoded background-image cache. Tuple of
+    /// (cfg.background_image path, decoded ImageData). Invalidated
+    /// + re-decoded when the config path changes.
+    bg_image_cache: Option<(String, kettle_vt::ImageData)>,
 
     font_family: String,
     font_size: f32,
@@ -509,6 +514,7 @@ impl Renderer {
             menu_quads,
             menu_text_renderer,
             imgs,
+            bg_image_cache: None,
             font_family: cfg.font_family.clone(),
             font_size,
             metrics,
@@ -687,6 +693,39 @@ impl Renderer {
         let mut over: Vec<QuadInstance> = Vec::new();
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        // Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
+        // 3+4): when cfg.background_type = Image + cfg.background_image
+        // is set, decode-once + cache + prepend a fullscreen image
+        // item BEFORE any cell-images so the wallpaper renders at the
+        // back. The cycle-381 decode_bg_image helper handles the
+        // file-not-found / decode-error paths gracefully.
+        use kettle_config::BackgroundType;
+        if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
+        {
+            let want = cfg.background_image.clone();
+            let need_reload = self
+                .bg_image_cache
+                .as_ref()
+                .map(|(p, _)| p != &want)
+                .unwrap_or(true);
+            if need_reload && let Some(decoded) = bg_image::decode_bg_image(&want) {
+                use std::sync::Arc;
+                let data = kettle_vt::ImageData {
+                    width: decoded.width,
+                    height: decoded.height,
+                    rgba: Arc::new(decoded.rgba),
+                };
+                self.bg_image_cache = Some((want.clone(), data));
+            }
+            if let Some((_, data)) = self.bg_image_cache.as_ref() {
+                // Stretch-to-fill the full surface. UV-mode variants
+                // (tile / center / scale + align) are subsequent
+                // sub-cycles 5+6.
+                img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                live.insert(std::sync::Arc::as_ptr(&data.rgba) as usize);
+            }
+        }
 
         // Cycle 296: status-bar background. The text is uploaded
         // alongside `tabbar_buffer.set_text` further down so the same
