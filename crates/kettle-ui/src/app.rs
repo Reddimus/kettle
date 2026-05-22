@@ -4278,7 +4278,64 @@ impl ApplicationHandler<UserEvent> for App {
             // the target kettle process; passes the source tab's
             // serialized state via a one-shot JSON file. The handoff
             // file is deleted after read.
-            let loaded = if let Some(path) = self.startup.tab_handoff.as_deref() {
+            // Cycle 409 (Terminator parity, detachable-tabs Bucket-D
+            // sub-cycle 7 target): --tab-handoff-fd FD wins over
+            // --tab-handoff PATH. Receives a serialized tab + PTY
+            // fds via SCM_RIGHTS over the inherited socket fd. Unix-
+            // only; Windows + Wayland use the file-fallback path.
+            //
+            // Today's commit ships the recv + deserialize half;
+            // adopting the received fds as live Pane PTYs needs a
+            // Terminal::from_fd constructor — that's the remaining
+            // sub-cycle 7 piece. For now: the recv runs + the JSON
+            // restores via the existing path; PTY fds get closed on
+            // drop. Future sub-cycle replaces the existing PTY-spawn
+            // with adoption.
+            let loaded = if let Some(fd) = self.startup.tab_handoff_fd {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::io::FromRawFd;
+                    // SAFETY: the fd was passed via --tab-handoff-fd
+                    // by the source kettle process; the parent
+                    // surrendered ownership via fork+exec. Owned
+                    // here for the duration of recv_fds.
+                    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                    let mut payload = vec![0u8; 1024 * 1024];
+                    match crate::fd_transport::recv_fds(&socket, &mut payload, 64) {
+                        Ok((n, received_fds)) => {
+                            log::info!(
+                                "tab-handoff-fd: received {n} bytes + {} fds",
+                                received_fds.len()
+                            );
+                            // Future cycle adopts received_fds as
+                            // Pane PTYs; for now they leak on drop
+                            // (the source process holds the
+                            // canonical reference + will close them
+                            // when its source tab closes).
+                            for fd in received_fds {
+                                // SAFETY: each fd is owned; close
+                                // via libc::close. Drop-on-leak
+                                // would also work but is less explicit.
+                                unsafe {
+                                    libc::close(fd);
+                                }
+                            }
+                            payload.truncate(n);
+                            serde_json::from_slice::<crate::session::Session>(&payload).ok()
+                        }
+                        Err(e) => {
+                            log::warn!("tab-handoff-fd recv_fds: {e}");
+                            None
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = fd;
+                    log::warn!("--tab-handoff-fd unsupported on non-Unix");
+                    None
+                }
+            } else if let Some(path) = self.startup.tab_handoff.as_deref() {
                 crate::session::Session::load_tab_handoff(path)
             } else {
                 match self.startup.layout.as_deref() {
