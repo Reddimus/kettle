@@ -2093,8 +2093,9 @@ impl App {
                     TitleEditScope::Window => "Edit window title:",
                     TitleEditScope::Tab => "Edit tab title:",
                     TitleEditScope::Pane => "Edit pane title:",
+                    TitleEditScope::Group => "Edit pane group:",
                 };
-                let anchor_y = if matches!(s.scope, TitleEditScope::Pane) {
+                let anchor_y = if matches!(s.scope, TitleEditScope::Pane | TitleEditScope::Group) {
                     let area = self.area();
                     let active = self.mux.active;
                     let rects = self.mux.layout(active, area);
@@ -2453,6 +2454,11 @@ impl App {
                 TitleEditScope::Pane => {
                     if let Some(p) = self.mux.focused() {
                         p.title = value;
+                    }
+                }
+                TitleEditScope::Group => {
+                    if let Some(p) = self.mux.focused() {
+                        p.group_name = if value.is_empty() { None } else { Some(value) };
                     }
                 }
             }
@@ -3233,6 +3239,24 @@ impl App {
                     .unwrap_or_default();
                 self.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Pane,
+                    input: current,
+                });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Action::EditPaneGroup => {
+                // Cycle 407: edit the focused pane's broadcast-group
+                // name. Empty input → clear the group. Same overlay
+                // mechanism as cycle-369 EditPaneTitle.
+                self.close_all_modals();
+                let current = self
+                    .mux
+                    .focused()
+                    .and_then(|p| p.group_name.clone())
+                    .unwrap_or_default();
+                self.editing_title = Some(TitleEditState {
+                    scope: TitleEditScope::Group,
                     input: current,
                 });
                 if let Some(w) = &self.window {

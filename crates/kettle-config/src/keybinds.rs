@@ -258,6 +258,11 @@ pub enum Action {
     /// (cross-process PTY transfer needs SCM_RIGHTS — multi-cycle
     /// full impl thread).
     MoveTabToNewWindow,
+    /// Cycle 407 (Terminator parity, titlebar Bucket-D sub-cycle 8):
+    /// open the edit overlay for the focused pane's broadcast
+    /// group name. Same shape as EditPaneTitle but writes to
+    /// pane.group_name. Enter empty input → clear the group.
+    EditPaneGroup,
     OpenSsh,
     ReloadConfig,
     CommandPalette,
@@ -412,6 +417,8 @@ pub fn action_names() -> Vec<&'static str> {
         // Cycle 384.
         "move_tab_to_new_window",
         "detach_tab",
+        "edit_pane_group",
+        "edit_group",
         "command_palette",
         "palette",
         "hint_mode",
@@ -527,6 +534,7 @@ impl Action {
             "move_tab_to_new_window" | "move-tab-to-new-window" | "detach_tab" | "detach-tab" => {
                 MoveTabToNewWindow
             }
+            "edit_pane_group" | "edit-pane-group" | "edit_group" | "edit-group" => EditPaneGroup,
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
