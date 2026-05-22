@@ -37,6 +37,24 @@ test:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# === Supply chain ==================================================
+
+# `cargo deny check` — supply-chain gate covering advisories,
+# duplicate-version bans, allowed licenses, and crates.io-only
+# sources. CI runs this on every Cargo.lock change via
+# `.github/workflows/deny.yml`. Local run mirrors CI exactly so
+# a green `just deny` means the workflow won't catch new issues.
+# Requires `cargo install cargo-deny` (one-time).
+deny:
+    cargo deny check
+
+# `cargo machete` — finds unused workspace dependencies. CI runs
+# this on every PR via `.github/workflows/machete.yml`. Local
+# pre-flight before adding a `Cargo.toml` dep, since a forgotten
+# leftover trips CI later. Requires `cargo install cargo-machete`.
+machete:
+    cargo machete
+
 # === Builds ========================================================
 
 # Dev build (fast incremental) — what `cargo build` would do anyway,

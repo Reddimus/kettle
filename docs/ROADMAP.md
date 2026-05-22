@@ -1379,8 +1379,9 @@ ergonomics that landed in the v1.8.0 → v1.31.0 sweep. See
       parity config keys in `print_default_config_round_trip`;
       cycle 430 pinned the `kettle.notify` + `kettle.set_theme`
       queue/drain contract; cycle 435 pinned
-      `kettle.add_menu_item` + `kettle.add_url_handler` contracts.
-      Workspace tests 308 → 318.
+      `kettle.add_menu_item` + `kettle.add_url_handler` contracts;
+      cycle 446 pinned `kettle.config_path` return-type contract.
+      Workspace tests 308 → 319.
 - [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
       -D warnings` passes on `kettle-render` and `kettle-vt` after
       fixing 3 intra-doc link + bare-URL warnings.
