@@ -6,6 +6,72 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-05-22
+
+Plugin emission wirings + Edit-title overlay implementation.
+
+### Plugin sub-cycle wirings (cycles 366-368)
+
+The cycle-365 LuaEvent enum is now wired end-to-end at all 4
+emission sites. Users can write event-hook plugins and have
+them fire on real kettle events:
+
+  cycle 366  LuaEvent::Startup    fires after first-pane-ready
+                                  in App::resumed (guarded against
+                                  Wayland's resumed re-emission).
+                                  App now persists LuaEngine across
+                                  its full lifetime.
+  cycle 367  LuaEvent::Bell       fires for each belled pane after
+                                  the kettle-side bell processing.
+  cycle 368  LuaEvent::TabAdd     fires from Action::NewTab dispatch
+                                  with the new active tab index.
+             LuaEvent::TabClose   fires from Action::CloseTab dispatch
+                                  with the closing tab index.
+
+All 4 LuaEvent variants thus have App emission sites. The
+docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles 2-5 are complete
+(foundation + every event-site wiring). Subsequent plugin
+sub-cycles (notify, add_menu_item, add_url_handler, set_theme,
+sandbox config) build on this foundation.
+
+User-facing example:
+
+  -- ~/.config/kettle/init.lua (autoload pending sub-cycle 11)
+  kettle.on('startup', function()
+    kettle.send_text('echo \"kettle ' .. kettle.version() .. '\"\\n')
+  end)
+  kettle.on('bell', function(pane)
+    kettle.exec_action('toggle_window_visibility')
+  end)
+  kettle.on('tab_add', function(idx)
+    -- could send greeting text, switch profile, etc.
+  end)
+
+### Edit-title overlay (cycle 369)
+
+Replaces the cycle-354 placeholders with a real overlay state
+machine. `TitleEditState { scope, input }` opens on
+Action::Edit{Window,Tab,Pane}Title pre-filled with the current
+title; Enter applies via the appropriate setter (Window::set_title,
+Tab.title_override, Pane.title); Esc cancels.
+
+The overlay registers with any_modal_open + close_all_modals so
+the cycle-X modal discipline (Esc-to-dismiss, cursor-icon override,
+key-route guard) extends transparently. Visual chrome render of
+the overlay is a follow-up sub-cycle paired with the per-pane
+titlebar Bucket-D work; today's state + apply path is observable
+via --remote-list-tabs and the OS window title.
+
+### Status
+
+ALL 18 cycle-342 Action variants are now FULLY wired end-to-end.
+Zero placeholder stubs remain in the Action dispatch path.
+
+The 4 LuaEvent emission sites are wired. The plugin foundation
+(cycle 365) is now functional end-to-end.
+
+Workspace tests stay at 302.
+
 ## [1.12.0] — 2026-05-22
 
 Minor-bump — final config-key wiring batch + all four Bucket-D
