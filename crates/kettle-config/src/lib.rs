@@ -2105,7 +2105,17 @@ mod config_tests {
         // contributor hardcodes a count.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
-        for rel in ["README.md", "docs/CONFIG.md", "docs/INSTALL.md"] {
+        for rel in [
+            "README.md",
+            "docs/CONFIG.md",
+            "docs/INSTALL.md",
+            // Cycle 474: the example config is user-facing through
+            // `kettle --print-default-config > ~/.config/kettle/config`.
+            // Cycle refs inside it would leak into every user's
+            // bootstrap file — same drift-guard reasoning as the
+            // markdown docs above.
+            "docs/kettle.example.config",
+        ] {
             let path = repo_root.join(rel);
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("missing user-facing doc {}: {e}", path.display()));
