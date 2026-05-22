@@ -941,6 +941,7 @@ impl Renderer {
                 overlay.vi_cursor,
                 overlay.vi_visual_anchor,
                 &mut quads,
+                pane_titlebar_h,
             );
 
             // Image placements, anchored history-aware so they scroll.
@@ -959,7 +960,10 @@ impl Renderer {
                     live.insert(std::sync::Arc::as_ptr(&p.img.rgba) as usize);
                     img_items.push((
                         rx + pad_x + p.col as f32 * cw,
-                        ry + pad_y + row as f32 * ch,
+                        // Cycle 383: image placements also shift
+                        // below the titlebar so a kitty/sixel
+                        // image at row 0 doesn't overlap the bar.
+                        ry + pad_y + pane_titlebar_h + row as f32 * ch,
                         p.cell_cols as f32 * cw,
                         p.cell_rows as f32 * ch,
                         p.img.clone(),
@@ -979,7 +983,7 @@ impl Renderer {
                 };
                 quads.push(rect(
                     rx + pad_x + ln.col as f32 * cw,
-                    ry + pad_y + ln.row as f32 * ch + ch - 1.5,
+                    ry + pad_y + pane_titlebar_h + ln.row as f32 * ch + ch - 1.5,
                     ln.width as f32 * cw,
                     1.5,
                     col,
@@ -992,7 +996,7 @@ impl Renderer {
                 for hl in &overlay.highlights {
                     quads.push(rect(
                         rx + pad_x + hl.col as f32 * cw,
-                        ry + pad_y + hl.row as f32 * ch,
+                        ry + pad_y + pane_titlebar_h + hl.row as f32 * ch,
                         hl.width as f32 * cw,
                         ch,
                         if hl.active {
@@ -1008,7 +1012,7 @@ impl Renderer {
                     let n = hint.label.chars().count().max(1) as f32;
                     quads.push(rect(
                         rx + pad_x + hint.col as f32 * cw,
-                        ry + pad_y + hint.row as f32 * ch,
+                        ry + pad_y + pane_titlebar_h + hint.row as f32 * ch,
                         n * cw,
                         ch,
                         if hint.dim {
@@ -1349,7 +1353,10 @@ impl Renderer {
             areas.push(TextArea {
                 buffer: &self.pane_buffers[i],
                 left: rx + pad_x,
-                top: ry + pad_y,
+                // Cycle 383: shift cell text below the titlebar
+                // when active. Same offset used inside build_pane
+                // (which renders cells/cursor/images/links).
+                top: ry + pad_y + pane_titlebar_h,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rx as i32,
@@ -1503,7 +1510,10 @@ impl Renderer {
                 areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
                     left: frx + pad_x + hint.col as f32 * cw,
-                    top: fry + pad_y + hint.row as f32 * ch,
+                    // Cycle 383: hint labels also shift below the
+                    // titlebar so they land over the cell they
+                    // mark, not over the title text.
+                    top: fry + pad_y + pane_titlebar_h + hint.row as f32 * ch,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: frx as i32,
@@ -1683,6 +1693,7 @@ impl Renderer {
 
     /// Build one pane's text buffer + background/cursor/selection/search quads.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn build_pane(
         &mut self,
         idx: usize,
@@ -1694,11 +1705,16 @@ impl Renderer {
         vi_cursor: Option<(usize, usize)>,
         vi_visual_anchor: Option<(usize, usize)>,
         quads: &mut Vec<QuadInstance>,
+        // Cycle 383 (Terminator parity, per-pane-titlebar Bucket-D
+        // sub-cycle 2 complete): extra top offset for cell content
+        // so it doesn't overlap the cycle-379 titlebar bar. When
+        // titlebar is off this is 0.0 (zero overhead).
+        pane_titlebar_h: f32,
     ) {
         let theme = &cfg.theme;
         let (rx, ry, rw, rh) = pv.rect;
         let ox = rx + cfg.padding_x;
-        let oy = ry + cfg.padding_y;
+        let oy = ry + cfg.padding_y + pane_titlebar_h;
         let cw = self.cell_w;
         let ch = self.cell_h;
         let term = pv.term;
