@@ -133,6 +133,49 @@ impl DragState {
             DragState::DraggingInside { .. } | DragState::DraggingOutside { .. }
         )
     }
+
+    /// Cycle 401 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 9): cancel path. Returns Some(tab_idx) if a tab
+    /// was being dragged when the cancel fired — caller can
+    /// restore that tab's visual state (clear ghost, reset focus).
+    /// None when the cancel comes from Idle (no-op).
+    pub fn cancel(self) -> (Self, Option<usize>) {
+        match self {
+            DragState::Idle => (DragState::Idle, None),
+            DragState::ArmedInside { tab_idx, .. } => (DragState::Idle, Some(tab_idx)),
+            DragState::DraggingInside { tab_idx, .. } => (DragState::Idle, Some(tab_idx)),
+            DragState::DraggingOutside { tab_idx, .. } => (DragState::Idle, Some(tab_idx)),
+        }
+    }
+
+    /// Cycle 401: transition DraggingInside → DraggingOutside on
+    /// cursor-leaves-window event. Captures a fresh session_id
+    /// for the cross-process IPC handshake (sub-cycle 7 fills
+    /// in). Returns self unchanged from non-DraggingInside.
+    pub fn on_cursor_leave_window(self, session_id: u64) -> Self {
+        match self {
+            DragState::DraggingInside { tab_idx, .. } => DragState::DraggingOutside {
+                tab_idx,
+                session_id,
+            },
+            other => other,
+        }
+    }
+
+    /// Cycle 401: transition DraggingOutside → DraggingInside on
+    /// cursor-re-entered-this-window event (user changed their
+    /// mind mid-drag). Preserves the original tab_idx. Returns
+    /// self unchanged from non-DraggingOutside.
+    pub fn on_cursor_reenter_window(self, ghost_x: f32, ghost_y: f32) -> Self {
+        match self {
+            DragState::DraggingOutside { tab_idx, .. } => DragState::DraggingInside {
+                tab_idx,
+                ghost_x,
+                ghost_y,
+            },
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +232,121 @@ mod tests {
             ghost_y: 200.0,
         };
         assert!(matches!(s.on_abort(), DragState::Idle));
+    }
+
+    #[test]
+    fn cancel_returns_dragged_tab_idx() {
+        // Cycle 401 drift guard. cancel() reports the tab that
+        // was being manipulated so the caller can restore its
+        // visual state.
+        let (s, restored) = DragState::Idle.cancel();
+        assert!(matches!(s, DragState::Idle));
+        assert!(restored.is_none());
+        let (s, restored) = DragState::ArmedInside {
+            tab_idx: 5,
+            started_at: Instant::now(),
+        }
+        .cancel();
+        assert!(matches!(s, DragState::Idle));
+        assert_eq!(restored, Some(5));
+        let (s, restored) = DragState::DraggingInside {
+            tab_idx: 7,
+            ghost_x: 0.0,
+            ghost_y: 0.0,
+        }
+        .cancel();
+        assert!(matches!(s, DragState::Idle));
+        assert_eq!(restored, Some(7));
+        let (s, restored) = DragState::DraggingOutside {
+            tab_idx: 9,
+            session_id: 0,
+        }
+        .cancel();
+        assert!(matches!(s, DragState::Idle));
+        assert_eq!(restored, Some(9));
+    }
+
+    #[test]
+    fn cursor_leave_and_reenter_window_transitions() {
+        // Cycle 401: DraggingInside ↔ DraggingOutside transitions
+        // on cursor-leave / cursor-reenter events.
+        let s = DragState::DraggingInside {
+            tab_idx: 3,
+            ghost_x: 100.0,
+            ghost_y: 50.0,
+        };
+        let s = s.on_cursor_leave_window(42);
+        match s {
+            DragState::DraggingOutside {
+                tab_idx,
+                session_id,
+            } => {
+                assert_eq!(tab_idx, 3);
+                assert_eq!(session_id, 42);
+            }
+            _ => panic!("expected DraggingOutside"),
+        }
+        let s = DragState::DraggingOutside {
+            tab_idx: 3,
+            session_id: 42,
+        };
+        let s = s.on_cursor_reenter_window(200.0, 100.0);
+        match s {
+            DragState::DraggingInside {
+                tab_idx,
+                ghost_x,
+                ghost_y,
+            } => {
+                assert_eq!(tab_idx, 3);
+                assert_eq!(ghost_x, 200.0);
+                assert_eq!(ghost_y, 100.0);
+            }
+            _ => panic!("expected DraggingInside"),
+        }
+        // Non-Dragging states unchanged.
+        let s = DragState::Idle.on_cursor_leave_window(99);
+        assert!(matches!(s, DragState::Idle));
+        let s = DragState::ArmedInside {
+            tab_idx: 0,
+            started_at: Instant::now(),
+        }
+        .on_cursor_reenter_window(0.0, 0.0);
+        assert!(matches!(s, DragState::ArmedInside { .. }));
+    }
+
+    #[test]
+    fn end_to_end_drag_walkthrough() {
+        // Cycle 401 (Terminator parity, detachable-tabs Bucket-D
+        // sub-cycle 11 partial): pure-FSM e2e drift guard.
+        // Walks the full drag flow: Idle → ArmedInside →
+        // DraggingInside → DraggingOutside → cancel → Idle.
+        let s = DragState::Idle;
+        assert!(!s.is_dragging());
+        // Mouse down on tab 2.
+        let s = DragState::on_mouse_down_on_tab(2);
+        assert!(matches!(s, DragState::ArmedInside { .. }));
+        // Tiny move stays Armed.
+        let s = s.on_mouse_move(1.0, 1.0);
+        assert!(matches!(s, DragState::ArmedInside { .. }));
+        // Larger move starts dragging.
+        let s = s.on_mouse_move(20.0, 10.0);
+        assert!(matches!(s, DragState::DraggingInside { tab_idx: 2, .. }));
+        assert!(s.is_dragging());
+        // Cursor leaves window.
+        let s = s.on_cursor_leave_window(100);
+        assert!(matches!(
+            s,
+            DragState::DraggingOutside {
+                tab_idx: 2,
+                session_id: 100,
+            }
+        ));
+        assert!(s.is_dragging());
+        // User cancels with Escape.
+        let (s, restored) = s.cancel();
+        assert!(matches!(s, DragState::Idle));
+        assert_eq!(restored, Some(2));
+        assert!(!s.is_dragging());
     }
 
     #[test]
