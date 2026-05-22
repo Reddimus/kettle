@@ -2073,14 +2073,42 @@ impl App {
         let context_menu = self.context_menu_overlay();
         // Cycle 372: marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing.
-        let edit_title: Option<(String, String)> = self.editing_title.as_ref().map(|s| {
-            let label = match s.scope {
-                TitleEditScope::Window => "Edit window title:",
-                TitleEditScope::Tab => "Edit tab title:",
-                TitleEditScope::Pane => "Edit pane title:",
-            };
-            (label.to_string(), s.input.clone())
-        });
+        //
+        // Cycle 395 (Terminator parity, titlebar Bucket-D sub-cycle 7):
+        // for Pane scope, also pass the focused pane's titlebar y so
+        // the overlay anchors near the clicked pane vs the window-
+        // bottom (window/tab scopes still use window-bottom).
+        let edit_title: Option<(String, String, Option<f32>)> =
+            self.editing_title.as_ref().map(|s| {
+                let label = match s.scope {
+                    TitleEditScope::Window => "Edit window title:",
+                    TitleEditScope::Tab => "Edit tab title:",
+                    TitleEditScope::Pane => "Edit pane title:",
+                };
+                let anchor_y = if matches!(s.scope, TitleEditScope::Pane) {
+                    let area = self.area();
+                    let active = self.mux.active;
+                    let rects = self.mux.layout(active, area);
+                    let focus = self.mux.active_focus();
+                    rects
+                        .iter()
+                        .find(|(id, _)| Some(*id) == focus)
+                        .map(|(_, (_, ry, _, rh))| {
+                            // Anchor just below the focused pane's titlebar.
+                            // Falls below the bar (top mode) or just above
+                            // the bottom bar (bottom mode); either way the
+                            // user's eye-line stays near where they clicked.
+                            if self.cfg.title_at_bottom {
+                                *ry + *rh - 60.0
+                            } else {
+                                *ry + 30.0
+                            }
+                        })
+                } else {
+                    None
+                };
+                (label.to_string(), s.input.clone(), anchor_y)
+            });
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
