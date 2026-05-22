@@ -86,6 +86,23 @@ if git tag -l "v${VERSION}" | grep -q "^v${VERSION}\$"; then
     echo "  delete it first (git tag -d v${VERSION}) or pick a different version" >&2
     exit 1
 fi
+# Cycle 323: also check the REMOTE. Pre-fix, `git tag -l` only
+# listed local tags — if a previous run pushed v1.7.X but the
+# local clone hadn't fetched it, this script would silently
+# proceed and the eventual `git push origin v1.7.X` would fail
+# with a "remote tag already exists" error AFTER the local
+# commit + tag were already made. The user'd then have to delete
+# the local commit + tag manually to recover. Now: query the
+# remote up-front. If `git ls-remote` fails (no network / no
+# remote), warn but proceed (offline workflow is still valid).
+if remote_tag=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null) \
+    && [ -n "$remote_tag" ]; then
+    echo "::error::remote tag v${VERSION} already exists on origin" >&2
+    echo "  pick a different version, or `git fetch && git tag -d v${VERSION}`" >&2
+    echo "  if you need to overwrite (rarely the right move; cuts a fresh" >&2
+    echo "  patch version is usually safer than retagging a published v)" >&2
+    exit 1
+fi
 
 # Bump Cargo.toml workspace version. The workspace's leading
 # `[workspace.package]` block has the single `version = "X.Y.Z"`
