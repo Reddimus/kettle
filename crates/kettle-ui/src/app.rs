@@ -1337,6 +1337,16 @@ impl App {
             log::warn!("refused to open unsafe URL: {uri}");
             return;
         }
+        // Cycle 374 (Terminator plugin parity, plugin sub-cycle 9):
+        // Lua URL handlers get first dispatch. If a handler claims
+        // the URL (its pattern matches), kettle does NOT fall
+        // through to the cfg.custom_url_handler or system-open
+        // paths — the handler decides what (if anything) to launch.
+        if let Some(eng) = &self.lua_engine
+            && eng.try_url_handler(uri)
+        {
+            return;
+        }
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
             // Custom handler — spawn detached so a long-running
             // browser launch doesn't freeze kettle.
