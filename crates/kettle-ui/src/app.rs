@@ -3833,16 +3833,36 @@ impl App {
             } else if line == "new-tab" {
                 // Cycle 419 (Terminator parity, remote-control verb):
                 // open a new tab via the remote-control IPC channel.
-                // Mirrors the Action::NewTab dispatch (cycle 134) but
-                // skips the keybind layer + focus-change tracking
-                // (the remote caller isn't a keyboard user; the new
-                // tab becomes active automatically through new_tab).
+                // Mirrors the Action::NewTab dispatch (cycle 134) +
+                // cycle 423: also fire LuaEvent::TabAdd so plugins
+                // listening for tab_add see remote-triggered tabs
+                // the same as keyboard ones.
                 let (cw, ch) = self.cell_px();
                 let area = self.area();
                 let (cols, rows) = self.grid_of(area);
                 let waker = self.waker();
                 if let Err(e) = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
                     log::warn!("remote-control: new-tab failed: {e}");
+                } else if let Some(eng) = &self.lua_engine {
+                    eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
+                    for cmd in eng.drain_commands() {
+                        match cmd {
+                            crate::LuaCommand::SendText(s) => {
+                                self.pending_lua_send.extend_from_slice(s.as_bytes());
+                            }
+                            crate::LuaCommand::ExecAction(name) => {
+                                if let Some(a) = kettle_config::Action::from_name(&name) {
+                                    self.pending_lua_actions.push(a);
+                                } else {
+                                    log::warn!(
+                                        "lua kettle.exec_action (remote tab_add hook): \
+                                         unknown action {name:?}"
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             } else {
                 log::warn!("remote command not recognized: {line:?}");
