@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.4] — 2026-05-21
+
+Patch release. Two real subtle bugs caught by post-feature-sweep
+audit + the first release shipped via the new
+`scripts/release.sh` (cycle 307).
+
+### Fixed
+- **Status bar overflow on long pane titles (cycle 308).** A chatty
+  shell prompt that puts the full cwd in the window title (a common
+  pattern: `PROMPT_COMMAND='echo -ne "\033]0;$PWD\007"'`) produced
+  a status line that cosmic-text wrapped past the strip's 1-cell
+  visible region — the user saw the first ~80 chars and the rest
+  was silently invisible. Now: char-budget truncation at 60 chars
+  with a visible `…` ellipsis. UTF-8 safe (char-count, not
+  byte-count).
+- **Malformed trigger regex silently dropped (cycle 309).** A
+  `trigger = [unclosed` pattern parsed (config layer stores it as a
+  plain string), `--check-config` reported OK, then at runtime
+  `compile_triggers` failed `Regex::new` and the trigger silently
+  never fired (only a log::warn the user usually didn't see). Now:
+  `--check-config` surfaces the invalid pattern with non-zero exit.
+
+### Drift guards
+- `cap_title_for_status_bar_truncates_at_char_budget_with_ellipsis`
+  pins the cycle-308 fix (under/exact/over budget + UTF-8
+  multibyte).
+- `detect_malformed_values_flags_invalid_trigger_regex` pins the
+  cycle-309 fix (both directions — malformed flagged, valid
+  alternation `(BUILD SUCCESSFUL|FAILED)` not flagged).
+
+Workspace tests 267 → 269.
+
 ## [1.7.3] — 2026-05-21
 
 Repackaging of v1.7.2. Same code; v1.7.2 was tagged before the
