@@ -505,7 +505,11 @@ impl Mux {
         argv: &[String],
     ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
-        let term = Terminal::new(
+        // Cycle 343 Terminator parity: route through new_with_env so
+        // cfg.term / cfg.colorterm / cfg.login_shell take effect at
+        // PTY spawn. The legacy `Terminal::new` shim still exists
+        // for non-Mux callers (currently none in-tree).
+        let term = Terminal::new_with_env(
             argv,
             cwd,
             cfg.scrollback,
@@ -516,6 +520,9 @@ impl Mux {
             cfg.cursor_blink,
             engine_cursor_shape(cfg.cursor_style),
             Some(cfg.word_delimiters.as_str()),
+            &cfg.term,
+            &cfg.colorterm,
+            cfg.login_shell,
             tx,
             waker,
         )?;

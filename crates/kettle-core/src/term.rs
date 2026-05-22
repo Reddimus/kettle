@@ -102,6 +102,7 @@ pub struct Terminal {
 
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         argv: &[String],
         cwd: Option<&str>,
@@ -116,6 +117,52 @@ impl Terminal {
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
     ) -> Result<Terminal> {
+        Self::new_with_env(
+            argv,
+            cwd,
+            scrollback,
+            cols,
+            rows,
+            cell_w,
+            cell_h,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            "xterm-256color",
+            "truecolor",
+            false,
+            event_tx,
+            waker,
+        )
+    }
+
+    /// Cycle 343 Terminator parity: PTY spawn with explicit `TERM` +
+    /// `COLORTERM` env override + `login_shell` flag (prepends `-l`
+    /// to the shell argv to get login-shell semantics).
+    ///
+    /// `term` / `colorterm` correspond to Terminator's per-profile
+    /// `term` (terminatorlib/config.py:114) and `colorterm`
+    /// (`:115`); `login_shell` is `:122`. Empty strings preserve
+    /// kettle's existing default — same shape as the parse-side
+    /// fall-through (cycle 335).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_env(
+        argv: &[String],
+        cwd: Option<&str>,
+        scrollback: usize,
+        cols: usize,
+        rows: usize,
+        cell_w: u16,
+        cell_h: u16,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        login_shell: bool,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+    ) -> Result<Terminal> {
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize {
             rows: rows as u16,
@@ -127,15 +174,45 @@ impl Terminal {
         let mut cmd = match argv.split_first() {
             Some((prog, rest)) => {
                 let mut c = CommandBuilder::new(prog);
+                if login_shell {
+                    // Cycle 343: `-l` (POSIX-defined "shell that
+                    // reads /etc/profile + ~/.profile + login dotfiles
+                    // before running interactively"). Goes BEFORE
+                    // the user's argv args so a config like
+                    // `command = bash -i` still works.
+                    c.arg("-l");
+                }
                 for a in rest {
                     c.arg(a);
                 }
                 c
             }
-            None => CommandBuilder::new_default_prog(),
+            None => {
+                let mut c = CommandBuilder::new_default_prog();
+                if login_shell {
+                    c.arg("-l");
+                }
+                c
+            }
         };
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        // Cycle 343: honor cfg.term + cfg.colorterm (empty preserves
+        // kettle's default).
+        cmd.env(
+            "TERM",
+            if term_env.is_empty() {
+                "xterm-256color"
+            } else {
+                term_env
+            },
+        );
+        cmd.env(
+            "COLORTERM",
+            if colorterm_env.is_empty() {
+                "truecolor"
+            } else {
+                colorterm_env
+            },
+        );
         cmd.env("TERM_PROGRAM", "kettle");
         // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
         // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
