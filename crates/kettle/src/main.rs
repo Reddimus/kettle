@@ -626,55 +626,15 @@ fn main() -> anyhow::Result<()> {
                 styles_set.join(", ")
             );
         }
-        // Cycle 461: echo the Terminator-parity opt-in keys when the
-        // user has actually set them. Without this, a user who set
-        // `accent-color = #00d4ff` couldn't verify it parsed — the
-        // summary silently dropped it like font-features did before
-        // its echo line was added. Symmetric with the lines above.
-        if let Some(c) = cfg.accent_color {
-            println!("accent:  #{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-        }
-        if cfg.force_no_bell {
-            println!("bell:    force-no-bell=true (silences every bell flavor)");
-        }
-        if !cfg.triggers.is_empty() {
-            println!(
-                "triggers: {} pattern(s) configured (cycle-289 Urgency action)",
-                cfg.triggers.len()
-            );
-        }
-        if cfg.lua_sandbox != kettle_config::LuaSandbox::Safe {
-            println!("lua:     sandbox={:?}", cfg.lua_sandbox);
-        }
-        if !cfg.background_image.is_empty() {
-            println!(
-                "bg-image: {} (mode={}, blur={}, darkness={})",
-                cfg.background_image,
-                cfg.background_image_mode,
-                cfg.background_blur,
-                cfg.background_darkness
-            );
-        }
-        // Cycle 463: window-state / borderless / always-on-top echo
-        // when any is set to a non-default. Most users leave these at
-        // their defaults; the ones who set them benefit from seeing
-        // them confirmed (especially `window-state = fullscreen` or
-        // `borderless = true` which are easy to set then forget).
-        let window_flags = cfg.window_state != kettle_config::WindowState::Normal
-            || cfg.borderless
-            || cfg.always_on_top;
-        if window_flags {
-            println!(
-                "window-flags: state={:?} borderless={} always-on-top={}",
-                cfg.window_state, cfg.borderless, cfg.always_on_top
-            );
-        }
-        // Cycle 470: status-bar (cycle 295) — non-default echo. The
-        // strip subtracts a row from the pane grid, so users debugging
-        // "why is the pane grid 23 rows instead of 24?" should be
-        // able to confirm the setting from --check-config.
-        if cfg.status_bar != kettle_config::StatusBarMode::Off {
-            println!("status-bar: {:?}", cfg.status_bar);
+        // Cycles 461-470: echo Terminator-parity / cycle-295 opt-in
+        // keys when the user has actually set them. Extracted as a
+        // pure helper (`extra_check_config_lines`) so the contract
+        // is unit-testable — without this, a user who set
+        // `accent-color = #00d4ff` couldn't verify it parsed and
+        // there'd be no regression test catching a future silent
+        // drop. Symmetric with the lines above.
+        for line in extra_check_config_lines(&cfg) {
+            println!("{line}");
         }
         // Cycle 201: count and display I/O errors (cycle 196's read
         // failures) as their own category rather than reusing the
@@ -943,6 +903,61 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// Empty input yields a single "(no ssh-host entries configured)" line so
 /// the user sees their config is empty rather than no output at all.
 /// Pure so the formatting is unit-testable without the CLI.
+/// Format the cycles-461-470 opt-in echo lines for `--check-config`.
+/// Pure helper: takes a `Config`, returns one `String` per echo line
+/// the user should see. Empty `Vec` for a default config — terse
+/// default-summary output is the contract.
+///
+/// Each variant gates on a single field's non-default-ness:
+///   - `accent` (cycle 309) — `accent_color` is `Some`
+///   - `bell: force-no-bell` (cycle 349) — `force_no_bell` is `true`
+///   - `triggers` (cycle 289) — at least one trigger
+///   - `lua: sandbox=...` (cycle 376) — `lua_sandbox != Safe`
+///   - `bg-image` (cycles 380-396) — `background_image` non-empty
+///   - `window-flags` (cycles 339/342) — any of window_state /
+///     borderless / always_on_top is non-default
+///   - `status-bar` (cycle 295) — `status_bar != Off`
+fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(c) = cfg.accent_color {
+        lines.push(format!("accent:  #{:02x}{:02x}{:02x}", c.r, c.g, c.b));
+    }
+    if cfg.force_no_bell {
+        lines.push("bell:    force-no-bell=true (silences every bell flavor)".into());
+    }
+    if !cfg.triggers.is_empty() {
+        lines.push(format!(
+            "triggers: {} pattern(s) configured (cycle-289 Urgency action)",
+            cfg.triggers.len()
+        ));
+    }
+    if cfg.lua_sandbox != kettle_config::LuaSandbox::Safe {
+        lines.push(format!("lua:     sandbox={:?}", cfg.lua_sandbox));
+    }
+    if !cfg.background_image.is_empty() {
+        lines.push(format!(
+            "bg-image: {} (mode={}, blur={}, darkness={})",
+            cfg.background_image,
+            cfg.background_image_mode,
+            cfg.background_blur,
+            cfg.background_darkness
+        ));
+    }
+    let window_flags = cfg.window_state != kettle_config::WindowState::Normal
+        || cfg.borderless
+        || cfg.always_on_top;
+    if window_flags {
+        lines.push(format!(
+            "window-flags: state={:?} borderless={} always-on-top={}",
+            cfg.window_state, cfg.borderless, cfg.always_on_top
+        ));
+    }
+    if cfg.status_bar != kettle_config::StatusBarMode::Off {
+        lines.push(format!("status-bar: {:?}", cfg.status_bar));
+    }
+    lines
+}
+
 fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
     if hosts.is_empty() {
         return vec!["(no ssh-host entries configured)".into()];
@@ -960,7 +975,7 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, config_path_problem, format_ssh_hosts};
+    use super::{Cli, config_path_problem, extra_check_config_lines, format_ssh_hosts};
     use clap::Parser;
 
     #[test]
@@ -1366,6 +1381,81 @@ mod tests {
             "man page is missing load-bearing default keybinds: {missing:?}\n\
              Update packaging/linux/kettle.1 to document them (or change \
              this guard if a binding was intentionally removed)."
+        );
+    }
+
+    #[test]
+    fn extra_check_config_lines_empty_for_default_config() {
+        // Cycle 471 drift guard. The default config produces no
+        // opt-in echo lines so `kettle --check-config` stays terse
+        // for the common case (just the base summary + `status: OK`).
+        // A future cycle that adds a noisy default-fires echo line
+        // would regress this contract.
+        let cfg = kettle_config::Config::default();
+        assert_eq!(
+            extra_check_config_lines(&cfg),
+            Vec::<String>::new(),
+            "default config emitted echo lines: {:?}",
+            extra_check_config_lines(&cfg)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn extra_check_config_lines_surface_each_opt_in_key() {
+        // Cycle 471 drift guard. Each cycle 461-470 echo branch
+        // fires for its specific opt-in field; setting each one
+        // independently should produce exactly the expected line.
+        let mut cfg = kettle_config::Config::default();
+        cfg.accent_color = Some(kettle_config::Rgb {
+            r: 0x00,
+            g: 0xd4,
+            b: 0xff,
+        });
+        let lines = extra_check_config_lines(&cfg);
+        assert!(
+            lines.iter().any(|l| l == "accent:  #00d4ff"),
+            "accent line missing: {lines:?}"
+        );
+
+        let mut cfg = kettle_config::Config::default();
+        cfg.force_no_bell = true;
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l.starts_with("bell:    force-no-bell=true"))
+        );
+
+        let mut cfg = kettle_config::Config::default();
+        cfg.lua_sandbox = kettle_config::LuaSandbox::Trusted;
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l == "lua:     sandbox=Trusted")
+        );
+
+        let mut cfg = kettle_config::Config::default();
+        cfg.background_image = "/tmp/wp.jpg".into();
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l.starts_with("bg-image: /tmp/wp.jpg"))
+        );
+
+        let mut cfg = kettle_config::Config::default();
+        cfg.borderless = true;
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l.starts_with("window-flags: ") && l.contains("borderless=true"))
+        );
+
+        let mut cfg = kettle_config::Config::default();
+        cfg.status_bar = kettle_config::StatusBarMode::Bottom;
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l == "status-bar: Bottom")
         );
     }
 }
