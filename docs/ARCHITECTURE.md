@@ -150,20 +150,15 @@ own design doc; the architectural integration is summarized here.
 
 ### Plugin system (cycles 324, 365-378)
 
-```
-init.lua  ──auto-load──▶  LuaEngine ──registers──▶  on/notify/set_theme/
-                            │                       send_text/exec_action/
-                            │                       add_url_handler/
-                            │                       add_menu_item
-                            ▼
-                       App.lua_engine ──fire_event──▶ Startup, Bell,
-                                                      TabAdd, TabClose,
-                                                      Output(bytes)
-                            │
-                            ▼
-                     LuaCommand queue ──drain──▶  App dispatch (SendText,
-                                                  ExecAction, Notify,
-                                                  SetTheme)
+```mermaid
+flowchart TD
+    A["init.lua (auto-load)"]
+    A --> B["LuaEngine"]
+    B -->|registers| C["kettle.on / notify / set_theme<br/>send_text / exec_action<br/>add_url_handler / add_menu_item"]
+    B --> D["App.lua_engine"]
+    D -->|fire_event| E["Startup · Bell ·<br/>TabAdd · TabClose ·<br/>Output(bytes)"]
+    D --> F["LuaCommand queue"]
+    F -->|drain| G["App dispatch:<br/>SendText · ExecAction ·<br/>Notify · SetTheme"]
 ```
 
 `lua-sandbox = safe` (default) nils unsafe stdlib APIs (os.execute,
@@ -194,14 +189,13 @@ action edits the broadcast-group label. See
 
 ### Background image (cycles 380-396)
 
-```
-cfg.background_image  ──decode_bg_image──▶  BgImage  ──Arc-cached──▶  imgpipe
-   │                       │                  │                          │
-   ▼                       ▼                  ▼                          ▼
-PNG/JPEG/WebP/      Optional box blur     Render BEFORE pane     Fullscreen quad
-BMP/GIF              (cycle 396)           backgrounds            UV-mode dispatch
-                                                                  (stretch / tile /
-                                                                   center / scale)
+```mermaid
+flowchart LR
+    A["cfg.background_image"] --> B["decode_bg_image<br/>(PNG / JPEG / WebP /<br/>BMP / GIF)"]
+    B --> C["Optional box blur<br/>(cycle 396, 3-pass<br/>separable)"]
+    C --> D["BgImage<br/>(Arc-cached by path)"]
+    D --> E["imgpipe"]
+    E --> F["Render BEFORE pane<br/>backgrounds with UV-mode<br/>dispatch (stretch /<br/>tile / center / scale)"]
 ```
 
 Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
