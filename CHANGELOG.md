@@ -6,6 +6,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.29.0] — 2026-05-22
+
+Detachable-tabs end-to-end file-fallback path COMPLETE.
+
+  cycle 402 — winit CursorLeft/Entered → drag FSM transitions.
+              Closes detachable-tabs sub-cycle 6.
+  cycle 403 — `--tab-handoff PATH` CLI flag scaffolding.
+  cycle 404 — Session::load_tab_handoff App-side restore.
+              Closes detachable-tabs sub-cycle 8 in the
+              file-fallback path.
+  cycle 405 — Action::MoveTabToNewWindow → write JSON
+              handoff + spawn --tab-handoff PATH child.
+              Source tab serializes; target reconstructs.
+              Cross-platform (works on Linux/macOS/Windows/
+              Wayland). Closes the cross-process tab-handoff
+              workflow end-to-end via the file path.
+
+### End-to-end detachable-tabs flow (file-fallback)
+
+  Source process:
+    1. User triggers Action::MoveTabToNewWindow.
+    2. Mux::serialize_tab(active) → STab.
+    3. serde_json::to_string + write to /tmp/kettle-handoff-PID.json
+    4. Spawn `kettle --tab-handoff PATH --config CFG`.
+    5. Close source tab.
+
+  Target process:
+    1. App startup detects --tab-handoff PATH.
+    2. Session::load_tab_handoff reads + deletes the file.
+    3. Restore tab(s) via cycle-291 restore path.
+    4. User sees split tree + cwds in the new window.
+
+Live PTY transfer requires SCM_RIGHTS (sub-cycle 7); the file-
+fallback trades that for cross-platform support (target spawns
+fresh shells instead of adopting fds).
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 — all impl shipped
+                                   E — sub-cycle 8 (group-name
+                                       edit) Bucket-E
+bg-image (12 sub-cycles):         ✅ 11/12 effectively COMPLETE
+Detachable tabs (11 sub-cycles):  ✅ 10 — all sub-cycles shipped
+                                       end-to-end via file-fallback
+                                   ⌛ 1 — sub-cycle 7 SCM_RIGHTS
+                                       cross-process PTY fd transfer
+                                       (file-fallback is the cross-
+                                       platform analog shipped today;
+                                       SCM_RIGHTS variant preserves
+                                       live shells)
+
+43 of 46 Bucket-D sub-cycles end-to-end (93%).
+
+Workspace tests stay at 308.
+
 ## [1.28.0] — 2026-05-22
 
   cycle 401 — Drag FSM cancel path + cursor-leave/reenter
