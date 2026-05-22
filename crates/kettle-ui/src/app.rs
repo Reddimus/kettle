@@ -558,6 +558,13 @@ pub struct App {
     /// release. Mouse moves while held swap the active tab by the
     /// delta between the current cursor index and the active index.
     tab_drag_active: bool,
+    /// Cycle 402 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 6): cross-window drag FSM state. Distinct from
+    /// the existing in-window tab_drag_active (cycle 249) — that
+    /// handles drag-to-reorder within this window. detach_drag
+    /// handles cross-window drag-to-detach. Both fire from the
+    /// same mouse-down on the tab bar.
+    detach_drag: crate::detach::DragState,
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over. Drives both the OS pointer-cursor swap and
     /// the renderer's hover-background quad so the trailing `✕` reads
@@ -853,6 +860,7 @@ impl App {
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,
+            detach_drag: crate::detach::DragState::default(),
             hovered_close_idx: None,
             vi_mode: None,
             compiled_triggers: initial_triggers,
@@ -4374,6 +4382,32 @@ impl ApplicationHandler<UserEvent> for App {
                 // cursor icon so the affordance updates the moment Ctrl
                 // is pressed/released over a link.
                 self.sync_cursor_icon();
+            }
+            // Cycle 402 (Terminator parity, detachable-tabs Bucket-D
+            // sub-cycle 6): winit CursorLeft/Entered events transition
+            // the detach FSM. CursorLeft → DraggingOutside (caller
+            // generates a fresh session_id for the future cross-process
+            // IPC handshake); CursorEntered → DraggingInside (user
+            // brought the cursor back; cancel the cross-window flow).
+            WindowEvent::CursorLeft { .. } => {
+                let prev = std::mem::take(&mut self.detach_drag);
+                self.detach_drag = prev.on_cursor_leave_window(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_micros() as u64)
+                        .unwrap_or(0),
+                );
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::CursorEntered { .. } => {
+                let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+                let prev = std::mem::take(&mut self.detach_drag);
+                self.detach_drag = prev.on_cursor_reenter_window(x, y);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
