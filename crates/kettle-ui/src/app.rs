@@ -2642,9 +2642,7 @@ impl App {
             //   ToggleScrollbar (runtime scrollbar toggle)
             //   EditWindowTitle / EditTabTitle / EditPaneTitle
             //   NextProfile / PrevProfile (runtime profile cycle)
-            Action::RotateCw
-            | Action::RotateCcw
-            | Action::EditWindowTitle
+            Action::EditWindowTitle
             | Action::EditTabTitle
             | Action::EditPaneTitle
             | Action::NextProfile
@@ -2653,6 +2651,22 @@ impl App {
                     "Action {action:?} dispatched but behavior wiring is a \
                      follow-up sub-cycle (docs/TERMINATOR-AUDIT.md)"
                 );
+            }
+            // Cycle 347: split-tree rotation. RotateCw flips dir +
+            // swaps children (Terminator's clockwise semantics);
+            // RotateCcw flips dir without swap. No-op when the
+            // focused leaf has no parent (single-pane tab).
+            Action::RotateCw => {
+                self.mux.rotate_focused_split(true);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Action::RotateCcw => {
+                self.mux.rotate_focused_split(false);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             // Cycle 346: runtime scrollbar toggle. Cycles
             // ScrollbarMode through Never → Always → Auto → Never.

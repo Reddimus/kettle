@@ -804,6 +804,51 @@ impl Mux {
         self.panes.get_mut(&id)
     }
 
+    /// Cycle 347 (Terminator parity, terminatorlib/terminal.py:key_rotate_cw):
+    /// rotate the focused leaf's parent split by flipping its direction
+    /// (Horizontal ↔ Vertical) and optionally swapping its children.
+    /// `clockwise = true` matches Terminator's rotate_cw (vertical→
+    /// horizontal-with-swap, horizontal→vertical-no-swap); `false`
+    /// is the inverse.
+    ///
+    /// No-op when the focused leaf has no parent split (i.e., the
+    /// tab has a single pane).
+    pub fn rotate_focused_split(&mut self, clockwise: bool) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        let focus = tab.focus;
+        fn walk(node: &mut Node, target: u64, clockwise: bool) -> bool {
+            if let Node::Split { dir, a, b, .. } = node {
+                let a_has = a.contains(target);
+                let b_has = b.contains(target);
+                if (a_has || b_has)
+                    && (matches!(**a, Node::Leaf(_)) || matches!(**b, Node::Leaf(_)))
+                {
+                    // This Split is the focused leaf's immediate
+                    // parent. Flip direction + swap children for the
+                    // clockwise rotation per Terminator semantics.
+                    *dir = match *dir {
+                        Dir::Horizontal => Dir::Vertical,
+                        Dir::Vertical => Dir::Horizontal,
+                    };
+                    if clockwise {
+                        std::mem::swap(a, b);
+                    }
+                    return true;
+                }
+                if a_has && walk(a, target, clockwise) {
+                    return true;
+                }
+                if b_has && walk(b, target, clockwise) {
+                    return true;
+                }
+            }
+            false
+        }
+        walk(&mut tab.root, focus, clockwise)
+    }
+
     /// Cycle 345: 0-based index of the focused pane within its tab's
     /// in-order traversal of the binary split tree. Used by
     /// `InsertPaneNumber` + `InsertPanePadded` to send the pane index
