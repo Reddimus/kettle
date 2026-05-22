@@ -138,6 +138,11 @@ pub struct Overlay {
     pub palette_query: Option<String>,
     /// The ranked command labels (selected one marked) for the palette.
     pub palette_hint: String,
+    /// Cycle 372 (Terminator parity, edit-title overlay UX): the
+    /// in-progress title-edit text + a scope label for the prompt
+    /// (e.g. "Edit window title:" / "Edit tab title:" /
+    /// "Edit pane title:"). `None` when no edit is in progress.
+    pub edit_title: Option<(String, String)>,
     /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
     pub window_focused: bool,
     /// Cursor is in its "on" blink phase.
@@ -1039,6 +1044,29 @@ impl Renderer {
                 "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
                 overlay.ssh_hint
             );
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some((label_prefix, q)) = &overlay.edit_title {
+            // Cycle 372 (Terminator parity, edit-title overlay UX):
+            // a thin bar at the bottom of the window mirroring the
+            // shape of the cycle-X palette + ssh-input overlays.
+            // Uses palette[3] (yellow) so it's visually distinct
+            // from the palette (5) and ssh (4) bars.
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[3], 0.96));
+            let label = format!("  ✎ {label_prefix} {q}_   (Enter apply · Esc cancel)");
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
             self.search_buffer

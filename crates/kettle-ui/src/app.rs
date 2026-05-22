@@ -1906,6 +1906,16 @@ impl App {
             .unwrap_or(0.0);
 
         let context_menu = self.context_menu_overlay();
+        // Cycle 372: marshal the in-progress Edit-title state for
+        // the render layer so the user sees what they're typing.
+        let edit_title: Option<(String, String)> = self.editing_title.as_ref().map(|s| {
+            let label = match s.scope {
+                TitleEditScope::Window => "Edit window title:",
+                TitleEditScope::Tab => "Edit tab title:",
+                TitleEditScope::Pane => "Edit pane title:",
+            };
+            (label.to_string(), s.input.clone())
+        });
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
@@ -1914,6 +1924,7 @@ impl App {
                 ssh_hint,
                 palette_query,
                 palette_hint,
+                edit_title,
                 hint_labels,
                 window_focused,
                 cursor_visible,
@@ -1948,6 +1959,7 @@ impl App {
             ssh_hint,
             palette_query,
             palette_hint,
+            edit_title,
             hint_labels,
             window_focused,
             cursor_visible,
