@@ -32,7 +32,7 @@ Each cycle has the same shape:
 4. **Pin the contract with a test — and add a drift guard if the
    bug class can recur.** Hand-rolled scenarios that would have
    failed pre-fix. Most cycles add 1–3 assertions; the workspace
-   test suite grows ~1/cycle (currently 318+, see
+   test suite grows ~1/cycle (currently 319+, see
    `cargo test --workspace`).
 
    A **drift guard** is a separate test that catches *the next
