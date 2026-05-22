@@ -4131,6 +4131,98 @@ mod tests {
     }
 
     #[test]
+    fn cursor_in_status_bar_band_geometry() {
+        // Cycle 321 drift guard for the cycle-320 status-bar
+        // cursor-icon fix. Same shape as the cycle-264 tab-bar
+        // drift guard above. Pins:
+        //   - Off mode → always false (status bar invisible).
+        //   - Top mode → [0, bar_h).
+        //   - Bottom mode → [surface - bar_h, surface].
+        //   - bar_h == 0 → false regardless of mode (cycle-296
+        //     `status_bar_h()` returns 0 on the Off branch even
+        //     before the mode check; this is the same defensive
+        //     contract).
+        use super::cursor_in_status_bar_band;
+        use kettle_config::StatusBarMode;
+        // Off → always false.
+        assert!(!cursor_in_status_bar_band(
+            0.0,
+            22.0,
+            600.0,
+            StatusBarMode::Off
+        ));
+        assert!(!cursor_in_status_bar_band(
+            300.0,
+            22.0,
+            600.0,
+            StatusBarMode::Off
+        ));
+        // Top: [0, 22).
+        assert!(cursor_in_status_bar_band(
+            0.0,
+            22.0,
+            600.0,
+            StatusBarMode::Top
+        ));
+        assert!(cursor_in_status_bar_band(
+            21.0,
+            22.0,
+            600.0,
+            StatusBarMode::Top
+        ));
+        assert!(!cursor_in_status_bar_band(
+            22.0,
+            22.0,
+            600.0,
+            StatusBarMode::Top
+        ));
+        assert!(!cursor_in_status_bar_band(
+            300.0,
+            22.0,
+            600.0,
+            StatusBarMode::Top
+        ));
+        // Bottom: [578, 600].
+        assert!(cursor_in_status_bar_band(
+            578.0,
+            22.0,
+            600.0,
+            StatusBarMode::Bottom
+        ));
+        assert!(cursor_in_status_bar_band(
+            600.0,
+            22.0,
+            600.0,
+            StatusBarMode::Bottom
+        ));
+        assert!(!cursor_in_status_bar_band(
+            577.0,
+            22.0,
+            600.0,
+            StatusBarMode::Bottom
+        ));
+        assert!(!cursor_in_status_bar_band(
+            0.0,
+            22.0,
+            600.0,
+            StatusBarMode::Bottom
+        ));
+        // bar_h == 0 → out of band regardless of mode.
+        assert!(!cursor_in_status_bar_band(
+            0.0,
+            0.0,
+            600.0,
+            StatusBarMode::Top
+        ));
+        assert!(!cursor_in_status_bar_band(
+            0.0,
+            0.0,
+            600.0,
+            StatusBarMode::Bottom
+        ));
+    }
+
+    #[test]
     fn chrome_cursor_icon_overrides_only_for_chrome() {
         use super::chrome_cursor_icon;
         use winit::window::CursorIcon;
