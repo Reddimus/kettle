@@ -1457,5 +1457,22 @@ mod tests {
                 .iter()
                 .any(|l| l == "status-bar: Bottom")
         );
+
+        // Triggers branch — cycle 472 fills the gap cycle-471 left.
+        // Two patterns to verify the count is plural-rendered.
+        let mut cfg = kettle_config::Config::default();
+        cfg.triggers.push(kettle_config::OutputTrigger {
+            pattern: "error:.*".into(),
+            action: kettle_config::TriggerAction::Urgency,
+        });
+        cfg.triggers.push(kettle_config::OutputTrigger {
+            pattern: "warning:.*".into(),
+            action: kettle_config::TriggerAction::Urgency,
+        });
+        assert!(
+            extra_check_config_lines(&cfg)
+                .iter()
+                .any(|l| l == "triggers: 2 pattern(s) configured (cycle-289 Urgency action)")
+        );
     }
 }
