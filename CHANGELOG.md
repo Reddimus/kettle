@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-05-22
+
+  cycle 382 — Per-pane titlebar TITLE TEXT render. cycle-379's
+              background quad now actually displays each pane's
+              title via a parallel `pane_titlebar_buffers` field
+              on Renderer. Focus state picks fg color
+              (transmit_fg / inactive_fg); empty title falls
+              back to 'kettle'.
+
+The per-pane titlebar is now FULLY visible end-to-end:
+  - Background quad colored per focused/unfocused state (cycle 379)
+  - Title text rendered in the configured fg variant (cycle 382)
+  - Hit-testing, group label, activity dot, size-text, cell-content
+    layout-shift remain titlebar Bucket-D follow-ups.
+
+### Titlebar Bucket-D progress
+
+  ✅  2 (partial): visible background quad (cycle 379)
+  ✅  3 (partial): title text render (cycle 382)
+  ⌛  3 (remainder): activity dot in titlebar
+  ⌛  4: color variants for receive (group-broadcast) state
+  ⌛  5: hit-test for click + drag-detach region
+  ⌛  6: title_hide_sizetext + icon_bell wired
+  ⌛  7: edit-title overlay anchors to clicked pane's titlebar
+        (existing cycle-369/372 overlay works at window-level
+         now; per-pane click is the follow-up)
+  ⌛  8: inline group-name edit
+  ⌛  9: title_at_bottom flip
+  ⌛  10: pixel-tolerance --screenshot acceptance test
+
+4 of 10 titlebar sub-cycles per design doc are functional.
+
+Workspace tests stay at 304.
+
 ## [1.17.0] — 2026-05-22
 
 Plugin Bucket-D COMPLETE end-to-end + first user-visible
