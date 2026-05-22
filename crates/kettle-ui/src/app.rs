@@ -429,6 +429,10 @@ pub enum TitleEditScope {
     /// Edit the focused pane's title (used for the future per-pane
     /// titlebar render Bucket-D + as the OSC-1 equivalent).
     Pane,
+    /// Cycle 407 (Terminator parity, titlebar Bucket-D sub-cycle 8):
+    /// edit the focused pane's broadcast-group name. Writes to
+    /// pane.group_name. Empty input clears the group.
+    Group,
 }
 
 #[derive(Debug, Clone)]
