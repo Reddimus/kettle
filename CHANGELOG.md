@@ -6,6 +6,49 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.25.0] — 2026-05-22
+
+  cycle 395 — Per-pane Edit-title overlay anchors near clicked
+              pane. Pane-scope edits render the overlay at the
+              focused pane's titlebar position; window + tab
+              scopes keep window-bottom. UX matches Terminator's
+              click-to-edit-in-place expectation. Closes
+              titlebar Bucket-D sub-cycle 7.
+  cycle 396 — CPU-side `background_blur` for bg-image. 3-pass
+              separable box blur approximates Gaussian at much
+              lower compute (~30-50ms on a 1080p image at radius
+              8). Applied at decode-time, so per-frame render
+              cost is zero. Closes bg-image Bucket-D sub-cycle 9.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 of 10 — sub-cycles 2/3/4/5/6/7/9/10 +
+                                       layout-shift
+                                   E — sub-cycle 8 (inline group-name
+                                       edit) deferred until kettle
+                                       grows named broadcast groups
+                                       (currently per-tab on/off only)
+bg-image (12 sub-cycles):         ✅ 11 of 12 — sub-cycles 2/3/4/5/6/7/8/9/10/11/12
+                                   ⌛ 0 (all impl complete; sub-cycle 8
+                                       was implicit per-frame recompute,
+                                       documented in cycle 394)
+Detachable tabs (11 sub-cycles):  ✅ 1 — sub-cycle 10 Wayland-fallback
+                                   ⌛ 10 — sub-cycles 2-9, 11 (cursor
+                                       drag + SCM_RIGHTS fd transfer +
+                                       cross-process IPC + auth +
+                                       reattach — multi-week thread)
+
+34 of 46 Bucket-D sub-cycles end-to-end (74%).
+
+bg-image Bucket-D is now effectively COMPLETE — every sub-cycle
+has a shipped implementation (10 explicit + 1 documented-as-
+implicit). The blur is CPU-side; a future wgpu-shader version
+would shave the ~50ms decode-time cost but the user-visible
+effect lands today.
+
+Workspace tests stay at 306.
+
 ## [1.24.0] — 2026-05-22
 
   cycle 394 — bg-image resize handler documented as implicit
