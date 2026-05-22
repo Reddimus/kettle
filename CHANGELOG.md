@@ -6,7 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-Post-v1.36.0 polish.
+## [1.37.0] — 2026-05-22
+
+UX + observability release. One real exit-action=restart bug fix,
+six new `--check-config` echo lines covering all the Terminator-
+parity opt-in keys (accent, force-no-bell, triggers, lua-sandbox,
+bg-image, window-flags), three new example-config keys + 3-key
+drift-guard extension, build-system fix follow-ups, and supply-
+chain hygiene.
 
   cycle 450 — README + INSTALL.md version pins bumped to v1.36.0.
 
@@ -24,6 +31,76 @@ Post-v1.36.0 polish.
               only one respawn happens regardless of how many
               TermEvent variants the engine emits per child
               death.
+
+  cycle 454 — Cycle-452 in-code comment cites the two
+              alacritty_terminal source-line refs
+              (event_loop.rs:263 + term/mod.rs:810) that
+              confirm both events ARE emitted on a normal
+              shell exit. Future contributors don't have to
+              re-derive the dedup rationale.
+
+  cycle 455 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries
+              extended to v1.36.0 (cycles 411-452, 5 releases,
+              308 → 319 tests).
+
+  cycle 456 — `Justfile` gained `just deny` (`cargo deny check`)
+              + `just machete` (`cargo machete`) recipes
+              mirroring the existing CI workflows. Contributors
+              can pre-flight supply-chain hygiene locally —
+              would have caught cycle-444's stale ignore one
+              cycle earlier.
+
+  cycle 457 — `docs/INSTALL.md` line 143 MSRV said "1.88" but
+              Cargo.toml + README badge + INSTALL line 49 said
+              1.89 (cycle-250 bump). Pointed the stray line at
+              `Cargo.toml`'s `rust-version` field so future
+              bumps only need the toml change to ripple.
+
+  cycle 458 — Normalized `docs/TESTING.md`, `docs/INSTALL.md`,
+              and `CONTRIBUTING.md` to 319+ tests + v1.36.0
+              baseline (cycle-446 drift guard + v1.36.0 release
+              had left three docs trailing).
+
+  cycle 459 — Three Terminator-parity config keys (accent-color
+              cycle 309, force-no-bell cycle 349, trigger cycle
+              289) were in the parser but missing from the
+              embedded example config. Users following the
+              cycle-227 first-launch bootstrap never saw them.
+              Added commented-out defaults + extended the
+              cycle-413 drift guard from 9 → 12 pinned keys.
+
+  cycle 460 — **Fix-my-own-bug.** Cycle 459's trigger example
+              used a non-existent `trigger = REGEX = ACTION`
+              syntax. v1's parser hardcodes the action to
+              Urgency and takes the entire post-`=` value as
+              the regex; a copy-paste would have ended up with
+              "= notify" literally in the pattern. Corrected
+              to `trigger = REGEX` with a "do NOT add a second
+              `=`" warning.
+
+  cycle 461 — `--check-config` summary echoes four Terminator-
+              parity opt-in keys when set:
+                accent:   #RRGGBB
+                bell:     force-no-bell=true ...
+                triggers: N pattern(s) configured ...
+                lua:      sandbox=Trusted
+              Guarded so default-config output stays terse.
+              Symmetric with the existing font-features /
+              styled-families echoes. End-to-end verified.
+
+  cycle 462 — `--check-config` also echoes bg-image when set:
+                bg-image: PATH (mode=…, blur=…, darkness=…)
+              Most visually-impactful opt-in surface; the
+              cycle-461 sweep had skipped it.
+
+  cycle 463 — `--check-config` also echoes window-flags when
+              non-default:
+                window-flags: state=Fullscreen borderless=true
+                              always-on-top=true
+              Easy-to-set-then-forget Terminator-parity keys
+              (cycles 339/342) that the summary used to
+              silently drop.
 
 ## [1.36.0] — 2026-05-22
 
