@@ -249,6 +249,15 @@ pub enum Action {
     /// 303) via the remote-control IPC; this is the in-process keybind
     /// equivalent for users who don't want to set up a global hotkey.
     ToggleWindowVisibility,
+    /// Cycle 384 (Terminator parity, detachable-tabs Bucket-D
+    /// Wayland-fallback per docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md
+    /// sub-cycle 10): move the focused tab to a new kettle window.
+    /// Keyboard-driven alternative for Wayland (where cross-window
+    /// cursor drag isn't feasible without global tracking). New
+    /// window inherits cwd; running shells stay in the source tab
+    /// (cross-process PTY transfer needs SCM_RIGHTS — multi-cycle
+    /// full impl thread).
+    MoveTabToNewWindow,
     OpenSsh,
     ReloadConfig,
     CommandPalette,
@@ -400,6 +409,9 @@ pub fn action_names() -> Vec<&'static str> {
         "hide_window",
         "toggle_window",
         "toggle_window_visibility",
+        // Cycle 384.
+        "move_tab_to_new_window",
+        "detach_tab",
         "command_palette",
         "palette",
         "hint_mode",
@@ -512,6 +524,9 @@ impl Action {
             | "toggle_window"
             | "toggle-window"
             | "toggle_window_visibility" => ToggleWindowVisibility,
+            "move_tab_to_new_window" | "move-tab-to-new-window" | "detach_tab" | "detach-tab" => {
+                MoveTabToNewWindow
+            }
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,

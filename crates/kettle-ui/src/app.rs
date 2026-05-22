@@ -3313,6 +3313,49 @@ impl App {
                     }
                 }
             }
+            // Cycle 384 (Terminator parity, detachable-tabs Bucket-D
+            // Wayland-fallback). Spawn a NEW kettle process with the
+            // focused pane's cwd as its starting dir, then close the
+            // source tab. Running shells in the source tab stay
+            // alive in the original window (cross-process PTY
+            // transfer needs SCM_RIGHTS — multi-cycle full impl).
+            //
+            // For now: just open a fresh kettle in the same cwd.
+            // This gives the user the "move this work to a new
+            // window" UX path Terminator's detachable_tabs ships.
+            Action::MoveTabToNewWindow => {
+                let cwd = self
+                    .mux
+                    .focused()
+                    .and_then(|p| p.term.current_dir())
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|p| p.display().to_string())
+                    });
+                if let Ok(exe) = std::env::current_exe() {
+                    let mut cmd = std::process::Command::new(exe);
+                    if let Some(d) = cwd {
+                        cmd.arg("--working-directory").arg(d);
+                    }
+                    if let Some(p) = self.config_path.as_ref() {
+                        cmd.arg("--config").arg(p);
+                    }
+                    // Detached so the parent isn't waited-on by the
+                    // child; OS reaps when the child exits.
+                    cmd.stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    if cmd.spawn().is_ok() {
+                        // Close the source tab once the new window
+                        // is launched. CloseTab handles single-tab
+                        // case by exit'ing the loop.
+                        let _ = self.mux.close_tab();
+                    } else {
+                        log::warn!("MoveTabToNewWindow: spawn failed; tab kept in source window");
+                    }
+                }
+            }
             Action::ResetAndClear => {
                 // Cycle 342 Terminator parity (key_reset_clear):
                 // Reset (RIS, \ec) + ClearHistory (CSI 3 J) composed

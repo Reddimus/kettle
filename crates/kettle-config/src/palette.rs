@@ -64,6 +64,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll half page down", ScrollPageDownHalf),
         ("Paste primary selection (X11)", PastePrimary),
         ("Toggle window visibility", ToggleWindowVisibility),
+        ("Move tab to new window", MoveTabToNewWindow),
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
         ("Reset terminal", Reset),
@@ -217,6 +218,7 @@ mod tests {
             ScrollPageDownHalf,
             PastePrimary,
             ToggleWindowVisibility,
+            MoveTabToNewWindow,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -295,6 +297,7 @@ mod tests {
                 | ScrollPageDownHalf
                 | PastePrimary
                 | ToggleWindowVisibility
+                | MoveTabToNewWindow
                 | GotoTab(_) => {}
             }
         }
