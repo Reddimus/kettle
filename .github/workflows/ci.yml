@@ -262,24 +262,24 @@ jobs:
           # silently checked the default path even when --profile
           # was set — bug class is the silent-fallback at the CLI
           # surface. Write a tiny profile file with a deliberately
-          # malformed value, then assert --check-config flags it
-          # WHEN --profile is set (and doesn't when it isn't).
+          # malformed value, then assert the EXIT CODE goes non-zero
+          # when --profile is set (--check-config exits non-zero
+          # whenever it finds issues — cycle 194 contract).
+          # Cycle 318: pivoted from grep-on-output (flaky on Windows
+          # bash where the if-condition's pipe semantics differed)
+          # to a direct exit-code check.
           mkdir -p ~/.config/kettle/profiles
           echo 'font-size = not_a_number' > ~/.config/kettle/profiles/cibad.config
-          # --profile picks up the file → malformed value surfaces:
-          if cargo run -q -p kettle -- --profile cibad --check-config 2>&1 \
-              | grep -qE 'font-size'; then
-            echo "✓ --profile cibad --check-config surfaces malformed value"
-          else
-            echo "::error::--profile cibad --check-config did NOT surface malformed font-size"
-            cargo run -q -p kettle -- --profile cibad --check-config 2>&1
-            exit 1
-          fi
-          # Without --profile, the default config is checked instead
-          # and the cibad profile's malformed line is invisible:
-          # (no assertion needed beyond "command exits 0 cleanly" —
-          # the previous --check-config line in this script already
-          # asserted status: OK).
+          # --profile picks up the file → check-config exits non-zero:
+          out=$(cargo run -q -p kettle -- --profile cibad --check-config 2>&1) && \
+              { echo "::error::--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
+                echo "$out"; \
+                exit 1; }
+          echo "$out" | grep -q 'font-size' && \
+              echo "✓ --profile cibad --check-config surfaces malformed font-size" || \
+              { echo "::error::--profile cibad output missing 'font-size' diagnostic"; \
+                echo "$out"; \
+                exit 1; }
           rm -f ~/.config/kettle/profiles/cibad.config
           # Cycle 229: --shell-integration <bash|zsh|fish> emits the
           # embedded shell-integration/kettle.{bash,zsh,fish} snippet.
