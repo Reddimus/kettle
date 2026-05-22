@@ -39,6 +39,11 @@ pub enum LuaCommand {
     /// keybind grammar accepts: `new_tab`, `split_right`,
     /// `toggle_vi_mode`, etc.
     ExecAction(String),
+    /// `kettle.notify(title, body)` (cycle 371) → desktop notification
+    /// via notify-rust. Fires once kettle drains commands so a script
+    /// running before the first paint doesn't race the notification
+    /// daemon.
+    Notify { title: String, body: String },
 }
 
 /// Cycle 365 (Terminator plugin parity, design doc:
@@ -159,6 +164,25 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.exec_action")?;
+        // Cycle 371 (plugin sub-cycle 7): kettle.notify(title, body?)
+        // queues a desktop notification. Body is optional;
+        // `kettle.notify('Build done')` works too.
+        let pending_for_notify = Arc::clone(&pending);
+        kettle_tbl
+            .set(
+                "notify",
+                lua.create_function(move |_, args: mlua::Variadic<String>| {
+                    let mut iter = args.into_iter();
+                    let title = iter.next().unwrap_or_default();
+                    let body = iter.next().unwrap_or_default();
+                    pending_for_notify
+                        .lock()
+                        .map(|mut v| v.push(LuaCommand::Notify { title, body }))
+                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.notify")?;
         // Cycle 365 (Terminator plugin parity foundation):
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table

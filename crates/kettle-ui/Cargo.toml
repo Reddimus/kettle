@@ -32,6 +32,7 @@ log.workspace = true
 # Future sub-cycles add send_text + event hooks.
 mlua.workspace = true
 notify = "8.2.0"
+notify-rust.workspace = true
 open = "5.3.5"
 pollster = "0.4.0"
 # Cycle 290: triggers (cycle 289 config) compile to `regex::Regex`

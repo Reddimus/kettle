@@ -571,6 +571,25 @@ pub struct App {
     lua_startup_fired: bool,
 }
 
+/// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
+/// desktop notification with the given title + optional body. Wraps
+/// `notify-rust::Notification` so the caller doesn't need to import
+/// it directly. Failure modes degrade silently to log::warn — a
+/// headless run (no DBUS_SESSION_BUS_ADDRESS) or a sandboxed
+/// environment (snap/flatpak) where the notification daemon isn't
+/// reachable doesn't crash kettle, just skips the notification.
+pub(crate) fn fire_notify(title: &str, body: &str) {
+    let mut n = notify_rust::Notification::new();
+    n.summary(title);
+    if !body.is_empty() {
+        n.body(body);
+    }
+    n.appname("kettle");
+    if let Err(e) = n.show() {
+        log::warn!("kettle.notify: notification send failed: {e}");
+    }
+}
+
 impl App {
     pub fn run() -> Result<()> {
         Self::run_with(crate::Options::default())
@@ -717,6 +736,9 @@ impl App {
                                         "lua kettle.exec_action: unknown action name {name:?}"
                                     );
                                 }
+                            }
+                            crate::LuaCommand::Notify { title, body } => {
+                                fire_notify(&title, &body);
                             }
                         }
                     }
@@ -1609,6 +1631,9 @@ impl App {
                                 );
                             }
                         }
+                        crate::LuaCommand::Notify { title, body } => {
+                            fire_notify(&title, &body);
+                        }
                     }
                 }
             }
@@ -2477,6 +2502,9 @@ impl App {
                                     );
                                 }
                             }
+                            crate::LuaCommand::Notify { title, body } => {
+                                fire_notify(&title, &body);
+                            }
                         }
                     }
                 }
@@ -2554,6 +2582,9 @@ impl App {
                                          unknown action name {name:?}"
                                     );
                                 }
+                            }
+                            crate::LuaCommand::Notify { title, body } => {
+                                fire_notify(&title, &body);
                             }
                         }
                     }
@@ -3964,6 +3995,9 @@ impl ApplicationHandler<UserEvent> for App {
                                      unknown action name {name:?}"
                                 );
                             }
+                        }
+                        crate::LuaCommand::Notify { title, body } => {
+                            fire_notify(&title, &body);
                         }
                     }
                 }
