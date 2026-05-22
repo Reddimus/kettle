@@ -6,6 +6,53 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-05-22
+
+Titlebar Bucket-D + detachable-tabs Wayland-fallback push.
+
+  cycle 383 — Cell-content layout-shift for per-pane titlebar.
+              build_pane gets a `pane_titlebar_h` parameter;
+              cells, images, search highlights, hint labels all
+              shift below the bar. Closes titlebar sub-cycle 2.
+  cycle 384 — `Action::MoveTabToNewWindow` (detachable-tabs
+              Bucket-D Wayland-fallback sub-cycle 10). Spawns
+              a new kettle process with focused pane's cwd +
+              closes source tab. Cross-process PTY transfer
+              for the cursor-drag case remains a multi-cycle
+              SCM_RIGHTS thread.
+  cycle 385 — `title-at-bottom` config wired to render. Bar
+              + title text flip to bottom of pane. Closes
+              titlebar sub-cycle 9.
+  cycle 386 — Titlebar size text + icon_bell. Format:
+              "title  WxH  🔔". `title-hide-sizetext` skips
+              the WxH; `icon_bell` skips the bell glyph.
+              Closes titlebar sub-cycle 6.
+
+### Titlebar Bucket-D status
+
+  ✅  2: cell-content layout-shift (cycle 383)
+  ✅  3: title text render (cycle 382)
+  ✅  6: title_hide_sizetext + icon_bell (cycle 386)
+  ✅  9: title_at_bottom flip (cycle 385)
+  ⌛  4: receive/group color variants
+  ⌛  5: hit-testing for click + drag-detach
+  ⌛  7: edit-title overlay per-pane anchor
+  ⌛  8: inline group-name edit
+  ⌛  10: pixel acceptance test
+
+6 of 10 titlebar sub-cycles complete + visible end-to-end.
+
+### Detachable Tabs Bucket-D status
+
+  ✅  10: Wayland-fallback keyboard alternative (Action::
+        MoveTabToNewWindow). Spawns new window with cwd
+        inheritance; PTY-transfer remains the SCM_RIGHTS
+        thread.
+  ⌛  2-9: cross-window cursor drag, IPC, fd transfer,
+        cancel/reattach.
+
+Workspace tests stay at 304.
+
 ## [1.18.0] — 2026-05-22
 
   cycle 382 — Per-pane titlebar TITLE TEXT render. cycle-379's
