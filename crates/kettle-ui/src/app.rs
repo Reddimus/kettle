@@ -2591,6 +2591,24 @@ impl App {
         let Some(path) = self.startup.remote_file.clone() else {
             return;
         };
+        // Cycle 315: cap the read at 1 MB. A legitimate command is
+        // dozens of bytes; even a chatty automation pushing 1000
+        // commands fits in ~64 KB. 1 MB is 10× safety margin. A
+        // larger file likely means a runaway script or an accidental
+        // log redirect (`some-cmd >> remote.cmd` instead of
+        // `kettle --remote-send "$(some-cmd)"`); silently truncate
+        // + warn rather than allocate the whole thing.
+        const MAX_REMOTE_BYTES: u64 = 1 << 20; // 1 MB
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size > MAX_REMOTE_BYTES {
+            log::warn!(
+                "remote-command file at {} is {size} bytes (cap {MAX_REMOTE_BYTES}); \
+                 truncating without processing",
+                path.display()
+            );
+            let _ = std::fs::write(&path, "");
+            return;
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(s) if !s.is_empty() => s,
             _ => return,
