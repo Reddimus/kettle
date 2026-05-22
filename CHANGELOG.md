@@ -6,6 +6,57 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.27.0] — 2026-05-22
+
+Two more detachable-tabs Bucket-D foundations.
+
+  cycle 399 — `kettle_ui::fd_transport` SCM_RIGHTS module.
+              send_fds / recv_fds on Unix sockets via
+              libc::sendmsg + ancillary cmsg + SCM_RIGHTS.
+              Unix-only (#[cfg(unix)]). Windows + Wayland get
+              the cycle-384 keyboard-driven fallback.
+              Closes detachable-tabs Bucket-D sub-cycle 3.
+
+  cycle 400 — `kettle_ui::detach::DragState` FSM. Pure-data
+              state machine with 4 states (Idle, ArmedInside,
+              DraggingInside, DraggingOutside) + 5 transitions
+              (on_mouse_down_on_tab, on_mouse_move,
+              on_mouse_up, on_abort, is_dragging).
+              4px drag-threshold matches GTK + most desktops.
+              Closes detachable-tabs Bucket-D sub-cycle 5.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 — sub-cycles 2-7, 9, 10 +
+                                       layout-shift
+                                   E — sub-cycle 8 (group-name
+                                       edit) Bucket-E
+bg-image (12 sub-cycles):         ✅ 11 — all implemented
+                                       (cycle 396 closed sub-
+                                       cycle 9 blur shader as
+                                       CPU-side decode-time)
+Detachable tabs (11 sub-cycles):  ✅ 6 — sub-cycles 1 (design),
+                                       2 (serialize), 3 (SCM_RIGHTS),
+                                       4 (extract/insert), 5
+                                       (drag FSM), 10 (Wayland
+                                       fallback)
+                                   ⌛ 5 — sub-cycles 6 (cursor
+                                       detection), 7 (cross-
+                                       process IPC + fd transfer),
+                                       8 (new-window-on-drop), 9
+                                       (cancel path), 11 (e2e test)
+
+39 of 46 Bucket-D sub-cycles end-to-end (85%).
+
+The 5 remaining detachable-tabs sub-cycles are all integration
+work: each composes the foundations now shipped (FSM, SCM_RIGHTS,
+serialize/extract/insert, Wayland fallback) into the cross-
+process workflow. Multi-week per the design doc; pickable
+cleanly by future sessions.
+
+Workspace tests stay at 308.
+
 ## [1.26.0] — 2026-05-22
 
 Detachable-tabs Bucket-D foundation APIs.
