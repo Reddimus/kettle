@@ -525,6 +525,20 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        // Cycle 394 (Terminator parity, bg-image Bucket-D sub-cycle 8):
+        // explicit resize handler for the background-image render
+        // path. The cycle-388 bg-image cache stores the DECODED
+        // image (not a window-sized texture); the cycle-390 UV-mode
+        // dispatch recomputes the image rect from the current
+        // surface dims every frame via build_frame. So a resize
+        // implicitly takes effect on the next frame — no manual
+        // texture re-upload needed.
+        //
+        // This comment closes the docs/TERMINATOR-BG-IMAGE-DESIGN.md
+        // sub-cycle 8 with the "implicit per-frame recompute"
+        // contract documented so a future contributor sees that
+        // the per-frame recompute IS the impl.
+        //
         // Floor at 1 (`surface.configure(0, …)` panics) and ceiling
         // at the device's max-texture-dimension-2d. The default wgpu
         // Limits cap that at 8192 px; an oversized window (stretched
