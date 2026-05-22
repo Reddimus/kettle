@@ -4,7 +4,7 @@ kettle is built one *audit cycle* at a time — each cycle picks one bug or
 parity gap, fixes it with a durable implementation, pins the contract with
 a test, and lands behind the full gate. This file explains how a cycle
 looks so a new contributor can land their first change the same shape as
-the existing 300+ in [CHANGELOG.md](CHANGELOG.md).
+the existing 440+ in [CHANGELOG.md](CHANGELOG.md).
 
 Participation in this project — issues, PRs, discussions, code review —
 is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
@@ -32,13 +32,13 @@ Each cycle has the same shape:
 4. **Pin the contract with a test — and add a drift guard if the
    bug class can recur.** Hand-rolled scenarios that would have
    failed pre-fix. Most cycles add 1–3 assertions; the workspace
-   test suite grows ~1/cycle (currently 267+, see
+   test suite grows ~1/cycle (currently 318+, see
    `cargo test --workspace`).
 
    A **drift guard** is a separate test that catches *the next
    time someone reintroduces the same shape of bug* — not just
    the specific instance you fixed. Drift guards are how kettle
-   stays consistent across 300+ cycles without regressing. Three
+   stays consistent across 440+ cycles without regressing. Three
    kinds you'll see in the codebase:
 
    - **Exhaustive-match guards.** When a new `Action` variant is
