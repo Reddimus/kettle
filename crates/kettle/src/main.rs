@@ -387,12 +387,9 @@ fn main() -> anyhow::Result<()> {
         // configuring a bunch of hosts wanted to verify the parse
         // *from the CLI* without launching kettle. Same `--config FILE`
         // override convention as the rest of the introspection
-        // commands; falls back to the default config path.
-        let cfg = match cli
-            .config
-            .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
+        // commands; falls back to the default config path. Cycle
+        // 313: also honors `--profile NAME`.
+        let cfg = match resolve_config_path(&cli) {
             Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
         };
@@ -423,11 +420,8 @@ fn main() -> anyhow::Result<()> {
         // had to restart kettle and inspect by hand to confirm a
         // `keybind = …` line took effect; now they can introspect from
         // the CLI in one shot.
-        let lines = match cli
-            .config
-            .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
+        // Cycle 313: honor `--profile NAME` here too.
+        let lines = match resolve_config_path(&cli) {
             Some(p) if p.exists() => {
                 let cfg = kettle_config::Config::load_from(&p);
                 kettle_config::keybinds::describe(&cfg.keybinds)
@@ -440,11 +434,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.config_path {
-        match cli
-            .config
-            .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
+        // Cycle 313: honor `--profile NAME` here too.
+        match resolve_config_path(&cli) {
             Some(p) => println!("{}", p.display()),
             None => println!("(no config path resolvable)"),
         }
@@ -459,24 +450,12 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.check_config {
-        // Cycle 312: honor `--profile NAME` here too. Pre-fix, the
-        // resolution lookup only checked `cli.config` and fell back
-        // to the default config path. A user running
-        // `kettle --profile dev --check-config` would silently check
-        // `<config-dir>/config` instead of `profiles/dev.config`,
-        // missing typos the runtime path WOULD load. Mirrors the
-        // windowed-run resolution at line 780+ — `--config FILE`
-        // wins over `--profile NAME`, falls through to default when
-        // both omitted.
-        let path = cli
-            .config
-            .clone()
-            .or_else(|| {
-                cli.profile
-                    .as_deref()
-                    .and_then(kettle_config::Config::path_for_profile)
-            })
-            .or_else(kettle_config::Config::default_path);
+        // Cycle 313: route through `resolve_config_path` so this
+        // path honors `--profile NAME` uniformly with every other
+        // introspection flag. Cycle 312 did the same inline; cycle
+        // 313 extracts the helper because the same gap existed at
+        // every other site.
+        let path = resolve_config_path(&cli);
         // Cycle 196: surface read errors explicitly. Pre-fix,
         // `load_from_with_diagnostics` silently returned defaults on
         // any read error (permission denied, ENOENT-after-stat-race,
@@ -687,11 +666,8 @@ fn main() -> anyhow::Result<()> {
         // both unknown keys *and* malformed values, which made it
         // confusing when a screenshot didn't reflect what the user
         // thought their config said.
-        let mut cfg = match cli
-            .config
-            .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
+        // Cycle 313: honor `--profile NAME` here too.
+        let mut cfg = match resolve_config_path(&cli) {
             Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
         };
@@ -820,6 +796,28 @@ fn main() -> anyhow::Result<()> {
 /// `Config::default_path`.
 fn default_remote_file() -> Option<std::path::PathBuf> {
     kettle_config::Config::default_path().and_then(|p| p.parent().map(|d| d.join("remote.cmd")))
+}
+
+/// Cycle 313: resolve the effective config file path from
+/// `--config FILE` / `--profile NAME` / the default path, in that
+/// precedence. Used by every introspection flag (`--check-config`,
+/// `--list-keybinds`, `--list-ssh-hosts`, `--config-path`,
+/// `--screenshot`) so they all honor `--profile` uniformly.
+///
+/// Before this helper, only the windowed-run path (and as of cycle
+/// 312, `--check-config`) honored `--profile`. A user running e.g.
+/// `kettle --profile dev --list-keybinds` would silently get the
+/// default config's keymap rather than the dev profile's — same
+/// silent-fallback shape as cycle 196.
+fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
+    cli.config
+        .clone()
+        .or_else(|| {
+            cli.profile
+                .as_deref()
+                .and_then(kettle_config::Config::path_for_profile)
+        })
+        .or_else(kettle_config::Config::default_path)
 }
 
 /// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
