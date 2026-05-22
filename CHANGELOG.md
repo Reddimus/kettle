@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.35.0] — 2026-05-22
+
 Post-v1.34.0 polish. Plugin-contract refactor finished off, drift
 guards extended, docs caught up to current HEAD.
 
