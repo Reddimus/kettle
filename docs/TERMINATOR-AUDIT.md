@@ -577,3 +577,45 @@ same UX, or an explicit Bucket-E rationale for paradigm-divergent features
 `Terminal::from_raw_fd` in kettle-core for the SCM_RIGHTS live-PTY-
 adoption variant of detachable tabs — a kettle-internal optimization,
 not a missing Terminator feature.
+
+## Post-sweep polish (cycles 411-430, v1.32.0 → v1.34.0, 3 releases)
+
+After the Terminator-parity sweep landed at v1.31.0, cycles 411-430 ran
+a production-grade hardening pass on the new surfaces. Twenty cycles, three
+tagged releases, +8 tests:
+
+  Workspace tests             308 → 316 (+8 drift guards)
+  Tagged releases             v1.32.0 (cycles 411-415) ·
+                              v1.33.0 (cycles 416-419) ·
+                              v1.34.0 (cycles 420-427)
+  Plugin-contract bug fixes   6 silent event-bypass sites covered:
+                              remote-control new-tab → TabAdd
+                              (cycle 423); 3 close_tab paths →
+                              TabClose (cycle 424: SCM_RIGHTS, file-
+                              fallback, ✕-click); 2 new_tab paths →
+                              TabAdd (cycle 425: NewWindow fallback,
+                              exit-action=restart respawn)
+  Real exit-action=restart    cycle 418 closed the cycle-357
+                              "not yet implemented" warn; cycle 420
+                              fixed live-grid vs hardcoded 80x24
+  Refactor                    fire_tab_add_event +
+                              fire_tab_close_event + drain_lua_hook_
+                              commands helpers eliminate ~170 lines
+                              of inline LuaCommand-variant duplication
+                              across all 5 event hooks (cycles 426-428)
+  Docs                        ARCHITECTURE.md detachable-tabs +
+                              plugin + bg-image flows upgraded ASCII
+                              → mermaid (cycles 421-422); CONFIG.md
+                              Terminator-parity-keys table (cycle 415);
+                              INSTALL.md SHA-256 pin example bumped
+                              v1.3.4 → v1.34.0 (cycles 417, 429);
+                              this audit-doc tail
+  Drift guards                cycle 413 pinned 9 load-bearing config
+                              keys in print_default_config_round_trip;
+                              cycle 430 added Notify + SetTheme queue
+                              contract tests
+
+After cycle 430 the kettle plugin contract is consistent across every
+new_tab / close_tab / event-hook call site, with one canonical drain
+path shared by all 5 LuaEvent variants (Startup / TabAdd / TabClose /
+Bell / Output). Adding a sixth event is one new `fire_event` call.
