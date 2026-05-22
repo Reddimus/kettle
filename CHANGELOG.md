@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-05-22
+
+Minor-bump — final config-key wiring batch + all four Bucket-D
+design docs + plugin-system foundation.
+
+### Behavior wirings (cycles 358-360)
+
+  cycle 358 — invert-search direction toggle
+  cycle 359 — geometry-hinting via winit ResizeIncrements
+  cycle 360 — focus = sloppy (focus-follows-mouse)
+
+### Bucket-D design docs shipped (cycles 361-364)
+
+All four multi-cycle Bucket-D items from docs/TERMINATOR-AUDIT.md
+have concrete design docs now, each following the cycle-328/329
+template:
+
+  docs/TERMINATOR-PLUGIN-DESIGN.md          — Lua event-hooks
+  docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md   — per-pane titlebar
+  docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md — cross-window drag
+  docs/TERMINATOR-BG-IMAGE-DESIGN.md        — background image
+
+### Plugin foundation (cycle 365)
+
+  kettle.on(event_name, callback)  — Lua-side registration
+  LuaEvent enum                    — Startup / TabAdd / TabClose / Bell
+  LuaEngine::fire_event(&LuaEvent) — multi-subscriber, error-isolated
+
+Subsequent plugin sub-cycles wire each LuaEvent variant to its
+App emission site.
+
+Workspace tests 300 → 302.
+
 ## [1.11.0] — 2026-05-22
 
 Behavior wiring batch — closes the gap between parsed config keys
