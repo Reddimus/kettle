@@ -669,6 +669,13 @@ fn main() -> anyhow::Result<()> {
                 cfg.window_state, cfg.borderless, cfg.always_on_top
             );
         }
+        // Cycle 470: status-bar (cycle 295) — non-default echo. The
+        // strip subtracts a row from the pane grid, so users debugging
+        // "why is the pane grid 23 rows instead of 24?" should be
+        // able to confirm the setting from --check-config.
+        if cfg.status_bar != kettle_config::StatusBarMode::Off {
+            println!("status-bar: {:?}", cfg.status_bar);
+        }
         // Cycle 201: count and display I/O errors (cycle 196's read
         // failures) as their own category rather than reusing the
         // "malformed value:" prefix — a permission-denied file isn't
