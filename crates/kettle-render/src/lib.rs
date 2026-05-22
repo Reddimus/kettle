@@ -709,6 +709,14 @@ impl Renderer {
                 // color (red). The chip is a small rounded-feeling
                 // square (no shader for actual rounded corners; we get
                 // the chip feel from the pad + opacity choice).
+                //
+                // Cycle 349 (Terminator parity, terminatorlib/config.py:81
+                // `close_button_on_tab`): when false, skip the close
+                // chip + the ✕ glyph entirely. Tab is still closable
+                // via Ctrl+Shift+W; just the visual chrome is removed.
+                if !cfg.close_button_on_tab {
+                    continue;
+                }
                 let (cx, cy, ccw, cch) = s.close;
                 let pad = 5.0_f32;
                 let inner_w = (ccw - pad * 2.0).max(0.0);
@@ -1257,6 +1265,12 @@ impl Renderer {
                 // it independently of the title. Bright on hover, dim
                 // at rest (still readable, but visually subordinate to
                 // the title text). Centered inside `seg.close`.
+                //
+                // Cycle 349: skipped when cfg.close_button_on_tab is
+                // false (matches the quad branch above).
+                if !cfg.close_button_on_tab {
+                    continue;
+                }
                 let (cx, _, ccw, _) = s.close;
                 let hovered = tabbar.hovered_close_idx == Some(s.idx);
                 let close_fg = if hovered {

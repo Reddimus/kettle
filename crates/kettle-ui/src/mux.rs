@@ -699,15 +699,29 @@ impl Mux {
         cwd: Option<&str>,
     ) -> Result<()> {
         let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd, argv)?;
-        self.tabs.push(Tab {
+        let new_tab = Tab {
             root: Node::Leaf(id),
             focus: id,
             zoomed: false,
             last_output_at: None,
             last_seen_at: None,
             bell: false,
-        });
-        self.active = self.tabs.len() - 1;
+        };
+        // Cycle 349 (Terminator parity, terminatorlib/config.py:97
+        // `new_tab_after_current_tab`): when true, insert the new
+        // tab right AFTER the active one (vs at the end of the
+        // tabs list). The new tab becomes active either way.
+        if cfg.new_tab_after_current_tab && self.active + 1 < self.tabs.len() {
+            self.tabs.insert(self.active + 1, new_tab);
+            self.active += 1;
+        } else if cfg.new_tab_after_current_tab && self.active + 1 == self.tabs.len() {
+            // Already at the end — same as appending.
+            self.tabs.push(new_tab);
+            self.active = self.tabs.len() - 1;
+        } else {
+            self.tabs.push(new_tab);
+            self.active = self.tabs.len() - 1;
+        }
         Ok(())
     }
 

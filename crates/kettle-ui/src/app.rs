@@ -1422,10 +1422,17 @@ impl App {
                         self.blink_on = true;
                         self.last_blink = std::time::Instant::now();
                     }
-                    TermEvent::Bell => {
+                    // Cycle 349 (Terminator parity, terminatorlib/
+                    // config.py:103 `force_no_bell`): silence every
+                    // bell flavor regardless of cfg.bell mode. The
+                    // match-guard combines the variant + the cfg
+                    // check so a future tweak doesn't fight clippy's
+                    // collapsible-if lint.
+                    TermEvent::Bell if !self.cfg.force_no_bell => {
                         bell = true;
                         bell_panes.push(pane_id);
                     }
+                    TermEvent::Bell => {}
                     TermEvent::Exit | TermEvent::ChildExit(_) => pane.closed = true,
                     _ => {}
                 }
