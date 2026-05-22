@@ -157,6 +157,25 @@ blank-menu regression class.
 Override the rendered grid size (in cells) for
 .BR \-\-screenshot " / " \-\-screenshot-menu .
 Default 96x28.
+.TP
+.BI \-\-tab\-handoff \ PATH
+Restore a tab from a JSON handoff file written by another
+.B kettle
+process. Used by
+.B Action::MoveTabToNewWindow
+on platforms without SCM_RIGHTS (Windows + Wayland): the source
+process serializes the focused tab + passes the path; the target
+reads + reconstructs. Running shells stay in the source window —
+live PTY-fd transfer needs
+.BR \-\-tab\-handoff\-fd .
+The handoff file is deleted after read (one-shot).
+.TP
+.BI \-\-tab\-handoff\-fd \ FD
+Receive a tab handoff via SCM_RIGHTS over the named inherited
+file descriptor. Used by
+.B Action::MoveTabToNewWindow
+on Linux + macOS where SCM_RIGHTS is available — composes with
+the cycles 397-410 socket-pair + fork+exec source path. Unix-only.
 .
 .SH KEY BINDINGS
 Defaults (every binding remappable via
