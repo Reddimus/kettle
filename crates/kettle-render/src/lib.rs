@@ -369,7 +369,7 @@ pub struct Renderer {
     /// 3+4): decoded background-image cache. Tuple of
     /// (cfg.background_image path, decoded ImageData). Invalidated
     /// + re-decoded when the config path changes.
-    bg_image_cache: Option<(String, kettle_vt::ImageData)>,
+    bg_image_cache: Option<(String, kettle_core::ImageData)>,
 
     font_family: String,
     font_size: f32,
@@ -711,7 +711,7 @@ impl Renderer {
                 .unwrap_or(true);
             if need_reload && let Some(decoded) = bg_image::decode_bg_image(&want) {
                 use std::sync::Arc;
-                let data = kettle_vt::ImageData {
+                let data = kettle_core::ImageData {
                     width: decoded.width,
                     height: decoded.height,
                     rgba: Arc::new(decoded.rgba),
