@@ -620,6 +620,24 @@ impl App {
             initial_cfg.accent_color = Some(rgb);
         }
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
+        // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
+        // was set, init a LuaEngine + run the script once. Failures
+        // log::warn but don't block the launch (same shape as the
+        // cycle-289 trigger compile fallthrough).
+        if let Some(script) = &startup.lua_script {
+            match crate::LuaEngine::new(&initial_cfg.theme_name) {
+                Ok(eng) => {
+                    if let Err(e) = eng.exec_file(script) {
+                        log::warn!("lua script {}: {e:#}", script.display());
+                    } else {
+                        log::info!("lua script {}: executed", script.display());
+                    }
+                }
+                Err(e) => {
+                    log::warn!("lua engine init failed: {e:#}");
+                }
+            }
+        }
         let mut app = App {
             cfg: initial_cfg,
             window: None,

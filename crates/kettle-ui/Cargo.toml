@@ -26,6 +26,11 @@ kettle-config = { version = "1.2.0", path = "../kettle-config" }
 kettle-core = { version = "1.2.0", path = "../kettle-core" }
 kettle-render = { version = "1.2.0", path = "../kettle-render" }
 log.workspace = true
+# Cycle 324: Lua scripting foundation. The `--lua-script PATH`
+# CLI flag executes a Lua file at startup with a `kettle`
+# namespace exposing the introspection surface. WezTerm parity.
+# Future sub-cycles add send_text + event hooks.
+mlua.workspace = true
 notify = "8.2.0"
 open = "5.3.5"
 pollster = "0.4.0"

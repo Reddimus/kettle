@@ -234,6 +234,26 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     remote_file: Option<std::path::PathBuf>,
 
+    /// Execute a Lua script at startup (WezTerm parity, foundation
+    /// sub-cycle). The script runs once with a `kettle` global
+    /// namespace exposing read-only introspection:
+    ///
+    ///   kettle.version()      → string, e.g. "1.7.x"
+    ///   kettle.config_path()  → string|nil, the resolved config path
+    ///   kettle.theme()        → string, the resolved theme name
+    ///
+    /// Subsequent sub-cycles add side-effect APIs (send_text,
+    /// notify, event hooks). Errors in the script print to stderr
+    /// + log::warn but don't fail the kettle launch — same shape
+    /// as malformed-config tolerance.
+    ///
+    /// Example: print kettle's version on every launch:
+    ///
+    ///   echo 'print("kettle " .. kettle.version() .. " starting")' > ~/init.lua
+    ///   kettle --lua-script ~/init.lua
+    #[arg(long, value_name = "PATH", verbatim_doc_comment)]
+    lua_script: Option<std::path::PathBuf>,
+
     /// Run this command in the first tab instead of the shell, e.g.
     /// `kettle -e htop` or `kettle -e ssh box`. Consumes the rest of the
     /// arguments (hyphenated flags for the program are passed through).
@@ -785,6 +805,7 @@ fn main() -> anyhow::Result<()> {
         layout: cli.layout,
         accent_override,
         remote_file,
+        lua_script: cli.lua_script,
     })
 }
 

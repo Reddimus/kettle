@@ -22,10 +22,12 @@
 
 mod app;
 mod input;
+mod lua;
 mod mux;
 mod session;
 
 pub use app::App;
+pub use lua::LuaEngine;
 
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
@@ -55,6 +57,11 @@ pub struct Options {
     /// window. Cross-platform via the existing notify watcher (no
     /// platform-specific socket code yet).
     pub remote_file: Option<std::path::PathBuf>,
+    /// Cycle 324 Lua scripting foundation: when set, App initializes
+    /// a `LuaEngine` and executes the script once at startup with
+    /// the `kettle` namespace installed. Errors are logged + don't
+    /// block the launch.
+    pub lua_script: Option<std::path::PathBuf>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).
