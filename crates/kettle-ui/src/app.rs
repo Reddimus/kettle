@@ -2297,6 +2297,37 @@ impl App {
 
     fn redraw(&mut self) {
         self.drain_events();
+        // Cycle 418: process any pane-restart requests queued during
+        // drain_events. Done HERE (after drain) so we don't hold a
+        // &mut iter into self.mux.panes when spawning a new tab.
+        // event_loop arg is unused for now (the spawn doesn't need it);
+        // kept in the signature for symmetry with other dispatchers.
+        if !self.pending_pane_restarts.is_empty() {
+            let pane_ids: Vec<u64> = std::mem::take(&mut self.pending_pane_restarts);
+            let (cw, ch) = self.cell_px();
+            let waker = self.waker();
+            for pane_id in pane_ids {
+                let restart_info: Option<(Vec<String>, Option<String>)> = self
+                    .mux
+                    .panes
+                    .get(&pane_id)
+                    .map(|p| (p.argv.clone(), p.term.current_dir()));
+                if let Some((argv, cwd)) = restart_info
+                    && let Err(e) = self.mux.new_tab_with(
+                        &self.cfg,
+                        80,
+                        24,
+                        cw,
+                        ch,
+                        waker.clone(),
+                        &argv,
+                        cwd.as_deref(),
+                    )
+                {
+                    log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {e}");
+                }
+            }
+        }
         // Reflect the active pane (incl. after tab/focus switches).
         self.sync_window_title();
         // Advance the cursor blink phase (configurable half-period). Skip
