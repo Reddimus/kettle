@@ -1234,6 +1234,7 @@ version = "1.7.3"
 dependencies = [
  "bitflags 2.11.1",
  "log",
+ "regex",
 ]
 
 [[package]]
