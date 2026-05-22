@@ -980,16 +980,25 @@ impl App {
         Ok(())
     }
 
-    /// Cycle 426: drain commands a Lua event hook just enqueued.
-    /// Handles every LuaCommand variant the cycle-368 inline
-    /// dispatch knows about (SendText / ExecAction / Notify /
-    /// SetTheme). Shared by fire_tab_add_event +
-    /// fire_tab_close_event so the helpers fully replace the
-    /// previously-duplicated inline code in Action::NewTab /
-    /// Action::CloseTab.
+    /// Drain commands a Lua callback (event hook or menu-item)
+    /// just enqueued. Handles every LuaCommand variant: SendText
+    /// (cycle 325), ExecAction (cycle 326), Notify (cycle 371),
+    /// SetTheme (cycle 373).
     ///
-    /// `hook_name` is the hook label used in unknown-action
-    /// warn messages (e.g. "tab_add hook", "tab_close hook").
+    /// Shared canonical drain path. Six call sites:
+    ///   - fire_tab_add_event       (cycles 425-426)
+    ///   - fire_tab_close_event     (cycles 424-426)
+    ///   - bell-event drain         (cycle 427)
+    ///   - output-event drain       (cycle 427)
+    ///   - startup-event drain      (cycle 428)
+    ///   - lua-menu-item click      (cycle 433)
+    ///
+    /// `App::new` cannot use this (early init operates on locals
+    /// before `self` exists). All other LuaCommand consumers route
+    /// here.
+    ///
+    /// `hook_name` is the hook label used in unknown-action warn
+    /// messages (e.g. "tab_add hook", "lua menu-item").
     fn drain_lua_hook_commands(&mut self, hook_name: &str) {
         if let Some(eng) = &self.lua_engine {
             for cmd in eng.drain_commands() {
