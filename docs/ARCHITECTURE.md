@@ -143,10 +143,14 @@ See [TESTING.md](TESTING.md) for the per-crate breakdown
 Comparative analysis behind these choices (with citations) is in
 [RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
 
-## Terminator-parity subsystems (cycles 330-415)
+## Terminator-parity subsystems (cycles 330-410)
 
-The v1.8.0 → v1.32.0 sweep added four major subsystems. Each has its
+The v1.8.0 → v1.31.0 sweep added four major subsystems. Each has its
 own design doc; the architectural integration is summarized here.
+Cycles 411-438 (v1.32.0 → v1.35.0) hardened the plugin contract +
+extended drift guards on top of these — see
+[`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md)'s post-sweep section
+for that polish run.
 
 ### Plugin system (cycles 324, 365-378)
 
