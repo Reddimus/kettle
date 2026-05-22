@@ -149,6 +149,10 @@ Next steps:
        git push origin main
        git push origin "v${VERSION}"
 
-  3. Watch the release workflow:
-       gh run watch \$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+  3. Watch the release workflow (resolve the run AFTER the push
+     lands — the \`run list\` is racy if you copy this command
+     before pushing because it returns the previous run, not the
+     one you just triggered):
+       sleep 5  # let GitHub register the push-triggered run
+       gh run watch \$(gh run list --workflow=release.yml --branch "v${VERSION}" --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
 EOF
