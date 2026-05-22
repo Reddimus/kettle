@@ -176,6 +176,65 @@ file descriptor. Used by
 .B Action::MoveTabToNewWindow
 on Linux + macOS where SCM_RIGHTS is available — composes with
 the cycles 397-410 socket-pair + fork+exec source path. Unix-only.
+.TP
+.BI \-\-remote\-send \ TEXT
+Send
+.I TEXT
+to the running kettle's focused pane via cycle-302 file IPC.
+Cross-platform (no D-Bus needed). Pair with
+.B \-\-remote\-file
+to address a non-default kettle instance.
+.TP
+.BI \-\-remote\-file \ PATH
+Override the IPC drop path used by
+.B \-\-remote\-send " / " \-\-toggle .
+Default is the per-user state dir; useful when running multiple
+kettle instances each with their own remote-control endpoint.
+.TP
+.B \-\-toggle
+Show / hide the running kettle window (Yakuake / Tilda / Ghostty
+quick-terminal parity, cycle 303). Bind a compositor / DE / OS
+global hotkey to
+.B kettle \-\-toggle
+for one-key drop-down access.
+.TP
+.BI \-\-profile \ NAME
+Launch with the named profile (cycle 292). Profiles live in the
+config file as
+.B profile = name=...
+entries — argv-supplied profile overrides the default-startup one
+without editing the config.
+.TP
+.BI \-\-layout \ NAME
+Restore a named saved layout on startup. Layouts are stored
+under
+.IR ~/.config/kettle/layouts/ " ;"
+see
+.B Action::SaveLayoutAs " / " Action::RestoreLayout
+for in-window save/restore.
+.TP
+.BI \-\-accent \ COLOR
+Tint this window's chrome (cycle 309, peacock parity) with the
+named or hex color, so multiple kettle windows are visually
+distinct. Accepts
+.B "#RRGGBB"
+or any palette name from
+.BR \-\-list\-themes .
+.TP
+.BI \-\-lua\-script \ PATH
+Load
+.I PATH
+as the init script instead of the default
+.IR ~/.config/kettle/init.lua .
+The script runs in the cycle-376 sandbox (
+.B lua-sandbox = safe
+by default).
+.TP
+.BI \-\-annotate \ "ROW:COL:TEXT"
+Annotate the
+.B \-\-screenshot
+output with caption text anchored at the given grid cell.
+Repeatable: pass once per caption.
 .
 .SH KEY BINDINGS
 Defaults (every binding remappable via
