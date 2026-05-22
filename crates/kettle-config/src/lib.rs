@@ -365,6 +365,35 @@ pub struct Config {
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
     pub ask_before_closing: AskBeforeClosing,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:81
+    /// `close_button_on_tab`): show ✕ on tabs.
+    pub close_button_on_tab: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:97
+    /// `new_tab_after_current_tab`): insert new tab after the
+    /// currently-active tab (vs at the end).
+    pub new_tab_after_current_tab: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:95
+    /// `title_at_bottom`): per-pane titlebar position. No-op until
+    /// the per-pane titlebar Bucket-D lands; config accepted now.
+    pub title_at_bottom: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
+    /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
+    pub scroll_tabbar: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:83
+    /// `homogeneous_tabbar`): equal-width tabs.
+    pub homogeneous_tabbar: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
+    /// `hide_on_lose_focus`): hide window when it loses focus.
+    /// Quake-style behavior. winit hint; partial OS support.
+    pub hide_on_lose_focus: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:78
+    /// `sticky`): show window on every workspace (X11 only;
+    /// no-op on Wayland and most other platforms).
+    pub sticky: bool,
+    /// Cycle 337 (Terminator parity, terminatorlib/config.py:76
+    /// `hide_from_taskbar`): hide kettle from the OS taskbar.
+    /// Linux-specific (X11 + Wayland support varies).
+    pub hide_from_taskbar: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -525,6 +554,14 @@ impl Default for Config {
             login_shell: false,
             exit_action: ExitAction::Close,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
+            close_button_on_tab: true,
+            new_tab_after_current_tab: false,
+            title_at_bottom: false,
+            scroll_tabbar: false,
+            homogeneous_tabbar: true,
+            hide_on_lose_focus: false,
+            sticky: false,
+            hide_from_taskbar: false,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1278,6 +1315,46 @@ impl Config {
                         "never" => AskBeforeClosing::Never,
                         _ => AskBeforeClosing::MultipleTerminals,
                     };
+                }
+                "close-button-on-tab" | "close_button_on_tab" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.close_button_on_tab = b;
+                    }
+                }
+                "new-tab-after-current-tab" | "new_tab_after_current_tab" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.new_tab_after_current_tab = b;
+                    }
+                }
+                "title-at-bottom" | "title_at_bottom" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.title_at_bottom = b;
+                    }
+                }
+                "scroll-tabbar" | "scroll_tabbar" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.scroll_tabbar = b;
+                    }
+                }
+                "homogeneous-tabbar" | "homogeneous_tabbar" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.homogeneous_tabbar = b;
+                    }
+                }
+                "hide-on-lose-focus" | "hide_on_lose_focus" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.hide_on_lose_focus = b;
+                    }
+                }
+                "sticky" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.sticky = b;
+                    }
+                }
+                "hide-from-taskbar" | "hide_from_taskbar" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.hide_from_taskbar = b;
+                    }
                 }
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {
@@ -2430,6 +2507,41 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn tab_ux_and_window_state_bools_parse() {
+        // Cycle 337 drift guard. 8 bool config keys from
+        // terminatorlib/config.py:75-97.
+        let d = Config::default();
+        assert!(d.close_button_on_tab);
+        assert!(!d.new_tab_after_current_tab);
+        assert!(!d.title_at_bottom);
+        assert!(!d.scroll_tabbar);
+        assert!(d.homogeneous_tabbar);
+        assert!(!d.hide_on_lose_focus);
+        assert!(!d.sticky);
+        assert!(!d.hide_from_taskbar);
+        // Each accepts kebab + underscore form. Probe via specific
+        // field reads (Config doesn't derive PartialEq).
+        assert!(!Config::parse_text("close-button-on-tab = false").close_button_on_tab);
+        assert!(!Config::parse_text("close_button_on_tab = false").close_button_on_tab);
+        assert!(Config::parse_text("new-tab-after-current-tab = true").new_tab_after_current_tab);
+        assert!(Config::parse_text("new_tab_after_current_tab = true").new_tab_after_current_tab);
+        assert!(Config::parse_text("title-at-bottom = true").title_at_bottom);
+        assert!(Config::parse_text("title_at_bottom = true").title_at_bottom);
+        assert!(Config::parse_text("scroll-tabbar = true").scroll_tabbar);
+        assert!(Config::parse_text("scroll_tabbar = true").scroll_tabbar);
+        assert!(Config::parse_text("hide-on-lose-focus = true").hide_on_lose_focus);
+        assert!(Config::parse_text("hide_on_lose_focus = true").hide_on_lose_focus);
+        assert!(Config::parse_text("hide-from-taskbar = true").hide_from_taskbar);
+        assert!(Config::parse_text("hide_from_taskbar = true").hide_from_taskbar);
+        // sticky is single-form (no underscore variant — it's
+        // already a single word).
+        assert!(Config::parse_text("sticky = true").sticky);
+        // homogeneous-tabbar default true, parse_text confirms it
+        // accepts override to false.
+        assert!(!Config::parse_text("homogeneous-tabbar = false").homogeneous_tabbar);
     }
 
     #[test]
