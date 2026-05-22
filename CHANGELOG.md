@@ -6,6 +6,108 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-05-22
+
+Feature-bump release — Terminator-parity audit + sweep (cycles 330-342).
+Adds ~70 new config keys + 18 new Action variants covering the entire
+Terminator config surface. Behavior wiring for some keys + most new
+actions lands in follow-up sub-cycles; the config + Action surface is
+discoverable via `--check-config` + `--list-actions` so Terminator
+users can copy their config and have `--check-config` not flag anything.
+
+### Audit + planning (cycle 330)
+
+`docs/TERMINATOR-AUDIT.md` is the single source of truth — every
+Terminator source file enumerated with feature/setting bullets +
+a 5-bucket gap table (A/B/C/D/E). Phase 1 audited Terminator at
+SHA `403fa1e5`; subsequent cycles flip B/C rows to ✅ A.
+
+### Config keys shipped (cycles 331-341)
+
+  Window state:        borderless, always-on-top, hide-on-lose-focus,
+                       sticky, hide-from-taskbar, window-state, focus,
+                       handle-size, geometry-hinting, extra-styling
+  Tab UX:              close-button-on-tab, new-tab-after-current-tab,
+                       title-at-bottom, scroll-tabbar, homogeneous-tabbar
+  Tab-position:        accepts `hidden` (alias to `tab-bar = off`),
+                       `left`/`right` (accepted by parser, falls
+                       through to top with a log::warn — vertical
+                       tab bars deferred to Bucket C)
+  Render:              allow-bold, bold-is-bright, cursor-color-default,
+                       use-system-font, use-theme-colors
+  Mouse / paste:       link-single-click, disable-mousewheel-zoom,
+                       clear-select-on-copy, disable-mouse-paste,
+                       putty-paste-style, smart-copy,
+                       putty-paste-style-source-clipboard
+  Bell:                force-no-bell, icon-bell
+  Search / env:        invert-search, term, colorterm
+  Shell exec:          login-shell, exit-action (Close/Restart/Hold),
+                       ask-before-closing (Always/MultipleTerminals/Never)
+  Key encoding:        backspace-binding, delete-binding
+  Group / broadcast:   broadcast-default (All/Group/Off),
+                       split-to-group, autoclean-groups
+  URL handler:         use-custom-url-handler, custom-url-handler
+  Inactive offsets:    inactive-color-offset, inactive-bg-color-offset
+  Per-pane titlebar:   show-titlebar, title-hide-sizetext,
+                       title-use-system-font, title-font, six
+                       title-{transmit,receive,inactive}-{fg,bg}-color
+                       fields
+  Background image:    background-type (Solid/Image/Transparent),
+                       background-image, background-image-mode,
+                       background-image-align-horiz/vert,
+                       background-blur, background-darkness
+  Misc:                cell-height, cell-width, http-proxy,
+                       always-split-with-profile, detachable-tabs
+
+Every key accepts both kebab-case (kettle convention) and
+underscore form (Terminator convention).
+
+### Action variants shipped (cycle 342)
+
+18 new `Action::*` variants registered in the keymap grammar +
+discoverable via `--list-actions`:
+
+  RotateCw / RotateCcw
+  ToggleScrollbar
+  EditWindowTitle / EditTabTitle / EditPaneTitle
+  InsertPaneNumber / InsertPanePadded
+  NextProfile / PrevProfile
+  ZoomInAll / ZoomOutAll / ZoomNormalAll
+  ResetAndClear (fully wired — Reset + ClearHistory composed)
+  ScrollPageUpHalf / ScrollPageDownHalf
+  PastePrimary
+  ToggleWindowVisibility
+
+13 of 18 appear in the cycle-117 palette (Ctrl+Shift+K); the
+5 title-edit + insert-text variants are excluded because they
+need overlays or send raw text.
+
+### Drift guards
+
+Eight new test functions pin defaults + parsing for every new
+config key + every action variant. The cycle-117 palette
+exhaustive-match guard updated to fail compile on a future
+unclassified variant.
+
+### Followups (each its own sub-cycle)
+
+Most config-key BEHAVIOR wiring is a follow-up sub-cycle. The
+config + drift guard ship now so Terminator users can copy their
+config without --check-config errors. Specifically pending:
+- Render-layer: allow-bold, bold-is-bright, background-image,
+  inactive-color-offset (per-fg/bg dim).
+- Mouse handler: link-single-click, disable-mousewheel-zoom,
+  disable-mouse-paste, putty-paste-style.
+- Window: borderless + always-on-top WIRED in cycle 332.
+  hide-from-taskbar / sticky / hide-on-lose-focus deferred
+  (winit support varies).
+- Per-pane titlebar: Bucket D (multi-cycle, needs render-layer
+  rework).
+- Action behaviors: 17 stubbed actions with log::info dispatch
+  (ResetAndClear is fully wired).
+
+Workspace tests 286 → 300 (+14 drift guards).
+
 ## [1.8.0] — 2026-05-21
 
 Feature-bump release — Lua scripting (WezTerm parity) + tmux `-CC`
