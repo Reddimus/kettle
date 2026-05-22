@@ -6,6 +6,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.30.0] — 2026-05-22
+
+Named broadcast groups + EditPaneGroup action — titlebar Bucket-D
+sub-cycle 8 now COMPLETE.
+
+  cycle 406 — Named broadcast groups foundation.
+              Pane.group_name: Option<String>.
+              PaneView grows group_name field.
+              Per-pane titlebar prefixes "[group-name] " before
+              the title (Terminator titlebar.py indicator pattern).
+
+  cycle 407 — Action::EditPaneGroup full impl.
+              Aliases: edit_pane_group, edit-pane-group,
+                       edit_group, edit-group.
+              Opens TitleEditState with new TitleEditScope::Group.
+              Apply: writes pane.group_name (None on empty input).
+              Overlay label: "Edit pane group:".
+              Anchors near focused pane (same as EditPaneTitle).
+
+The previously-Bucket-E titlebar sub-cycle 8 is now end-to-end:
+data model + render + keyboard-bindable action + palette entry +
+edit overlay.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 10/10 COMPLETE
+                                       (cycle 406 + 407 closed
+                                        sub-cycle 8 from Bucket-E)
+bg-image (12 sub-cycles):         ✅ 11/12 — all implemented
+                                       (sub-cycle 8 is implicit
+                                        per-frame UV recompute,
+                                        cycle 394 documented this)
+Detachable tabs (11 sub-cycles):  ✅ 10/11 — file-fallback path
+                                       end-to-end shipped
+                                   ⌛ 1 — sub-cycle 7 SCM_RIGHTS
+                                       live PTY transfer (multi-
+                                       week cross-process IPC)
+
+44 of 46 Bucket-D sub-cycles end-to-end (96%).
+
+Two titlebar sub-cycle 8 from Bucket-E to shipped:
+  ✅ EditPaneGroup action + palette entry + edit overlay
+  ✅ Pane.group_name data model
+  ✅ Titlebar render shows "[group-name] title  WxH  🔔"
+
+Workspace tests stay at 308.
+
 ## [1.29.0] — 2026-05-22
 
 Detachable-tabs end-to-end file-fallback path COMPLETE.
