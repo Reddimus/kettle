@@ -97,8 +97,32 @@ rm -f Cargo.toml.bak
 
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
+#
+# Cycle 311: tolerate `cargo` not being on PATH (e.g. running from
+# a CI runner, cron, or a context that didn't source ~/.cargo/env).
+# rustup's default install puts cargo at ~/.cargo/bin/cargo;
+# Homebrew puts it at /opt/homebrew/bin/cargo or
+# /usr/local/bin/cargo. Search those in order; bail with a clear
+# error if none resolve. First catch: ran release.sh from a script
+# context where PATH was sanitized and the cycle-307 fallout
+# happened — version bumped but Cargo.lock not refreshed.
+CARGO=cargo
+if ! command -v "$CARGO" >/dev/null 2>&1; then
+    for candidate in "$HOME/.cargo/bin/cargo" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do
+        if [ -x "$candidate" ]; then
+            CARGO=$candidate
+            break
+        fi
+    done
+fi
+if ! command -v "$CARGO" >/dev/null 2>&1 && [ ! -x "$CARGO" ]; then
+    echo "::error::cargo not found on PATH or in standard rustup / Homebrew locations" >&2
+    echo "  install rustup (https://rustup.rs) or set PATH to include cargo" >&2
+    echo "  (Cargo.toml was already bumped to ${VERSION} — restore with: git checkout Cargo.toml)" >&2
+    exit 1
+fi
 echo "refreshing Cargo.lock"
-cargo build --workspace --quiet
+"$CARGO" build --workspace --quiet
 
 # Commit.
 git add Cargo.toml Cargo.lock CHANGELOG.md
