@@ -6,6 +6,97 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-05-21
+
+Feature-bump release — Lua scripting (WezTerm parity) + tmux `-CC`
+parser foundation (iTerm2 parity, multi-cycle thread starts) +
+detachable-mux-server design doc.
+
+### Added — Lua scripting (cycles 324-326, WezTerm parity)
+
+`kettle --lua-script PATH` runs a Lua 5.4 file at startup with a
+`kettle` namespace. Useful for programmatic startup workflows
+without leaving the keymap surface.
+
+  init.lua:
+    print("kettle " .. kettle.version() .. " on " .. kettle.theme())
+    kettle.exec_action("new_tab")
+    kettle.exec_action("split_right")
+    kettle.send_text("htop\\n")
+
+  Read-only API (cycle 324):
+    kettle.version()      → string
+    kettle.config_path()  → string|nil
+    kettle.theme()        → string
+
+  Side-effect API (cycles 325-326):
+    kettle.send_text(s)        → write s to focused pane's PTY
+    kettle.exec_action(name)   → dispatch any kettle Action by
+                                  name (same names as the keymap
+                                  grammar; cycle-326 promoted
+                                  Action::from_name to pub for
+                                  this)
+
+Errors in the script `log::warn!` + don't fail launch. Side-
+effect commands queue on the engine; the App drains them once
+the first pane spawns.
+
+Implementation: `mlua 0.11` with `lua54 + vendored + send +
+error-send` features. Vendored Lua means no system liblua
+dependency; deterministic across OSes.
+
+### Added — tmux `-CC` parser foundation (cycles 327-328, iTerm2 parity)
+
+`kettle_vt::tmux_cc::TmuxControlParser` is a pure streaming
+parser for tmux's control-mode protocol. Feed it bytes, pull
+`TmuxEvent` enum values out.
+
+Covers every documented tmux control-mode message: Begin / End /
+Error / Output (with `\nnn` octal decode) / WindowAdd / Close /
+Renamed / SessionChanged / Renamed / LayoutChange /
+ClientDetached / Exit / Unknown / OutsideBlock. 11 unit tests
+pin every variant + edge cases (CRLF, partial-line, 64 KB
+overflow recovery).
+
+This is the FOUNDATION; tmux integration into kettle's tab
+surface is a multi-cycle thread. See `docs/TMUX-CC-DESIGN.md`
+for the 7-cycle roadmap.
+
+### Added — Documentation
+
+- `docs/TMUX-CC-DESIGN.md` (cycle 328) — wire protocol summary +
+  7-cycle integration roadmap (pane-state → tab synthesis →
+  input routing → layout-change → detach cleanup).
+- `docs/MUX-SERVER-DESIGN.md` (cycle 329) — architecture + wire
+  protocol sketch + 13-cycle roadmap for the detachable mux
+  server. No code; honest deliverable for a multi-week thread.
+
+### Library / API additions
+
+  kettle_ui::LuaEngine             — public type
+  kettle_ui::LuaCommand            — public enum
+  kettle_config::Action::from_name — promoted pub(crate) → pub
+  kettle_vt::tmux_cc               — new module
+  kettle_vt::tmux_cc::TmuxControlParser
+  kettle_vt::tmux_cc::TmuxEvent
+  kettle_ui::Options::lua_script   — new field
+
+### CLI additions
+
+  --lua-script PATH    — run Lua at startup (WezTerm parity)
+
+Workspace tests 270 → 286 (+11 tmux parser + 5 lua).
+
+### Deferred (each multi-cycle, see design docs)
+
+- tmux `-CC` full integration (#42): parser shipped; pane-state
+  plumbing + tab synthesis + input routing + detach cleanup
+  pending. Roadmap in `docs/TMUX-CC-DESIGN.md`.
+- Detachable mux server (#44): no code; design doc in
+  `docs/MUX-SERVER-DESIGN.md`.
+- Persistent in-terminal annotations: still pending.
+- Native macOS menu bar + code-signed builds: still pending.
+
 ## [1.7.8] — 2026-05-21
 
 Patch release. Cosmetic UX catch on the cycle-295 status bar.
