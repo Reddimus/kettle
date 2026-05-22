@@ -167,6 +167,18 @@ pub enum BackgroundType {
     Transparent,
 }
 
+/// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12): Lua
+/// sandbox level. `Safe` is the default — Lua plugins can still
+/// access the kettle.* APIs but the dangerous parts of the Lua
+/// stdlib (os.execute, io.open, os.exit, package.loadlib) are nil'd
+/// out. `Trusted` exposes everything; user explicitly opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LuaSandbox {
+    #[default]
+    Safe,
+    Trusted,
+}
+
 /// Cycle 339 (Terminator parity, terminatorlib/config.py:73
 /// `focus`): focus mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
