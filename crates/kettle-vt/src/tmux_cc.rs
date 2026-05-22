@@ -23,8 +23,8 @@
 //!   cycle 330+: route user keystrokes back to tmux via the
 //!     control channel's `send-keys` command.
 //!
-//! Reference: https://github.com/tmux/tmux/blob/master/control.c
-//! iTerm2's tmux integration: https://iterm2.com/documentation-tmux-integration.html
+//! Reference: <https://github.com/tmux/tmux/blob/master/control.c>
+//! iTerm2's tmux integration: <https://iterm2.com/documentation-tmux-integration.html>
 
 use std::collections::VecDeque;
 

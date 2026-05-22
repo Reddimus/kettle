@@ -311,8 +311,9 @@ pub struct PaneView<'a> {
     /// also true, a small dot renders in the titlebar.
     pub bell: bool,
     /// Cycle 406 (Terminator parity, titlebar Bucket-D sub-cycle 8):
-    /// optional named broadcast group. When Some(name), the
-    /// titlebar prefixes "[name] " before the pane title.
+    /// optional named broadcast group. When `Some(name)`, the
+    /// titlebar prefixes `[name]` (group label in brackets)
+    /// before the pane title.
     pub group_name: Option<String>,
 }
 
