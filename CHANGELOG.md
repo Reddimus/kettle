@@ -6,6 +6,51 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.32.0] — 2026-05-22
+
+Production-readiness polish — docs sync + drift guards + foundation
+for exit-action=restart.
+
+  cycle 411 — `cargo doc -D warnings` clean (3 doc-comment warnings
+              fixed in kettle-render + kettle-vt). Matches the CI
+              doc-warnings gate.
+
+  cycle 412 — exit-action = restart pane-respawn queue infrastructure
+              (partial). Replaces the cycle-357 TODO with concrete
+              pending_pane_restarts plumbing; respawn dispatch is
+              the next sub-cycle.
+
+  cycle 413 — `print_default_config_round_trip` drift guard pins 9
+              load-bearing Terminator-parity keys (window-state,
+              borderless, always-on-top, show-titlebar,
+              title-at-bottom, background-image,
+              background-image-mode, exit-action, lua-sandbox)
+              in the embedded example config so future strips
+              fail loud.
+
+  cycle 414 — Man page (`packaging/linux/kettle.1`) documents
+              `--tab-handoff PATH` (cycle 403 file-fallback) +
+              `--tab-handoff-fd FD` (cycle 408 SCM_RIGHTS path).
+
+  cycle 415 — `docs/CONFIG.md` adds a "Terminator-parity keys" table
+              covering ~30 cycles 331-410 keys with type + default +
+              behavior. Cross-references the audit doc for the full
+              85-key parsed surface.
+
+  docs sync — README Status line v1.7.x → v1.31.x (caught up after
+              24 releases of sweep). `docs/ROADMAP.md` grew a
+              "v1.8.0 → v1.31.0 Terminator-parity sweep" section
+              + trimmed Next list to the genuine remaining threads.
+              `docs/TERMINATOR-AUDIT.md` tail appended with the
+              cumulative cycles 330-412 sweep completion summary.
+              `docs/kettle.example.config` grew a Terminator-parity
+              section with every major new knob's default + origin.
+
+Workspace tests stay at 308. `cargo doc -D warnings` clean. `cargo
+machete` reports zero unused deps. End-to-end binary smoke green
+(`--version`, `--check-config`, `--list-actions`, `--list-keybinds`,
+`--print-default-config`).
+
 ## [1.31.0] — 2026-05-22
 
 SCM_RIGHTS cross-process tab handoff end-to-end for the JSON
