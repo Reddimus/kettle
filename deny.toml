@@ -32,12 +32,12 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = [
-  # Upstream-bound: paste is unmaintained per RUSTSEC-2024-0436 and
-  # reaches kettle only through image → rav1e → paste (the AVIF
-  # decoder path). Same ignore the cycle-244 audit.yml uses.
-  "RUSTSEC-2024-0436",
-]
+ignore = []
+# Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
+# here while it reached kettle via `image → rav1e → paste` (AVIF
+# decoder). Verified gone with `cargo tree -i paste` / `cargo tree
+# -i rav1e` (both return "did not match any packages"); the ignore
+# was made stale upstream-resolved + removed in cycle 444.
 
 [licenses]
 # SPDX expressions every workspace dep is allowed to carry. The

@@ -53,14 +53,13 @@ jobs:
       # is the standard GITHUB_TOKEN; permissions come from the
       # workflow-level `permissions:` block above.
       #
-      # `ignore`: RUSTSEC-2024-0436 is `paste` "no longer maintained" —
-      # informational only (no vulnerability), and `paste` reaches us
-      # purely through `image → rav1e → paste` (the AVIF decoder path).
-      # We can't migrate upstream off `paste` from kettle's side; the
-      # alternative is a permanently-red audit job, which trains the
-      # team to ignore the signal we want it to keep. Revisit when
-      # `rav1e` or `image` cut a release on `pastey`.
+      # Cycle 444 removed the RUSTSEC-2024-0436 ignore — `paste`
+      # (and the `image → rav1e → paste` chain through which it
+      # reached kettle) is no longer in our Cargo.lock. `cargo deny`
+      # was warning that the ignore matched no crate; the audit job
+      # ran clean once the path dropped out, so an explicit ignore
+      # would just lie about a vulnerability we don't have. Add a
+      # new entry here only if an unfixable advisory re-surfaces.
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2024-0436
