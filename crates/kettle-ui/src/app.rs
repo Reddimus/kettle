@@ -2632,6 +2632,44 @@ impl App {
                     self.mux.touch_active_tab_seen();
                 }
             }
+            // Cycle 342 Terminator-parity actions. Stubbed dispatch
+            // until each gets a wiring sub-cycle. log::info! so the
+            // action is observable in --check-config-style debug
+            // runs; future cycle adds the actual behavior.
+            Action::RotateCw
+            | Action::RotateCcw
+            | Action::ToggleScrollbar
+            | Action::EditWindowTitle
+            | Action::EditTabTitle
+            | Action::EditPaneTitle
+            | Action::InsertPaneNumber
+            | Action::InsertPanePadded
+            | Action::NextProfile
+            | Action::PrevProfile
+            | Action::ZoomInAll
+            | Action::ZoomOutAll
+            | Action::ZoomNormalAll
+            | Action::ScrollPageUpHalf
+            | Action::ScrollPageDownHalf
+            | Action::PastePrimary
+            | Action::ToggleWindowVisibility => {
+                log::info!(
+                    "Action {action:?} dispatched but behavior wiring is a \
+                     follow-up sub-cycle (docs/TERMINATOR-AUDIT.md cycle 342)"
+                );
+            }
+            Action::ResetAndClear => {
+                // Cycle 342 Terminator parity (key_reset_clear):
+                // Reset (RIS, \ec) + ClearHistory (CSI 3 J) composed
+                // into a single keybind. The two byte writes go to
+                // the existing PTY-write path; the engine handles
+                // them the same as cycle-X's separate Reset +
+                // ClearHistory actions.
+                if let Some(p) = self.mux.focused() {
+                    p.term.write(b"\x1bc");
+                    p.term.write(b"\x1b[3J");
+                }
+            }
         }
         // Cycle 135 (cont.): if focus moved as a result of the action,
         // land the cursor visible on the new pane right away.

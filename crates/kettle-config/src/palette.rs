@@ -50,6 +50,20 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Jump to previous prompt", JumpPrevPrompt),
         ("Jump to next prompt", JumpNextPrompt),
         ("Toggle vi-mode (scrollback)", ToggleViMode),
+        // Cycle 342 Terminator-parity entries.
+        ("Rotate panes clockwise", RotateCw),
+        ("Rotate panes counter-clockwise", RotateCcw),
+        ("Toggle scrollbar visibility", ToggleScrollbar),
+        ("Next profile", NextProfile),
+        ("Previous profile", PrevProfile),
+        ("Zoom in (all panes)", ZoomInAll),
+        ("Zoom out (all panes)", ZoomOutAll),
+        ("Reset zoom (all panes)", ZoomNormalAll),
+        ("Reset terminal + clear scrollback", ResetAndClear),
+        ("Scroll half page up", ScrollPageUpHalf),
+        ("Scroll half page down", ScrollPageDownHalf),
+        ("Paste primary selection (X11)", PastePrimary),
+        ("Toggle window visibility", ToggleWindowVisibility),
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
         ("Reset terminal", Reset),
@@ -114,6 +128,18 @@ mod tests {
             // weird self-reference (palette → context menu → palette
             // entry). Triggered by the mouse only, not user-typed.
             OpenContextMenu,
+            // Cycle 342 Terminator-parity actions excluded from the palette
+            // because they're either parametric (no enumeration target),
+            // tied to inline overlays (the title-edit ones open their own
+            // input prompts), or send raw text to the focused PTY (insert-
+            // number) which doesn't fit the palette's "do a thing" model.
+            // The palette doesn't need a row for each; they remain
+            // reachable via keybinds.
+            EditWindowTitle,
+            EditTabTitle,
+            EditPaneTitle,
+            InsertPaneNumber,
+            InsertPanePadded,
         ];
         // Enumerate every Action variant explicitly via this exhaustive
         // list; if a future variant is added the match below fails to
@@ -172,6 +198,25 @@ mod tests {
             UndoCloseTab,
             DuplicateTab,
             DuplicatePane,
+            // Cycle 342 Terminator-parity actions.
+            RotateCw,
+            RotateCcw,
+            ToggleScrollbar,
+            EditWindowTitle,
+            EditTabTitle,
+            EditPaneTitle,
+            InsertPaneNumber,
+            InsertPanePadded,
+            NextProfile,
+            PrevProfile,
+            ZoomInAll,
+            ZoomOutAll,
+            ZoomNormalAll,
+            ResetAndClear,
+            ScrollPageUpHalf,
+            ScrollPageDownHalf,
+            PastePrimary,
+            ToggleWindowVisibility,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -179,16 +224,77 @@ mod tests {
         // to add a row to `every_action` above as well.
         for a in &every_action {
             match a {
-                Copy | Paste | NewTab | CloseTab | NextTab | PrevTab | MoveTabLeft
-                | MoveTabRight | SplitRight | SplitDown | SplitAuto | ClosePane | CloseWindow
-                | NewWindow | FocusNext | FocusPrev | FocusUp | FocusDown | FocusLeft
-                | FocusRight | ResizeUp | ResizeDown | ResizeLeft | ResizeRight | ToggleZoom
-                | IncreaseFontSize | DecreaseFontSize | ResetFontSize | StartSearch
-                | ToggleBroadcastAll | ToggleBroadcastOff | ToggleFullscreen | Reset
-                | ClearHistory | ScrollPageUp | ScrollPageDown | ScrollLineUp | ScrollLineDown
-                | ScrollToTop | ScrollToBottom | JumpPrevPrompt | JumpNextPrompt | OpenSsh
-                | ReloadConfig | CommandPalette | HintMode | NextTheme | PrevTheme
-                | OpenContextMenu | UndoCloseTab | DuplicateTab | DuplicatePane | ToggleViMode
+                Copy
+                | Paste
+                | NewTab
+                | CloseTab
+                | NextTab
+                | PrevTab
+                | MoveTabLeft
+                | MoveTabRight
+                | SplitRight
+                | SplitDown
+                | SplitAuto
+                | ClosePane
+                | CloseWindow
+                | NewWindow
+                | FocusNext
+                | FocusPrev
+                | FocusUp
+                | FocusDown
+                | FocusLeft
+                | FocusRight
+                | ResizeUp
+                | ResizeDown
+                | ResizeLeft
+                | ResizeRight
+                | ToggleZoom
+                | IncreaseFontSize
+                | DecreaseFontSize
+                | ResetFontSize
+                | StartSearch
+                | ToggleBroadcastAll
+                | ToggleBroadcastOff
+                | ToggleFullscreen
+                | Reset
+                | ClearHistory
+                | ScrollPageUp
+                | ScrollPageDown
+                | ScrollLineUp
+                | ScrollLineDown
+                | ScrollToTop
+                | ScrollToBottom
+                | JumpPrevPrompt
+                | JumpNextPrompt
+                | OpenSsh
+                | ReloadConfig
+                | CommandPalette
+                | HintMode
+                | NextTheme
+                | PrevTheme
+                | OpenContextMenu
+                | UndoCloseTab
+                | DuplicateTab
+                | DuplicatePane
+                | ToggleViMode
+                | RotateCw
+                | RotateCcw
+                | ToggleScrollbar
+                | EditWindowTitle
+                | EditTabTitle
+                | EditPaneTitle
+                | InsertPaneNumber
+                | InsertPanePadded
+                | NextProfile
+                | PrevProfile
+                | ZoomInAll
+                | ZoomOutAll
+                | ZoomNormalAll
+                | ResetAndClear
+                | ScrollPageUpHalf
+                | ScrollPageDownHalf
+                | PastePrimary
+                | ToggleWindowVisibility
                 | GotoTab(_) => {}
             }
         }

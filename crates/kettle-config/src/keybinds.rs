@@ -194,6 +194,61 @@ pub enum Action {
     /// Esc exit; movement + visual / yank come in follow-up
     /// sub-cycles.
     ToggleViMode,
+    /// Cycle 342 Terminator parity (terminatorlib/terminal.py:key_rotate_cw):
+    /// rotate the split tree clockwise.
+    RotateCw,
+    /// Cycle 342 Terminator parity: rotate the split tree counter-clockwise.
+    RotateCcw,
+    /// Cycle 342 Terminator parity (key_toggle_scrollbar): runtime
+    /// show/hide of the scrollbar without editing config.
+    ToggleScrollbar,
+    /// Cycle 342 Terminator parity (key_edit_window_title): open an
+    /// inline overlay to edit the window title (OSC 0/2 equivalent).
+    EditWindowTitle,
+    /// Cycle 342 Terminator parity (key_edit_tab_title): edit the
+    /// active tab's title.
+    EditTabTitle,
+    /// Cycle 342 Terminator parity (key_edit_terminal_title): edit
+    /// the focused pane's title.
+    EditPaneTitle,
+    /// Cycle 342 Terminator parity (key_insert_number): send the
+    /// focused pane's index as text input.
+    InsertPaneNumber,
+    /// Cycle 342 Terminator parity (key_insert_padded): send the
+    /// focused pane's index zero-padded.
+    InsertPanePadded,
+    /// Cycle 342 Terminator parity (key_next_profile): cycle to the
+    /// next named profile at runtime.
+    NextProfile,
+    /// Cycle 342 Terminator parity (key_previous_profile): cycle to
+    /// the previous named profile.
+    PrevProfile,
+    /// Cycle 342 Terminator parity (key_zoom_in_all): increase font
+    /// size on every pane (broadcast variant of IncreaseFontSize).
+    ZoomInAll,
+    /// Cycle 342 Terminator parity (key_zoom_out_all): decrease font
+    /// size on every pane.
+    ZoomOutAll,
+    /// Cycle 342 Terminator parity (key_zoom_normal_all): reset font
+    /// size on every pane.
+    ZoomNormalAll,
+    /// Cycle 342 Terminator parity (key_reset_clear): Reset (RIS)
+    /// + ClearHistory composed.
+    ResetAndClear,
+    /// Cycle 342 Terminator parity (key_page_up_half): scroll up
+    /// half a page.
+    ScrollPageUpHalf,
+    /// Cycle 342 Terminator parity (key_page_down_half): scroll down
+    /// half a page.
+    ScrollPageDownHalf,
+    /// Cycle 342 Terminator parity (key_paste_selection): paste the
+    /// X11 primary selection (Linux-only; no-op on macOS/Windows).
+    PastePrimary,
+    /// Cycle 342 Terminator parity (key_hide_window): toggle window
+    /// visibility in-process. Same effect as `kettle --toggle` (cycle
+    /// 303) via the remote-control IPC; this is the in-process keybind
+    /// equivalent for users who don't want to set up a global hotkey.
+    ToggleWindowVisibility,
     OpenSsh,
     ReloadConfig,
     CommandPalette,
@@ -315,6 +370,36 @@ pub fn action_names() -> Vec<&'static str> {
         "vi_mode",
         "vi",
         "scrollback_vi",
+        // Cycle 342 Terminator-parity action names.
+        "rotate_cw",
+        "rotate_ccw",
+        "toggle_scrollbar",
+        "edit_window_title",
+        "edit_tab_title",
+        "edit_terminal_title",
+        "edit_pane_title",
+        "insert_number",
+        "insert_padded",
+        "insert_pane_number",
+        "insert_pane_padded",
+        "next_profile",
+        "previous_profile",
+        "prev_profile",
+        "zoom_in_all",
+        "zoom_out_all",
+        "zoom_normal_all",
+        "reset_zoom_all",
+        "reset_clear",
+        "reset_and_clear",
+        "page_up_half",
+        "page_down_half",
+        "scroll_page_up_half",
+        "scroll_page_down_half",
+        "paste_selection",
+        "paste_primary",
+        "hide_window",
+        "toggle_window",
+        "toggle_window_visibility",
         "command_palette",
         "palette",
         "hint_mode",
@@ -397,6 +482,36 @@ impl Action {
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
             "toggle_vi_mode" | "vi_mode" | "vi" | "scrollback_vi" => ToggleViMode,
+            // Cycle 342 Terminator-parity actions. Names match
+            // terminatorlib/terminal.py:key_<name> + the kebab-case
+            // alias.
+            "rotate_cw" | "rotate-cw" => RotateCw,
+            "rotate_ccw" | "rotate-ccw" => RotateCcw,
+            "toggle_scrollbar" | "toggle-scrollbar" => ToggleScrollbar,
+            "edit_window_title" | "edit-window-title" => EditWindowTitle,
+            "edit_tab_title" | "edit-tab-title" => EditTabTitle,
+            "edit_terminal_title"
+            | "edit-terminal-title"
+            | "edit_pane_title"
+            | "edit-pane-title" => EditPaneTitle,
+            "insert_number" | "insert-number" | "insert_pane_number" => InsertPaneNumber,
+            "insert_padded" | "insert-padded" | "insert_pane_padded" => InsertPanePadded,
+            "next_profile" | "next-profile" => NextProfile,
+            "previous_profile" | "previous-profile" | "prev_profile" | "prev-profile" => {
+                PrevProfile
+            }
+            "zoom_in_all" | "zoom-in-all" => ZoomInAll,
+            "zoom_out_all" | "zoom-out-all" => ZoomOutAll,
+            "zoom_normal_all" | "zoom-normal-all" | "reset_zoom_all" => ZoomNormalAll,
+            "reset_clear" | "reset-clear" | "reset_and_clear" | "reset-and-clear" => ResetAndClear,
+            "page_up_half" | "page-up-half" | "scroll_page_up_half" => ScrollPageUpHalf,
+            "page_down_half" | "page-down-half" | "scroll_page_down_half" => ScrollPageDownHalf,
+            "paste_selection" | "paste-selection" | "paste_primary" => PastePrimary,
+            "hide_window"
+            | "hide-window"
+            | "toggle_window"
+            | "toggle-window"
+            | "toggle_window_visibility" => ToggleWindowVisibility,
             "new_ssh" | "ssh" => OpenSsh,
             "command_palette" | "palette" => CommandPalette,
             "hint_mode" | "hints" | "quick_select" => HintMode,
