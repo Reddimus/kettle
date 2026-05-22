@@ -147,7 +147,7 @@ Comparative analysis behind these choices (with citations) is in
 
 The v1.8.0 → v1.31.0 sweep added four major subsystems. Each has its
 own design doc; the architectural integration is summarized here.
-Cycles 411-438 (v1.32.0 → v1.35.0) hardened the plugin contract +
+Cycles 411-452 (v1.32.0 → v1.36.0) hardened the plugin contract +
 extended drift guards on top of these — see
 [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md)'s post-sweep section
 for that polish run.

@@ -1344,9 +1344,9 @@ deliverables table. Highlights:
 - [x] 20 new `Action::*` variants fully wired end-to-end (cycles 342,
       384, 407).
 
-## v1.32.0 → v1.35.0 — post-sweep production polish (cycles 411-438, shipped)
+## v1.32.0 → v1.36.0 — post-sweep production polish (cycles 411-452, shipped)
 
-Twenty-eight cycles + four releases hardening the plugin contract +
+Forty-two cycles + five releases hardening the plugin contract +
 ergonomics that landed in the v1.8.0 → v1.31.0 sweep. See
 `docs/TERMINATOR-AUDIT.md`'s post-sweep section for the full breakdown.
 
