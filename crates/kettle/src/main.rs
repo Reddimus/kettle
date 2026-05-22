@@ -459,9 +459,23 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.check_config {
+        // Cycle 312: honor `--profile NAME` here too. Pre-fix, the
+        // resolution lookup only checked `cli.config` and fell back
+        // to the default config path. A user running
+        // `kettle --profile dev --check-config` would silently check
+        // `<config-dir>/config` instead of `profiles/dev.config`,
+        // missing typos the runtime path WOULD load. Mirrors the
+        // windowed-run resolution at line 780+ — `--config FILE`
+        // wins over `--profile NAME`, falls through to default when
+        // both omitted.
         let path = cli
             .config
             .clone()
+            .or_else(|| {
+                cli.profile
+                    .as_deref()
+                    .and_then(kettle_config::Config::path_for_profile)
+            })
             .or_else(kettle_config::Config::default_path);
         // Cycle 196: surface read errors explicitly. Pre-fix,
         // `load_from_with_diagnostics` silently returned defaults on
