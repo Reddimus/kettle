@@ -6,6 +6,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.24.0] — 2026-05-22
+
+  cycle 394 — bg-image resize handler documented as implicit
+              per-frame UV recompute. The cycle-388 cache
+              stores the decoded image bytes; the cycle-390
+              UV-mode dispatch reads current surface dims each
+              frame in build_frame. Window resizes implicitly
+              take effect on the next frame. Closes bg-image
+              Bucket-D sub-cycle 8 by documenting the
+              recompute-contract so future contributors don't
+              add a redundant resize handler.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 of 10
+                                   ⌛ 1 — sub-cycle 7
+                                       (per-pane edit anchor;
+                                       overlay renders at
+                                       window-bottom today,
+                                       anchoring at clicked
+                                       pane's titlebar is polish)
+                                   E — sub-cycle 8 (group-name
+                                       edit) deferred — kettle
+                                       doesn't yet have named-
+                                       groups infra; sub-cycle
+                                       waits on that to land
+                                       independently
+bg-image (12 sub-cycles):         ✅ 10 of 12
+                                   ⌛ 2 — sub-cycle 8 ✅
+                                       (implicit per-frame
+                                       recompute documented),
+                                       sub-cycle 9 (blur shader
+                                       — needs WGSL Gaussian
+                                       two-pass pipeline)
+Detachable tabs (11 sub-cycles):  ✅ 1 — sub-cycle 10
+                                       Wayland-fallback
+                                   ⌛ 10 — sub-cycles 2-9, 11
+                                       (cross-window cursor
+                                       drag + SCM_RIGHTS fd
+                                       transfer + auth +
+                                       reattach — multi-week
+                                       thread)
+
+33 of 46 Bucket-D sub-cycles end-to-end (72%).
+
+Workspace tests stay at 306.
+
 ## [1.23.0] — 2026-05-22
 
   cycle 393 — Titlebar pixel acceptance test. Pure
