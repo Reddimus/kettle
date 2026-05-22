@@ -26,6 +26,12 @@ mod lua;
 mod mux;
 mod session;
 
+// Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D.
+// Unix-only (Linux + macOS + BSDs); Windows users get the
+// Action::MoveTabToNewWindow keyboard-driven fallback (cycle 384).
+#[cfg(unix)]
+mod fd_transport;
+
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
 

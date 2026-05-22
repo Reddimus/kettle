@@ -1525,6 +1525,7 @@ dependencies = [
  "kettle-config",
  "kettle-core",
  "kettle-render",
+ "libc",
  "log",
  "mlua",
  "notify",
