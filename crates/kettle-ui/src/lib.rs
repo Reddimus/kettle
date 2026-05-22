@@ -31,6 +31,10 @@ mod session;
 // Action::MoveTabToNewWindow keyboard-driven fallback (cycle 384).
 #[cfg(unix)]
 mod fd_transport;
+// Cycle 400: drag state machine for detachable tabs. Pure-data
+// FSM; the App's mouse-handler advances it on MouseDown / Move /
+// Up. Cross-platform (no Unix-specific code).
+mod detach;
 
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
