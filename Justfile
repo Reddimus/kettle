@@ -25,7 +25,7 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# `cargo test --workspace` — runs all 261+ unit + integration tests
+# `cargo test --workspace` — runs all 319+ unit + integration tests
 # including the cycle-251 visual-regression menu_visual.rs.
 test:
     cargo test --workspace
