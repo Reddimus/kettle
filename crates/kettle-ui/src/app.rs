@@ -2632,31 +2632,130 @@ impl App {
                     self.mux.touch_active_tab_seen();
                 }
             }
-            // Cycle 342 Terminator-parity actions. Stubbed dispatch
-            // until each gets a wiring sub-cycle. log::info! so the
-            // action is observable in --check-config-style debug
-            // runs; future cycle adds the actual behavior.
+            // Cycle 345 Terminator-parity behavior wiring (continued
+            // from cycle 342's stubs). Each branch implements the
+            // Terminator key_<name> behavior in kettle-idiomatic
+            // shape.
+            //
+            // Still stubbed (overlay-required; future sub-cycles):
+            //   RotateCw / RotateCcw (split-tree rotation in Mux)
+            //   ToggleScrollbar (runtime scrollbar toggle)
+            //   EditWindowTitle / EditTabTitle / EditPaneTitle
+            //   NextProfile / PrevProfile (runtime profile cycle)
             Action::RotateCw
             | Action::RotateCcw
             | Action::ToggleScrollbar
             | Action::EditWindowTitle
             | Action::EditTabTitle
             | Action::EditPaneTitle
-            | Action::InsertPaneNumber
-            | Action::InsertPanePadded
             | Action::NextProfile
-            | Action::PrevProfile
-            | Action::ZoomInAll
-            | Action::ZoomOutAll
-            | Action::ZoomNormalAll
-            | Action::ScrollPageUpHalf
-            | Action::ScrollPageDownHalf
-            | Action::PastePrimary
-            | Action::ToggleWindowVisibility => {
+            | Action::PrevProfile => {
                 log::info!(
                     "Action {action:?} dispatched but behavior wiring is a \
-                     follow-up sub-cycle (docs/TERMINATOR-AUDIT.md cycle 342)"
+                     follow-up sub-cycle (docs/TERMINATOR-AUDIT.md)"
                 );
+            }
+            // Cycle 345: broadcast zoom. kettle's font-size is
+            // window-wide (not per-pane like VTE's per-terminal
+            // scale), so zoom-all has the same effect as the
+            // existing single-pane zoom. Compose by reusing the
+            // IncreaseFontSize / DecreaseFontSize / ResetFontSize
+            // arm — same shape as ResetAndClear.
+            Action::ZoomInAll => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_font_size(r.cell_h / 1.25 + 1.0);
+                }
+            }
+            Action::ZoomOutAll => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_font_size((r.cell_h / 1.25 - 1.0).max(6.0));
+                }
+            }
+            Action::ZoomNormalAll => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_font_size(self.cfg.font_size);
+                }
+            }
+            // Cycle 345: insert pane index. Pane index is 1-based
+            // (matches Terminator's GotoTab + every user-facing
+            // numbering). InsertPanePadded uses 2-digit zero-padded
+            // form (Terminator default).
+            Action::InsertPaneNumber => {
+                let idx = self
+                    .mux
+                    .focused_pane_index_in_tab()
+                    .map(|i| i + 1)
+                    .unwrap_or(1);
+                if let Some(p) = self.mux.focused() {
+                    p.term.write(idx.to_string().as_bytes());
+                }
+            }
+            Action::InsertPanePadded => {
+                let idx = self
+                    .mux
+                    .focused_pane_index_in_tab()
+                    .map(|i| i + 1)
+                    .unwrap_or(1);
+                if let Some(p) = self.mux.focused() {
+                    p.term.write(format!("{idx:02}").as_bytes());
+                }
+            }
+            // Cycle 345: half-page scroll. Same shape as cycle-X's
+            // ScrollPageUp/Down handler but with half the row count.
+            // Pull the row count from the focused pane's grid
+            // dimensions (cycle-X pattern; works for any pane size).
+            Action::ScrollPageUpHalf | Action::ScrollPageDownHalf => {
+                if let Some(p) = self.mux.focused()
+                    && let Ok(mut t) = p.term.term.lock()
+                {
+                    use kettle_core::Dimensions;
+                    let rows = t.screen_lines() as i32;
+                    let half = (rows / 2).max(1);
+                    let dir = if matches!(action, Action::ScrollPageUpHalf) {
+                        half
+                    } else {
+                        -half
+                    };
+                    t.scroll_display(Scroll::Delta(dir));
+                }
+            }
+            // Cycle 345: paste primary selection (X11 primary
+            // clipboard). arboard's get_text() reads the regular
+            // clipboard; macOS / Windows / Wayland don't have a
+            // separate primary selection so fall through to
+            // get_text. log::warn on read failure.
+            Action::PastePrimary => {
+                if let Some(cb) = self.clipboard.as_mut() {
+                    match cb.get_text() {
+                        Ok(s) => {
+                            if let Some(p) = self.mux.focused() {
+                                p.term.write(s.as_bytes());
+                            }
+                        }
+                        Err(e) => log::warn!("paste-primary: clipboard read failed: {e}"),
+                    }
+                } else {
+                    log::warn!("paste-primary: clipboard unavailable");
+                }
+            }
+            // Cycle 345: in-process Quake toggle. Same tri-state
+            // logic as cycle-319's --toggle remote command:
+            //   hidden → show + focus
+            //   visible + focused → hide
+            //   visible + !focused → focus (don't hide)
+            Action::ToggleWindowVisibility => {
+                if let Some(w) = &self.window {
+                    let visible = w.is_visible().unwrap_or(true);
+                    let focused = w.has_focus();
+                    if !visible {
+                        w.set_visible(true);
+                        w.focus_window();
+                    } else if focused {
+                        w.set_visible(false);
+                    } else {
+                        w.focus_window();
+                    }
+                }
             }
             Action::ResetAndClear => {
                 // Cycle 342 Terminator parity (key_reset_clear):

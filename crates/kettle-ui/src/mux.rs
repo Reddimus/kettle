@@ -804,6 +804,33 @@ impl Mux {
         self.panes.get_mut(&id)
     }
 
+    /// Cycle 345: 0-based index of the focused pane within its tab's
+    /// in-order traversal of the binary split tree. Used by
+    /// `InsertPaneNumber` + `InsertPanePadded` to send the pane index
+    /// to the PTY. Returns None when no tab exists.
+    pub fn focused_pane_index_in_tab(&self) -> Option<usize> {
+        let tab = self.tabs.get(self.active)?;
+        let focus = tab.focus;
+        fn walk(node: &Node, target: u64, idx: &mut usize) -> bool {
+            match node {
+                Node::Leaf(id) => {
+                    if *id == target {
+                        return true;
+                    }
+                    *idx += 1;
+                    false
+                }
+                Node::Split { a, b, .. } => walk(a, target, idx) || walk(b, target, idx),
+            }
+        }
+        let mut idx = 0;
+        if walk(&tab.root, focus, &mut idx) {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
