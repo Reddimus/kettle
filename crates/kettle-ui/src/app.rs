@@ -1891,9 +1891,23 @@ impl App {
                             // dead pane closes here; the cycle-418
                             // handler spawns a fresh shell with
                             // the same argv + cwd in a new tab.
-                            pending_restarts_local.push(pane_id);
+                            //
+                            // Cycle 452: alacritty fires BOTH
+                            // TermEvent::Exit (PTY-side EOF) and
+                            // TermEvent::ChildExit(code) (child
+                            // reaper) for the same shell exit on
+                            // some platforms. Without the dedup
+                            // contains-check, exit-action=restart
+                            // spawned two new tabs per dead shell.
+                            // pane.closed = true is idempotent so
+                            // the second event just no-ops on it.
+                            if !pending_restarts_local.contains(&pane_id) {
+                                pending_restarts_local.push(pane_id);
+                                log::info!(
+                                    "exit-action = restart: queued pane {pane_id} for respawn"
+                                );
+                            }
                             pane.closed = true;
-                            log::info!("exit-action = restart: queued pane {pane_id} for respawn");
                         }
                         kettle_config::ExitAction::Close => pane.closed = true,
                     },
