@@ -210,22 +210,18 @@ See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
 
 ### Detachable tabs (cycles 397-410)
 
-Two paths, both end-to-end:
+Three paths, all end-to-end:
 
-```
-                    Action::MoveTabToNewWindow
-                              │
-            ┌─────────────────┼──────────────────┐
-            ▼                 ▼                  ▼
-       Wayland-fallback   Unix SCM_RIGHTS    File-fallback
-       (keyboard only)    socketpair + fork  /tmp/handoff.json
-                          + send_fds         + --tab-handoff PATH
-            │                 │                  │
-            └────────┬────────┴──────────────────┘
-                     ▼
-            Target kettle (recv_fds OR load_tab_handoff)
-                     ▼
-            Session restore → user sees split tree + cwds
+```mermaid
+flowchart TD
+    A["Action::MoveTabToNewWindow"]
+    A --> B1["Wayland-fallback<br/>(keyboard-only)"]
+    A --> B2["Unix SCM_RIGHTS<br/>socketpair + fork+exec<br/>+ send_fds (cycle 399)"]
+    A --> B3["File-fallback<br/>/tmp/handoff.json<br/>+ --tab-handoff PATH"]
+    B1 --> C["Target kettle"]
+    B2 --> C
+    B3 --> C
+    C --> D["Session restore<br/>(split tree + cwds preserved)"]
 ```
 
 In-process foundation: `Mux::serialize_tab` (cycle 397) +
