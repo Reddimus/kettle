@@ -6,6 +6,42 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-05-22
+
+Plugin system implementation push. Cycles 370-372 ship:
+
+  cycle 370 — `~/.config/kettle/init.lua` auto-loads at startup
+              (no need for explicit --lua-script). Follows the
+              Neovim/Hammerspoon/WezTerm convention.
+  cycle 371 — `kettle.notify(title, body?)` Lua API for desktop
+              notifications. Cross-platform via notify-rust crate
+              (libnotify on Linux, NSUserNotification on macOS,
+              Toast on Windows). Body is optional; failures
+              degrade silently to log::warn (headless / no DBUS).
+  cycle 372 — Edit-title overlay visual chrome. Yellow palette[3]
+              bottom bar renders the prompt + typed input + cursor.
+              Edit-title is now FULLY interactive end-to-end
+              (state machine cycle-369 + visual feedback this cycle).
+
+### Plugin system status
+
+  ✅  cycle 365 — kettle.on event-hook foundation
+  ✅  cycle 366 — LuaEvent::Startup emission
+  ✅  cycle 367 — LuaEvent::Bell emission
+  ✅  cycle 368 — LuaEvent::TabAdd / TabClose emission
+  ✅  cycle 370 — init.lua auto-load
+  ✅  cycle 371 — kettle.notify
+
+  ⌛  pending — LuaEvent::Output, kettle.add_menu_item,
+                kettle.add_url_handler, kettle.set_theme,
+                sandbox config
+
+6 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+
+### Workspace tests
+
+Stay at 302.
+
 ## [1.13.0] — 2026-05-22
 
 Plugin emission wirings + Edit-title overlay implementation.
