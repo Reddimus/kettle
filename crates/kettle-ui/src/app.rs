@@ -3427,6 +3427,16 @@ impl App {
             // This gives the user the "move this work to a new
             // window" UX path Terminator's detachable_tabs ships.
             Action::MoveTabToNewWindow => {
+                // Cycle 405 (Terminator parity, detachable-tabs
+                // Bucket-D sub-cycle 8 full): serialize the focused
+                // tab to a one-shot JSON handoff file + spawn a
+                // new kettle process with --tab-handoff PATH.
+                // The target reads + reconstructs the tab (cycle 404).
+                //
+                // Running shells in the source tab stay in the
+                // source window (true PTY-fd transfer needs the
+                // SCM_RIGHTS path, sub-cycle 7). The file-fallback
+                // works cross-platform incl. Windows + Wayland.
                 let cwd = self
                     .mux
                     .focused()
@@ -3436,26 +3446,45 @@ impl App {
                             .ok()
                             .map(|p| p.display().to_string())
                     });
+                // Serialize the focused tab to a temp file.
+                let handoff_path: Option<std::path::PathBuf> =
+                    self.mux.serialize_tab(self.mux.active).and_then(|stab| {
+                        let session = crate::session::Session {
+                            tabs: vec![stab],
+                            active: 0,
+                            theme: Some(self.cfg.theme_name.clone()),
+                        };
+                        let path = std::env::temp_dir()
+                            .join(format!("kettle-handoff-{}.json", std::process::id()));
+                        match serde_json::to_string(&session)
+                            .ok()
+                            .and_then(|json| std::fs::write(&path, json).ok())
+                        {
+                            Some(_) => Some(path),
+                            None => None,
+                        }
+                    });
                 if let Ok(exe) = std::env::current_exe() {
                     let mut cmd = std::process::Command::new(exe);
-                    if let Some(d) = cwd {
+                    if let Some(p) = handoff_path.as_ref() {
+                        cmd.arg("--tab-handoff").arg(p);
+                    } else if let Some(d) = cwd {
                         cmd.arg("--working-directory").arg(d);
                     }
                     if let Some(p) = self.config_path.as_ref() {
                         cmd.arg("--config").arg(p);
                     }
-                    // Detached so the parent isn't waited-on by the
-                    // child; OS reaps when the child exits.
                     cmd.stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null());
                     if cmd.spawn().is_ok() {
-                        // Close the source tab once the new window
-                        // is launched. CloseTab handles single-tab
-                        // case by exit'ing the loop.
                         let _ = self.mux.close_tab();
                     } else {
                         log::warn!("MoveTabToNewWindow: spawn failed; tab kept in source window");
+                        // Clean up the orphan handoff file.
+                        if let Some(p) = handoff_path.as_ref() {
+                            let _ = std::fs::remove_file(p);
+                        }
                     }
                 }
             }
