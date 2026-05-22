@@ -2216,18 +2216,33 @@ impl App {
                 imgs.extend(p.term.placeholder_tiles());
                 imgs.extend(p.term.relative_tiles());
                 if let Ok(g) = p.term.term.lock() {
-                    guards.push((*r, g, Some(*id) == focus, imgs, p.title.clone()));
+                    use kettle_core::Dimensions;
+                    let cols = g.columns() as u16;
+                    let rows = g.screen_lines() as u16;
+                    guards.push((
+                        *r,
+                        g,
+                        Some(*id) == focus,
+                        imgs,
+                        p.title.clone(),
+                        cols,
+                        rows,
+                        false,
+                    ));
                 }
             }
         }
         let panes: Vec<PaneView> = guards
             .iter()
-            .map(|(r, g, f, imgs, title)| PaneView {
+            .map(|(r, g, f, imgs, title, cols, rows, bell)| PaneView {
                 rect: *r,
                 term: g,
                 focused: *f,
                 images: imgs.clone(),
                 title: title.clone(),
+                size_cols: *cols,
+                size_rows: *rows,
+                bell: *bell,
             })
             .collect();
         // Cycle 296: status bar built BEFORE the &mut renderer borrow
