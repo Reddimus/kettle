@@ -2390,6 +2390,28 @@ impl App {
         match action {
             Action::NewTab => {
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
+                // Cycle 368 (Terminator plugin parity, plugin sub-cycle 4):
+                // fire LuaEvent::TabAdd with the new active tab index.
+                if let Some(eng) = &self.lua_engine {
+                    eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
+                    for cmd in eng.drain_commands() {
+                        match cmd {
+                            crate::LuaCommand::SendText(s) => {
+                                self.pending_lua_send.extend_from_slice(s.as_bytes());
+                            }
+                            crate::LuaCommand::ExecAction(name) => {
+                                if let Some(a) = kettle_config::Action::from_name(&name) {
+                                    self.pending_lua_actions.push(a);
+                                } else {
+                                    log::warn!(
+                                        "lua kettle.exec_action (from tab_add hook): \
+                                         unknown action name {name:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Action::NewWindow => {
                 // Spawn a *separate* kettle process so the user gets a real
@@ -2440,8 +2462,33 @@ impl App {
                 }
             }
             Action::CloseTab => {
+                // Cycle 368: capture the active index BEFORE close
+                // so the LuaEvent::TabClose payload is meaningful
+                // (after close, self.mux.active points at a
+                // different tab).
+                let closing_idx = self.mux.active;
                 if self.mux.close_tab() {
                     event_loop.exit();
+                }
+                if let Some(eng) = &self.lua_engine {
+                    eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
+                    for cmd in eng.drain_commands() {
+                        match cmd {
+                            crate::LuaCommand::SendText(s) => {
+                                self.pending_lua_send.extend_from_slice(s.as_bytes());
+                            }
+                            crate::LuaCommand::ExecAction(name) => {
+                                if let Some(a) = kettle_config::Action::from_name(&name) {
+                                    self.pending_lua_actions.push(a);
+                                } else {
+                                    log::warn!(
+                                        "lua kettle.exec_action (from tab_close hook): \
+                                         unknown action name {name:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Action::CloseWindow => {
