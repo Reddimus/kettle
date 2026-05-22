@@ -140,8 +140,8 @@ cargo run --release
 ```
 
 macOS and Windows need only a stable Rust toolchain (`rustup`) — no extra
-system packages. Minimum supported Rust version is **1.88** (let-chains);
-`rustup update stable` will always satisfy it.
+system packages. Minimum supported Rust version is **1.89** (Cargo.toml
+`rust-version`); `rustup update stable` will always satisfy it.
 
 ## Verifying your build
 
