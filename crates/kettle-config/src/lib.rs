@@ -154,6 +154,35 @@ pub enum StatusBarMode {
     Bottom,
 }
 
+/// Cycle 336 (Terminator parity, terminatorlib/config.py:118
+/// `exit_action`): what to do when the shell process exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExitAction {
+    /// Close the pane (kettle default + Terminator default).
+    #[default]
+    Close,
+    /// Re-spawn the shell. Useful for long-running session windows.
+    Restart,
+    /// Keep the pane open with the dead shell visible (so the user
+    /// can read final output / scrollback before manually closing).
+    Hold,
+}
+
+/// Cycle 336 (Terminator parity, terminatorlib/config.py:79
+/// `ask_before_closing`): when to show the close-confirmation dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskBeforeClosing {
+    /// Always show the dialog, even with one pane (Terminator's
+    /// most-cautious mode).
+    Always,
+    /// Show the dialog only when ≥2 panes/tabs would be killed.
+    /// Terminator's default.
+    #[default]
+    MultipleTerminals,
+    /// Never show the dialog. Close immediately.
+    Never,
+}
+
 /// When the per-pane scrollback scrollbar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
@@ -324,6 +353,18 @@ pub struct Config {
     /// `truecolor` signals 24-bit color support to programs that
     /// honor it (vim, nvim, tmux, ...).
     pub colorterm: String,
+    /// Cycle 336 (Terminator parity, terminatorlib/config.py:122
+    /// `login_shell`): when true, spawn the shell with `-l` (login
+    /// shell semantics — reads /etc/profile, ~/.profile,
+    /// ~/.bash_profile, ...). Default false matches Terminator.
+    pub login_shell: bool,
+    /// Cycle 336 (Terminator parity, terminatorlib/config.py:118
+    /// `exit_action`): what to do when the shell process exits.
+    pub exit_action: ExitAction,
+    /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
+    /// `ask_before_closing`): when to show the close-confirmation
+    /// dialog on window close.
+    pub ask_before_closing: AskBeforeClosing,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -481,6 +522,9 @@ impl Default for Config {
             invert_search: false,
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
+            login_shell: false,
+            exit_action: ExitAction::Close,
+            ask_before_closing: AskBeforeClosing::MultipleTerminals,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1215,6 +1259,25 @@ impl Config {
                     if !v.is_empty() {
                         cfg.colorterm = v.to_string();
                     }
+                }
+                "login-shell" | "login_shell" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.login_shell = b;
+                    }
+                }
+                "exit-action" | "exit_action" => {
+                    cfg.exit_action = match e.value.to_ascii_lowercase().as_str() {
+                        "restart" => ExitAction::Restart,
+                        "hold" => ExitAction::Hold,
+                        _ => ExitAction::Close,
+                    };
+                }
+                "ask-before-closing" | "ask_before_closing" => {
+                    cfg.ask_before_closing = match e.value.to_ascii_lowercase().as_str() {
+                        "always" => AskBeforeClosing::Always,
+                        "never" => AskBeforeClosing::Never,
+                        _ => AskBeforeClosing::MultipleTerminals,
+                    };
                 }
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {
@@ -2367,6 +2430,41 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn shell_exec_and_close_behavior_parse() {
+        // Cycle 336 drift guard.
+        let d = Config::default();
+        assert!(!d.login_shell);
+        assert_eq!(d.exit_action, ExitAction::Close);
+        assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
+        assert!(Config::parse_text("login-shell = true").login_shell);
+        assert!(Config::parse_text("login_shell = true").login_shell);
+        assert_eq!(
+            Config::parse_text("exit-action = restart").exit_action,
+            ExitAction::Restart
+        );
+        assert_eq!(
+            Config::parse_text("exit-action = hold").exit_action,
+            ExitAction::Hold
+        );
+        assert_eq!(
+            Config::parse_text("exit_action = close").exit_action,
+            ExitAction::Close
+        );
+        assert_eq!(
+            Config::parse_text("ask-before-closing = always").ask_before_closing,
+            AskBeforeClosing::Always
+        );
+        assert_eq!(
+            Config::parse_text("ask_before_closing = never").ask_before_closing,
+            AskBeforeClosing::Never
+        );
+        assert_eq!(
+            Config::parse_text("exit-action = wat").exit_action,
+            ExitAction::Close
+        );
     }
 
     #[test]
