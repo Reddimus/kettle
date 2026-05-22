@@ -337,11 +337,11 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 |---|---|---|---|
 | ~~`tab_position = left` / `right` / `hidden`~~ | config.py | ✅ cycle-331 — `hidden` aliases to `tab-bar = off`; `left`/`right` accepted by parser + check-config but fall through to top with a log::warn (vertical tab bars are deferred Bucket C) | cycle-331 |
 | `inactive_color_offset` (dim unfocused term FG) | config.py | 🟡 kettle has `unfocused-split-opacity` (single combined dim); Terminator has separate fg + bg offsets | add `inactive-color-offset` + `inactive-bg-color-offset` aliases that map to `unfocused-split-opacity` (single value); or split into two |
-| `allow_bold` (render bold text on/off) | config.py | ❌ | new config key |
-| `bold_is_bright` (bold = bright palette mapping) | config.py | ❌ | new config key |
-| `link_single_click` (single-click opens URLs) | config.py | ❌ | new config key (kettle uses Ctrl+click) |
+| ~~`allow_bold`~~ | config.py | ✅ cycle-333 — bool config key (default true; kettle render-time behavior wiring in render layer is a follow-up sub-cycle but config + drift guard ship now) | cycle-333 |
+| ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 — bool config key (default false; xterm-convention SGR1→bright mapping; render-layer wiring is a follow-up) | cycle-333 |
+| ~~`link_single_click`~~ | config.py | ✅ cycle-333 — bool config key (default false; mouse-handler wiring is a follow-up) | cycle-333 |
 | `disable_mousewheel_zoom` | config.py | ❌ | new config key |
-| `clear_select_on_copy` | config.py | ❌ | new config key |
+| ~~`clear_select_on_copy`~~ | config.py | ✅ cycle-333 — bool config key + Action::Copy clears selection when true | cycle-333 |
 | `putty_paste_style` (right-click pastes) | config.py | ❌ | new config key |
 | `disable_mouse_paste` (no middle-click paste) | config.py | ❌ | new config key |
 | `case_sensitive` (search) | config.py | 🟡 kettle does smart-case | document divergence in audit; not a gap |

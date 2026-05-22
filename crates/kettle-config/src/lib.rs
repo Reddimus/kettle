@@ -270,6 +270,24 @@ pub struct Config {
     /// windows. Best-effort per OS (Wayland respects compositor
     /// rules; X11 + macOS + Windows mostly honor it).
     pub always_on_top: bool,
+    /// Cycle 333 (Terminator parity, terminatorlib/config.py:111
+    /// `allow_bold`): when false, suppress bold text rendering
+    /// (everything renders plain regardless of SGR 1). Useful on
+    /// monospace fonts that lack a bold companion.
+    pub allow_bold: bool,
+    /// Cycle 333 (Terminator parity, terminatorlib/config.py:130
+    /// `bold_is_bright`): when true, SGR 1 (bold) for indices
+    /// 0-7 maps to the bright variant (8-15). xterm convention.
+    pub bold_is_bright: bool,
+    /// Cycle 333 (Terminator parity, terminatorlib/config.py:120
+    /// `link_single_click`): when true, single-click on a URL
+    /// opens it (kettle default: Ctrl+click). PuTTY/iTerm2-style.
+    pub link_single_click: bool,
+    /// Cycle 333 (Terminator parity, terminatorlib/config.py:91
+    /// `clear_select_on_copy`): when true, the selection is
+    /// deselected after Copy (default: keep selected, so user can
+    /// re-copy).
+    pub clear_select_on_copy: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -416,6 +434,10 @@ impl Default for Config {
             status_bar: StatusBarMode::Off,
             borderless: false,
             always_on_top: false,
+            allow_bold: true,
+            bold_is_bright: false,
+            link_single_click: false,
+            clear_select_on_copy: false,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1092,6 +1114,26 @@ impl Config {
                     // Cycle 332 (Terminator parity).
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.always_on_top = b;
+                    }
+                }
+                "allow-bold" | "allow_bold" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.allow_bold = b;
+                    }
+                }
+                "bold-is-bright" | "bold_is_bright" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.bold_is_bright = b;
+                    }
+                }
+                "link-single-click" | "link_single_click" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.link_single_click = b;
+                    }
+                }
+                "clear-select-on-copy" | "clear_select_on_copy" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.clear_select_on_copy = b;
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2215,7 +2257,7 @@ mod config_tests {
     }
 
     #[test]
-    fn borderless_and_always_on_top_parse(){
+    fn borderless_and_always_on_top_parse() {
         // Cycle 332 drift guard. Terminator's `borderless` +
         // `always_on_top` config keys (terminatorlib/config.py:75
         // + 78). kettle accepts both true/false + the standard

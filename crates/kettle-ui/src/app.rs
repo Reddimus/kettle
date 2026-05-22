@@ -2349,12 +2349,25 @@ impl App {
             Action::ResizeUp => self.mux.resize_focus(Dir::Vertical, -0.03),
             Action::ResizeDown => self.mux.resize_focus(Dir::Vertical, 0.03),
             Action::Copy => {
+                let mut copied = false;
                 if let Some(p) = self.mux.focused()
                     && let Ok(t) = p.term.term.lock()
                     && let Some(sel) = t.selection_to_string()
                     && let Some(cb) = &mut self.clipboard
                 {
                     let _ = cb.set_text(sel);
+                    copied = true;
+                }
+                // Cycle 333 (Terminator parity, terminatorlib/config.py:91
+                // `clear_select_on_copy`): if the config asked, drop the
+                // selection so the user sees the copy "took". Default
+                // false matches Terminator's default — the selection
+                // stays so re-Copy still works.
+                if copied && self.cfg.clear_select_on_copy {
+                    self.clear_selection_on_input();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             Action::Paste => self.paste_clipboard(),
