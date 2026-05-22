@@ -204,6 +204,38 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.set_theme")?;
+        // Cycle 374 (plugin sub-cycle 9): kettle.add_url_handler(
+        //   name, pattern, callback). Lua-supplied URL handlers that
+        // run when a URL matches the pattern, BEFORE kettle's default
+        // open-in-browser path. Use case: route Launchpad/GitHub PR
+        // URLs to a custom CLI tool instead of the system browser.
+        //
+        // Storage: same `kettle_events` registry table used by
+        // kettle.on; just a different key (`url_handlers`) that
+        // holds a list of {name, pattern, callback} tables.
+        let url_handlers_tbl = lua
+            .create_table()
+            .context("create kettle_url_handlers table")?;
+        lua.set_named_registry_value("kettle_url_handlers", url_handlers_tbl)
+            .context("register kettle_url_handlers")?;
+        kettle_tbl
+            .set(
+                "add_url_handler",
+                lua.create_function(
+                    |lua, (name, pattern, cb): (String, String, mlua::Function)| {
+                        let handlers: mlua::Table =
+                            lua.named_registry_value("kettle_url_handlers")?;
+                        let entry = lua.create_table()?;
+                        entry.set("name", name)?;
+                        entry.set("pattern", pattern)?;
+                        entry.set("callback", cb)?;
+                        let n = handlers.len()?;
+                        handlers.set(n + 1, entry)?;
+                        Ok(())
+                    },
+                )?,
+            )
+            .context("set kettle.add_url_handler")?;
         // Cycle 365 (Terminator plugin parity foundation):
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table
@@ -239,6 +271,49 @@ impl LuaEngine {
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
         Ok(Self { lua, pending })
+    }
+
+    /// Cycle 374: invoke the first registered URL handler whose
+    /// pattern matches the given URL. Returns true when a handler
+    /// claimed the URL (kettle should NOT also open it); false
+    /// otherwise (kettle continues to its default open-in-browser
+    /// path).
+    ///
+    /// Uses Lua's built-in `string.match` for pattern compatibility
+    /// with Terminator's URLHandler regex semantics (which are
+    /// Python-flavored, but Lua patterns are similar enough for
+    /// the common URL shapes — alternation isn't supported but most
+    /// URL handlers don't need it).
+    pub fn try_url_handler(&self, url: &str) -> bool {
+        let r: mlua::Result<bool> = (|| {
+            let handlers: mlua::Table = self.lua.named_registry_value("kettle_url_handlers")?;
+            let n = handlers.len()?;
+            for i in 1..=n {
+                let entry: mlua::Table = handlers.get(i)?;
+                let pattern: String = entry.get("pattern")?;
+                // Use Lua's string.match for compat with user-typed
+                // patterns. If it returns non-nil, the handler matches.
+                let s: mlua::Function = self
+                    .lua
+                    .globals()
+                    .get::<mlua::Table>("string")?
+                    .get("match")?;
+                let m: mlua::Value = s.call((url, pattern.as_str()))?;
+                if !matches!(m, mlua::Value::Nil) {
+                    let cb: mlua::Function = entry.get("callback")?;
+                    let call_result: mlua::Result<()> = cb.call(url.to_string());
+                    if let Err(e) = call_result {
+                        log::warn!("lua url_handler callback {i}: {e}");
+                    }
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })();
+        r.unwrap_or_else(|e| {
+            log::warn!("lua try_url_handler: {e}");
+            false
+        })
     }
 
     /// Cycle 365: fire a named event to every Lua callback registered
