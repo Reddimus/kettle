@@ -921,9 +921,22 @@ impl Renderer {
                     cfg.title_inactive_bg_color
                         .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
                 };
+                // Cycle 385 (Terminator parity, titlebar Bucket-D
+                // sub-cycle 9): title_at_bottom flips the bar from
+                // (top of pane) to (bottom of pane). Cells shift
+                // is still applied at the top — that's the
+                // intentional follow-up. Today the bar lands at the
+                // user's chosen position; the small top-pad gap
+                // when title_at_bottom is true is a layout-shift
+                // follow-up.
+                let bar_y = if cfg.title_at_bottom {
+                    ry + rh - bw - pane_titlebar_h
+                } else {
+                    ry + bw
+                };
                 quads.push(rect(
                     rx + bw,
-                    ry + bw,
+                    bar_y,
                     rw - 2.0 * bw,
                     pane_titlebar_h,
                     bar_bg,
@@ -1375,7 +1388,7 @@ impl Renderer {
         // build_pane_titlebar_text).
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
-                let (rx, ry, rw, _rh) = pv.rect;
+                let (rx, ry, rw, rh) = pv.rect;
                 let fg = if pv.focused {
                     cfg.title_transmit_fg_color
                         .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
@@ -1383,16 +1396,30 @@ impl Renderer {
                     cfg.title_inactive_fg_color
                         .unwrap_or(Rgb::new(0x00, 0x00, 0x00))
                 };
+                // Cycle 385: text-area position mirrors the
+                // cycle-385 bar position so the title text follows
+                // the bar to the bottom when title_at_bottom is
+                // true. 2px top padding matches cycle-382.
+                let text_top = if cfg.title_at_bottom {
+                    ry + rh - pane_titlebar_h + 2.0
+                } else {
+                    ry + 2.0
+                };
+                let text_bot = if cfg.title_at_bottom {
+                    ry + rh
+                } else {
+                    ry + pane_titlebar_h
+                };
                 areas.push(TextArea {
                     buffer: &self.pane_titlebar_buffers[i],
                     left: rx,
-                    top: ry + 2.0,
+                    top: text_top,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rx as i32,
-                        top: ry as i32,
+                        top: (text_top - 2.0) as i32,
                         right: (rx + rw) as i32,
-                        bottom: (ry + pane_titlebar_h) as i32,
+                        bottom: text_bot as i32,
                     },
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
