@@ -591,6 +591,61 @@ mod tests {
     }
 
     #[test]
+    fn notify_queues_notify_command() {
+        // Cycle 430 drift guard. `kettle.notify(title, body?)` must
+        // queue a `LuaCommand::Notify` with the title + optional
+        // body; the cycle-426-428 `drain_lua_hook_commands` helper
+        // depends on this variant being present.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str("kettle.notify('Build done', 'rustc finished')")
+            .expect("eval");
+        eng.eval_str("kettle.notify('Quick ping')").expect("eval");
+        let cmds = eng.drain_commands();
+        assert_eq!(cmds.len(), 2);
+        match (&cmds[0], &cmds[1]) {
+            (
+                LuaCommand::Notify {
+                    title: t1,
+                    body: b1,
+                },
+                LuaCommand::Notify {
+                    title: t2,
+                    body: b2,
+                },
+            ) => {
+                assert_eq!(t1, "Build done");
+                assert_eq!(b1, "rustc finished");
+                assert_eq!(t2, "Quick ping");
+                // Optional body defaults to empty string when omitted.
+                assert_eq!(b2, "");
+            }
+            other => panic!("unexpected commands: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_theme_queues_set_theme_command() {
+        // Cycle 430 drift guard. `kettle.set_theme(name)` must queue
+        // a `LuaCommand::SetTheme` with the name; the cycle-426-428
+        // `drain_lua_hook_commands` helper resolves it via
+        // `kettle_config::Theme::find_name` at drain time.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str("kettle.set_theme('TokyoNight Night')")
+            .expect("eval");
+        eng.eval_str("kettle.set_theme('Solarized Dark')")
+            .expect("eval");
+        let cmds = eng.drain_commands();
+        assert_eq!(cmds.len(), 2);
+        match (&cmds[0], &cmds[1]) {
+            (LuaCommand::SetTheme(a), LuaCommand::SetTheme(b)) => {
+                assert_eq!(a, "TokyoNight Night");
+                assert_eq!(b, "Solarized Dark");
+            }
+            other => panic!("unexpected commands: {other:?}"),
+        }
+    }
+
+    #[test]
     fn on_event_hook_registers_and_fires() {
         // Cycle 365 drift guard. kettle.on('startup', fn) registers
         // a callback; fire_event(Startup) invokes it. Errors from
