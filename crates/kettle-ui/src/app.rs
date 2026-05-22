@@ -3865,8 +3865,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let area = self.area();
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
+                //
+                // Cycle 350 (Terminator parity, terminatorlib/config.py:120
+                // `link_single_click`): when true, single-click (no
+                // modifier) is enough to open URLs. Default keeps
+                // kettle's Ctrl-click guard so accidental drags don't
+                // navigate.
+                let url_modifier =
+                    self.cfg.link_single_click || self.mods.control_key() || self.mods.super_key();
                 if bcode == 0
-                    && (self.mods.control_key() || self.mods.super_key())
+                    && url_modifier
                     && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
                 {
                     if !kettle_core::links::is_safe_url(&uri) {
@@ -3886,7 +3894,23 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Middle-click in the content area pastes the clipboard
                 // (standard X11 terminal behavior; PRIMARY ≈ clipboard).
-                if bcode == 1 {
+                //
+                // Cycle 350 (Terminator parity, terminatorlib/config.py:88
+                // `disable_mouse_paste`): when true, middle-click does
+                // not paste. Useful for terminal-of-last-resort use
+                // cases where accidental middle-clicks shouldn't leak
+                // clipboard content into commands.
+                if bcode == 1 && !self.cfg.disable_mouse_paste {
+                    self.paste_clipboard();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Cycle 350 (Terminator parity, terminatorlib/config.py:89
+                // `putty_paste_style`): right-click pastes (PuTTY/Windows
+                // convention) instead of opening the context menu.
+                if bcode == 2 && self.cfg.putty_paste_style {
                     self.paste_clipboard();
                     if let Some(w) = &self.window {
                         w.request_redraw();
