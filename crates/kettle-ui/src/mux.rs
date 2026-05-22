@@ -1095,6 +1095,45 @@ impl Mux {
         self.close_tab_at(a)
     }
 
+    /// Cycle 398 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 4): extract a tab from the tabs list WITHOUT
+    /// dropping its panes' PTYs. Used by the cross-process tab
+    /// handoff path (sub-cycle 7): the source process extracts
+    /// the tab → sends the serialized state + PTY fds via
+    /// SCM_RIGHTS to the target process → target reconstructs
+    /// the tab.
+    ///
+    /// Returns the extracted Tab struct + the focused pane id;
+    /// the Pane structs themselves stay in self.panes (extract
+    /// only touches tabs vec). The caller is responsible for
+    /// transferring or dropping those Pane refs.
+    ///
+    /// Returns None for out-of-range idx.
+    #[allow(dead_code)]
+    pub fn extract_tab(&mut self, idx: usize) -> Option<Tab> {
+        if idx >= self.tabs.len() {
+            return None;
+        }
+        // Bound the active idx so it points at a still-existing tab.
+        if self.active >= idx && self.active > 0 {
+            self.active -= 1;
+        }
+        Some(self.tabs.remove(idx))
+    }
+
+    /// Cycle 398 (companion to extract_tab): insert a Tab into
+    /// the tabs vec at the given index. Used by the cross-process
+    /// receive path (sub-cycle 8) when an incoming handoff lands.
+    /// `at` clamps to [0, tabs.len()].
+    #[allow(dead_code)]
+    pub fn insert_tab(&mut self, at: usize, tab: Tab) {
+        let pos = at.min(self.tabs.len());
+        self.tabs.insert(pos, tab);
+        // Make the inserted tab active so the user sees the
+        // transferred work immediately.
+        self.active = pos;
+    }
+
     /// Close the entire window: drop every pane in every tab. The caller
     /// (the chrome layer) then exits the event loop because `tabs` is
     /// empty. Distinct from `close_tab` which only closes the focused
@@ -2108,12 +2147,47 @@ mod node_tests {
     #[test]
     fn serialize_tab_handles_out_of_range_idx() {
         // Cycle 397 drift guard. Out-of-range index returns
-        // None without panic. (A roundtrip-with-real-tree test
-        // is deferred — needs Pane fixtures with PTYs, not just
-        // Tab. The pure-None case is the bounded contract that
-        // protects callers from index-out-of-bounds.)
+        // None without panic.
         let m = Mux::new();
         assert!(m.serialize_tab(0).is_none());
         assert!(m.serialize_tab(99).is_none());
+    }
+
+    #[test]
+    fn extract_and_insert_tab_roundtrip() {
+        // Cycle 398 drift guard. extract_tab → insert_tab
+        // reproduces the same tab + the active idx tracks
+        // correctly across the operation.
+        let mut m = Mux::new();
+        let mk = |id: u64| Tab {
+            root: Node::Leaf(id),
+            focus: id,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        };
+        m.tabs.push(mk(1));
+        m.tabs.push(mk(2));
+        m.tabs.push(mk(3));
+        m.active = 2; // focus on tab 3.
+        let extracted = m.extract_tab(1).expect("extract 1");
+        // Tab 2 removed; remaining tabs are [1, 3].
+        assert_eq!(m.tabs.len(), 2);
+        // active=2 was past the removed idx; clamped to 1.
+        assert_eq!(m.active, 1);
+        // Insert the extracted tab back at the head.
+        m.insert_tab(0, extracted);
+        // Tabs are now [2, 1, 3]; active=0 (insert_tab sets
+        // active to the new position so the moved tab is focused).
+        assert_eq!(m.tabs.len(), 3);
+        assert_eq!(m.active, 0);
+        // Out-of-range extract returns None.
+        assert!(m.extract_tab(99).is_none());
+        // Out-of-range insert clamps to end.
+        m.insert_tab(99, mk(4));
+        assert_eq!(m.tabs.len(), 4);
+        assert_eq!(m.active, 3);
     }
 }
