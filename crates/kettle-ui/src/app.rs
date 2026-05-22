@@ -1916,76 +1916,25 @@ impl App {
         // LuaCommands (kettle.notify, kettle.send_text); they get
         // drained at the next App tick — same as the cycle-366
         // startup flow.
+        // Cycle 427: route Bell + Output event drains through the
+        // cycle-426 drain_lua_hook_commands helper so all 4 hook
+        // event drains (TabAdd, TabClose, Bell, Output) share the
+        // same canonical LuaCommand-match path.
         for id in bell_panes {
             self.mux.touch_tab_bell(id);
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Bell(id));
-                for cmd in eng.drain_commands() {
-                    match cmd {
-                        crate::LuaCommand::SendText(s) => {
-                            self.pending_lua_send.extend_from_slice(s.as_bytes());
-                        }
-                        crate::LuaCommand::ExecAction(name) => {
-                            if let Some(a) = kettle_config::Action::from_name(&name) {
-                                self.pending_lua_actions.push(a);
-                            } else {
-                                log::warn!(
-                                    "lua kettle.exec_action (from bell hook): \
-                                     unknown action name {name:?}"
-                                );
-                            }
-                        }
-                        crate::LuaCommand::Notify { title, body } => {
-                            fire_notify(&title, &body);
-                        }
-                        crate::LuaCommand::SetTheme(name) => {
-                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                self.cfg.theme_name = canonical.to_string();
-                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                            } else {
-                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                            }
-                        }
-                    }
-                }
             }
+            self.drain_lua_hook_commands("bell hook");
         }
         // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
         // fire LuaEvent::Output(pane_id, bytes) for each pane that
-        // accumulated PTY-output chunks this drain pass. Drain any
-        // queued LuaCommands.
+        // accumulated PTY-output chunks this drain pass.
         for (pane_id, bytes) in output_chunks {
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
-                for cmd in eng.drain_commands() {
-                    match cmd {
-                        crate::LuaCommand::SendText(s) => {
-                            self.pending_lua_send.extend_from_slice(s.as_bytes());
-                        }
-                        crate::LuaCommand::ExecAction(name) => {
-                            if let Some(a) = kettle_config::Action::from_name(&name) {
-                                self.pending_lua_actions.push(a);
-                            } else {
-                                log::warn!(
-                                    "lua kettle.exec_action (from output hook): \
-                                     unknown action name {name:?}"
-                                );
-                            }
-                        }
-                        crate::LuaCommand::Notify { title, body } => {
-                            fire_notify(&title, &body);
-                        }
-                        crate::LuaCommand::SetTheme(name) => {
-                            if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                self.cfg.theme_name = canonical.to_string();
-                                self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                            } else {
-                                log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                            }
-                        }
-                    }
-                }
             }
+            self.drain_lua_hook_commands("output hook");
         }
         // Cycle 412: stash the per-tick restart list on App so the
         // post-drain handler can process it with a fresh
