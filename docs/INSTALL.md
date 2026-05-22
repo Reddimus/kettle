@@ -15,7 +15,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v1.3.4 sh
+  | KETTLE_VERSION=v1.32.0 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 `KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once.
 
 The script verifies the gzip magic bytes on the downloaded tarball,
-checks the SHA-256 against the published sidecar (v1.3.4+), and runs
+checks the SHA-256 against the published sidecar (every release ships one), and runs
 everything in a `mktemp -d` cleaned up on exit. Uninstall later via
 `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -98,14 +98,14 @@ GitHub runners for every platform:
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v1.32.0)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.3.4/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.3.4/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.32.0/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v1.32.0/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```
