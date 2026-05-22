@@ -335,7 +335,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 
 | Terminator feature | source | kettle status | Cycle target |
 |---|---|---|---|
-| `tab_position = left` / `right` / `hidden` | config.py | 🟡 only top/bottom | extend `TabBarPos` enum + parser arm |
+| ~~`tab_position = left` / `right` / `hidden`~~ | config.py | ✅ cycle-331 — `hidden` aliases to `tab-bar = off`; `left`/`right` accepted by parser + check-config but fall through to top with a log::warn (vertical tab bars are deferred Bucket C) | cycle-331 |
 | `inactive_color_offset` (dim unfocused term FG) | config.py | 🟡 kettle has `unfocused-split-opacity` (single combined dim); Terminator has separate fg + bg offsets | add `inactive-color-offset` + `inactive-bg-color-offset` aliases that map to `unfocused-split-opacity` (single value); or split into two |
 | `allow_bold` (render bold text on/off) | config.py | ❌ | new config key |
 | `bold_is_bright` (bold = bright palette mapping) | config.py | ❌ | new config key |

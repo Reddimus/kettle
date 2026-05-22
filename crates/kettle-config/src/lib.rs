@@ -739,7 +739,19 @@ impl Config {
                     "off" | "none" | "false" | "auto" | "always"
                 ),
                 "tab-bar-position" => {
-                    matches!(v.to_ascii_lowercase().as_str(), "top" | "bottom")
+                    // Cycle 331 (Terminator parity, terminatorlib/config.py:144
+                    // `tab_position` accepts top/left/right/bottom/hidden).
+                    // kettle accepts top + bottom natively, treats `hidden`
+                    // as the well-known alias for `tab-bar = off` (the
+                    // separate visibility key). `left`/`right` would require
+                    // a vertical-tab-bar render-layer change (Bucket C in
+                    // docs/TERMINATOR-AUDIT.md); accepted here so a config
+                    // copied from Terminator doesn't fail --check-config, but
+                    // the runtime falls through to top with a log::warn.
+                    matches!(
+                        v.to_ascii_lowercase().as_str(),
+                        "top" | "bottom" | "hidden" | "left" | "right"
+                    )
                 }
                 "scrollbar" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -1023,9 +1035,31 @@ impl Config {
                     }
                 }
                 "tab-bar-position" => {
-                    cfg.tab_bar_pos = match e.value.to_ascii_lowercase().as_str() {
-                        "bottom" => TabBarPos::Bottom,
-                        _ => TabBarPos::Top,
+                    // Cycle 331 (Terminator parity, terminatorlib/config.py:144
+                    // `tab_position`). Terminator accepts top/left/right/
+                    // bottom/hidden. kettle:
+                    //   - `top` / `bottom`: native (cycle-X).
+                    //   - `hidden`: alias to `tab-bar = off` (the kettle
+                    //     visibility-vs-position split — different keys).
+                    //   - `left` / `right`: vertical tab bars require a
+                    //     render-layer change (Bucket C in audit doc).
+                    //     Accept the value so --check-config doesn't flag it
+                    //     as malformed on a copied Terminator config, but
+                    //     fall through to top + log::warn so the user knows
+                    //     it didn't take effect.
+                    let lowered = e.value.to_ascii_lowercase();
+                    match lowered.as_str() {
+                        "bottom" => cfg.tab_bar_pos = TabBarPos::Bottom,
+                        "hidden" => cfg.tab_bar = TabBarMode::Off,
+                        "left" | "right" => {
+                            log::warn!(
+                                "tab-bar-position = {lowered} requested but vertical \
+                                 tab bars aren't yet implemented; falling through to top \
+                                 (see docs/TERMINATOR-AUDIT.md Bucket C)"
+                            );
+                            cfg.tab_bar_pos = TabBarPos::Top;
+                        }
+                        _ => cfg.tab_bar_pos = TabBarPos::Top,
                     }
                 }
                 "status-bar" | "statusbar" => {
@@ -2154,6 +2188,37 @@ mod config_tests {
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
         );
+    }
+
+    #[test]
+    fn tab_bar_position_terminator_aliases() {
+        // Cycle 331 drift guard. Terminator's `tab_position` accepts
+        // top/left/right/bottom/hidden; kettle maps them as:
+        //   - top/bottom: native.
+        //   - hidden: alias to `tab-bar = off`.
+        //   - left/right: accepted by --check-config (so a copied
+        //     Terminator config doesn't fail), but the runtime falls
+        //     through to top with a log::warn (vertical tab bars
+        //     are Bucket C in docs/TERMINATOR-AUDIT.md).
+        let hidden = Config::parse_text("tab-bar-position = hidden");
+        assert_eq!(hidden.tab_bar, TabBarMode::Off);
+        let left = Config::parse_text("tab-bar-position = left");
+        assert_eq!(left.tab_bar_pos, TabBarPos::Top);
+        let right = Config::parse_text("tab-bar-position = right");
+        assert_eq!(right.tab_bar_pos, TabBarPos::Top);
+        // detect_malformed_values must NOT flag any of the five
+        // Terminator values — that's what guarantees Terminator
+        // users can copy their config without --check-config errors.
+        for value in &["top", "bottom", "hidden", "left", "right"] {
+            let bad = Config::detect_malformed_values(&format!("tab-bar-position = {value}\n"));
+            assert!(
+                bad.iter().all(|b| !b.contains("tab-bar-position")),
+                "value {value:?} flagged as malformed: {bad:?}"
+            );
+        }
+        // A truly bogus value still gets flagged.
+        let bad = Config::detect_malformed_values("tab-bar-position = sideways\n");
+        assert!(bad.iter().any(|b| b.contains("tab-bar-position")));
     }
 
     #[test]
