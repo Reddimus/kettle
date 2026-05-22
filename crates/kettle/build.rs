@@ -53,17 +53,21 @@ fn main() {
         }
     }
 
-    // Cycle 195 note: we intentionally *don't* call
-    // `cargo:rerun-if-changed=…` here. Restricting the rerun set to
-    // `.git/HEAD` + the symbolic-ref file (the cycle-192 design) made
-    // the script rerun on commit / branch switch — but NOT on a
-    // source-file edit, which is exactly when the `+dirty` marker
-    // needs to refresh. The two `git` invocations below are ~10ms
-    // total; running the build script on every cargo build is well
-    // under the noise floor of any real build. The cost-benefit
-    // pivots once `+dirty` matters more than ~10ms per build, and it
-    // does for bug reports against dev-iter builds with uncommitted
-    // changes.
+    // Cycle 195 note: we want the script to re-run on every cargo
+    // build so the `+dirty` marker refreshes when ANY source edit
+    // lands — not just edits in this package's tree. Cargo's
+    // default behavior (no rerun-if directives) is to scan only
+    // THIS package's directory; an edit to kettle-ui or kettle-vt
+    // didn't trigger a re-run, so a SHA captured on a clean tree
+    // stayed in the binary across subsequent dirty workspace edits.
+    //
+    // Cycle 445: emit a `rerun-if-changed=NONEXISTENT_FORCE_RERUN`
+    // directive that points at a file Cargo can never stat. Per
+    // the build-script protocol, Cargo treats a missing path as
+    // "always changed" and re-runs the script every time. The
+    // two `git` invocations below are ~10ms total; running on
+    // every cargo build is well under build-time noise.
+    println!("cargo:rerun-if-changed=NONEXISTENT_FORCE_RERUN_FOR_KETTLE_GIT_SHA");
 
     let repo_arg = repo_root.to_str().unwrap_or(".");
     let sha = Command::new("git")
