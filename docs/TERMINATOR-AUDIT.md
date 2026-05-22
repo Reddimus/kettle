@@ -578,12 +578,15 @@ same UX, or an explicit Bucket-E rationale for paradigm-divergent features
 adoption variant of detachable tabs — a kettle-internal optimization,
 not a missing Terminator feature.
 
-## Post-sweep polish (cycles 411-463, v1.32.0 → v1.37.0, 6 releases)
+## Post-sweep polish (cycles 411-475, v1.32.0 → v1.38.0, 7 releases)
 
-After the Terminator-parity sweep landed at v1.31.0, cycles 411-463 ran
-a production-grade hardening pass on the new surfaces. Fifty-three
-cycles, six tagged releases, +11 tests, plus a UX-observability sweep
-that surfaced all 7 Terminator-parity opt-in keys in `--check-config`:
+After the Terminator-parity sweep landed at v1.31.0, cycles 411-475 ran
+a production-grade hardening pass on the new surfaces. Sixty-five
+cycles, seven tagged releases, +13 tests, plus a UX-observability
+sweep that surfaced all 7 Terminator-parity opt-in keys in
+`--check-config`, plus a doc-durability sweep that scrubbed internal
+cycle refs from every user-facing surface and extended the drift
+guard to enforce it:
 
   Workspace tests             308 → 321 (+13 drift guards)
   Tagged releases             v1.32.0 (cycles 411-415) ·
@@ -591,7 +594,8 @@ that surfaced all 7 Terminator-parity opt-in keys in `--check-config`:
                               v1.34.0 (cycles 420-427) ·
                               v1.35.0 (cycles 428-437) ·
                               v1.36.0 (cycles 438-448) ·
-                              v1.37.0 (cycles 450-463)
+                              v1.37.0 (cycles 450-463) ·
+                              v1.38.0 (cycles 466-475)
   Plugin-contract bug fixes   6 silent event-bypass sites covered:
                               remote-control new-tab → TabAdd
                               (cycle 423); 3 close_tab paths →
