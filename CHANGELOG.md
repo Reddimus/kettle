@@ -6,6 +6,66 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-05-22
+
+Plugin Bucket-D COMPLETE end-to-end + first user-visible
+deliverables for titlebar + bg-image Bucket-D items.
+
+  cycle 377 — LuaEvent::Output variant + fire_event dispatch
+              (API surface)
+  cycle 378 — LuaEvent::Output PTY-reader sidechannel emission.
+              Per-pane `output_rx: Option<Receiver<Vec<u8>>>`
+              attached when LuaEngine is active; reader-thread
+              try_sends raw bytes; App drain_events coalesces +
+              fires LuaEvent::Output(pane_id, bytes).
+              Zero-cost when no Lua subscriber.
+  cycle 379 — Per-pane titlebar background quad render. When
+              cfg.show_titlebar=true + >1 pane in tab, a
+              cfg.title_*_bg_color strip renders at the top of
+              each pane.
+  cycle 380 — background-darkness + background-type composed
+              alpha. background-type=transparent or image
+              multiplies opacity by darkness, applied to the
+              wgpu clear-color (both live + screenshot path).
+  cycle 381 — bg-image decoder foundation. New
+              `kettle_render::bg_image::decode_bg_image(path)`
+              helper with format-feature flags PNG/JPEG/WebP/
+              BMP/GIF; tilde-expansion; graceful nil-on-missing.
+
+### Plugin Bucket-D end-to-end
+
+All 5 LuaEvent variants emit; all 7 user-facing kettle.* APIs
+ship; init.lua auto-loads; sandbox config knob in place; URL
++ menu handlers route through Lua registry before kettle
+defaults.
+
+  ✅  13 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles
+
+### Titlebar Bucket-D progress
+
+  ✅  2 (partial): visible background quad
+  ⌛  3+: title text render, color variants for receive state,
+         hit-testing, icon_bell, layout-shift so cells don't
+         overlap the bar
+
+### bg-image Bucket-D progress
+
+  ✅  2:  decoder foundation
+  ✅  7:  background-darkness overlay (composed alpha)
+  ✅  10: background-type=transparent path (composed alpha)
+  ⌛  3,4,5,6,8,9,11,12 — wgpu texture upload + render quad +
+         UV modes + align + resize + blur + reload + tests
+
+### Detachable tabs Bucket-D
+
+  ⌛  All sub-cycles deferred to dedicated session per
+      docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md. Needs
+      SCM_RIGHTS fd transfer (Linux/macOS) + cross-window
+      IPC. Wayland users get the documented keybind-fallback
+      alternative.
+
+Workspace tests 302 → 304 (+2 bg_image drift guards).
+
 ## [1.16.0] — 2026-05-22
 
   cycle 375 — `kettle.add_menu_item(label, callback)` Lua API.
