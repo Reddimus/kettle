@@ -170,6 +170,14 @@ struct Cli {
     #[arg(long, value_name = "PATH", verbatim_doc_comment)]
     tab_handoff: Option<std::path::PathBuf>,
 
+    /// Receive a tab handoff via SCM_RIGHTS over the named file
+    /// descriptor. Used by Action::MoveTabToNewWindow on Linux +
+    /// macOS where SCM_RIGHTS is available — preserves live
+    /// running shells across the window move (vs the file-handoff
+    /// path which restarts shells). Unix-only.
+    #[arg(long, value_name = "FD", verbatim_doc_comment)]
+    tab_handoff_fd: Option<i32>,
+
     /// Launch with a named-profile *config* (distinct from --layout
     /// which picks the *session*). Loads
     /// `<config-dir>/profiles/<NAME>.config` instead of the default
@@ -816,6 +824,7 @@ fn main() -> anyhow::Result<()> {
         remote_file,
         lua_script: cli.lua_script,
         tab_handoff: cli.tab_handoff,
+        tab_handoff_fd: cli.tab_handoff_fd,
     })
 }
 

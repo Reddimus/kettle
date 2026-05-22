@@ -79,6 +79,15 @@ pub struct Options {
     /// path + uses it as the startup tab (replacing the default
     /// shell). Path is deleted after read (one-shot handoff).
     pub tab_handoff: Option<std::path::PathBuf>,
+    /// Cycle 408 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 7 SCM_RIGHTS live-PTY transfer): inherited
+    /// socket fd carrying the serialized tab JSON + PTY-fd
+    /// SCM_RIGHTS ancillary payload. The target kettle calls
+    /// fd_transport::recv_fds on this fd to receive both the
+    /// JSON state + the duplicated PTY fds, then reconstructs
+    /// the tab with adopted fds (running shells preserved).
+    /// Unix-only.
+    pub tab_handoff_fd: Option<i32>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).
