@@ -3456,13 +3456,10 @@ impl App {
                         };
                         let path = std::env::temp_dir()
                             .join(format!("kettle-handoff-{}.json", std::process::id()));
-                        match serde_json::to_string(&session)
+                        serde_json::to_string(&session)
                             .ok()
                             .and_then(|json| std::fs::write(&path, json).ok())
-                        {
-                            Some(_) => Some(path),
-                            None => None,
-                        }
+                            .map(|_| path)
                     });
                 if let Ok(exe) = std::env::current_exe() {
                     let mut cmd = std::process::Command::new(exe);
