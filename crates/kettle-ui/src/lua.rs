@@ -20,6 +20,19 @@
 use anyhow::{Context, Result};
 use mlua::Lua;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+/// Cycle 325: side-effect commands buffered from Lua. The Lua VM
+/// can't directly mutate App state (lifetime + threading), so
+/// side-effect APIs (send_text, set_tab_title, notify, ...) push
+/// onto this queue and the App drains it after the script
+/// returns. Same shape as the cycle-302 remote-control IPC's
+/// line-buffer, just in-process.
+#[derive(Debug, Clone)]
+pub enum LuaCommand {
+    /// `kettle.send_text(s)` → write s to the focused pane's PTY.
+    SendText(String),
+}
 
 /// Owned Lua VM with kettle's namespace registered. Single-threaded
 /// today (Lua VMs aren't natively reentrant); future cycles may
@@ -27,6 +40,9 @@ use std::path::Path;
 /// the App's threads.
 pub struct LuaEngine {
     lua: Lua,
+    /// Side-effect commands queued by Lua functions. Drained by
+    /// the App after exec_file returns.
+    pending: Arc<Mutex<Vec<LuaCommand>>>,
 }
 
 impl LuaEngine {
@@ -42,6 +58,7 @@ impl LuaEngine {
     /// happy path for subsequent sub-cycles — extend this function.
     pub fn new(theme_name: &str) -> Result<Self> {
         let lua = Lua::new();
+        let pending: Arc<Mutex<Vec<LuaCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
         // Expose values as callable functions (not bare strings) so
         // user scripts use the conventional `kettle.version()` form.
@@ -69,10 +86,38 @@ impl LuaEngine {
                 lua.create_function(move |_, ()| Ok(theme.clone()))?,
             )
             .context("set kettle.theme")?;
+        // Cycle 325: side-effect API. `kettle.send_text(s)` queues
+        // a SendText command for the App to drain + write to the
+        // focused pane's PTY. Lua-side it looks synchronous, but
+        // the actual PTY write happens once the script returns —
+        // a kettle script can't observe its own typing.
+        let pending_for_send = Arc::clone(&pending);
+        kettle_tbl
+            .set(
+                "send_text",
+                lua.create_function(move |_, s: String| {
+                    pending_for_send
+                        .lock()
+                        .map(|mut v| v.push(LuaCommand::SendText(s)))
+                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
+                    Ok(())
+                })?,
+            )
+            .context("set kettle.send_text")?;
         lua.globals()
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
-        Ok(Self { lua })
+        Ok(Self { lua, pending })
+    }
+
+    /// Cycle 325: drain pending side-effect commands queued by Lua
+    /// during the most recent script execution. Returns whatever
+    /// the script accumulated; the buffer is reset.
+    pub fn drain_commands(&self) -> Vec<LuaCommand> {
+        self.pending
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 
     /// Run the contents of a Lua file. Errors bubble up via anyhow
@@ -139,6 +184,26 @@ mod tests {
         assert_eq!(r, "5");
         let r2 = eng.eval_str("return string.upper('hello')").expect("eval");
         assert_eq!(r2, "HELLO");
+    }
+
+    #[test]
+    fn send_text_queues_command_drained_by_app() {
+        // Cycle 325 drift guard. `kettle.send_text(s)` queues a
+        // command that the App drains + writes to the focused pane.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str("kettle.send_text('echo hello\\n')")
+            .expect("eval");
+        eng.eval_str("kettle.send_text('ls -la\\n')").expect("eval");
+        let cmds = eng.drain_commands();
+        assert_eq!(cmds.len(), 2);
+        match (&cmds[0], &cmds[1]) {
+            (LuaCommand::SendText(a), LuaCommand::SendText(b)) => {
+                assert_eq!(a, "echo hello\n");
+                assert_eq!(b, "ls -la\n");
+            }
+        }
+        // Drain is destructive — second drain returns empty.
+        assert_eq!(eng.drain_commands().len(), 0);
     }
 
     #[test]

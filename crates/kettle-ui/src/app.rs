@@ -522,6 +522,11 @@ pub struct App {
     /// alive for the whole App lifetime; dropping the watcher would
     /// kill the notify thread without warning.
     _remote_watcher: Option<notify::RecommendedWatcher>,
+    /// Cycle 325 Lua scripting: bytes the user's `--lua-script`
+    /// queued via `kettle.send_text(s)` before the first pane
+    /// existed. Drained + written to the first focused pane's
+    /// PTY once that pane is ready.
+    pending_lua_send: Vec<u8>,
 }
 
 impl App {
@@ -624,6 +629,12 @@ impl App {
         // was set, init a LuaEngine + run the script once. Failures
         // log::warn but don't block the launch (same shape as the
         // cycle-289 trigger compile fallthrough).
+        //
+        // Cycle 325: also drain pending side-effect commands queued
+        // by Lua and stash them on App so the first focused pane
+        // gets them written to its PTY once it's ready (the pane
+        // doesn't exist yet at this point in App::new).
+        let mut pending_lua_send: Vec<u8> = Vec::new();
         if let Some(script) = &startup.lua_script {
             match crate::LuaEngine::new(&initial_cfg.theme_name) {
                 Ok(eng) => {
@@ -631,6 +642,13 @@ impl App {
                         log::warn!("lua script {}: {e:#}", script.display());
                     } else {
                         log::info!("lua script {}: executed", script.display());
+                    }
+                    for cmd in eng.drain_commands() {
+                        match cmd {
+                            crate::LuaCommand::SendText(s) => {
+                                pending_lua_send.extend_from_slice(s.as_bytes());
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -674,6 +692,7 @@ impl App {
             startup,
             _watcher: watcher,
             _remote_watcher: remote_watcher,
+            pending_lua_send,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -3338,6 +3357,16 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         self.resize_all();
+        // Cycle 325 Lua scripting: drain any `kettle.send_text(s)`
+        // bytes the startup script queued, into the now-existing
+        // focused pane's PTY. The pane is fresh; the shell will
+        // see this as the user's first typing.
+        if !self.pending_lua_send.is_empty()
+            && let Some(p) = self.mux.focused()
+        {
+            let bytes = std::mem::take(&mut self.pending_lua_send);
+            p.term.write(&bytes);
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }

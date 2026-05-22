@@ -27,7 +27,7 @@ mod mux;
 mod session;
 
 pub use app::App;
-pub use lua::LuaEngine;
+pub use lua::{LuaCommand, LuaEngine};
 
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]

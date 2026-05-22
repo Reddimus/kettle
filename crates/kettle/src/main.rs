@@ -244,7 +244,7 @@ struct Cli {
     ///
     /// Subsequent sub-cycles add side-effect APIs (send_text,
     /// notify, event hooks). Errors in the script print to stderr
-    /// + log::warn but don't fail the kettle launch — same shape
+    /// (log::warn) but don't fail the kettle launch — same shape
     /// as malformed-config tolerance.
     ///
     /// Example: print kettle's version on every launch:
