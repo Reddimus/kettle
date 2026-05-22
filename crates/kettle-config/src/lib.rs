@@ -154,6 +154,51 @@ pub enum StatusBarMode {
     Bottom,
 }
 
+/// Cycle 338 (Terminator parity, terminatorlib/config.py:107
+/// `backspace_binding`): how Backspace key is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackspaceBinding {
+    /// Send ASCII DEL (0x7f) — VTE convention + kettle default.
+    #[default]
+    AsciiDel,
+    /// Send Ctrl-H (0x08).
+    ControlH,
+    /// Send the escape sequence `\e[3~`.
+    EscapeSequence,
+    /// Automatic per the TERM database.
+    Automatic,
+}
+
+/// Cycle 338 (Terminator parity, terminatorlib/config.py:108
+/// `delete_binding`): how Delete key is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeleteBinding {
+    /// Send ASCII DEL (0x7f).
+    AsciiDel,
+    /// Send Ctrl-H.
+    ControlH,
+    /// Send the escape sequence `\e[3~` — VTE convention + kettle default.
+    #[default]
+    EscapeSequence,
+    /// Automatic per the TERM database.
+    Automatic,
+}
+
+/// Cycle 338 (Terminator parity, terminatorlib/config.py:71
+/// `broadcast_default`): default broadcast scope when none set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BroadcastDefault {
+    /// Broadcast to every pane in every window (Terminator's
+    /// most-permissive mode).
+    All,
+    /// Broadcast within a per-tab group (kettle default — matches
+    /// the cycle-178 per-tab broadcast model).
+    #[default]
+    Group,
+    /// Don't broadcast (each pane gets its own input).
+    Off,
+}
+
 /// Cycle 336 (Terminator parity, terminatorlib/config.py:118
 /// `exit_action`): what to do when the shell process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -394,6 +439,33 @@ pub struct Config {
     /// `hide_from_taskbar`): hide kettle from the OS taskbar.
     /// Linux-specific (X11 + Wayland support varies).
     pub hide_from_taskbar: bool,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:107
+    /// `backspace_binding`): how Backspace key is encoded.
+    pub backspace_binding: BackspaceBinding,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:108
+    /// `delete_binding`): how Delete key is encoded.
+    pub delete_binding: DeleteBinding,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:71
+    /// `broadcast_default`): default broadcast scope.
+    pub broadcast_default: BroadcastDefault,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:86
+    /// `use_custom_url_handler`): use an external program for
+    /// URL clicks instead of the OS default.
+    pub use_custom_url_handler: bool,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:87
+    /// `custom_url_handler`): path to the custom URL handler.
+    /// No-op unless `use_custom_url_handler` is true.
+    pub custom_url_handler: String,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:84
+    /// `inactive_color_offset`): float 0.0-1.0 — unfocused-pane
+    /// FG color dimming. kettle's `unfocused-split-opacity`
+    /// applies to the whole pane; this is a separate FG-only
+    /// dim. No-op until wired into the render layer.
+    pub inactive_color_offset: f32,
+    /// Cycle 338 (Terminator parity, terminatorlib/config.py:85
+    /// `inactive_bg_color_offset`): BG-only dim for unfocused
+    /// panes. No-op until wired into the render layer.
+    pub inactive_bg_color_offset: f32,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -562,6 +634,13 @@ impl Default for Config {
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
+            backspace_binding: BackspaceBinding::AsciiDel,
+            delete_binding: DeleteBinding::EscapeSequence,
+            broadcast_default: BroadcastDefault::Group,
+            use_custom_url_handler: false,
+            custom_url_handler: String::new(),
+            inactive_color_offset: 1.0,
+            inactive_bg_color_offset: 1.0,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1354,6 +1433,47 @@ impl Config {
                 "hide-from-taskbar" | "hide_from_taskbar" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.hide_from_taskbar = b;
+                    }
+                }
+                "backspace-binding" | "backspace_binding" => {
+                    cfg.backspace_binding = match e.value.to_ascii_lowercase().as_str() {
+                        "control-h" | "ctrl-h" | "control_h" => BackspaceBinding::ControlH,
+                        "escape-sequence" | "escape_sequence" => BackspaceBinding::EscapeSequence,
+                        "automatic" | "auto" => BackspaceBinding::Automatic,
+                        _ => BackspaceBinding::AsciiDel,
+                    };
+                }
+                "delete-binding" | "delete_binding" => {
+                    cfg.delete_binding = match e.value.to_ascii_lowercase().as_str() {
+                        "ascii-del" | "ascii_del" => DeleteBinding::AsciiDel,
+                        "control-h" | "ctrl-h" | "control_h" => DeleteBinding::ControlH,
+                        "automatic" | "auto" => DeleteBinding::Automatic,
+                        _ => DeleteBinding::EscapeSequence,
+                    };
+                }
+                "broadcast-default" | "broadcast_default" => {
+                    cfg.broadcast_default = match e.value.to_ascii_lowercase().as_str() {
+                        "all" => BroadcastDefault::All,
+                        "off" | "none" => BroadcastDefault::Off,
+                        _ => BroadcastDefault::Group,
+                    };
+                }
+                "use-custom-url-handler" | "use_custom_url_handler" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.use_custom_url_handler = b;
+                    }
+                }
+                "custom-url-handler" | "custom_url_handler" => {
+                    cfg.custom_url_handler = e.value.trim().to_string();
+                }
+                "inactive-color-offset" | "inactive_color_offset" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.inactive_color_offset = v.clamp(0.0, 1.0);
+                    }
+                }
+                "inactive-bg-color-offset" | "inactive_bg_color_offset" => {
+                    if let Ok(v) = e.value.parse::<f32>() {
+                        cfg.inactive_bg_color_offset = v.clamp(0.0, 1.0);
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2507,6 +2627,54 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn key_encoding_broadcast_url_offsets_parse() {
+        // Cycle 338 drift guard.
+        let d = Config::default();
+        assert_eq!(d.backspace_binding, BackspaceBinding::AsciiDel);
+        assert_eq!(d.delete_binding, DeleteBinding::EscapeSequence);
+        assert_eq!(d.broadcast_default, BroadcastDefault::Group);
+        assert!(!d.use_custom_url_handler);
+        assert_eq!(d.custom_url_handler, "");
+        assert!((d.inactive_color_offset - 1.0).abs() < 1e-6);
+        assert!((d.inactive_bg_color_offset - 1.0).abs() < 1e-6);
+        // Key-encoding parse arms.
+        assert_eq!(
+            Config::parse_text("backspace-binding = control-h").backspace_binding,
+            BackspaceBinding::ControlH
+        );
+        assert_eq!(
+            Config::parse_text("delete_binding = ascii-del").delete_binding,
+            DeleteBinding::AsciiDel
+        );
+        // Broadcast default.
+        assert_eq!(
+            Config::parse_text("broadcast-default = all").broadcast_default,
+            BroadcastDefault::All
+        );
+        assert_eq!(
+            Config::parse_text("broadcast_default = off").broadcast_default,
+            BroadcastDefault::Off
+        );
+        // Custom URL handler.
+        let c = Config::parse_text(
+            "use-custom-url-handler = true\ncustom-url-handler = firefox-developer-edition",
+        );
+        assert!(c.use_custom_url_handler);
+        assert_eq!(c.custom_url_handler, "firefox-developer-edition");
+        // Inactive offset clamps.
+        assert!(
+            (Config::parse_text("inactive-color-offset = 0.5").inactive_color_offset - 0.5).abs()
+                < 1e-6
+        );
+        assert!(
+            (Config::parse_text("inactive_bg_color_offset = 999.0").inactive_bg_color_offset - 1.0)
+                .abs()
+                < 1e-6,
+            "should clamp to 1.0 max"
+        );
     }
 
     #[test]
