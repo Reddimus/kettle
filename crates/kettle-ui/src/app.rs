@@ -1808,14 +1808,14 @@ impl App {
                     TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
                         kettle_config::ExitAction::Hold => {}
                         kettle_config::ExitAction::Restart => {
+                            // Cycle 418: queue for post-drain
+                            // respawn via Mux::new_tab_with. The
+                            // dead pane closes here; the cycle-418
+                            // handler spawns a fresh shell with
+                            // the same argv + cwd in a new tab.
                             pending_restarts_local.push(pane_id);
                             pane.closed = true;
                             log::info!("exit-action = restart: queued pane {pane_id} for respawn");
-                            log::warn!(
-                                "exit-action = restart not yet implemented; \
-                                     falling through to close (pane id {pane_id})"
-                            );
-                            pane.closed = true;
                         }
                         kettle_config::ExitAction::Close => pane.closed = true,
                     },
@@ -3824,13 +3824,19 @@ impl App {
                     }
                 }
             } else if line == "new-tab" {
-                // Forward-compat: another planned remote-control verb.
-                // No-op for v1 because the App's NewTab dispatch path
-                // expects an Action through the keybind layer; wiring
-                // that from here would need an Action-emitter helper.
-                // Logging the recognition so a user testing the path
-                // sees it landed.
-                log::info!("remote-control: new-tab (not yet implemented)");
+                // Cycle 419 (Terminator parity, remote-control verb):
+                // open a new tab via the remote-control IPC channel.
+                // Mirrors the Action::NewTab dispatch (cycle 134) but
+                // skips the keybind layer + focus-change tracking
+                // (the remote caller isn't a keyboard user; the new
+                // tab becomes active automatically through new_tab).
+                let (cw, ch) = self.cell_px();
+                let area = self.area();
+                let (cols, rows) = self.grid_of(area);
+                let waker = self.waker();
+                if let Err(e) = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                    log::warn!("remote-control: new-tab failed: {e}");
+                }
             } else {
                 log::warn!("remote command not recognized: {line:?}");
             }
