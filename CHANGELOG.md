@@ -6,6 +6,64 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.34.0 polish. Plugin-contract refactor finished off, drift
+guards extended, docs caught up to current HEAD.
+
+  cycle 428 — `App::resumed` startup-hook drain (the last remaining
+              inline `LuaCommand`-variant match in the
+              `ApplicationHandler` trait impl) now routes through
+              `drain_lua_hook_commands`. A stale comment claimed
+              inherent methods aren't callable from trait impls —
+              they are, as long as `self: &mut App`. All 5 event
+              hooks (Startup / TabAdd / TabClose / Bell / Output)
+              now share one canonical drain path.
+
+  cycle 429 — README + `docs/INSTALL.md` version pins bumped to
+              v1.34.0 (README status line v1.31.x → v1.34.x;
+              KETTLE_VERSION example v1.3.4 → v1.34.0; INSTALL.md
+              SHA-256 verify URLs v1.32.0 → v1.34.0). The
+              recommended install command now lands users on a
+              current binary.
+
+  cycle 430 — Drift-guard tests for `kettle.notify` +
+              `kettle.set_theme` queue/drain semantics. The
+              cycle-426-428 helper depends on these variants
+              being present; a future refactor of the mlua
+              closures could silently drop the push and the
+              helper would just see empty drains. 308 → 316.
+
+  cycle 431 — `docs/TERMINATOR-AUDIT.md` tail extended with the
+              post-sweep polish summary (cycles 411-430 spanning
+              v1.32.0 → v1.34.0). Future contributors see the
+              audit's trajectory through current HEAD.
+
+  cycle 432 — `docs/ROADMAP.md` gained a v1.32.0 → v1.34.0
+              section bridging the v1.8.0 → v1.31.0 sweep and
+              the Next list. Five threads: plugin-contract bug
+              fixes, exit-action=restart, helper unification,
+              docs-as-code, drift guards.
+
+  cycle 433 — Lua menu-item click drain (cycle 375) routed
+              through `drain_lua_hook_commands` — −35 more lines
+              of duplication. The only remaining inline drain
+              is App::new (early init before `self` exists).
+
+  cycle 434 — `drain_lua_hook_commands` rustdoc updated to list
+              all 6 callers (was 2). Future contributors see the
+              full surface without grepping.
+
+  cycle 435 — Drift-guard tests for `kettle.add_menu_item` /
+              `invoke_menu_item` + `kettle.add_url_handler` /
+              `try_url_handler`. Pattern-match short-circuit,
+              error isolation, out-of-range index safety.
+              316 → 318.
+
+  cycle 436 — `packaging/linux/kettle.1` man page filled in 8
+              missing CLI-flag entries (--remote-send,
+              --remote-file, --toggle, --profile, --layout,
+              --accent, --lua-script, --annotate). `man kettle`
+              now matches `kettle --help`.
+
 ## [1.34.0] — 2026-05-22
 
 Plugin-contract hardening — every new_tab / close_tab call site now
