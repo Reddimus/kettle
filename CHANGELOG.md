@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-05-22
+
+Titlebar receive-state variant + background-image full render.
+
+  cycle 387 — Per-pane titlebar receive-state color variant.
+              cfg.title_receive_bg/fg_color used when broadcast
+              is on + pane isn't the focused source. Closes
+              titlebar sub-cycle 4.
+  cycle 388 — Background-image full wgpu render. When
+              cfg.background_type = image + cfg.background_image
+              is set, decodes via cycle-381 helper, caches the
+              ImageData, prepends to img_items so imgpipe draws
+              it as the first textured quad — wallpaper visible
+              behind padding gaps, transparent cells, and
+              dim overlays. Closes bg-image sub-cycles 3+4.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):       ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):     ✅ 7 (sub-cycles 2/3/4/6/9 + layout-shift)
+                              ⌛ 3 (5 hit-test / 7 per-pane edit / 8 group label / 10 test)
+bg-image (12 sub-cycles):     ✅ 5 (sub-cycles 2/3/4/7/10)
+                              ⌛ 7 (UV modes 5+6, align, resize, blur, reload, test)
+Detachable tabs (11 sub-cycles): ✅ 1 (10 Wayland-fallback)
+                              ⌛ 10 (cursor drag, IPC, SCM_RIGHTS,
+                                    reattach)
+
+26 of 46 Bucket-D sub-cycles shipped end-to-end.
+
+Workspace tests stay at 304.
+
 ## [1.19.0] — 2026-05-22
 
 Titlebar Bucket-D + detachable-tabs Wayland-fallback push.
