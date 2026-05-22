@@ -310,6 +310,10 @@ pub struct PaneView<'a> {
     /// indicator for the pane. When true and cfg.icon_bell is
     /// also true, a small dot renders in the titlebar.
     pub bell: bool,
+    /// Cycle 406 (Terminator parity, titlebar Bucket-D sub-cycle 8):
+    /// optional named broadcast group. When Some(name), the
+    /// titlebar prefixes "[name] " before the pane title.
+    pub group_name: Option<String>,
 }
 
 pub struct Renderer {
