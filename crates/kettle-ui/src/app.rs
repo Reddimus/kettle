@@ -980,6 +980,36 @@ impl App {
         Ok(())
     }
 
+    /// Cycle 425: fire LuaEvent::TabAdd + drain Lua commands.
+    /// Companion to fire_tab_close_event; every Mux::new_tab /
+    /// new_tab_with call site that USER-VISIBLY creates a tab
+    /// (i.e. NOT startup-time first-tab init before plugins load)
+    /// should call this. Centralizes the plugin-contract dispatch
+    /// so future new_tab callers can't drift out of sync.
+    fn fire_tab_add_event(&mut self) {
+        if let Some(eng) = &self.lua_engine {
+            eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
+            for cmd in eng.drain_commands() {
+                match cmd {
+                    crate::LuaCommand::SendText(s) => {
+                        self.pending_lua_send.extend_from_slice(s.as_bytes());
+                    }
+                    crate::LuaCommand::ExecAction(name) => {
+                        if let Some(a) = kettle_config::Action::from_name(&name) {
+                            self.pending_lua_actions.push(a);
+                        } else {
+                            log::warn!(
+                                "lua kettle.exec_action (tab_add hook): \
+                                 unknown action {name:?}"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Cycle 424: fire LuaEvent::TabClose + drain any Lua commands
     /// the hook produces. Extracted from Action::CloseTab so every
     /// close_tab call site can emit the same event (cycle 423
@@ -2351,8 +2381,8 @@ impl App {
                     .panes
                     .get(&pane_id)
                     .map(|p| (p.argv.clone(), p.term.current_dir()));
-                if let Some((argv, cwd)) = restart_info
-                    && let Err(e) = self.mux.new_tab_with(
+                if let Some((argv, cwd)) = restart_info {
+                    if let Err(e) = self.mux.new_tab_with(
                         &self.cfg,
                         cols,
                         rows,
@@ -2361,9 +2391,13 @@ impl App {
                         waker.clone(),
                         &argv,
                         cwd.as_deref(),
-                    )
-                {
-                    log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {e}");
+                    ) {
+                        log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {e}");
+                    } else {
+                        // Cycle 425: respawned tab is a fresh tab
+                        // from the plugin's POV; fire TabAdd.
+                        self.fire_tab_add_event();
+                    }
                 }
             }
         }
@@ -3003,6 +3037,11 @@ impl App {
                     .is_some();
                 if !spawned {
                     let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
+                    // Cycle 425: NewWindow's fallback path creates a
+                    // tab in this process when current_exe isn't
+                    // resolvable. Plugins listening for tab_add
+                    // should see this just like Action::NewTab.
+                    self.fire_tab_add_event();
                 }
             }
             Action::SplitRight => {
