@@ -142,3 +142,94 @@ See [TESTING.md](TESTING.md) for the per-crate breakdown
 (run `cargo test --workspace` for today's count — it grows ~1/cycle).
 Comparative analysis behind these choices (with citations) is in
 [RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
+
+## Terminator-parity subsystems (cycles 330-415)
+
+The v1.8.0 → v1.32.0 sweep added four major subsystems. Each has its
+own design doc; the architectural integration is summarized here.
+
+### Plugin system (cycles 324, 365-378)
+
+```
+init.lua  ──auto-load──▶  LuaEngine ──registers──▶  on/notify/set_theme/
+                            │                       send_text/exec_action/
+                            │                       add_url_handler/
+                            │                       add_menu_item
+                            ▼
+                       App.lua_engine ──fire_event──▶ Startup, Bell,
+                                                      TabAdd, TabClose,
+                                                      Output(bytes)
+                            │
+                            ▼
+                     LuaCommand queue ──drain──▶  App dispatch (SendText,
+                                                  ExecAction, Notify,
+                                                  SetTheme)
+```
+
+`lua-sandbox = safe` (default) nils unsafe stdlib APIs (os.execute,
+io.open, etc); `trusted` mode opt-in. See
+[`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
+
+### Per-pane titlebar (cycles 379-407)
+
+Renders ONLY when a tab has >1 pane (single-pane tab uses the OS
+window title). Layout:
+
+```
+┌─────────────────────────────────────────────────┐  ← per-pane bar
+│  [group] pane title   80x24   🔔                │     (top OR bottom
+├─────────────────────────────────────────────────┤      per cfg)
+│                                                 │
+│              cell content                       │  ← cell-grid render
+│              (shifted by bar height)            │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+Three color variants based on broadcast state: transmit (focused
+source), receive (group member), inactive (idle). Click on the bar
+focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
+action edits the broadcast-group label. See
+[`docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md).
+
+### Background image (cycles 380-396)
+
+```
+cfg.background_image  ──decode_bg_image──▶  BgImage  ──Arc-cached──▶  imgpipe
+   │                       │                  │                          │
+   ▼                       ▼                  ▼                          ▼
+PNG/JPEG/WebP/      Optional box blur     Render BEFORE pane     Fullscreen quad
+BMP/GIF              (cycle 396)           backgrounds            UV-mode dispatch
+                                                                  (stretch / tile /
+                                                                   center / scale)
+```
+
+Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
+via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
+See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+
+### Detachable tabs (cycles 397-410)
+
+Two paths, both end-to-end:
+
+```
+                    Action::MoveTabToNewWindow
+                              │
+            ┌─────────────────┼──────────────────┐
+            ▼                 ▼                  ▼
+       Wayland-fallback   Unix SCM_RIGHTS    File-fallback
+       (keyboard only)    socketpair + fork  /tmp/handoff.json
+                          + send_fds         + --tab-handoff PATH
+            │                 │                  │
+            └────────┬────────┴──────────────────┘
+                     ▼
+            Target kettle (recv_fds OR load_tab_handoff)
+                     ▼
+            Session restore → user sees split tree + cwds
+```
+
+In-process foundation: `Mux::serialize_tab` (cycle 397) +
+`extract_tab`/`insert_tab` (cycle 398); IPC primitive:
+`fd_transport::send_fds`/`recv_fds` (cycle 399); drag FSM:
+`detach::DragState` (cycle 400). See
+[`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md).
