@@ -309,6 +309,21 @@ pub struct Config {
     /// selection exists (passes through to the shell). When false,
     /// the key is always consumed.
     pub smart_copy: bool,
+    /// Cycle 335 (Terminator parity, terminatorlib/config.py:93
+    /// `invert_search`): when true, scrollback search goes from
+    /// the bottom up (newest matches first) instead of the default
+    /// top-down (oldest first).
+    pub invert_search: bool,
+    /// Cycle 335 (Terminator parity, terminatorlib/config.py:114
+    /// `term`): TERM environment variable for spawned shells.
+    /// Default `xterm-256color` matches kettle's pre-cycle-335
+    /// hardcoded value + Terminator's own default.
+    pub term: String,
+    /// Cycle 335 (Terminator parity, terminatorlib/config.py:115
+    /// `colorterm`): COLORTERM environment variable. Default
+    /// `truecolor` signals 24-bit color support to programs that
+    /// honor it (vim, nvim, tmux, ...).
+    pub colorterm: String,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -463,6 +478,9 @@ impl Default for Config {
             disable_mouse_paste: false,
             putty_paste_style: false,
             smart_copy: true,
+            invert_search: false,
+            term: "xterm-256color".to_string(),
+            colorterm: "truecolor".to_string(),
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1179,6 +1197,23 @@ impl Config {
                 "smart-copy" | "smart_copy" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.smart_copy = b;
+                    }
+                }
+                "invert-search" | "invert_search" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.invert_search = b;
+                    }
+                }
+                "term" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.term = v.to_string();
+                    }
+                }
+                "colorterm" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.colorterm = v.to_string();
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2332,6 +2367,25 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn invert_search_and_env_strings_parse() {
+        // Cycle 335 drift guard.
+        let d = Config::default();
+        assert!(!d.invert_search);
+        assert_eq!(d.term, "xterm-256color");
+        assert_eq!(d.colorterm, "truecolor");
+        assert!(Config::parse_text("invert-search = true").invert_search);
+        assert!(Config::parse_text("invert_search = true").invert_search);
+        assert_eq!(
+            Config::parse_text("term = screen-256color").term,
+            "screen-256color"
+        );
+        assert_eq!(Config::parse_text("colorterm = 24bit").colorterm, "24bit");
+        // Empty value preserves the default (avoids breaking shells
+        // that rely on a non-empty TERM).
+        assert_eq!(Config::parse_text("term =").term, "xterm-256color");
     }
 
     #[test]

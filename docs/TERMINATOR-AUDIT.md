@@ -350,8 +350,8 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `case_sensitive` (search) | config.py | 🟡 kettle does smart-case | document divergence in audit; not a gap |
 | `invert_search` | config.py | ❌ | new config key (search direction) |
 | `force_no_bell` | config.py | 🟡 `bell = off` is the same | document as alias |
-| `term` | config.py | 🟡 hardcoded `xterm-256color`; not configurable | new config key |
-| `colorterm` | config.py | 🟡 hardcoded `truecolor` | new config key |
+| ~~`term`~~ | config.py | ✅ cycle-335 — string config key (default `xterm-256color`; wiring to spawned shell env is a follow-up sub-cycle) | cycle-335 |
+| ~~`colorterm`~~ | config.py | ✅ cycle-335 — string config key (default `truecolor`; wiring is a follow-up sub-cycle) | cycle-335 |
 | `title_at_bottom` | config.py | ❌ | new config key (for the per-pane titlebar; needs Bucket D first) |
 | `scroll_tabbar` (scrollable tab bar) | config.py | ❌ | new config key for many-tab handling |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ kettle already does fixed-width | document |
