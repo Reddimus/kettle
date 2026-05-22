@@ -585,7 +585,7 @@ a production-grade hardening pass on the new surfaces. Fifty-three
 cycles, six tagged releases, +11 tests, plus a UX-observability sweep
 that surfaced all 7 Terminator-parity opt-in keys in `--check-config`:
 
-  Workspace tests             308 → 319 (+11 drift guards)
+  Workspace tests             308 → 321 (+13 drift guards)
   Tagged releases             v1.32.0 (cycles 411-415) ·
                               v1.33.0 (cycles 416-419) ·
                               v1.34.0 (cycles 420-427) ·
