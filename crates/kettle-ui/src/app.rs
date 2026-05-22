@@ -2644,7 +2644,6 @@ impl App {
             //   NextProfile / PrevProfile (runtime profile cycle)
             Action::RotateCw
             | Action::RotateCcw
-            | Action::ToggleScrollbar
             | Action::EditWindowTitle
             | Action::EditTabTitle
             | Action::EditPaneTitle
@@ -2654,6 +2653,23 @@ impl App {
                     "Action {action:?} dispatched but behavior wiring is a \
                      follow-up sub-cycle (docs/TERMINATOR-AUDIT.md)"
                 );
+            }
+            // Cycle 346: runtime scrollbar toggle. Cycles
+            // ScrollbarMode through Never → Always → Auto → Never.
+            // Three-state cycle (vs binary) because Auto is the
+            // useful steady state for most users; explicit toggle
+            // is for power users with a specific preference. Same
+            // shape as cycle-X's NextTheme cycle.
+            Action::ToggleScrollbar => {
+                use kettle_config::ScrollbarMode::*;
+                self.cfg.scrollbar = match self.cfg.scrollbar {
+                    Never => Always,
+                    Always => Auto,
+                    Auto => Never,
+                };
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             // Cycle 345: broadcast zoom. kettle's font-size is
             // window-wide (not per-pane like VTE's per-terminal
