@@ -735,7 +735,10 @@ impl App {
                 let _ = crate::fd_transport::send_fds(&parent, &json, &[]);
                 drop(parent);
                 // Close the source tab now that the child is up.
+                // Cycle 424: fire TabClose so plugins see the close.
+                let closing_idx = self.mux.active;
                 let _ = self.mux.close_tab();
+                self.fire_tab_close_event(closing_idx);
                 true
             }
             Err(_) => false,
@@ -975,6 +978,35 @@ impl App {
         };
         event_loop.run_app(&mut app)?;
         Ok(())
+    }
+
+    /// Cycle 424: fire LuaEvent::TabClose + drain any Lua commands
+    /// the hook produces. Extracted from Action::CloseTab so every
+    /// close_tab call site can emit the same event (cycle 423
+    /// spotted the same class of plugin-contract divergence for
+    /// TabAdd; this helper covers TabClose comprehensively).
+    fn fire_tab_close_event(&mut self, closing_idx: usize) {
+        if let Some(eng) = &self.lua_engine {
+            eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
+            for cmd in eng.drain_commands() {
+                match cmd {
+                    crate::LuaCommand::SendText(s) => {
+                        self.pending_lua_send.extend_from_slice(s.as_bytes());
+                    }
+                    crate::LuaCommand::ExecAction(name) => {
+                        if let Some(a) = kettle_config::Action::from_name(&name) {
+                            self.pending_lua_actions.push(a);
+                        } else {
+                            log::warn!(
+                                "lua kettle.exec_action (tab_close hook): \
+                                 unknown action {name:?}"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn waker(&self) -> kettle_core::Waker {
@@ -2993,6 +3025,12 @@ impl App {
                 // so the LuaEvent::TabClose payload is meaningful
                 // (after close, self.mux.active points at a
                 // different tab).
+                //
+                // Cycle 424: extracted into fire_tab_close_event
+                // helper so the same TabClose event fires from
+                // every close_tab call site (cycle 423 spotted
+                // remote-control new-tab missing TabAdd; same
+                // class of plugin-contract divergence here).
                 let closing_idx = self.mux.active;
                 if self.mux.close_tab() {
                     event_loop.exit();
@@ -3669,7 +3707,10 @@ impl App {
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null());
                     if cmd.spawn().is_ok() {
+                        // Cycle 424: fire TabClose so plugins see the close.
+                        let closing_idx = self.mux.active;
                         let _ = self.mux.close_tab();
+                        self.fire_tab_close_event(closing_idx);
                     } else {
                         log::warn!("MoveTabToNewWindow: spawn failed; tab kept in source window");
                         // Clean up the orphan handoff file.
@@ -4913,6 +4954,9 @@ impl ApplicationHandler<UserEvent> for App {
                             // action so the cursor on the now-active
                             // tab lands visible immediately.
                             let pre = self.focus_key();
+                            // Cycle 424: fire TabClose so plugins see
+                            // the ✕-click close the same as Action::CloseTab.
+                            let closing_idx = seg.idx;
                             if self.mux.close_tab_at(seg.idx) {
                                 // Cycle 157: save the (empty) session
                                 // before exit so next launch starts
@@ -4921,10 +4965,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 // exit paths (Action::CloseTab on the
                                 // last tab, WindowEvent::CloseRequested)
                                 // already save; this one was missed.
+                                self.fire_tab_close_event(closing_idx);
                                 self.save_session();
                                 event_loop.exit();
                                 return;
                             }
+                            self.fire_tab_close_event(closing_idx);
                             self.note_focus_change(pre);
                         } else {
                             let pre = self.focus_key();
