@@ -6,6 +6,55 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-05-22
+
+Plugin Lua API expansion. Two new plugin sub-cycles + URL routing.
+
+  cycle 373 — `kettle.set_theme(name)` Lua API for runtime theme
+              switching. Resolves via Theme::find_name (case-
+              insensitive lookup of ~500 bundled themes).
+              Unknown name → log::warn fallthrough.
+  cycle 374 — `kettle.add_url_handler(name, pattern, callback)`
+              Lua API for user-supplied URL routing. Uses Lua's
+              native string.match (Terminator-pattern-compatible
+              for common URL shapes). Dispatched in
+              App::open_url BEFORE cfg.custom_url_handler +
+              system-open fallthrough; first-match wins.
+
+### User-facing examples
+
+Replicating Terminator's auto_theme.py + url_handlers.py +
+run_cmd_on_match.py + maven.py as a few-line Lua module:
+
+  -- ~/.config/kettle/init.lua
+  kettle.on('startup', function()
+    local hour = tonumber(os.date('%H'))
+    kettle.set_theme(hour >= 18 or hour < 6
+      and 'Solarized Dark' or 'Solarized Light')
+  end)
+
+  kettle.add_url_handler('github_pr',
+    'https?://github%.com/[^/]+/[^/]+/pull/(%d+)',
+    function(url) os.execute('gh pr view ' .. url) end)
+
+### Plugin sub-cycle status
+
+  ✅  365 — kettle.on event-hook foundation
+  ✅  366 — LuaEvent::Startup emission
+  ✅  367 — LuaEvent::Bell emission
+  ✅  368 — LuaEvent::TabAdd / TabClose emission
+  ✅  370 — init.lua auto-load
+  ✅  371 — kettle.notify
+  ✅  373 — kettle.set_theme
+  ✅  374 — kettle.add_url_handler
+
+  ⌛  pending — LuaEvent::Output, kettle.add_menu_item,
+                sandbox config knob
+
+8 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+
+Workspace tests stay at 302.
+
 ## [1.14.0] — 2026-05-22
 
 Plugin system implementation push. Cycles 370-372 ship:
