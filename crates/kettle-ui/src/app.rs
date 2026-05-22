@@ -671,22 +671,20 @@ impl App {
                 }
             }
         }
+        // Cycle 357 (Terminator parity, terminatorlib/config.py:71
+        // `broadcast_default`): seed the mux's broadcast flag from
+        // config BEFORE the cfg moves into the struct.
+        let initial_broadcast = !matches!(
+            initial_cfg.broadcast_default,
+            kettle_config::BroadcastDefault::Off
+        );
         let mut app = App {
             cfg: initial_cfg,
             window: None,
             renderer: None,
             mux: {
                 let mut m = Mux::new();
-                // Cycle 357 (Terminator parity, terminatorlib/config.py:71
-                // `broadcast_default`): seed the mux's broadcast flag
-                // from config. `All` and `Group` both flip kettle's
-                // per-tab broadcast on; `Off` leaves it off (kettle
-                // default). Distinction between All vs Group lands
-                // with named groups (Bucket D).
-                m.broadcast = !matches!(
-                    initial_cfg.broadcast_default,
-                    kettle_config::BroadcastDefault::Off
-                );
+                m.broadcast = initial_broadcast;
                 m
             },
             mods: ModifiersState::empty(),
