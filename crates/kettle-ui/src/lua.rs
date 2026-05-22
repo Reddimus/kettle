@@ -44,6 +44,11 @@ pub enum LuaCommand {
     /// running before the first paint doesn't race the notification
     /// daemon.
     Notify { title: String, body: String },
+    /// `kettle.set_theme(name)` (cycle 373) → switch the active theme
+    /// at runtime. Looked up case-insensitively against the ~500
+    /// bundled themes via Theme::find_name; falls through with
+    /// log::warn if no match.
+    SetTheme(String),
 }
 
 /// Cycle 365 (Terminator plugin parity, design doc:
