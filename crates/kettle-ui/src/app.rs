@@ -980,15 +980,18 @@ impl App {
         Ok(())
     }
 
-    /// Cycle 425: fire LuaEvent::TabAdd + drain Lua commands.
-    /// Companion to fire_tab_close_event; every Mux::new_tab /
-    /// new_tab_with call site that USER-VISIBLY creates a tab
-    /// (i.e. NOT startup-time first-tab init before plugins load)
-    /// should call this. Centralizes the plugin-contract dispatch
-    /// so future new_tab callers can't drift out of sync.
-    fn fire_tab_add_event(&mut self) {
+    /// Cycle 426: drain commands a Lua event hook just enqueued.
+    /// Handles every LuaCommand variant the cycle-368 inline
+    /// dispatch knows about (SendText / ExecAction / Notify /
+    /// SetTheme). Shared by fire_tab_add_event +
+    /// fire_tab_close_event so the helpers fully replace the
+    /// previously-duplicated inline code in Action::NewTab /
+    /// Action::CloseTab.
+    ///
+    /// `hook_name` is the hook label used in unknown-action
+    /// warn messages (e.g. "tab_add hook", "tab_close hook").
+    fn drain_lua_hook_commands(&mut self, hook_name: &str) {
         if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
             for cmd in eng.drain_commands() {
                 match cmd {
                     crate::LuaCommand::SendText(s) => {
@@ -999,44 +1002,48 @@ impl App {
                             self.pending_lua_actions.push(a);
                         } else {
                             log::warn!(
-                                "lua kettle.exec_action (tab_add hook): \
+                                "lua kettle.exec_action ({hook_name}): \
                                  unknown action {name:?}"
                             );
                         }
                     }
-                    _ => {}
+                    crate::LuaCommand::Notify { title, body } => {
+                        fire_notify(&title, &body);
+                    }
+                    crate::LuaCommand::SetTheme(name) => {
+                        if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                            self.cfg.theme_name = canonical.to_string();
+                            self.cfg.theme = kettle_config::Theme::by_name(canonical);
+                        } else {
+                            log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// Cycle 424: fire LuaEvent::TabClose + drain any Lua commands
-    /// the hook produces. Extracted from Action::CloseTab so every
-    /// close_tab call site can emit the same event (cycle 423
-    /// spotted the same class of plugin-contract divergence for
-    /// TabAdd; this helper covers TabClose comprehensively).
+    /// Cycle 425+426: fire LuaEvent::TabAdd + drain commands.
+    /// Every Mux::new_tab / new_tab_with call site that USER-VISIBLY
+    /// creates a tab (i.e. NOT startup-time first-tab init before
+    /// plugins load) should call this. Centralizes the plugin-
+    /// contract dispatch so future new_tab callers can't drift.
+    fn fire_tab_add_event(&mut self) {
+        if let Some(eng) = &self.lua_engine {
+            eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
+        }
+        self.drain_lua_hook_commands("tab_add hook");
+    }
+
+    /// Cycle 424+426: fire LuaEvent::TabClose + drain commands.
+    /// Every close_tab call site should call this so plugins
+    /// listening for tab_close see every close regardless of
+    /// trigger source.
     fn fire_tab_close_event(&mut self, closing_idx: usize) {
         if let Some(eng) = &self.lua_engine {
             eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
-            for cmd in eng.drain_commands() {
-                match cmd {
-                    crate::LuaCommand::SendText(s) => {
-                        self.pending_lua_send.extend_from_slice(s.as_bytes());
-                    }
-                    crate::LuaCommand::ExecAction(name) => {
-                        if let Some(a) = kettle_config::Action::from_name(&name) {
-                            self.pending_lua_actions.push(a);
-                        } else {
-                            log::warn!(
-                                "lua kettle.exec_action (tab_close hook): \
-                                 unknown action {name:?}"
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
         }
+        self.drain_lua_hook_commands("tab_close hook");
     }
 
     fn waker(&self) -> kettle_core::Waker {
@@ -2971,40 +2978,12 @@ impl App {
         let pre_focus = self.focus_key();
         match action {
             Action::NewTab => {
+                // Cycle 368 (plugin sub-cycle 4): fires LuaEvent::TabAdd
+                // with the new active tab index after Mux::new_tab.
+                // Cycle 426 collapsed the inline event/drain into the
+                // shared fire_tab_add_event helper.
                 let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
-                // Cycle 368 (Terminator plugin parity, plugin sub-cycle 4):
-                // fire LuaEvent::TabAdd with the new active tab index.
-                if let Some(eng) = &self.lua_engine {
-                    eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
-                    for cmd in eng.drain_commands() {
-                        match cmd {
-                            crate::LuaCommand::SendText(s) => {
-                                self.pending_lua_send.extend_from_slice(s.as_bytes());
-                            }
-                            crate::LuaCommand::ExecAction(name) => {
-                                if let Some(a) = kettle_config::Action::from_name(&name) {
-                                    self.pending_lua_actions.push(a);
-                                } else {
-                                    log::warn!(
-                                        "lua kettle.exec_action (from tab_add hook): \
-                                         unknown action name {name:?}"
-                                    );
-                                }
-                            }
-                            crate::LuaCommand::Notify { title, body } => {
-                                fire_notify(&title, &body);
-                            }
-                            crate::LuaCommand::SetTheme(name) => {
-                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                    self.cfg.theme_name = canonical.to_string();
-                                    self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                                } else {
-                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                                }
-                            }
-                        }
-                    }
-                }
+                self.fire_tab_add_event();
             }
             Action::NewWindow => {
                 // Spawn a *separate* kettle process so the user gets a real
@@ -3065,46 +3044,13 @@ impl App {
                 // (after close, self.mux.active points at a
                 // different tab).
                 //
-                // Cycle 424: extracted into fire_tab_close_event
-                // helper so the same TabClose event fires from
-                // every close_tab call site (cycle 423 spotted
-                // remote-control new-tab missing TabAdd; same
-                // class of plugin-contract divergence here).
+                // Cycle 426 collapsed the inline event/drain into
+                // the shared fire_tab_close_event helper.
                 let closing_idx = self.mux.active;
                 if self.mux.close_tab() {
                     event_loop.exit();
                 }
-                if let Some(eng) = &self.lua_engine {
-                    eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
-                    for cmd in eng.drain_commands() {
-                        match cmd {
-                            crate::LuaCommand::SendText(s) => {
-                                self.pending_lua_send.extend_from_slice(s.as_bytes());
-                            }
-                            crate::LuaCommand::ExecAction(name) => {
-                                if let Some(a) = kettle_config::Action::from_name(&name) {
-                                    self.pending_lua_actions.push(a);
-                                } else {
-                                    log::warn!(
-                                        "lua kettle.exec_action (from tab_close hook): \
-                                         unknown action name {name:?}"
-                                    );
-                                }
-                            }
-                            crate::LuaCommand::Notify { title, body } => {
-                                fire_notify(&title, &body);
-                            }
-                            crate::LuaCommand::SetTheme(name) => {
-                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                    self.cfg.theme_name = canonical.to_string();
-                                    self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                                } else {
-                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                                }
-                            }
-                        }
-                    }
-                }
+                self.fire_tab_close_event(closing_idx);
             }
             Action::CloseWindow => {
                 // Distinct from `CloseTab`: drop *every* tab + pane in
@@ -3923,26 +3869,8 @@ impl App {
                 let waker = self.waker();
                 if let Err(e) = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
                     log::warn!("remote-control: new-tab failed: {e}");
-                } else if let Some(eng) = &self.lua_engine {
-                    eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
-                    for cmd in eng.drain_commands() {
-                        match cmd {
-                            crate::LuaCommand::SendText(s) => {
-                                self.pending_lua_send.extend_from_slice(s.as_bytes());
-                            }
-                            crate::LuaCommand::ExecAction(name) => {
-                                if let Some(a) = kettle_config::Action::from_name(&name) {
-                                    self.pending_lua_actions.push(a);
-                                } else {
-                                    log::warn!(
-                                        "lua kettle.exec_action (remote tab_add hook): \
-                                         unknown action {name:?}"
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                } else {
+                    self.fire_tab_add_event();
                 }
             } else {
                 log::warn!("remote command not recognized: {line:?}");
