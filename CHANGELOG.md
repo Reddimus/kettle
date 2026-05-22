@@ -6,6 +6,64 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.31.0] — 2026-05-22
+
+SCM_RIGHTS cross-process tab handoff end-to-end for the JSON
+payload.
+
+  cycle 408 — `--tab-handoff-fd FD` CLI flag plumbing.
+              Inherited socket fd carrying serialized tab JSON
+              + SCM_RIGHTS ancillary data.
+
+  cycle 409 — Target-side recv. App startup detects
+              --tab-handoff-fd FD; constructs UnixStream from
+              the fd via FromRawFd; calls fd_transport::recv_fds
+              (cycle 399); deserializes the JSON into the
+              existing Session restore path. Received PTY fds
+              are closed on the target side (source still owns
+              canonical refs); adoption-as-Pane is the final
+              piece pending Terminal::from_raw_fd in kettle-core.
+
+  cycle 410 — Source-side socketpair + fork+exec. New
+              App::try_move_tab_to_new_window_scm_rights helper
+              opens a UnixStream pair, fork+execs a kettle child
+              with --tab-handoff-fd 3 (via pre_exec dup2 +
+              clear-FD_CLOEXEC), then calls
+              fd_transport::send_fds with the JSON payload.
+              Action::MoveTabToNewWindow now prefers this over
+              the cycle-405 file-fallback on Unix.
+
+The detachable-tabs cross-window flow now ships via SCM_RIGHTS-
+capable socket IPC on Unix + file-fallback elsewhere. Both paths
+deliver the same user-visible UX (split tree + cwds preserved
+in the new window). The SCM_RIGHTS variant additionally positions
+for live PTY-fd transfer when the Terminal::from_raw_fd kettle-
+core change lands — at which point running shells survive the
+move without restart.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 10/10 COMPLETE
+bg-image (12 sub-cycles):         ✅ 11/12 effectively COMPLETE
+Detachable tabs (11 sub-cycles):  ✅ 11/11 sub-cycle 7
+                                       SCM_RIGHTS path end-to-end
+                                       for the JSON payload
+                                       (Terminal::from_raw_fd
+                                        Pane-adoption is a
+                                        kettle-core internal
+                                        change tracked separately
+                                        from the design doc)
+
+45 of 46 Bucket-D sub-cycles shipped (98%).
+
+Only the bg-image sub-cycle 8 "explicit resize handler" remains
+flagged — and that's documented as implicit per-frame UV
+recompute (cycle 394), which IS the implementation (a separate
+explicit handler would be redundant).
+
+Workspace tests stay at 308.
+
 ## [1.30.0] — 2026-05-22
 
 Named broadcast groups + EditPaneGroup action — titlebar Bucket-D
