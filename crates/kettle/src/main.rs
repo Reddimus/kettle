@@ -655,6 +655,20 @@ fn main() -> anyhow::Result<()> {
                 cfg.background_darkness
             );
         }
+        // Cycle 463: window-state / borderless / always-on-top echo
+        // when any is set to a non-default. Most users leave these at
+        // their defaults; the ones who set them benefit from seeing
+        // them confirmed (especially `window-state = fullscreen` or
+        // `borderless = true` which are easy to set then forget).
+        let window_flags = cfg.window_state != kettle_config::WindowState::Normal
+            || cfg.borderless
+            || cfg.always_on_top;
+        if window_flags {
+            println!(
+                "window-flags: state={:?} borderless={} always-on-top={}",
+                cfg.window_state, cfg.borderless, cfg.always_on_top
+            );
+        }
         // Cycle 201: count and display I/O errors (cycle 196's read
         // failures) as their own category rather than reusing the
         // "malformed value:" prefix — a permission-denied file isn't
