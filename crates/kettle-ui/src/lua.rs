@@ -701,6 +701,59 @@ mod tests {
     }
 
     #[test]
+    fn add_menu_item_registers_and_invoke_runs_callback() {
+        // Cycle 435 drift guard. `kettle.add_menu_item(label, cb)`
+        // (cycle 375) appends a {label, callback} entry to the
+        // kettle_menu_items registry; `invoke_menu_item(idx)` calls
+        // the matching callback. Plugin-context-menu surface relies
+        // on both. Callback errors log + don't propagate.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "fired = 0
+             kettle.add_menu_item('First', function() fired = fired + 1 end)
+             kettle.add_menu_item('Second', function() fired = fired + 10 end)
+             kettle.add_menu_item('Broken', function() error('intentional') end)",
+        )
+        .expect("eval");
+        eng.invoke_menu_item(0);
+        assert_eq!(eng.eval_str("return fired").unwrap(), "1");
+        eng.invoke_menu_item(1);
+        assert_eq!(eng.eval_str("return fired").unwrap(), "11");
+        // Broken callback errors log but don't propagate.
+        eng.invoke_menu_item(2);
+        // Out-of-range index errors log but don't propagate either.
+        eng.invoke_menu_item(99);
+        // fired is unchanged after the broken + out-of-range calls.
+        assert_eq!(eng.eval_str("return fired").unwrap(), "11");
+    }
+
+    #[test]
+    fn url_handler_matches_pattern_and_short_circuits() {
+        // Cycle 435 drift guard. `kettle.add_url_handler(name,
+        // pattern, cb)` (cycle 374) registers a handler;
+        // `try_url_handler(url)` returns true + invokes the cb when
+        // the Lua-pattern matches, false otherwise. Used by the
+        // url-open path to let plugins claim URLs before the system
+        // browser sees them.
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "github_hits = 0
+             kettle.add_url_handler(
+                'github',
+                'https://github%.com/.*',
+                function(_url) github_hits = github_hits + 1 end
+             )",
+        )
+        .expect("eval");
+        // Matching URL → handler claims it.
+        assert!(eng.try_url_handler("https://github.com/kettle"));
+        assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
+        // Non-matching URL → kettle's default path proceeds.
+        assert!(!eng.try_url_handler("https://example.com/"));
+        assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
+    }
+
+    #[test]
     fn exec_file_runs_a_real_script() {
         // The script writes a result into a global so the test can
         // check it ran. Same shape as a user's `~/.config/kettle/
