@@ -288,6 +288,27 @@ pub struct Config {
     /// deselected after Copy (default: keep selected, so user can
     /// re-copy).
     pub clear_select_on_copy: bool,
+    /// Cycle 334 (Terminator parity, terminatorlib/config.py:128
+    /// `disable_mousewheel_zoom`): when true, Ctrl+wheel doesn't
+    /// change font size (lets terminal-based scroll-wheel users
+    /// avoid accidental zooms).
+    pub disable_mousewheel_zoom: bool,
+    /// Cycle 334 (Terminator parity, terminatorlib/config.py:88
+    /// `disable_mouse_paste`): when true, middle-click paste is
+    /// disabled. Useful for terminal-of-last-resort use cases
+    /// where you don't want clipboard content to leak in via
+    /// accidental middle-clicks.
+    pub disable_mouse_paste: bool,
+    /// Cycle 334 (Terminator parity, terminatorlib/config.py:89
+    /// `putty_paste_style`): when true, right-click pastes (PuTTY/
+    /// Windows convention). When false, right-click opens the
+    /// context menu (kettle default + Linux convention).
+    pub putty_paste_style: bool,
+    /// Cycle 334 (Terminator parity, terminatorlib/config.py:90
+    /// `smart_copy`): when true, Ctrl+Shift+C is a no-op when no
+    /// selection exists (passes through to the shell). When false,
+    /// the key is always consumed.
+    pub smart_copy: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -438,6 +459,10 @@ impl Default for Config {
             bold_is_bright: false,
             link_single_click: false,
             clear_select_on_copy: false,
+            disable_mousewheel_zoom: false,
+            disable_mouse_paste: false,
+            putty_paste_style: false,
+            smart_copy: true,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1134,6 +1159,26 @@ impl Config {
                 "clear-select-on-copy" | "clear_select_on_copy" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.clear_select_on_copy = b;
+                    }
+                }
+                "disable-mousewheel-zoom" | "disable_mousewheel_zoom" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.disable_mousewheel_zoom = b;
+                    }
+                }
+                "disable-mouse-paste" | "disable_mouse_paste" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.disable_mouse_paste = b;
+                    }
+                }
+                "putty-paste-style" | "putty_paste_style" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.putty_paste_style = b;
+                    }
+                }
+                "smart-copy" | "smart_copy" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.smart_copy = b;
                     }
                 }
                 "unfocused-split-opacity" => {

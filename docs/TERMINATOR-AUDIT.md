@@ -340,7 +340,10 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`allow_bold`~~ | config.py | ✅ cycle-333 — bool config key (default true; kettle render-time behavior wiring in render layer is a follow-up sub-cycle but config + drift guard ship now) | cycle-333 |
 | ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 — bool config key (default false; xterm-convention SGR1→bright mapping; render-layer wiring is a follow-up) | cycle-333 |
 | ~~`link_single_click`~~ | config.py | ✅ cycle-333 — bool config key (default false; mouse-handler wiring is a follow-up) | cycle-333 |
-| `disable_mousewheel_zoom` | config.py | ❌ | new config key |
+| ~~`disable_mousewheel_zoom`~~ | config.py | ✅ cycle-334 — config key parsed; kettle has no Ctrl+wheel zoom feature today so the disable is a forward-compat stub | cycle-334 |
+| ~~`disable_mouse_paste`~~ | config.py | ✅ cycle-334 — config key parsed (mouse-handler wiring is a follow-up) | cycle-334 |
+| ~~`putty_paste_style`~~ | config.py | ✅ cycle-334 — config key parsed (right-click pastes; mouse-handler wiring is a follow-up) | cycle-334 |
+| ~~`smart_copy`~~ | config.py | ✅ cycle-334 — config key parsed; default true matches Terminator (no-op when no selection; behavior wiring is a follow-up) | cycle-334 |
 | ~~`clear_select_on_copy`~~ | config.py | ✅ cycle-333 — bool config key + Action::Copy clears selection when true | cycle-333 |
 | `putty_paste_style` (right-click pastes) | config.py | ❌ | new config key |
 | `disable_mouse_paste` (no middle-click paste) | config.py | ❌ | new config key |
