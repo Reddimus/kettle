@@ -719,11 +719,62 @@ impl Renderer {
                 self.bg_image_cache = Some((want.clone(), data));
             }
             if let Some((_, data)) = self.bg_image_cache.as_ref() {
-                // Stretch-to-fill the full surface. UV-mode variants
-                // (tile / center / scale + align) are subsequent
-                // sub-cycles 5+6.
-                img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                // Cycle 390 (Terminator parity, bg-image Bucket-D
+                // sub-cycle 5): UV-mode variants. background-image-mode
+                // controls how the decoded image fills the surface.
+                //
+                //   stretch_and_fill (default): one quad covering the
+                //                               whole surface (image
+                //                               is stretched).
+                //   tile:                       tile the original-size
+                //                               image across the
+                //                               surface (preserves
+                //                               aspect; visible seams
+                //                               at the tile boundaries).
+                //   center / scale:             single image quad at
+                //                               its natural size,
+                //                               centered. `scale`
+                //                               adds proportional fit.
+                let img_w = data.width as f32;
+                let img_h = data.height as f32;
                 live.insert(std::sync::Arc::as_ptr(&data.rgba) as usize);
+                match cfg.background_image_mode.as_str() {
+                    "tile" => {
+                        // Tile starts from (0, 0); rows go top-to-bottom.
+                        let mut y = 0.0;
+                        while y < sh {
+                            let mut x = 0.0;
+                            while x < sw {
+                                let tw = img_w.min(sw - x);
+                                let th = img_h.min(sh - y);
+                                img_items.push((x, y, tw, th, data.clone()));
+                                x += img_w;
+                            }
+                            y += img_h;
+                        }
+                    }
+                    "center" => {
+                        let x = ((sw - img_w) * 0.5).max(0.0);
+                        let y = ((sh - img_h) * 0.5).max(0.0);
+                        let w = img_w.min(sw);
+                        let h = img_h.min(sh);
+                        img_items.push((x, y, w, h, data.clone()));
+                    }
+                    "scale" => {
+                        // Aspect-preserving fit within the surface.
+                        let scale = (sw / img_w).min(sh / img_h);
+                        let w = img_w * scale;
+                        let h = img_h * scale;
+                        let x = ((sw - w) * 0.5).max(0.0);
+                        let y = ((sh - h) * 0.5).max(0.0);
+                        img_items.push((x, y, w, h, data.clone()));
+                    }
+                    _ => {
+                        // "stretch_and_fill" + any unknown value:
+                        // single quad covering the whole surface.
+                        img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                    }
+                }
             }
         }
 
