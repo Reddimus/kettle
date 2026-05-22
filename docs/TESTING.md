@@ -14,13 +14,16 @@ cargo test --workspace
 
 ## What's covered (automated)
 
-**~267 tests across the workspace** (post-v1.7.0 — the cycle-288 →
-303 feature sweep added drift guards for smart selection, triggers,
-status-bar, vi-mode entry, remote-control etc.) — see
-[CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions. The workspace
-grows by 1–3 tests per audit cycle, so per-crate counts below are
-order-of-magnitude snapshots rather than exact figures (run `cargo test
---workspace` for today's number).
+**~318 tests across the workspace** (post-v1.35.0 — the cycle-288 →
+303 feature sweep, the cycles 330-410 Terminator-parity sweep, and
+the cycles 411-438 production-polish run added drift guards for
+smart selection, triggers, status-bar, vi-mode entry, remote-control,
+detachable tabs, plugin event hooks + LuaCommand queue/drain
+contracts, etc.) — see [CHANGELOG.md](../CHANGELOG.md) for the
+per-cycle additions. The workspace grows by 1–3 tests per audit
+cycle, so per-crate counts below are order-of-magnitude snapshots
+rather than exact figures (run `cargo test --workspace` for today's
+number).
 
 - **kettle-vt** (~33 tests): plain-text passthrough is byte-exact;
   iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
