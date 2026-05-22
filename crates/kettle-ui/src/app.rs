@@ -1020,6 +1020,42 @@ impl App {
 
     /// Content area for panes (excludes both the tab bar and the
     /// cycle-296 status bar), in physical pixels.
+    /// Cycle 389 (Terminator parity, titlebar Bucket-D sub-cycle 5):
+    /// hit-test for a click in any pane's per-pane titlebar region.
+    /// Returns the pane id whose titlebar was clicked, or None if
+    /// the click fell outside titlebar regions. Honors
+    /// cfg.show_titlebar gate + the cycle-385 title_at_bottom flip.
+    /// Used by the click handler to dispatch EditPaneTitle on the
+    /// clicked pane.
+    fn pane_at_titlebar_click(&self, px: f32, py: f32) -> Option<u64> {
+        if !self.cfg.show_titlebar {
+            return None;
+        }
+        let active = self.mux.active;
+        let rects = self.mux.layout(active, self.area());
+        if rects.len() < 2 {
+            // Single-pane tab: titlebar isn't rendered (cycle-379
+            // gates on >1 pane).
+            return None;
+        }
+        let bar_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_h + 6.0)
+            .unwrap_or(20.0);
+        for (id, (rx, ry, rw, rh)) in &rects {
+            let (bar_top, bar_bot) = if self.cfg.title_at_bottom {
+                (*ry + *rh - bar_h, *ry + *rh)
+            } else {
+                (*ry + 1.0, *ry + 1.0 + bar_h)
+            };
+            if px >= *rx && px < *rx + *rw && py >= bar_top && py < bar_bot {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
     fn area(&self) -> Rect {
         let (w, h) = self
             .renderer
@@ -4538,6 +4574,27 @@ impl ApplicationHandler<UserEvent> for App {
                     // Cycle 351: route through helper so custom URL
                     // handler config is honored.
                     self.open_url(&uri);
+                    return;
+                }
+                // Cycle 389 (Terminator parity, titlebar Bucket-D
+                // sub-cycle 5): left-click on per-pane titlebar
+                // focuses + opens the EditPaneTitle overlay. Two
+                // clicks model (focus first, edit second) avoids
+                // accidental title edits on focus transitions.
+                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                if bcode == 0
+                    && let Some(clicked_pane_id) = self.pane_at_titlebar_click(cx, cy)
+                {
+                    let already_focused = self.mux.active_focus() == Some(clicked_pane_id);
+                    let pre = self.focus_key();
+                    self.mux.focus_at(area, cx, cy);
+                    self.note_focus_change(pre);
+                    if already_focused {
+                        self.handle_action(Action::EditPaneTitle, event_loop);
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                     return;
                 }
                 let pre = self.focus_key();
