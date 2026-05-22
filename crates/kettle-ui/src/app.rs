@@ -680,10 +680,23 @@ impl App {
         let mut pending_lua_actions: Vec<kettle_config::Action> = Vec::new();
         // Cycle 366: keep the LuaEngine alive on App so kettle.on(...)
         // registrations survive past App::new + can be fire_event'd
-        // from emission sites. If no --lua-script was passed, skip
-        // engine init entirely so non-Lua kettle runs stay zero-cost.
+        // from emission sites. If no --lua-script was passed AND no
+        // ~/.config/kettle/init.lua exists, skip engine init entirely
+        // so non-Lua kettle runs stay zero-cost.
+        //
+        // Cycle 370 (plugin sub-cycle 11): auto-load
+        // `<config-dir>/init.lua` if present. Explicit --lua-script
+        // CLI flag wins (overrides auto-load). Path resolution:
+        //   1. --lua-script PATH (explicit; overrides)
+        //   2. <config-dir>/init.lua  (auto-loaded; default for plugins)
+        // where <config-dir> is the parent of Config::default_path().
+        let init_lua_path: Option<std::path::PathBuf> = startup.lua_script.clone().or_else(|| {
+            kettle_config::Config::default_path()
+                .and_then(|p| p.parent().map(|d| d.join("init.lua")))
+                .filter(|p| p.exists())
+        });
         let mut lua_engine: Option<crate::LuaEngine> = None;
-        if let Some(script) = &startup.lua_script {
+        if let Some(script) = &init_lua_path {
             match crate::LuaEngine::new(&initial_cfg.theme_name) {
                 Ok(eng) => {
                     if let Err(e) = eng.exec_file(script) {
