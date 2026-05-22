@@ -775,6 +775,17 @@ impl Config {
                     i.trim().parse::<usize>().is_ok_and(|n| n < 16)
                         && Rgb::parse(h.trim()).is_some()
                 }),
+                // Cycle 309: trigger patterns must be valid regex.
+                // Without this check, a malformed pattern like
+                // `trigger = [unclosed` parses (the config layer
+                // stores it as a plain string), `--check-config`
+                // reports OK, then at runtime `compile_triggers`
+                // fails `Regex::new` and the trigger silently never
+                // fires (only a log::warn that the user often
+                // doesn't see). Now: surface the malformed regex at
+                // check-config time so users see the issue before
+                // an event they expected to fire never does.
+                "trigger" => regex::Regex::new(v.trim()).is_ok(),
                 _ => true,
             };
             if !ok {
@@ -2936,5 +2947,35 @@ mod config_tests {
         // typo'd line doesn't fire on every byte.
         assert!(Config::parse_text("trigger =\n").triggers.is_empty());
         assert!(Config::parse_text("trigger =   \n").triggers.is_empty());
+    }
+
+    #[test]
+    fn detect_malformed_values_flags_invalid_trigger_regex() {
+        // Cycle 309 drift guard. A malformed regex pattern like
+        // `trigger = [unclosed` parses (the config layer stores it
+        // as a plain string), `--check-config` USED to report OK,
+        // then at runtime `compile_triggers` failed `Regex::new`
+        // and the trigger silently never fired (only a log::warn
+        // the user usually doesn't see). Now: surface invalid
+        // regex at check-config time.
+        let bad = Config::detect_malformed_values(
+            "trigger = [unclosed\n\
+             trigger = (mismatched\n\
+             trigger = good.*pattern\n",
+        );
+        // Both bad lines surface; the good one doesn't.
+        assert_eq!(
+            bad.iter().filter(|b| b.contains("trigger")).count(),
+            2,
+            "expected 2 malformed-trigger entries, got: {bad:?}"
+        );
+        // Valid alternation patterns must NOT be flagged (load-
+        // bearing — the cycle-289 docs explicitly tell users to
+        // write `(BUILD SUCCESSFUL|FAILED)`).
+        let ok = Config::detect_malformed_values("trigger = (BUILD SUCCESSFUL|FAILED)\n");
+        assert!(
+            ok.iter().all(|b| !b.contains("trigger")),
+            "valid alternation flagged as malformed: {ok:?}"
+        );
     }
 }

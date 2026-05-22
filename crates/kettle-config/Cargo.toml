@@ -18,3 +18,10 @@ workspace = true
 [dependencies]
 bitflags = "2.11.1"
 log.workspace = true
+# Cycle 309: `detect_malformed_values` validates `trigger = REGEX`
+# patterns at --check-config time. The regex crate is already a
+# transitive workspace dep via kettle-core (cycle-218 hints) and
+# kettle-ui (cycle-290 trigger matching), so adding it here just
+# imports the type — no new transitive deps. Cheaper than
+# reinventing a fragile syntactic regex sanity check.
+regex.workspace = true
