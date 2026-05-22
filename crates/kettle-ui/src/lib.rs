@@ -72,6 +72,13 @@ pub struct Options {
     /// the `kettle` namespace installed. Errors are logged + don't
     /// block the launch.
     pub lua_script: Option<std::path::PathBuf>,
+    /// Cycle 403 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 8 file-fallback): JSON handoff file written by
+    /// another kettle process (cycle 384's MoveTabToNewWindow).
+    /// When set, kettle reads + deserializes a STab from this
+    /// path + uses it as the startup tab (replacing the default
+    /// shell). Path is deleted after read (one-shot handoff).
+    pub tab_handoff: Option<std::path::PathBuf>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

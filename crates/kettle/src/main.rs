@@ -161,6 +161,19 @@ struct Cli {
     #[arg(long, value_name = "NAME", verbatim_doc_comment)]
     layout: Option<String>,
 
+    /// Cycle 403 (Terminator parity, detachable-tabs Bucket-D
+    /// sub-cycle 8 file-fallback): restore a tab from a JSON
+    /// handoff file written by another kettle process. Used by
+    /// the cycle-384 Action::MoveTabToNewWindow path on
+    /// platforms without SCM_RIGHTS (Windows + Wayland) — the
+    /// source process serializes the tab to a temp file +
+    /// passes the path; the target reads + reconstructs the
+    /// tab. Running shells in the source tab stay in the source
+    /// window (true PTY-fd transfer needs SCM_RIGHTS, sub-cycle
+    /// 7).
+    #[arg(long, value_name = "PATH", verbatim_doc_comment)]
+    tab_handoff: Option<std::path::PathBuf>,
+
     /// Launch with a named-profile *config* (distinct from --layout
     /// which picks the *session*). Loads
     /// `<config-dir>/profiles/<NAME>.config` instead of the default
@@ -806,6 +819,7 @@ fn main() -> anyhow::Result<()> {
         accent_override,
         remote_file,
         lua_script: cli.lua_script,
+        tab_handoff: cli.tab_handoff,
     })
 }
 
