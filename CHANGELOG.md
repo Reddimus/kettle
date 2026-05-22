@@ -6,6 +6,76 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.34.0] — 2026-05-22
+
+Plugin-contract hardening — every new_tab / close_tab call site now
+fires the canonical Lua event, and the four Lua hook drains share one
+helper. Also fixes a live-grid bug in the exit-action=restart path.
+
+  cycle 420 — `exit-action = restart` respawn now uses
+              `self.grid_of(self.area())` for cols/rows instead of
+              the hardcoded `80, 24` that cycle-418 shipped. The
+              restarted shell matches the surface size that was on
+              screen when it died, so `tput cols` / `tput lines`
+              and TUI apps read the right values.
+
+  cycle 421 — `docs/ARCHITECTURE.md` detachable-tabs flow upgraded
+              from ASCII tree to mermaid `flowchart TD` (3 IPC
+              paths → target kettle → session restore).
+
+  cycle 422 — `docs/ARCHITECTURE.md` Plugin + Background-image
+              flows upgraded to mermaid (`flowchart TD` for
+              `init.lua` → LuaEngine → LuaCommand dispatch;
+              `flowchart LR` for `decode_bg_image` → blur →
+              `BgImage` cache → `imgpipe`). The per-pane titlebar
+              keeps its ASCII art — it is layout, not flow.
+
+  cycle 423 — **Plugin-contract bug fix.** Remote-control IPC
+              `new-tab` verb (cycle 419) was bypassing
+              `LuaEvent::TabAdd`. Plugins listening for tab-spawn
+              now see IPC-driven tab creation as well as keyboard
+              + mouse paths.
+
+  cycle 424 — **Plugin-contract bug fix (3 sites).** Extracted
+              `fire_tab_close_event(closing_idx)` helper and
+              applied it to the three `close_tab` paths that had
+              been bypassing `LuaEvent::TabClose`:
+              - SCM_RIGHTS tab-handoff source (cycle 408)
+              - file-fallback tab-handoff source (cycle 403)
+              - tab-bar ✕-click (cycle 386)
+              Keyboard `CloseTab` already fired correctly; mouse
+              + detachable-tabs paths now match it.
+
+  cycle 425 — **Plugin-contract bug fix (2 sites).** Extracted
+              `fire_tab_add_event()` helper and applied it to the
+              two `new_tab` paths that had been bypassing
+              `LuaEvent::TabAdd`:
+              - `Action::NewWindow` fallback (when window-spawn
+                degrades to in-process new tab)
+              - cycle-418 exit-action=restart respawn
+              All five tab-spawn paths (keyboard, mouse,
+              remote-control, NewWindow fallback, restart) now
+              fire the canonical event.
+
+  cycle 426 — **Refactor.** Created `drain_lua_hook_commands(hook_name)`
+              with a full LuaCommand match (SendText / ExecAction /
+              Notify / SetTheme) and routed the three TabAdd / TabClose
+              hook drains through it. Deleted ~120 lines of inline
+              variant duplication; the helper logs `hook_name` for
+              every dispatched command so trace output identifies
+              which event fired what.
+
+  cycle 427 — **Refactor.** Bell + Output hook drains routed
+              through the same `drain_lua_hook_commands` helper.
+              −51 more lines. All four event hooks (TabAdd,
+              TabClose, Bell, Output) now share one canonical
+              command-drain path; adding a fifth event is one new
+              fire_event call + nothing else.
+
+After cycle 427: every new_tab / close_tab call site fires the
+matching `LuaEvent`, and every event hook routes through one
+helper. Workspace tests stay green; binary smoke clean.
+
 ## [1.33.0] — 2026-05-22
 
 Real feature work — `exit-action = restart` is now end-to-end, and
