@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.23.0] — 2026-05-22
+
+  cycle 393 — Titlebar pixel acceptance test. Pure
+              `pane_titlebar_hit_geometry` helper extracted +
+              drift-guarded with 8 assertions covering both
+              top + bottom bar positions, hit/miss for
+              multi-pane layouts. Closes titlebar Bucket-D
+              sub-cycle 10.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 9 — sub-cycles 2/3/4/5/6/9/10 +
+                                       layout-shift + size-text
+                                   ⌛ 1 — 7 per-pane edit anchor
+                                       (overlay renders at window
+                                       bottom; anchoring at the
+                                       clicked pane's titlebar is
+                                       polish), 8 group-name edit
+                                       (needs named-groups infra)
+bg-image (12 sub-cycles):         ✅ 9 — sub-cycles 2/3/4/5/6/7/10/11/12
+                                   ⌛ 3 — 8 explicit resize handler,
+                                       9 blur shader
+Detachable tabs (11 sub-cycles):  ✅ 1 — sub-cycle 10
+                                       Wayland-fallback
+                                   ⌛ 10 — cursor drag + IPC +
+                                       SCM_RIGHTS + auth + reattach
+
+32 of 46 Bucket-D sub-cycles shipped end-to-end (70%).
+
+Workspace tests 305 → 306.
+
 ## [1.22.0] — 2026-05-22
 
   cycle 391 — bg-image align_horiz + align_vert wired. The
