@@ -6,6 +6,50 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.7.5] — 2026-05-21
+
+Patch release. Real subtle audit catch + structural refactor.
+
+### Fixed
+- **`--profile NAME` silently ignored by every introspection flag
+  except the windowed run (cycles 312 + 313).** Cycle-292 shipped
+  `--profile NAME` only honored by the windowed-run path. A user
+  running `kettle --profile dev --check-config` would silently
+  check `<config-dir>/config` instead of `profiles/dev.config` —
+  same silent-fallback shape as cycle-196's
+  `load_from_with_diagnostics`. Cycle 312 fixed `--check-config`
+  inline; cycle 313 extracted `resolve_config_path(&Cli) ->
+  Option<PathBuf>` and applied it at every introspection site so
+  the precedence
+  (`--config FILE → --profile NAME → default path`) is uniform:
+
+  - `--check-config`
+  - `--list-keybinds`
+  - `--list-ssh-hosts`
+  - `--config-path`
+  - `--screenshot`
+  - `--screenshot-menu`
+
+  Every one was doing
+  `cli.config.clone().or_else(default_path)` without going through
+  `path_for_profile`.
+
+### release.sh
+- **Cycle-311 catch surfaced in cycle 311 itself.** First end-to-
+  end use of `scripts/release.sh` (cycle 307) tried to invoke
+  `cargo build` without `$HOME/.cargo/bin` on PATH and failed
+  mid-flow (version already bumped, lockfile not refreshed, no
+  commit). The script now falls back to `~/.cargo/bin/cargo`,
+  `/opt/homebrew/bin/cargo`, and `/usr/local/bin/cargo` before
+  hard-failing with a clear diagnostic + a restore command.
+
+### Other quality
+- Added `.claude/` to `.gitignore` (cycle 310) — per-developer
+  Claude Code state, not kettle source. Surfaced as untracked by
+  the cycle-307 release script's pre-flight check.
+
+Workspace tests stay at 269 green.
+
 ## [1.7.4] — 2026-05-21
 
 Patch release. Two real subtle bugs caught by post-feature-sweep
