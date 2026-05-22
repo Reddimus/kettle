@@ -526,6 +526,51 @@ pub struct Config {
     /// kettle is wgpu+glyphon, not GTK — this is a no-op stub
     /// for config compatibility.
     pub extra_styling: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:103
+    /// `force_no_bell`): suppress every bell flavor. Same as
+    /// kettle's `bell = off` but as a separate bool flag.
+    pub force_no_bell: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:101
+    /// `icon_bell`): show the bell icon in the per-pane titlebar
+    /// when a bell rings. No-op until the Bucket-D titlebar lands.
+    pub icon_bell: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:96
+    /// `show_titlebar`): show the per-pane titlebar widget. The
+    /// titlebar itself is Bucket-D in docs/TERMINATOR-AUDIT.md.
+    pub show_titlebar: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:131
+    /// `title_hide_sizetext`): hide the WxH size annotation in
+    /// the per-pane titlebar.
+    pub title_hide_sizetext: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:142
+    /// `title_use_system_font`): use the system font for the
+    /// per-pane titlebar text.
+    pub title_use_system_font: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:143
+    /// `title_font`): explicit font (when title_use_system_font
+    /// is false). Default `Sans 9`.
+    pub title_font: String,
+    /// Cycle 340 title-color triplets (terminatorlib/config.py:132-141).
+    pub title_transmit_fg_color: Option<Rgb>,
+    pub title_transmit_bg_color: Option<Rgb>,
+    pub title_receive_fg_color: Option<Rgb>,
+    pub title_receive_bg_color: Option<Rgb>,
+    pub title_inactive_fg_color: Option<Rgb>,
+    pub title_inactive_bg_color: Option<Rgb>,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:127
+    /// `cursor_color_default`): when true, the cursor uses the
+    /// theme's foreground color (default kettle behavior).
+    pub cursor_color_default: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:117
+    /// `use_system_font`): use the OS system font.
+    pub use_system_font: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:116
+    /// `use_theme_colors`): use OS theme colors.
+    pub use_theme_colors: bool,
+    /// Cycle 340 (Terminator parity, terminatorlib/config.py:144
+    /// `http_proxy`): HTTP proxy URL for plugin HTTP requests.
+    /// No-op until the plugin Bucket-D lands.
+    pub http_proxy: String,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -709,6 +754,22 @@ impl Default for Config {
             window_state: WindowState::Normal,
             geometry_hinting: false,
             extra_styling: true,
+            force_no_bell: false,
+            icon_bell: true,
+            show_titlebar: true,
+            title_hide_sizetext: false,
+            title_use_system_font: true,
+            title_font: "Sans 9".to_string(),
+            title_transmit_fg_color: None,
+            title_transmit_bg_color: None,
+            title_receive_fg_color: None,
+            title_receive_bg_color: None,
+            title_inactive_fg_color: None,
+            title_inactive_bg_color: None,
+            cursor_color_default: true,
+            use_system_font: true,
+            use_theme_colors: false,
+            http_proxy: String::new(),
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1588,6 +1649,73 @@ impl Config {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.extra_styling = b;
                     }
+                }
+                "force-no-bell" | "force_no_bell" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.force_no_bell = b;
+                    }
+                }
+                "icon-bell" | "icon_bell" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.icon_bell = b;
+                    }
+                }
+                "show-titlebar" | "show_titlebar" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.show_titlebar = b;
+                    }
+                }
+                "title-hide-sizetext" | "title_hide_sizetext" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.title_hide_sizetext = b;
+                    }
+                }
+                "title-use-system-font" | "title_use_system_font" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.title_use_system_font = b;
+                    }
+                }
+                "title-font" | "title_font" => {
+                    let v = e.value.trim();
+                    if !v.is_empty() {
+                        cfg.title_font = v.to_string();
+                    }
+                }
+                "title-transmit-fg-color" | "title_transmit_fg_color" => {
+                    cfg.title_transmit_fg_color = Rgb::parse(&e.value);
+                }
+                "title-transmit-bg-color" | "title_transmit_bg_color" => {
+                    cfg.title_transmit_bg_color = Rgb::parse(&e.value);
+                }
+                "title-receive-fg-color" | "title_receive_fg_color" => {
+                    cfg.title_receive_fg_color = Rgb::parse(&e.value);
+                }
+                "title-receive-bg-color" | "title_receive_bg_color" => {
+                    cfg.title_receive_bg_color = Rgb::parse(&e.value);
+                }
+                "title-inactive-fg-color" | "title_inactive_fg_color" => {
+                    cfg.title_inactive_fg_color = Rgb::parse(&e.value);
+                }
+                "title-inactive-bg-color" | "title_inactive_bg_color" => {
+                    cfg.title_inactive_bg_color = Rgb::parse(&e.value);
+                }
+                "cursor-color-default" | "cursor_color_default" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.cursor_color_default = b;
+                    }
+                }
+                "use-system-font" | "use_system_font" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.use_system_font = b;
+                    }
+                }
+                "use-theme-colors" | "use_theme_colors" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.use_theme_colors = b;
+                    }
+                }
+                "http-proxy" | "http_proxy" => {
+                    cfg.http_proxy = e.value.trim().to_string();
                 }
                 "unfocused-split-opacity" => {
                     if let Ok(v) = e.value.parse::<f32>() {
@@ -2740,6 +2868,46 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn bell_titlebar_misc_keys_parse() {
+        // Cycle 340 drift guard. Bell sub-flag aliases + per-pane
+        // titlebar color/font keys + system-font/theme-colors stubs
+        // + http_proxy. All defaults match Terminator's defaults.
+        let d = Config::default();
+        assert!(!d.force_no_bell);
+        assert!(d.icon_bell);
+        assert!(d.show_titlebar);
+        assert!(!d.title_hide_sizetext);
+        assert!(d.title_use_system_font);
+        assert_eq!(d.title_font, "Sans 9");
+        assert!(d.title_transmit_fg_color.is_none());
+        assert!(d.title_inactive_bg_color.is_none());
+        assert!(d.cursor_color_default);
+        assert!(d.use_system_font);
+        assert!(!d.use_theme_colors);
+        assert_eq!(d.http_proxy, "");
+        // Parsing samples.
+        assert!(Config::parse_text("force-no-bell = true").force_no_bell);
+        assert!(Config::parse_text("force_no_bell = true").force_no_bell);
+        assert!(!Config::parse_text("icon-bell = false").icon_bell);
+        assert!(!Config::parse_text("show-titlebar = false").show_titlebar);
+        assert!(Config::parse_text("title-hide-sizetext = true").title_hide_sizetext);
+        assert!(!Config::parse_text("title-use-system-font = false").title_use_system_font);
+        assert_eq!(
+            Config::parse_text("title-font = Inter 11").title_font,
+            "Inter 11"
+        );
+        let c = Config::parse_text("title-transmit-fg-color = #abcdef");
+        assert!(c.title_transmit_fg_color.is_some());
+        assert!(!Config::parse_text("cursor-color-default = false").cursor_color_default);
+        assert!(!Config::parse_text("use-system-font = false").use_system_font);
+        assert!(Config::parse_text("use-theme-colors = true").use_theme_colors);
+        assert_eq!(
+            Config::parse_text("http-proxy = http://proxy.example:8080").http_proxy,
+            "http://proxy.example:8080"
+        );
     }
 
     #[test]
