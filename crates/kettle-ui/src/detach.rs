@@ -39,9 +39,10 @@ use std::time::Instant;
 /// just the data its transitions need; the App's mouse-handler
 /// uses the type-state pattern to ensure only legal transitions
 /// happen (no "drag from no-armed state" footgun).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum DragState {
     /// No drag in progress.
+    #[default]
     Idle,
     /// Mouse-down landed on the tab bar; not yet a drag.
     /// `started_at` is used by the click-vs-drag distinguisher
@@ -63,12 +64,6 @@ pub enum DragState {
         /// IPC session token (sub-cycle 7 fills in).
         session_id: u64,
     },
-}
-
-impl Default for DragState {
-    fn default() -> Self {
-        DragState::Idle
-    }
 }
 
 impl DragState {
