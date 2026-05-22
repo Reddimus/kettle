@@ -2815,10 +2815,26 @@ impl App {
                         (cur, anchor)
                     };
                     let yanked = self.yank_vi_selection(start, end);
-                    if !yanked.is_empty()
-                        && let Some(clip) = self.clipboard.as_mut()
-                    {
-                        let _ = clip.set_text(yanked);
+                    if !yanked.is_empty() {
+                        // Cycle 316: log a warn when clipboard is None
+                        // (e.g. SSH without X11 / Wayland forwarding,
+                        // missing DISPLAY, or arboard init failed at
+                        // startup). Pre-fix, vi-mode `y` silently
+                        // dropped the selection — the user saw the
+                        // visual-mode highlight clear + vi-mode exit,
+                        // assumed copy worked, then hit paste and
+                        // got their previous clipboard contents.
+                        if let Some(clip) = self.clipboard.as_mut() {
+                            if let Err(e) = clip.set_text(yanked) {
+                                log::warn!("vi-mode yank: clipboard set_text failed: {e}");
+                            }
+                        } else {
+                            log::warn!(
+                                "vi-mode yank: clipboard unavailable (selection of {} bytes \
+                                 not copied — try a kettle window with DISPLAY / Wayland set)",
+                                yanked.len()
+                            );
+                        }
                     }
                 }
                 self.vi_mode = None;
