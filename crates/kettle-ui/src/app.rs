@@ -374,6 +374,27 @@ enum ContextMenuItem {
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
 /// Anchor is the post-clamp panel top-left; rows mirror the renderer's
 /// `ContextMenu` slice but carry the live `Action` for dispatch.
+/// Cycle 369 (Terminator parity): title-edit overlay state.
+#[derive(Debug, Clone)]
+pub enum TitleEditScope {
+    /// Edit the OS window title (winit Window::set_title).
+    Window,
+    /// Edit the active tab's title_override (overrides what the
+    /// tab-bar shows independent of any OSC 1/2 from a pane).
+    Tab,
+    /// Edit the focused pane's title (used for the future per-pane
+    /// titlebar render Bucket-D + as the OSC-1 equivalent).
+    Pane,
+}
+
+#[derive(Debug, Clone)]
+pub struct TitleEditState {
+    pub scope: TitleEditScope,
+    /// Current text the user has typed. Pre-filled with the existing
+    /// title so the user can edit in place vs starting blank.
+    pub input: String,
+}
+
 struct ContextMenuState {
     anchor: (f32, f32),
     items: Vec<ContextMenuItem>,
@@ -467,6 +488,11 @@ pub struct App {
     /// same Esc-to-dismiss key route. Anchored at the click point so
     /// the menu appears where the user looked, not at a fixed corner.
     context_menu: Option<ContextMenuState>,
+    /// Cycle 369 (Terminator parity, replaces cycle-354 placeholders):
+    /// when `Some`, the user is editing a window/tab/pane title via
+    /// an inline overlay. Enter applies + clears; Esc cancels +
+    /// clears; printable chars append; Backspace removes one.
+    editing_title: Option<TitleEditState>,
     window_focused: bool,
     /// True while the OS mouse cursor is hidden because the user is typing
     /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
@@ -718,6 +744,7 @@ impl App {
             palette_input: None,
             hint_state: None,
             context_menu: None,
+            editing_title: None,
             window_focused: true,
             mouse_hidden: false,
             last_cursor_icon: None,
@@ -2126,9 +2153,36 @@ impl App {
         self.hint_state = None;
         self.ssh_input = None;
         self.context_menu = None;
+        self.editing_title = None;
         // Cycle 298 vi-mode behaves like a modal — Esc exits it,
         // close_all_modals exits it. Sub-cycle 1.
         self.vi_mode = None;
+    }
+
+    /// Cycle 369: apply the in-progress title edit + clear the
+    /// overlay. The scope decides which setter is invoked.
+    fn apply_title_edit(&mut self) {
+        if let Some(state) = self.editing_title.take() {
+            let value = state.input;
+            match state.scope {
+                TitleEditScope::Window => {
+                    if let Some(w) = &self.window {
+                        w.set_title(&value);
+                    }
+                    self.last_title = value;
+                }
+                TitleEditScope::Tab => {
+                    if let Some(t) = self.mux.tabs.get_mut(self.mux.active) {
+                        t.title_override = if value.is_empty() { None } else { Some(value) };
+                    }
+                }
+                TitleEditScope::Pane => {
+                    if let Some(p) = self.mux.focused() {
+                        p.title = value;
+                    }
+                }
+            }
+        }
     }
 
     /// `true` while any modal overlay (search bar, command palette, hint
@@ -2142,6 +2196,7 @@ impl App {
             || self.hint_state.is_some()
             || self.ssh_input.is_some()
             || self.context_menu.is_some()
+            || self.editing_title.is_some()
             || self.vi_mode.is_some()
     }
 
@@ -2811,37 +2866,53 @@ impl App {
             //   ToggleScrollbar (runtime scrollbar toggle)
             //   EditWindowTitle / EditTabTitle / EditPaneTitle
             //   NextProfile / PrevProfile (runtime profile cycle)
-            // Cycle 354 (Terminator parity, terminatorlib/terminal.py:
-            // key_edit_window_title / key_edit_tab_title /
-            // key_edit_terminal_title): MVP title-edit by setting
-            // directly to a placeholder, with a log::info note
-            // pointing at the future Bucket-D per-pane titlebar
-            // overlay cycle. Reasoning: a full overlay state machine
-            // is multi-file work that pairs naturally with the
-            // per-pane titlebar render (Bucket D). Today's wiring
-            // demonstrates the title can be set programmatically;
-            // the user-facing UX lands with the titlebar.
+            // Cycle 369 (Terminator parity, replaces cycle-354
+            // placeholders): real Edit-title overlay. Each action
+            // opens the overlay pre-filled with the current title.
+            // Enter applies via the appropriate setter; Esc cancels.
+            // Render is a thin bar at the top of the window (similar
+            // shape to cycle-X's command palette overlay).
             Action::EditWindowTitle => {
+                self.close_all_modals();
+                let current = self.last_title.clone();
+                self.editing_title = Some(TitleEditState {
+                    scope: TitleEditScope::Window,
+                    input: current,
+                });
                 if let Some(w) = &self.window {
-                    w.set_title("kettle (edit-title overlay pending; cycle 354)");
+                    w.request_redraw();
                 }
-                log::info!(
-                    "EditWindowTitle: title set to placeholder; \
-                     interactive overlay pairs with per-pane titlebar \
-                     Bucket-D in docs/TERMINATOR-AUDIT.md"
-                );
             }
             Action::EditTabTitle => {
-                if let Some(t) = self.mux.tabs.get_mut(self.mux.active) {
-                    t.title_override = Some("edit-title overlay pending".to_string());
+                self.close_all_modals();
+                let current = self
+                    .mux
+                    .tabs
+                    .get(self.mux.active)
+                    .and_then(|t| t.title_override.clone())
+                    .unwrap_or_default();
+                self.editing_title = Some(TitleEditState {
+                    scope: TitleEditScope::Tab,
+                    input: current,
+                });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
-                log::info!("EditTabTitle: title_override set; overlay pending Bucket-D titlebar");
             }
             Action::EditPaneTitle => {
-                if let Some(p) = self.mux.focused() {
-                    p.title = "edit-title overlay pending".to_string();
+                self.close_all_modals();
+                let current = self
+                    .mux
+                    .focused()
+                    .map(|p| p.title.clone())
+                    .unwrap_or_default();
+                self.editing_title = Some(TitleEditState {
+                    scope: TitleEditScope::Pane,
+                    input: current,
+                });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
-                log::info!("EditPaneTitle: pane.title set; overlay pending Bucket-D titlebar");
             }
             // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
             // key_next_profile + key_previous_profile): runtime cycle
@@ -4474,6 +4545,40 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if self.ssh_input.is_some() {
                     self.ssh_key(&event.logical_key, text);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Cycle 369: Edit-title overlay key handler. Esc
+                // cancels; Enter applies via apply_title_edit;
+                // Backspace removes one char; printable text appends.
+                if self.editing_title.is_some() {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.editing_title = None;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            self.apply_title_edit();
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(state) = self.editing_title.as_mut() {
+                                state.input.pop();
+                            }
+                        }
+                        _ => {
+                            if let Some(s) = text
+                                && let Some(state) = self.editing_title.as_mut()
+                            {
+                                for c in s.chars() {
+                                    if !c.is_control() {
+                                        state.input.push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
