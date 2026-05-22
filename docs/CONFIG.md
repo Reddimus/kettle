@@ -91,7 +91,8 @@ per-key audit against Terminator's source.
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
 | `background-darkness` | float 0..1 | `1.0` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark) |
-| `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell) |
+| `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell). Cycle 452 fixed a double-spawn bug under `restart` where alacritty's `Exit` + `ChildExit` both fired for one shell |
+| `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `putty-paste-style` | bool | `false` | Right-click pastes (PuTTY convention) |
