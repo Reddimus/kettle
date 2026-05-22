@@ -6,6 +6,42 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.21.0] — 2026-05-22
+
+  cycle 389 — Per-pane titlebar click → EditPaneTitle. Hit-test
+              checks click in titlebar y-band (top or bottom
+              per cfg.title_at_bottom); focused-pane titlebar
+              click opens the edit overlay; unfocused-pane
+              titlebar click first focuses (two-click model
+              avoids accidental edits on focus transitions).
+              Closes titlebar sub-cycle 5.
+  cycle 390 — bg-image UV-mode variants. background-image-mode
+              controls how the decoded image fills the surface:
+                stretch_and_fill (default), tile, center, scale.
+              Closes bg-image sub-cycles 5 + 6.
+
+### Cumulative Bucket-D status
+
+Plugin (13 sub-cycles):           ✅ 13/13 COMPLETE
+Titlebar (10 sub-cycles):         ✅ 8 — sub-cycles 2/3/4/5/6/9 +
+                                       cell-shift + size-text done
+                                   ⌛ 2 — 7 per-pane edit anchor,
+                                       8 group-name edit,
+                                       10 pixel acceptance test
+bg-image (12 sub-cycles):         ✅ 7 — sub-cycles 2/3/4/5/6/7/10
+                                       + path-cache reload (11
+                                       implicit)
+                                   ⌛ 5 — 8 resize, 9 blur shader,
+                                       12 acceptance test
+Detachable tabs (11 sub-cycles):  ✅ 1 — sub-cycle 10
+                                       Wayland-fallback
+                                   ⌛ 10 — cursor drag + IPC +
+                                       SCM_RIGHTS + auth + reattach
+
+29 of 46 Bucket-D sub-cycles shipped end-to-end (63%).
+
+Workspace tests stay at 304.
+
 ## [1.20.0] — 2026-05-22
 
 Titlebar receive-state variant + background-image full render.
