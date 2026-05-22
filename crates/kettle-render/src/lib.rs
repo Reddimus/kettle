@@ -1565,7 +1565,18 @@ impl Renderer {
                             r: srgb(bg.r),
                             g: srgb(bg.g),
                             b: srgb(bg.b),
-                            a: cfg.background_opacity as f64,
+                            // Cycle 380 (Terminator parity, terminatorlib/
+                            // config.py:106 + 117 `background_darkness` +
+                            // `background_type`): when bg-type=transparent,
+                            // compose the configured darkness with the
+                            // cycle-X background-opacity. background_darkness
+                            // is documented as 0.0 = fully dark (no
+                            // transparency) .. 1.0 = no tint; we treat
+                            // 1.0 - darkness as the additional alpha-
+                            // reduction so a config like darkness=0.4
+                            // gives a 60% extra-transparent surface on
+                            // top of background-opacity.
+                            a: composed_bg_alpha(cfg),
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -2151,6 +2162,28 @@ fn srgb(c: u8) -> f64 {
         c / 12.92
     } else {
         ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Cycle 380 (Terminator parity, terminatorlib/config.py:106 + 117):
+/// compose the kettle background-opacity (cycle-X) with Terminator's
+/// `background_darkness` + `background_type`. Logic:
+///
+///   bg-type = solid (default):  alpha = background_opacity
+///   bg-type = transparent:      alpha = background_opacity * background_darkness
+///   bg-type = image:            alpha = background_opacity (image render
+///                               will land in a later bg-image sub-cycle;
+///                               for now darkness applies same as transparent
+///                               so users get the dim tint stage early)
+///
+/// All inputs already clamped at parse time so no defensive math needed.
+fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
+    use kettle_config::BackgroundType;
+    match cfg.background_type {
+        BackgroundType::Solid => cfg.background_opacity as f64,
+        BackgroundType::Transparent | BackgroundType::Image => {
+            (cfg.background_opacity as f64) * (cfg.background_darkness as f64)
+        }
     }
 }
 
@@ -2838,6 +2871,9 @@ pub fn capture_png_with_annotation(
                             r: srgb(bg.r),
                             g: srgb(bg.g),
                             b: srgb(bg.b),
+                            // Cycle 380: route through composed_bg_alpha
+                            // so the screenshot path also honors
+                            // background-type + background-darkness.
                             // Cycle 149: honor cfg.background_opacity
                             // here too. The live-window clear op
                             // already did (line ~862), but the
@@ -2848,7 +2884,7 @@ pub fn capture_png_with_annotation(
                             // the alpha channel directly; honoring
                             // the config makes the screenshot match
                             // what the live window shows.
-                            a: cfg.background_opacity as f64,
+                            a: composed_bg_alpha(cfg),
                         }),
                         store: wgpu::StoreOp::Store,
                     },
