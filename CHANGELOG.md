@@ -6,6 +6,48 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-05-22
+
+  cycle 375 — `kettle.add_menu_item(label, callback)` Lua API.
+              Last user-facing plugin API from docs/TERMINATOR-
+              PLUGIN-DESIGN.md. Lua plugins can extend the
+              cycle-245 right-click context menu with their
+              own entries; clicks invoke the registered
+              callback + drain any queued LuaCommands.
+              New ContextMenuItem::LuaItem variant + dispatch
+              path.
+
+  cycle 376 — `lua-sandbox = safe|trusted` config knob.
+              `safe` (default) nil's os.execute / os.exit /
+              os.remove / io.open / io.popen / loadfile /
+              dofile / package.loadlib in the Lua VM at
+              construction. Matches the sandbox defaults of
+              WezTerm + Hammerspoon + Neovim plugin runtimes.
+              `trusted` exposes everything (user opt-in).
+
+### Plugin sub-cycle status
+
+  ✅  365 — kettle.on event-hook foundation
+  ✅  366 — LuaEvent::Startup emission
+  ✅  367 — LuaEvent::Bell emission
+  ✅  368 — LuaEvent::TabAdd / TabClose emission
+  ✅  370 — init.lua auto-load
+  ✅  371 — kettle.notify
+  ✅  373 — kettle.set_theme
+  ✅  374 — kettle.add_url_handler
+  ✅  375 — kettle.add_menu_item
+  ✅  376 — lua-sandbox config
+
+  ⌛  pending — LuaEvent::Output emission (throttled per-PTY-chunk
+                event for plugins that watch terminal output)
+
+10 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+Every user-facing plugin Lua API is now shipped. Only Output
+event emission remains, and that's bounded (throttle bucket +
+fire call at the drain_events Output match arm).
+
+Workspace tests stay at 302.
+
 ## [1.15.0] — 2026-05-22
 
 Plugin Lua API expansion. Two new plugin sub-cycles + URL routing.
