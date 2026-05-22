@@ -43,7 +43,7 @@ mod color;
 mod imgpipe;
 mod quad;
 
-pub use bg_image::{BgImage, decode_bg_image};
+pub use bg_image::{BgImage, decode_bg_image, decode_bg_image_with_blur};
 
 use std::sync::Arc;
 
@@ -728,7 +728,16 @@ impl Renderer {
                 .as_ref()
                 .map(|(p, _)| p != &want)
                 .unwrap_or(true);
-            if need_reload && let Some(decoded) = bg_image::decode_bg_image(&want) {
+            // Cycle 396: route through decode_bg_image_with_blur
+            // so cfg.background_blur takes effect at load time.
+            // Radius 8 is a reasonable default for the on/off
+            // toggle Terminator's bool config exposes; a future
+            // sub-cycle could expose a `background_blur_radius`
+            // numeric for finer control.
+            let blur_radius: u32 = if cfg.background_blur { 8 } else { 0 };
+            if need_reload
+                && let Some(decoded) = bg_image::decode_bg_image_with_blur(&want, blur_radius)
+            {
                 use std::sync::Arc;
                 let data = kettle_core::ImageData {
                     width: decoded.width,
