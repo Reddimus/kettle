@@ -935,9 +935,17 @@ impl Renderer {
             // Color picks from the cfg.title_*_bg_color variants
             // based on focus + broadcast group state.
             if pane_titlebar_h > 0.0 {
+                // Cycle 387 (Terminator parity, titlebar sub-cycle 4):
+                // three color variants based on focus + broadcast state.
+                //   focused pane:           transmit colors
+                //   unfocused + broadcast:  receive colors  (group member)
+                //   unfocused + !broadcast: inactive colors
                 let bar_bg = if pv.focused {
                     cfg.title_transmit_bg_color
                         .unwrap_or(Rgb::new(0xc8, 0x00, 0x03))
+                } else if tabbar.broadcast {
+                    cfg.title_receive_bg_color
+                        .unwrap_or(Rgb::new(0x00, 0x76, 0xc9))
                 } else {
                     cfg.title_inactive_bg_color
                         .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
@@ -1410,8 +1418,12 @@ impl Renderer {
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, rh) = pv.rect;
+                // Cycle 387: matching fg variant for the three states.
                 let fg = if pv.focused {
                     cfg.title_transmit_fg_color
+                        .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
+                } else if tabbar.broadcast {
+                    cfg.title_receive_fg_color
                         .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
                 } else {
                     cfg.title_inactive_fg_color
