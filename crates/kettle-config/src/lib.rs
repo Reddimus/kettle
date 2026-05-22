@@ -154,6 +154,35 @@ pub enum StatusBarMode {
     Bottom,
 }
 
+/// Cycle 339 (Terminator parity, terminatorlib/config.py:73
+/// `focus`): focus mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusMode {
+    /// Click to focus (Terminator + kettle default).
+    #[default]
+    Click,
+    /// Focus follows mouse cursor.
+    Sloppy,
+    /// Use the OS / desktop-environment default.
+    System,
+}
+
+/// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+/// `window_state`): initial window state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowState {
+    /// Standard windowed (kettle + Terminator default).
+    #[default]
+    Normal,
+    /// Maximize at launch.
+    Maximise,
+    /// Fullscreen at launch (no chrome).
+    Fullscreen,
+    /// Launch hidden — useful for Quake-style dropdown setups
+    /// where `kettle --toggle` brings it up.
+    Hidden,
+}
+
 /// Cycle 338 (Terminator parity, terminatorlib/config.py:107
 /// `backspace_binding`): how Backspace key is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -466,6 +495,37 @@ pub struct Config {
     /// `inactive_bg_color_offset`): BG-only dim for unfocused
     /// panes. No-op until wired into the render layer.
     pub inactive_bg_color_offset: f32,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:99
+    /// `split_to_group`): new splits inherit the parent's broadcast
+    /// group.
+    pub split_to_group: bool,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:100
+    /// `autoclean_groups`): remove empty broadcast groups
+    /// automatically.
+    pub autoclean_groups: bool,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:80
+    /// `always_split_with_profile`): new splits inherit the
+    /// parent pane's profile.
+    pub always_split_with_profile: bool,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:73
+    /// `focus`): focus mode — click (default), sloppy (focus
+    /// follows mouse), system (use the desktop's focus mode).
+    pub focus: FocusMode,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:74
+    /// `handle_size`): split-divider grab width in px. -1 means
+    /// "use the GTK/winit theme default."
+    pub handle_size: i32,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// `window_state`): initial window state at launch.
+    pub window_state: WindowState,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// `geometry_hinting`): resize in font-step increments.
+    pub geometry_hinting: bool,
+    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// `extra_styling`): load extra GTK CSS per-theme.
+    /// kettle is wgpu+glyphon, not GTK — this is a no-op stub
+    /// for config compatibility.
+    pub extra_styling: bool,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
@@ -641,6 +701,14 @@ impl Default for Config {
             custom_url_handler: String::new(),
             inactive_color_offset: 1.0,
             inactive_bg_color_offset: 1.0,
+            split_to_group: false,
+            autoclean_groups: true,
+            always_split_with_profile: false,
+            focus: FocusMode::Click,
+            handle_size: -1,
+            window_state: WindowState::Normal,
+            geometry_hinting: false,
+            extra_styling: true,
             unfocused_split_opacity: 0.7,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
@@ -1474,6 +1542,51 @@ impl Config {
                 "inactive-bg-color-offset" | "inactive_bg_color_offset" => {
                     if let Ok(v) = e.value.parse::<f32>() {
                         cfg.inactive_bg_color_offset = v.clamp(0.0, 1.0);
+                    }
+                }
+                "split-to-group" | "split_to_group" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.split_to_group = b;
+                    }
+                }
+                "autoclean-groups" | "autoclean_groups" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.autoclean_groups = b;
+                    }
+                }
+                "always-split-with-profile" | "always_split_with_profile" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.always_split_with_profile = b;
+                    }
+                }
+                "focus" => {
+                    cfg.focus = match e.value.to_ascii_lowercase().as_str() {
+                        "sloppy" => FocusMode::Sloppy,
+                        "system" => FocusMode::System,
+                        _ => FocusMode::Click,
+                    };
+                }
+                "handle-size" | "handle_size" => {
+                    if let Ok(v) = e.value.parse::<i32>() {
+                        cfg.handle_size = v.clamp(-1, 50);
+                    }
+                }
+                "window-state" | "window_state" => {
+                    cfg.window_state = match e.value.to_ascii_lowercase().as_str() {
+                        "maximise" | "maximize" => WindowState::Maximise,
+                        "fullscreen" => WindowState::Fullscreen,
+                        "hidden" => WindowState::Hidden,
+                        _ => WindowState::Normal,
+                    };
+                }
+                "geometry-hinting" | "geometry_hinting" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.geometry_hinting = b;
+                    }
+                }
+                "extra-styling" | "extra_styling" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.extra_styling = b;
                     }
                 }
                 "unfocused-split-opacity" => {
@@ -2627,6 +2740,55 @@ mod config_tests {
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn group_focus_handle_window_state_parse() {
+        // Cycle 339 drift guard.
+        let d = Config::default();
+        assert!(!d.split_to_group);
+        assert!(d.autoclean_groups);
+        assert!(!d.always_split_with_profile);
+        assert_eq!(d.focus, FocusMode::Click);
+        assert_eq!(d.handle_size, -1);
+        assert_eq!(d.window_state, WindowState::Normal);
+        assert!(!d.geometry_hinting);
+        assert!(d.extra_styling);
+        // FocusMode parsing.
+        assert_eq!(
+            Config::parse_text("focus = sloppy").focus,
+            FocusMode::Sloppy
+        );
+        assert_eq!(
+            Config::parse_text("focus = system").focus,
+            FocusMode::System
+        );
+        // window-state alias.
+        assert_eq!(
+            Config::parse_text("window-state = maximise").window_state,
+            WindowState::Maximise
+        );
+        assert_eq!(
+            Config::parse_text("window_state = maximize").window_state,
+            WindowState::Maximise
+        );
+        assert_eq!(
+            Config::parse_text("window-state = fullscreen").window_state,
+            WindowState::Fullscreen
+        );
+        assert_eq!(
+            Config::parse_text("window-state = hidden").window_state,
+            WindowState::Hidden
+        );
+        // handle_size clamp.
+        assert_eq!(Config::parse_text("handle-size = 99").handle_size, 50);
+        // group bools both forms.
+        assert!(Config::parse_text("split-to-group = true").split_to_group);
+        assert!(Config::parse_text("split_to_group = true").split_to_group);
+        assert!(!Config::parse_text("autoclean-groups = false").autoclean_groups);
+        assert!(!Config::parse_text("autoclean_groups = false").autoclean_groups);
+        assert!(Config::parse_text("always-split-with-profile = true").always_split_with_profile);
+        assert!(Config::parse_text("always_split_with_profile = true").always_split_with_profile);
     }
 
     #[test]
