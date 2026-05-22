@@ -1590,6 +1590,7 @@ mod node_tests {
             m.tabs.push(Tab {
                 root: Node::Leaf(id),
                 focus: id,
+                title_override: None,
                 zoomed: false,
                 last_output_at: None,
                 last_seen_at: None,
@@ -1636,6 +1637,7 @@ mod node_tests {
             m.tabs.push(Tab {
                 root: Node::Leaf(id),
                 focus: id,
+                title_override: None,
                 zoomed: false,
                 last_output_at: None,
                 last_seen_at: None,
@@ -1896,6 +1898,7 @@ mod node_tests {
             Tab {
                 root: Node::Leaf(id),
                 focus: id,
+                title_override: None,
                 zoomed: false,
                 last_output_at: None,
                 last_seen_at: None,
@@ -1971,6 +1974,7 @@ mod node_tests {
             m.tabs.push(Tab {
                 root,
                 focus: id * 10,
+                title_override: None,
                 zoomed: false,
                 last_output_at: None,
                 last_seen_at: None,
