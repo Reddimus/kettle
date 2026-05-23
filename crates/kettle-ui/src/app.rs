@@ -1011,6 +1011,19 @@ struct ContextMenuState {
     /// "no nested-nested submenus in v1" carveout). The Vec
     /// shape is forward-compatible for arbitrary depth.
     drill_stack: Vec<Vec<ContextMenuItem>>,
+    /// Cycle 714 (Terminator menu UX, C5): scroll offset for long
+    /// submenus. The Theme submenu has ~512 entries; pre-cycle-714
+    /// the panel grew off-screen with no scroll handling. Now
+    /// `panel_h` is clamped to fit the surface, the visible window
+    /// is `[scroll_offset, scroll_offset + max_visible_rows)`, and
+    /// wheel / `↑↓` past the last visible row advances `scroll_offset`.
+    /// Reset to 0 on drill-in / drill-pop (each level has its own
+    /// view).
+    scroll_offset: usize,
+    /// Parallel stack to `drill_stack`: the scroll_offset to restore
+    /// when popping back to each level. Same length as `drill_stack`
+    /// at all times.
+    scroll_stack: Vec<usize>,
 }
 
 /// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
@@ -1038,6 +1051,36 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 /// field (no description), so the inner predicate is simpler.
 /// Pure — separated from `layout_picker_key` so a drift guard
 /// can exercise it without touching App state.
+/// Cycle 714 (Terminator menu UX, C5). How many rows starting at
+/// `start` fit within `panel_h` pixels. Separators take `sep_h`,
+/// every other row takes `row_h`. Used by `step_context_menu_highlight`
+/// and `scroll_context_menu` to keep `scroll_offset` honest when the
+/// panel is height-clamped by `context_menu_geometry`. Pure so the
+/// arithmetic is drift-guarded without standing up the App.
+fn count_rows_fitting(
+    items: &[ContextMenuItem],
+    start: usize,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    let mut used = 0.0_f32;
+    let mut count = 0;
+    for it in items.iter().skip(start) {
+        let h = if matches!(it, ContextMenuItem::Separator) {
+            sep_h
+        } else {
+            row_h
+        };
+        if used + h > panel_h {
+            break;
+        }
+        used += h;
+        count += 1;
+    }
+    count
+}
+
 /// Cycle 713 (Terminator menu UX, C4). Drop disabled `Item`s from
 /// the context-menu and collapse the separators that would orphan
 /// around them. Pre-cycle-713 disabled rows rendered greyed-out —
@@ -3983,6 +4026,8 @@ impl App {
             items,
             highlight,
             drill_stack: Vec::new(),
+            scroll_offset: 0,
+            scroll_stack: Vec::new(),
         });
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -3996,13 +4041,72 @@ impl App {
     /// current)` so the wrap+skip math is unit-testable independent of
     /// the App / cursor state.
     fn step_context_menu_highlight(&mut self, delta: isize) {
+        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry() else {
+            return;
+        };
+        let (_, ch) = self.cell_px();
+        let row_h = ch as f32 + 12.0;
+        let sep_h = 8.0_f32;
         let Some(menu) = self.context_menu.as_mut() else {
             return;
         };
         let next = next_context_menu_highlight(&menu.items, menu.highlight, delta);
         menu.highlight = next;
+        // Cycle 714: if the new highlight is outside the visible
+        // window, advance scroll_offset to bring it into view.
+        let visible = count_rows_fitting(&menu.items, menu.scroll_offset, panel_h, row_h, sep_h);
+        if next < menu.scroll_offset {
+            menu.scroll_offset = next;
+        } else if next >= menu.scroll_offset + visible {
+            // Pull scroll_offset forward until `next` is the last
+            // fully visible row.
+            let mut off = next;
+            loop {
+                let fit = count_rows_fitting(&menu.items, off, panel_h, row_h, sep_h);
+                if off + fit > next || off == 0 {
+                    break;
+                }
+                off -= 1;
+            }
+            menu.scroll_offset = off;
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Cycle 714. Scroll the context-menu by `delta` rows (positive
+    /// = down). Clamped so we can't scroll past the last row that
+    /// would still fill the visible window.
+    fn scroll_context_menu(&mut self, delta: isize) {
+        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry() else {
+            return;
+        };
+        let (_, ch) = self.cell_px();
+        let row_h = ch as f32 + 12.0;
+        let sep_h = 8.0_f32;
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        let n = menu.items.len();
+        let new_off = (menu.scroll_offset as isize + delta).max(0) as usize;
+        // Clamp: never scroll past the point where the last visible
+        // row is the final item.
+        let mut max_off = 0usize;
+        for cand in 0..n {
+            let fit = count_rows_fitting(&menu.items, cand, panel_h, row_h, sep_h);
+            if cand + fit >= n {
+                max_off = cand;
+                break;
+            }
+            max_off = cand;
+        }
+        let clamped = new_off.min(max_off);
+        if clamped != menu.scroll_offset {
+            menu.scroll_offset = clamped;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -4030,12 +4134,15 @@ impl App {
         let (_, ch) = self.cell_px();
         let row_h = ch as f32 + 12.0;
         let sep_h = 8.0_f32;
-        let kinds: Vec<bool> = menu
-            .items
+        // Cycle 714: row-walk starts at scroll_offset; only the
+        // visible slice is hit-tested. Off-by-one is handled by
+        // find_menu_row_y's half-open interval [y, y+h).
+        let start = menu.scroll_offset.min(menu.items.len());
+        let kinds: Vec<bool> = menu.items[start..]
             .iter()
             .map(|it| matches!(it, ContextMenuItem::Separator))
             .collect();
-        find_menu_row_y(py, ay, row_h, sep_h, &kinds)
+        find_menu_row_y(py, ay, row_h, sep_h, &kinds).map(|i| i + start)
     }
 
     /// Cycle 712. Set `menu.highlight` to whichever row the cursor is
@@ -4074,8 +4181,12 @@ impl App {
         let (_, ch) = self.cell_px();
         let row_h = ch as f32 + 12.0;
         let sep_h = 8.0_f32;
+        // Cycle 714: skip the scrolled-off rows above scroll_offset
+        // before walking. `row_y` starts at the panel top; iteration
+        // begins at item `scroll_offset`.
+        let start = menu.scroll_offset.min(menu.items.len());
         let mut row_y = ay;
-        for (idx, item) in menu.items.iter().enumerate() {
+        for (idx, item) in menu.items.iter().enumerate().skip(start) {
             let h = match item {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
@@ -4130,19 +4241,30 @@ impl App {
         let (cw, ch) = (cw as f32, ch as f32);
         let row_h = ch + 12.0;
         let sep_h = 8.0_f32;
-        let panel_h: f32 = menu
+        // Natural height: sum every row + separator.
+        let natural_h: f32 = menu
             .items
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. }
-                | ContextMenuItem::LuaItem { .. }
-                | ContextMenuItem::ConfigItem { .. }
-                | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. }
-                | ContextMenuItem::ProfileChoice { .. } => row_h,
+                _ => row_h,
             })
             .sum();
+        // Cycle 714 (Terminator menu UX, C5): clamp the panel
+        // height to the surface so a ~512-entry Theme submenu
+        // can't grow off-screen. We reserve 80px of vertical
+        // breathing room (40px top + 40px bottom) so the menu
+        // doesn't bump into the window edge.
+        let (_, surface_h) = self
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let max_h = (surface_h - 80.0).max(row_h);
+        let panel_h = natural_h.min(max_h);
         let max_chars = menu
             .items
             .iter()
@@ -4217,10 +4339,19 @@ impl App {
                 },
             })
             .collect();
+        // Cycle 714 (Terminator menu UX, C5): pass through the
+        // scroll state + clamped panel height the renderer needs to
+        // draw only the visible slice.
+        let panel_h_clamped = self
+            .context_menu_geometry()
+            .map(|(_, (_, h))| h)
+            .unwrap_or(0.0);
         Some(ContextMenu {
             anchor: menu.anchor,
             rows,
             highlight: menu.highlight,
+            scroll_offset: menu.scroll_offset,
+            panel_h_clamped,
         })
     }
 
@@ -6163,6 +6294,11 @@ impl App {
                     && let Some(parent) = menu.drill_stack.pop()
                 {
                     menu.items = parent;
+                    // Cycle 714: restore the parent level's
+                    // scroll_offset so popping out of a deep theme
+                    // list doesn't snap the parent's scroll position
+                    // to 0.
+                    menu.scroll_offset = menu.scroll_stack.pop().unwrap_or(0);
                     menu.highlight = menu
                         .items
                         .iter()
@@ -6898,6 +7034,13 @@ impl ApplicationHandler<UserEvent> for App {
                                 if !nested_items.is_empty() {
                                     let parent = std::mem::replace(&mut menu.items, nested_items);
                                     menu.drill_stack.push(parent);
+                                    // Cycle 714: save parent's
+                                    // scroll_offset onto the parallel
+                                    // stack + reset the submenu's
+                                    // offset to 0. Each level has
+                                    // its own view.
+                                    menu.scroll_stack.push(menu.scroll_offset);
+                                    menu.scroll_offset = 0;
                                     menu.highlight = menu
                                         .items
                                         .iter()
@@ -7193,6 +7336,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = wheel_lines(&delta, self.cfg.scroll_multiplier);
                 if lines == 0 {
+                    return;
+                }
+                // Cycle 714 (Terminator menu UX, C5): wheel over an
+                // open context menu scrolls its rows (one row per
+                // wheel notch). Pre-empts every other wheel dispatch
+                // so a 512-entry Theme submenu scrolls cleanly
+                // instead of leaking through to the underlying pane
+                // / tab bar / font-zoom.
+                if self.context_menu.is_some() {
+                    // Wheel up = lines > 0 = scroll up = decrement
+                    // offset; wheel down = lines < 0 = scroll down.
+                    self.scroll_context_menu(-(lines as isize));
                     return;
                 }
                 // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
@@ -7650,7 +7805,10 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextMenuItem, filter_disabled, find_menu_row_y, rank_layouts, selection_kind};
+    use super::{
+        ContextMenuItem, count_rows_fitting, filter_disabled, find_menu_row_y, rank_layouts,
+        selection_kind,
+    };
     use kettle_config::Action;
     use kettle_core::SelectionType;
 
@@ -7736,6 +7894,66 @@ mod tests {
         ];
         let got = filter_disabled(menu);
         assert!(got.is_empty());
+    }
+
+    /// Cycle 714 drift guard. `count_rows_fitting` walks rows from
+    /// `start` forward and sums heights until the next row would
+    /// exceed `panel_h`. Pinning the arithmetic so scroll math
+    /// can't silently drift if the row-height constants change.
+    #[test]
+    fn count_rows_fitting_respects_panel_height_and_separator_height() {
+        let menu = vec![
+            item("A", true),            // row_h=24
+            item("B", true),            // row_h=24
+            ContextMenuItem::Separator, // sep_h=8
+            item("C", true),            // row_h=24
+            item("D", true),            // row_h=24
+            item("E", true),            // row_h=24
+        ];
+        let row_h = 24.0;
+        let sep_h = 8.0;
+        // panel_h = 0 -> nothing fits.
+        assert_eq!(count_rows_fitting(&menu, 0, 0.0, row_h, sep_h), 0);
+        // panel_h = 24 -> A only (B would push us to 48 > 24).
+        assert_eq!(count_rows_fitting(&menu, 0, 24.0, row_h, sep_h), 1);
+        // panel_h = 48 -> A + B.
+        assert_eq!(count_rows_fitting(&menu, 0, 48.0, row_h, sep_h), 2);
+        // panel_h = 56 -> A + B + separator (24 + 24 + 8 = 56).
+        assert_eq!(count_rows_fitting(&menu, 0, 56.0, row_h, sep_h), 3);
+        // panel_h = 1000 -> all 6 rows.
+        assert_eq!(count_rows_fitting(&menu, 0, 1000.0, row_h, sep_h), 6);
+        // Start past the separator: skip the first 3, fit C+D in 48.
+        assert_eq!(count_rows_fitting(&menu, 3, 48.0, row_h, sep_h), 2);
+        // Start at last row, plenty of height — just 1 fits.
+        assert_eq!(count_rows_fitting(&menu, 5, 100.0, row_h, sep_h), 1);
+        // Start past the end -> 0.
+        assert_eq!(count_rows_fitting(&menu, 99, 1000.0, row_h, sep_h), 0);
+    }
+
+    /// Cycle 714 drift guard. With a 512-entry submenu and a real
+    /// surface-bound panel height of ~580px (surface_h=660 - 80px
+    /// chrome breathing room), `count_rows_fitting` reports a tiny
+    /// fraction of the total — the rest scrolls into view. The
+    /// "menu doesn't grow off-screen" invariant.
+    #[test]
+    fn theme_submenu_with_512_entries_clamps_panel_to_surface_height() {
+        let big: Vec<ContextMenuItem> = (0..512)
+            .map(|i| ContextMenuItem::Item {
+                label: Box::leak(format!("Theme {i}").into_boxed_str()),
+                action: Action::Paste,
+                enabled: true,
+            })
+            .collect();
+        let row_h = 24.0;
+        let sep_h = 8.0;
+        // 580px / 24px ≈ 24 rows visible.
+        let visible = count_rows_fitting(&big, 0, 580.0, row_h, sep_h);
+        assert!(
+            (20..30).contains(&visible),
+            "expected ~24 visible rows at 580px panel; got {visible}"
+        );
+        // All 512 rows shouldn't possibly fit in 580px.
+        assert!(visible < big.len(), "panel must clamp; visible={visible}");
     }
 
     /// Cycle 712 drift guard. Hover-to-highlight walks `find_menu_row_y`

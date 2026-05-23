@@ -122,6 +122,18 @@ pub struct ContextMenu {
     /// points at an enabled, non-separator row when the menu is
     /// non-empty.
     pub highlight: usize,
+    /// Cycle 714 (Terminator menu UX, C5): index of the first row
+    /// the renderer should paint. Rows `0..scroll_offset` are
+    /// scrolled off-panel; the renderer also stops drawing when
+    /// the accumulated row height exceeds `panel_h_clamped`. Zero
+    /// means "show from the top" (the pre-cycle-714 default).
+    pub scroll_offset: usize,
+    /// Cycle 714. Panel height after the surface clamp (App-side
+    /// `context_menu_geometry` already applies the clamp); the
+    /// renderer reuses it to decide which rows are visible + to
+    /// position the ▲/▼ arrows. Zero means "no clamp", in which
+    /// case the renderer falls back to the natural panel height.
+    pub panel_h_clamped: f32,
 }
 
 /// Search-bar + hyperlink overlay state.
@@ -1967,8 +1979,27 @@ impl Renderer {
             let row_h = ch + 12.0;
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
+            // Cycle 714: skip scrolled-off rows + stop drawing when
+            // the next row would extend past the clamped panel
+            // height. Keeps text rendering in lockstep with the
+            // chrome-quad loop above.
+            let natural_h: f32 = menu
+                .rows
+                .iter()
+                .map(|r| if r.separator { sep_h } else { row_h })
+                .sum();
+            let panel_h_eff = if menu.panel_h_clamped > 0.0 {
+                menu.panel_h_clamped.min(natural_h)
+            } else {
+                natural_h
+            };
+            let start = menu.scroll_offset.min(menu.rows.len());
             let mut row_y = ay;
-            for (i, row) in menu.rows.iter().enumerate() {
+            for (i, row) in menu.rows.iter().enumerate().skip(start) {
+                let h = if row.separator { sep_h } else { row_h };
+                if row_y + h > ay + panel_h_eff {
+                    break;
+                }
                 if row.separator {
                     row_y += sep_h;
                     continue;
@@ -2766,11 +2797,23 @@ fn menu_chrome_quads(
     let panel_w = (max_chars * cw + 40.0).max(180.0);
     let row_h = ch + 12.0;
     let sep_h = 8.0_f32;
-    let panel_h: f32 = menu
+    // Cycle 714 (Terminator menu UX, C5): natural panel height
+    // (sum of every row) may exceed the surface. App-side
+    // `context_menu_geometry` already computed the clamped
+    // height; if non-zero we honor it, otherwise fall back to
+    // the natural sum (pre-cycle-714 behavior — no clamp).
+    let natural_h: f32 = menu
         .rows
         .iter()
         .map(|r| if r.separator { sep_h } else { row_h })
         .sum();
+    let panel_h = if menu.panel_h_clamped > 0.0 {
+        menu.panel_h_clamped.min(natural_h)
+    } else {
+        natural_h
+    };
+    let clipped_top = menu.scroll_offset > 0;
+    let clipped_bottom = panel_h < natural_h;
     let (ax, ay) = menu.anchor;
 
     // Soft drop shadow — offset 4 px down-right at low opacity for
@@ -2807,9 +2850,15 @@ fn menu_chrome_quads(
         0.65,
     ));
 
-    // Per-row highlight + separators.
+    // Per-row highlight + separators. Cycle 714: skip scrolled-off
+    // rows; stop drawing when we'd go past panel_h.
     let mut row_y = ay;
-    for (i, row) in menu.rows.iter().enumerate() {
+    let start = menu.scroll_offset.min(menu.rows.len());
+    for (i, row) in menu.rows.iter().enumerate().skip(start) {
+        let h = if row.separator { sep_h } else { row_h };
+        if row_y + h > ay + panel_h {
+            break;
+        }
         if row.separator {
             out.push(rect(
                 ax + 12.0,
@@ -2838,6 +2887,29 @@ fn menu_chrome_quads(
             out.push(rect(ax + 1.0, row_y, 2.0, row_h, theme.palette[4], 1.0));
         }
         row_y += row_h;
+    }
+    // Cycle 714 (Terminator menu UX, C5): ▲/▼ scroll arrows when
+    // the natural list is clipped above or below. Drawn as small
+    // accent-colored bars rather than glyphs so they don't need a
+    // separate text-buffer path. The text-area loop in render_frame
+    // also bakes literal ▲ / ▼ unicode into the row labels for
+    // accessibility, but the chrome quad here gives the visual cue
+    // even when the row glyph is otherwise occupied (e.g. the first
+    // visible row's label might wrap).
+    if clipped_top {
+        // Centered 12-px wide accent bar near the top edge.
+        let bar_w = 12.0;
+        let bar_h = 3.0;
+        let bx = ax + (panel_w - bar_w) * 0.5;
+        let by = ay + 2.0;
+        out.push(rect(bx, by, bar_w, bar_h, theme.palette[4], 0.85));
+    }
+    if clipped_bottom {
+        let bar_w = 12.0;
+        let bar_h = 3.0;
+        let bx = ax + (panel_w - bar_w) * 0.5;
+        let by = ay + panel_h - 2.0 - bar_h;
+        out.push(rect(bx, by, bar_w, bar_h, theme.palette[4], 0.85));
     }
     out
 }
@@ -3435,6 +3507,11 @@ pub fn capture_png_with_annotation(
                 anchor: (pad + cw * 2.0, tab_h + pad + ch * 2.0),
                 rows,
                 highlight: 1,
+                // Cycle 714: deterministic screenshot fixture stays
+                // unscrolled + unclamped (the harness paints all 8
+                // rows in their natural height).
+                scroll_offset: 0,
+                panel_h_clamped: 0.0,
             };
             menu_q.extend(menu_chrome_quads(&menu, theme, cw, ch));
 

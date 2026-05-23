@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 714 — **Right-click menu: scrollable long submenus**:
+              Context-menu UX sub-cycle C5. The Theme submenu
+              (cycle-685) has ~512 entries; pre-cycle-714 the
+              panel grew off-screen with no scroll handling —
+              the bottom of the list was unreachable. Now:
+                - panel height is clamped to `surface_h - 80px`
+                  (40px top + 40px bottom breathing room) inside
+                  `context_menu_geometry`.
+                - `ContextMenuState` gains `scroll_offset: usize`
+                  + parallel `scroll_stack: Vec<usize>` so each
+                  drill-in level has its own view; drill-pop
+                  restores the parent's offset.
+                - mouse wheel over an open menu scrolls one row
+                  per notch (pre-empts pane scrollback +
+                  font-zoom + tab-cycle wheel routing).
+                - keyboard `↑/↓/Tab` auto-scroll when the new
+                  highlight is outside the visible window.
+                - new pure helper `count_rows_fitting(items,
+                  start, panel_h, row_h, sep_h) -> usize`.
+                - renderer skips rows < scroll_offset and stops
+                  when the next row would exceed panel_h;
+                  ▲/▼ accent bars at top/bottom of the panel
+                  signal clipped content.
+              Drift guards:
+                - `count_rows_fitting_respects_panel_height_and_separator_height`
+                  walks 8 cases (empty panel, exact fit, partial
+                  row, separator handling, mid-list start, past-
+                  end start).
+                - `theme_submenu_with_512_entries_clamps_panel_to_surface_height`
+                  asserts ~24 visible rows for a 512-entry list
+                  at a real 580px panel — the gap-table invariant.
+              Workspace tests 413 → 415.
+
   cycle 713 — **Right-click menu: hide disabled rows
               (Terminator-style)**:
               Context-menu UX sub-cycle C4. Before this cycle
