@@ -595,7 +595,7 @@ running as command substitution, mutating local state at error
 time — caught by manually running shellcheck before extending the
 hook gate to scripts/):
 
-  Workspace tests             308 → 321 (+13 drift guards)
+  Workspace tests             308 → 322 (+14 drift guards)
   Tagged releases             v1.32.0 (cycles 411-415) ·
                               v1.33.0 (cycles 416-419) ·
                               v1.34.0 (cycles 420-427) ·

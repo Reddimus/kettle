@@ -1387,7 +1387,7 @@ breakdown.
       cycles 471-472 added 3 drift guards on the
       `extra_check_config_lines` helper covering all 7 opt-in
       echo branches.
-      Workspace tests 308 → 321.
+      Workspace tests 308 → 322.
 - [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
       -D warnings` passes on `kettle-render` and `kettle-vt` after
       fixing 3 intra-doc link + bare-URL warnings.
