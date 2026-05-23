@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 674 — **Deploy: redeploy with `tab-bar-width` config**.
+              Binary at `~/.local/bin/kettle` reports
+              `1.45.1 (a13ea56)`. User-visible end-to-end:
+              setting `tab-bar-width = 240` (or any value in
+              `[40, 600]`) widens or narrows the vertical tab
+              strip on the deployed binary.
+
   cycle 673 — **vertical-tabs sub-cycle 7: `tab-bar-width`
               config key**: new `pub tab_bar_width: f32` field
               on Config, default 180.0 (Firefox-style sidebar).
