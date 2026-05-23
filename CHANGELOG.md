@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 671 — **Deploy: redeploy with `auto_theme.py` port
+              7/7 complete**. Binary at `~/.local/bin/kettle`
+              reports `1.45.1 (849726f)`. End-to-end on the
+              deployed binary:
+                - `theme-schedule = sunrise/sunset` with
+                  `theme-schedule-lat = 37.7749` +
+                  `theme-schedule-long = -122.4194` now flips
+                  the theme at actual sunrise/sunset UTC times
+                  for that lat/long
+                - `theme-schedule = 18:00 dark, 06:00 light`
+                  clock variant continues to work
+              Three Terminator-port subsystems fully end-to-end
+              deployed: remote.py (7/7), confirm-dialog (6/8
+              user-visible), auto-theme (7/7).
+
   cycle 670 — **auto-theme sub-cycle 7: solar-position math —
               completes the 7/7 auto-theme port**.
               New surface in kettle-config (pure, no dep):
