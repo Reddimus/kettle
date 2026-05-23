@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.44.0] — 2026-05-22
+
+Recovery release. The cycle-553 release.yml gate added in v1.43.0
+created a circular dependency: it required PKGBUILD/kettle.rb
+versions to match the tag, but those templates can't auto-bump
+because their sha256 lines need post-CI artifacts (which only
+exist AFTER the gate passes). The v1.43.0 Linux release job
+failed at this gate — macOS + Windows artifacts shipped, but
+Linux artifacts (the install-online.sh target) didn't.
+
+  cycle 558 — Revert the cycle-553 strict gates for PKGBUILD +
+              kettle.rb. flake.nix's gate stays (cycle 550 made
+              it auto-bumpable). Packaging templates follow the
+              "trail by one" pattern (carry v(N-1) artifacts
+              until maintainer re-publishes to AUR/tap),
+              matching AUR + Homebrew convention.
+
+After v1.44.0 ships, `/releases/latest` redirects to v1.44.0
+with full Linux + macOS + Windows artifacts; the v1.43.0
+partial release is no longer the "latest".
+
 ## [1.43.0] — 2026-05-22
 
 Post-v1.42.0 packaging-drift cleanup. Three template files
