@@ -6,6 +6,48 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.46.0] — 2026-05-23
+
+  Polish + production-grade Windows 11 audit + cross-platform DX +
+  CI hygiene. Cycles 719-731. No public API change to the kettle.exe
+  runtime; all additions are documentation polish, audit-trail
+  closures, dependency-version alignments, ProcessTree test coverage,
+  PowerShell shell integration, cross-platform Justfile, and a
+  workspace-test count bump 424 → 432 with full CI matrix green on
+  Linux/macOS/Windows for the first time since cycle 718.
+
+  Headline features for end users:
+  - PowerShell shell integration: `kettle --shell-integration powershell
+    >> $PROFILE` now emits an OSC 133 snippet wired via prompt-function
+    override + PSReadLine, idempotent + non-clobbering of starship /
+    oh-my-posh / posh-git. Win11 users get jump-to-prompt parity with
+    bash/zsh/fish.
+  - Cross-platform `just gauntlet`: Justfile rewritten so Windows
+    PowerShell contributors get the same CI gate the Linux/macOS
+    contributors have always had. Linux-only scripts (install.sh,
+    bench.sh, menu-screenshot.sh) gracefully degrade with a "use the
+    prebuilt zip" pointer on Windows.
+  - Windows 11 performance numbers: a new `scripts/bench.ps1`
+    captures wall-clock + peak working set on Windows 11 for the
+    PERFORMANCE.md baseline; Linux numbers stay pinned at v1.3.8
+    cycle 277 with a re-bench tracked for v1.47.
+
+  Headline fixes for maintainers:
+  - kettle-remote: ProcessTree trait extraction lets the BFS body
+    be unit-tested against synthetic process trees (cycle 646's
+    long-standing test gap finally closed; 8 new tests).
+  - Three pre-existing CI breakages fixed (cycles 730 + 731):
+    cycle-711's missing `#[cfg(unix)]` on
+    `scripts_menu_shot_exists_and_executable` broke Windows MSVC
+    test compilation; winit 0.30 dropped
+    `WindowExtMacOS::set_visible_on_all_workspaces` and the
+    cycle-718+ macOS `sticky = true` branch broke macOS build.
+    Both fixed; CI matrix green on all three OSes.
+  - Missing CHANGELOG entry for cycle 729 (the aeafd9a checkout@v6
+    alignment in release.yml's pretest job).
+
+  See the per-cycle paragraphs below for the full audit-trail.
+
   cycle 731 — **Fix: macOS sticky no-op replaces removed winit API**:
               Cycle-730's CI run surfaced a pre-existing macOS build
               break: `crates/kettle-ui/src/app.rs:7039` called
