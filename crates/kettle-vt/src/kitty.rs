@@ -27,6 +27,16 @@ use base64::Engine;
 
 use crate::image::{ImageData, Placed};
 
+/// Cycle 578: per-slot accumulator cap for kitty `m=1` chunked
+/// transmissions. A hostile PTY emitter can chain continuation
+/// chunks indefinitely; without a cap, the in-flight `String`
+/// grows until the host OOMs. 384 MiB covers the largest realistic
+/// payload (8192² × 4 RGBA bytes = 256 MiB base64-encoded at the
+/// 4/3 expansion ≈ 342 MiB) with margin, and stays well below any
+/// realistic host RAM. Pairs with the cycle-576 256-MiB decoded-
+/// image cap in `ImageData::from_encoded`.
+const MAX_KITTY_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
+
 #[derive(Default)]
 struct Acc {
     control: String,
@@ -342,14 +352,25 @@ impl KittyState {
             // first chunk carries `i=`/control; continuations carry only
             // `m`, so the id + control come from the in-flight slot.
             let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
-            let slot = self
-                .frame_in_flight
-                .get_or_insert_with(|| (id, Acc::default()));
-            if slot.1.control.is_empty() {
-                slot.0 = id;
-                slot.1.control = control.to_string();
+            let exceeded = {
+                let slot = self
+                    .frame_in_flight
+                    .get_or_insert_with(|| (id, Acc::default()));
+                if slot.1.control.is_empty() {
+                    slot.0 = id;
+                    slot.1.control = control.to_string();
+                }
+                slot.1.payload.push_str(payload.trim());
+                slot.1.payload.len() > MAX_KITTY_PAYLOAD_BYTES
+            };
+            // Cycle 578: defense against an attacker chaining `m=1`
+            // continuation chunks indefinitely. Drop the slot once it
+            // crosses the cap; any next-chunk for this transmission
+            // starts a fresh slot but will also fail past the cap.
+            if exceeded {
+                self.frame_in_flight = None;
+                return KittyOut::None;
             }
-            slot.1.payload.push_str(payload.trim());
             if more {
                 return KittyOut::None;
             }
@@ -471,11 +492,19 @@ impl KittyState {
         // Transmit (optionally + display): only the *first* chunk carries the
         // full control; continuation chunks carry just `m` (and maybe `q`).
         let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
-        let acc = self.in_flight.entry(id).or_default();
-        if acc.control.is_empty() {
-            acc.control = control.to_string();
+        let exceeded = {
+            let acc = self.in_flight.entry(id).or_default();
+            if acc.control.is_empty() {
+                acc.control = control.to_string();
+            }
+            acc.payload.push_str(payload.trim());
+            acc.payload.len() > MAX_KITTY_PAYLOAD_BYTES
+        };
+        // Cycle 578: see frame-path comment above.
+        if exceeded {
+            self.in_flight.remove(&id);
+            return KittyOut::None;
         }
-        acc.payload.push_str(payload.trim());
         if more {
             return KittyOut::None;
         }
@@ -856,5 +885,49 @@ mod tests {
         assert!(k.frames(4).is_empty(), "incomplete frame not stored yet");
         k.feed("m=0;BA==");
         assert_eq!(k.frames(4).len(), 1, "frame completes on final chunk");
+    }
+
+    /// Cycle 578: pins the per-slot chunked-transmission accumulator
+    /// cap. The behavioral drift guard (`chunked_transmission_caps_*`
+    /// below) actually exercises the cap; this test is the cheap
+    /// always-on snapshot that the constant hasn't drifted from its
+    /// documented sizing (8192² × 4 RGBA × base64 4/3 ≈ 342 MiB plus
+    /// ~12% margin = 384 MiB).
+    #[test]
+    fn kitty_payload_cap_fits_8k_rgba_base64_with_margin() {
+        // 8192² × 4 RGBA = 256 MiB. base64 expansion = 4/3.
+        let realistic_max_base64 = 8192usize * 8192 * 4 * 4 / 3;
+        assert!(
+            super::MAX_KITTY_PAYLOAD_BYTES > realistic_max_base64,
+            "cap {} must fit a legitimate 8192² RGBA base64 payload ({})",
+            super::MAX_KITTY_PAYLOAD_BYTES,
+            realistic_max_base64
+        );
+        // Sanity floor (>= 1 MiB) and ceiling (<= 1 GiB). const-block
+        // form so clippy's `assertions_on_constants` lint is satisfied
+        // — these are compile-time invariants of the constant itself.
+        const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
+        const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+    }
+
+    /// Cycle 578 behavioral drift guard: a single chunk whose payload
+    /// exceeds `MAX_KITTY_PAYLOAD_BYTES` must drop the in-flight slot
+    /// rather than continue accumulating. Allocates ~384 MiB, so it's
+    /// `#[ignore]` by default; run via
+    /// `cargo test -p kettle-vt -- --ignored kitty_chunk_payload_cap`.
+    #[test]
+    #[ignore = "allocates ~384 MiB; opt-in via --ignored"]
+    fn kitty_chunk_payload_cap_drops_oversize_in_flight() {
+        let mut k = KittyState::default();
+        // First chunk already exceeds the cap. The implementation
+        // pushes the payload then checks length, so this is the
+        // worst-case single-shot path.
+        let oversize = "A".repeat(super::MAX_KITTY_PAYLOAD_BYTES + 1);
+        let out = k.feed(&format!("a=T,i=99,f=32,s=1,v=1,m=1;{oversize}"));
+        assert!(matches!(out, KittyOut::None));
+        // A normal final chunk for the same id must NOT reassemble the
+        // dropped payload — the slot was cleared by the cap.
+        let out2 = k.feed("m=0;AAAA");
+        assert!(matches!(out2, KittyOut::None));
     }
 }

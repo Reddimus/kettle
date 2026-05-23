@@ -46,6 +46,32 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 578 — **Kitty chunked-transmission cap.** Both kitty
+              graphics accumulators in `KittyState::feed` (the
+              regular `a=T,m=1` chunked image and the `a=f,m=1`
+              animation-frame chunks) appended to a `String`
+              without any per-slot byte cap. A hostile PTY
+              emitter could chain `m=1` continuations
+              indefinitely and OOM the host before the final
+              chunk ever arrived. New constant
+              `MAX_KITTY_PAYLOAD_BYTES = 384 MiB` (covers the
+              largest realistic single transmission — 8192² × 4
+              RGBA at 4/3 base64 expansion ≈ 342 MiB — with
+              ~12% margin, and sits below the cycle-10
+              `MAX_SEQ = 64 MiB` per-chunk extractor cap times
+              6). On cap exceedance the in-flight slot is
+              dropped and `KittyOut::None` returned; any next
+              chunk for the same id starts fresh (and will
+              also hit the cap if the attacker persists).
+              Two new tests: `kitty_payload_cap_fits_8k_rgba_
+              base64_with_margin` pins the constant; the
+              `#[ignore]`-by-default behavioral guard
+              `kitty_chunk_payload_cap_drops_oversize_in_flight`
+              actually pushes a 384 MiB+1-byte chunk and
+              verifies the slot is cleared (run via
+              `cargo test -- --ignored`). Workspace tests
+              327 → 328 + 1 ignored.
+
   cycle 577 — **Overflow-safe `ImageData::new`.** The validation
               `rgba.len() != (width as usize * height as usize *
               4)` would panic on debug builds and silently wrap
