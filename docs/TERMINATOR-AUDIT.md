@@ -307,7 +307,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `audible_bell` / `visible_bell` / `urgent_bell` | config.py | ✅ `bell = off/visual/attention/both` | cycle-X |
 | `background_color` opacity (via `background_darkness`) | config.py | ✅ `background-opacity` | cycle-X |
 | `word_chars` (double-click word boundaries) | config.py | ✅ `word-delimiters` | cycle-X |
-| `tab_position` (top/bottom) | config.py | A+D | A: top/bottom/hidden shipped (cycle 331 + cycle 628 alias). D: left/right designed in [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](TERMINATOR-VERTICAL-TABS-DESIGN.md) — `TabBarOrientation` enum + content_rect helper + hit-test flip + drag-axis generalization. 8 sub-cycles. |
+| ~~`tab_position` (top/bottom/left/right/hidden)~~ | config.py | A | cycles 331/628/647/665/668/672/673 — 7/8 sub-cycles complete end-to-end + deployed: `TabBarPos::Left`/`Right` variants; `content_rect_for_with_strip` carves the configured strip width; `tab_bar_vertical` stacks segments; renderer paints vertical strips (column-shaped bg + per-segment chrome with own y/h + axis-flipped separators); `cursor_in_tab_bar` x-axis hit-test for vertical; new `tab-bar-width` config key clamped to `[40, 600]`. Sub-cycle 6 (drag-reorder y-axis) deferred to a polish cycle — horizontal drag-reorder already works (cycle-249); the y-axis flip is the same shape and lands when a user files a real need. | cycle-673 |
 | `broadcast_default = group` (per-tab broadcast) | config.py | ✅ per-tab broadcast via `Super+G` | cycle-X |
 | `scrollbar_position = right/hidden` | config.py | ✅ `scrollbar = always/auto/never` | cycle-X |
 | split_horiz / split_vert / split_auto | keybinds | ✅ same actions | cycle-X |

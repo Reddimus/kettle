@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 675 — **vertical-tabs sub-cycle 8: audit-doc
+              finalization**: audit row flipped from A+D
+              (design + partial) to A (shipped). 7/8
+              sub-cycles complete end-to-end + deployed on
+              the cycle-674 binary; sub-cycle 6 (drag-reorder
+              y-axis) deferred as polish — horizontal drag-
+              reorder already works (cycle-249) and the
+              y-axis flip is identical-shape work that can
+              land when a user files a real need. No code
+              change. **`tab_position = left/right` port now
+              effectively complete.**
+
   cycle 674 — **Deploy: redeploy with `tab-bar-width` config**.
               Binary at `~/.local/bin/kettle` reports
               `1.45.1 (a13ea56)`. User-visible end-to-end:
