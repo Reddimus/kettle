@@ -6,6 +6,47 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.45.1] — 2026-05-22
+
+Patch release for two critical pane-lifecycle bugs surfaced in
+the cycle-602 sweep. Same severity-class as the v1.45.0
+close-focused fix — these warrant a re-install per the
+cycle-527 "keep-local-current" memory.
+
+User-impacting bug fixes:
+
+  - cycle 603 part-A — `Mux::reap_tabs` now promotes the
+    closed-pane's neighbor to focus instead of jumping to the
+    leftmost leaf of the whole tab. Companion to cycle 602's
+    `close_focused` fix; same root-cause anti-pattern
+    (`tab.root.first_leaf()` as the post-close focus). Reachable
+    when a user runs `exit` in the rightmost pane of a split
+    tab — pre-fix, focus teleported back to the first split.
+
+  - cycle 603 part-B — **data-loss bug.** `Mux::reap_tabs` used
+    `Err(_) => tabs.remove(ti)` which conflated `Err(None)` (tab
+    is empty, remove) with `Err(Some(sibling))` (focused leaf
+    was a direct root child, sibling promoted, KEEP THE TAB).
+    In any 2-pane tab, `exit` in either pane caused the WHOLE
+    tab including the surviving sibling to disappear.
+    `close_focused` already had the right distinction since
+    cycle 285; `reap_tabs` didn't, and the existing
+    `reap_tabs_keeps_active_pointed_at_the_same_tab` test only
+    used single-leaf tabs so the bug went unnoticed for ~480
+    cycles.
+
+Drift guards (workspace 342 → 345):
+
+  - `reap_tabs_promotes_neighbor_when_focused_pane_dies` —
+    same 4-leaf tree as cycle 602's repro; reap dead leaf 40,
+    assert focus = 30 (neighbor), not 10 (leftmost).
+  - `reap_tabs_preserves_tab_when_2_pane_split_has_one_pane_exit`
+    — 2-pane tab, reap one leaf, assert tab survives with
+    the surviving sibling as root + focus.
+  - `reap_tabs_keeps_focus_when_dying_pane_is_not_focused` —
+    negative case: focus on Leaf(10), reap Leaf(20), assert
+    focus stays 10.
+
 ## [1.45.0] — 2026-05-22
 
 Release trigger: cycle-602 user-reported pane-close focus bug

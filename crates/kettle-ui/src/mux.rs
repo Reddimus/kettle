@@ -1372,16 +1372,44 @@ impl Mux {
         for id in dead_ids {
             let mut ti = 0;
             while ti < tabs.len() {
+                // Cycle 603: companion to cycle 602's `close_focused`
+                // fix. When a PTY exits and the dying leaf IS the
+                // focused one, capture the neighbor BEFORE the
+                // destructive `remove_leaf` so the post-rebuild
+                // focus can promote it instead of jumping to the
+                // leftmost leaf of the whole tab. Pre-cycle-603,
+                // typing `exit` in the rightmost pane of a 4-pane
+                // tab would jump focus to the leftmost pane —
+                // exactly the same user-described "first focused
+                // terminal" symptom that motivated cycle 602, just
+                // triggered by shell exit instead of `close-pane`.
+                let neighbor_if_focused = if tabs[ti].focus == *id {
+                    tabs[ti].root.neighbor_of(*id)
+                } else {
+                    None
+                };
                 let root = std::mem::replace(&mut tabs[ti].root, Node::Leaf(0));
                 match root.remove_leaf(*id) {
-                    Ok(n) => {
+                    // Cycle 603 part-B: previously this match used
+                    // `Err(_) => tabs.remove(ti)` which conflated two
+                    // distinct outcomes. `Err(Some(n))` means the
+                    // dying leaf was a direct child of root and `n`
+                    // is the surviving sibling — the tab MUST stay
+                    // with `n` as the new root. Pre-fix, any 2-pane
+                    // tab + `exit` in either pane deleted the whole
+                    // tab (the surviving sibling went with it).
+                    // Reachable in production via `child_exited()` in
+                    // `Mux::reap`. Mirrors the cycle-285 distinction
+                    // already in `close_focused` below.
+                    Ok(n) | Err(Some(n)) => {
                         tabs[ti].root = n;
                         if !tabs[ti].root.contains(tabs[ti].focus) {
-                            tabs[ti].focus = tabs[ti].root.first_leaf();
+                            tabs[ti].focus =
+                                neighbor_if_focused.unwrap_or_else(|| tabs[ti].root.first_leaf());
                         }
                         ti += 1;
                     }
-                    Err(_) => {
+                    Err(None) => {
                         tabs.remove(ti);
                         // Cycle 120: keep `active` pointing at the
                         // same tab the user is focused on after the
@@ -1900,6 +1928,126 @@ mod node_tests {
             m.tabs[0].focus, 30,
             "focus must move to the *nearest neighbor* (30), not jump back \
              to the leftmost-leaf-of-the-tab (10) — that's the cycle-602 bug"
+        );
+    }
+
+    /// Cycle 603: companion to cycle 602's close-focused fix —
+    /// the PTY-died-while-focused path through `reap_tabs` had
+    /// the same `tab.root.first_leaf()` anti-pattern. When the
+    /// user runs `exit` in the focused pane (or its process
+    /// crashes), focus should land on the immediate neighbor,
+    /// not jump back to the leftmost leaf of the whole tab.
+    ///
+    /// Same 4-leaf tree as cycle 602's test: focus = 40, reap
+    /// dead leaf 40. Pre-cycle-603: focus = 10 (leftmost). Post-
+    /// fix: focus = 30 (the immediate neighbor of 40).
+    #[test]
+    fn reap_tabs_promotes_neighbor_when_focused_pane_dies() {
+        let mut tabs = vec![Tab {
+            root: Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(10)),
+                b: Box::new(Node::Split {
+                    dir: Dir::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(20)),
+                    b: Box::new(Node::Split {
+                        dir: Dir::Horizontal,
+                        ratio: 0.5,
+                        a: Box::new(Node::Leaf(30)),
+                        b: Box::new(Node::Leaf(40)),
+                    }),
+                }),
+            },
+            focus: 40,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        }];
+        let mut active = 0;
+        // Pane 40's PTY exits → reap it.
+        Mux::reap_tabs(&mut tabs, &mut active, &[40]);
+        assert_eq!(tabs.len(), 1, "tab survives with 3 panes");
+        assert_eq!(
+            tabs[0].focus, 30,
+            "focus must move to the *nearest neighbor* (30), not jump back \
+             to the leftmost-leaf-of-the-tab (10) — that's the cycle-603 bug"
+        );
+    }
+
+    /// Cycle 603 part-B: the EXISTING `reap_tabs` match arm
+    /// conflated `Err(None)` (tab is empty) with `Err(Some(sibling))`
+    /// (focused leaf was a direct child of root and the sibling
+    /// was promoted). For a 2-pane tab where one pane's PTY exits,
+    /// `remove_leaf` returns `Err(Some(surviving_sibling))` — and
+    /// the pre-fix `Err(_) => tabs.remove(ti)` arm then deleted
+    /// the WHOLE tab, losing the surviving sibling along with it.
+    ///
+    /// Latent bug surfaced by cycle 603's broader audit: any
+    /// 2-pane tab + `exit` in either pane = both panes vanish.
+    /// Reachable in production via the `child_exited()` check in
+    /// `Mux::reap`.
+    #[test]
+    fn reap_tabs_preserves_tab_when_2_pane_split_has_one_pane_exit() {
+        let mut tabs = vec![Tab {
+            root: Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(10)),
+                b: Box::new(Node::Leaf(20)),
+            },
+            focus: 10,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        }];
+        let mut active = 0;
+        // Pane 20's PTY exits. Pre-fix: tab is removed — the
+        // surviving Leaf(10) goes with it. Post-fix: tab survives
+        // with root collapsed to Leaf(10).
+        Mux::reap_tabs(&mut tabs, &mut active, &[20]);
+        assert_eq!(
+            tabs.len(),
+            1,
+            "tab must survive a 2-pane sibling promotion (pre-fix this \
+             was 0 — `Err(_) => tabs.remove(ti)` ate the surviving pane)"
+        );
+        assert!(matches!(tabs[0].root, Node::Leaf(10)));
+        assert_eq!(tabs[0].focus, 10);
+    }
+
+    /// Cycle 603 negative-case: if the dying pane is NOT the
+    /// focused one, focus must stay put — the existing
+    /// `contains(focus)` guard already covers this, so this test
+    /// catches a regression where the cycle-603 neighbor-capture
+    /// accidentally triggers for non-focused dyings.
+    #[test]
+    fn reap_tabs_keeps_focus_when_dying_pane_is_not_focused() {
+        let mut tabs = vec![Tab {
+            root: Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(10)),
+                b: Box::new(Node::Leaf(20)),
+            },
+            // Focus is on 10; pane 20's PTY dies.
+            focus: 10,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        }];
+        let mut active = 0;
+        Mux::reap_tabs(&mut tabs, &mut active, &[20]);
+        assert_eq!(
+            tabs[0].focus, 10,
+            "focus on 10 must survive — pane 20's death shouldn't move focus"
         );
     }
 
