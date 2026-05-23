@@ -641,8 +641,9 @@ pub struct App {
     ///                  remote-control IPC new-tab, exit-action
     ///                  =restart respawn.
     ///   - TabClose   — `fire_tab_close_event` helper (cycle 424):
-    ///                  keyboard CloseTab, tab-bar ✕-click,
-    ///                  SCM_RIGHTS + file-fallback handoff sources.
+    ///                  keyboard CloseTab, tab-bar ✕-click (2
+    ///                  click-handler branches), SCM_RIGHTS +
+    ///                  file-fallback handoff sources — 5 sites.
     ///   - Bell       — drain_events Bell handler (cycle 367).
     ///   - Output     — drain_events output sidechannel (cycle 378).
     /// All 5 hooks share `drain_lua_hook_commands` for the
