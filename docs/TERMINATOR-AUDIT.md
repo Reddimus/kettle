@@ -179,8 +179,29 @@ Already covered in the keybindings table above.
 GTK widget inside each terminal showing: terminal title + size (WxH) +
 activity/bell indicators + custom icon + editable group label.
 
-kettle has tab-bar dots (activity / bell / silence) but NO per-pane
-titlebar. Adding one is multi-pane chrome — Bucket D (design doc).
+kettle **ships per-pane titlebars** (cycles 379/382/386/682). Layout
+reserves `ch + 6.0` pixels of chrome per pane when
+`show_titlebar = true` AND there are >1 panes in a tab (single-pane
+tabs hide the titlebar — same default as Terminator's `hide_titlebar
+= true` for solo panes). Label format:
+
+  `[group_name]  title  COLSxROWS  [bell]`
+
+with:
+
+- `[group_name]` prepended when the pane has a cycle-682 broadcast
+  group set (named-groups sub-cycle 6).
+- `COLSxROWS` shown unless `title_hide_sizetext = true`.
+- `[bell]` indicator shown when `icon_bell = true` and the pane has
+  a pending bell.
+
+Hit-testing for inline title edit (`Action::EditPaneTitle`) and
+focus/group indicators is wired through the cycle-407 title-edit
+overlay. Activity / silence / bell dots ride alongside the cycle-X
+tab-bar dots (the activitywatch.py + sleeping.py / silence.py plugin
+events both fan into the cycle-619 watcher).
+
+Row promoted to A from Bucket D (cycle-706 audit cleanup).
 
 ### `terminatorlib/searchbar.py` — search overlay
 
@@ -405,7 +426,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | Terminator feature | source | Why multi-cycle | Design doc |
 |---|---|---|---|
 | **Plugin system** | plugin.py + plugins/*.py | Status: **substantially complete**. Event-hook foundation laid via cycle-324 Lua scripting + cycle-365 `kettle.on(event, cb)` registry. **All 7 plugin-relevant events shipped**: `startup` (cycle-365), `tab_add` (cycle-365), `tab_close` (cycle-365), `bell` (cycle-377), `output` (cycle-377), `pane_focus` (cycle-703 — emits `(prev_opt, cur)` via `App::poll_focus_event`), `title_changed` (cycle-704 — emits `(pane_id, title)` via `App::poll_title_event`), `url_clicked` (cycle-705 — fired from `open_url` BEFORE pattern dispatch so analytics plugins see every click). Per-plugin porting status: `activitywatch.py` → cycle-619 watcher; `custom_commands.py` → cycle-611 `menu-item =` config + cycle-375 `kettle.add_menu_item`; `terminalshot.py` → cycles 688/689; `logger.py` → cycle-621 `Action::ToggleSessionLog`; `urlhandlers.py` → cycle-X URL detection + cycle-374 `try_url_handler` + cycle-695 `Action::ShowHelp`. Remaining: `launcher.py` (port to layout overlay — covered functionally by cycle-329 command palette listing layouts). | continued — see CHANGELOG cycles 365-705 |
-| **Per-terminal titlebar** | titlebar.py | New chrome region per-pane (currently only tab-bar exists). Affects layout math (pane content area shrinks), render order (titlebar quads + text), focus/group indicators, hit-testing. ~4-5 sub-cycles. | `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md` (TODO) |
+| ~~**Per-terminal titlebar**~~ | titlebar.py | A | cycles 379/382/386/682 — per-pane chrome reserves `ch + 6.0` px when `show_titlebar = true` && >1 panes; label format `[group] title COLS×ROWS [bell]`; title-edit overlay (cycle-407) + activity/bell/silence dots (cycle-X) all wired. See `### terminatorlib/titlebar.py` paragraph above for full mapping. | cycle-706 |
 | **Detachable tabs (drag across windows)** | notebook.py + window.py | Source window serializes the tab state, IPC's to target window, closes source without double-spawn. Builds on cycle-302 remote-control. ~3-4 sub-cycles. | `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md` (TODO) |
 | **Background image + blur** | config.py + rendering | New texture in the render pass; image-loading + cache; blur shader. ~4-5 sub-cycles; touches kettle-render. | `docs/TERMINATOR-BG-IMAGE-DESIGN.md` (TODO) |
 
