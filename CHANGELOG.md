@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 684 — **theme-submenu sub-cycle 1: `ContextMenuItem::
+              Submenu` recursive variant**. Adds the data
+              type that sub-cycles 2-9 of
+              [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)
+              will consume:
+                - `Submenu { label, items: Vec<ContextMenuItem> }`
+                  — recursive, so nested-nested submenus are
+                  expressible (v1 renderer only flattens one
+                  level; deeper nesting is sub-cycle 3.x
+                  polish)
+              Threaded through 4 match arms:
+                - `panel_h` computation (Submenu row = row_h)
+                - `max_chars` (Submenu adds +2 for the "▸"
+                  suffix)
+                - paint loop (Submenu shows the row at row_h)
+                - `to_context_menu` projection (renderer's
+                  ContextMenuRow gets `label + " ▸"` so the
+                  affordance is visible)
+              Click dispatch: Submenu row clicks log a
+              "flyout wiring lands in sub-cycle 3" info
+              message + no-op return. Keyboard nav lands on
+              Submenu rows (`item_is_dispatchable = true`
+              for Submenu so ↑↓ doesn't skip).
+              `#[allow(dead_code)]` gates the variant until
+              sub-cycle 2 populates from
+              `append_theme_submenu_items`.
+              Workspace tests stay 392.
+              Theme-submenu port: **1/9** sub-cycles complete.
+
   cycle 683 — **named-groups sub-cycles 7 + 8: right-click
               context-menu entries + audit-doc finalization**.
               New right-click items appended after the

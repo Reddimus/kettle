@@ -847,6 +847,21 @@ enum ContextMenuItem {
         label: String,
         command: String,
     },
+    /// Cycle 684 (Terminator parity, sub-cycle 1 of
+    /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// recursive variant carrying a nested item list. v1 of
+    /// the renderer just appends "▸" to the label (no flyout
+    /// yet); sub-cycle 3 wires the second-panel flyout +
+    /// hover-delay state machine + window-edge clipping.
+    /// Lands the type now so the renderer + dispatch can
+    /// compile against the final shape ahead of the
+    /// interaction wiring.
+    #[allow(dead_code)] // sub-cycle 2 populates from append_theme_submenu_items.
+    Submenu {
+        label: String,
+        items: Vec<ContextMenuItem>,
+    },
 }
 
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
@@ -975,6 +990,11 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
         ContextMenuItem::Item { enabled: true, .. }
             | ContextMenuItem::LuaItem { .. }
             | ContextMenuItem::ConfigItem { .. }
+            // Cycle 684: Submenu rows are dispatchable for keyboard
+            // nav (↑↓ lands on them); clicks/Enter on a Submenu row
+            // will open the flyout once sub-cycle 3 lands. For now
+            // the click no-ops with an info log.
+            | ContextMenuItem::Submenu { .. }
     )
 }
 
@@ -3614,7 +3634,8 @@ impl App {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
-                | ContextMenuItem::ConfigItem { .. } => row_h,
+                | ContextMenuItem::ConfigItem { .. }
+                | ContextMenuItem::Submenu { .. } => row_h,
             })
             .sum();
         let max_chars = items
@@ -3623,6 +3644,9 @@ impl App {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
+                // Cycle 684: submenu rows show "label ▸" so the
+                // max-width budget needs +2 for the suffix.
+                ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
                 _ => None,
             })
             .max()
@@ -3691,7 +3715,8 @@ impl App {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
-                | ContextMenuItem::ConfigItem { .. } => row_h,
+                | ContextMenuItem::ConfigItem { .. }
+                | ContextMenuItem::Submenu { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 match item {
@@ -3705,6 +3730,16 @@ impl App {
                     }
                     ContextMenuItem::ConfigItem { command, .. } => {
                         return Some(ContextMenuClick::ConfigCommand(command.clone()));
+                    }
+                    ContextMenuItem::Submenu { label, .. } => {
+                        // Cycle 684 (sub-cycle 1 of theme-submenu
+                        // design): click on a Submenu row is a
+                        // no-op + log in v1. Sub-cycle 3 wires
+                        // the flyout open/close machinery.
+                        log::info!(
+                            "Submenu '{label}' click: flyout wiring lands in sub-cycle 3 of TERMINATOR-THEME-SUBMENU-DESIGN.md"
+                        );
+                        return None;
                     }
                     _ => return None,
                 }
@@ -3730,7 +3765,8 @@ impl App {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
-                | ContextMenuItem::ConfigItem { .. } => row_h,
+                | ContextMenuItem::ConfigItem { .. }
+                | ContextMenuItem::Submenu { .. } => row_h,
             })
             .sum();
         let max_chars = menu
@@ -3774,6 +3810,15 @@ impl App {
                 },
                 ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
                     label: label.clone(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
+                    // Cycle 684: append "▸" to signal "this row
+                    // opens a submenu". Sub-cycle 3 wires the
+                    // actual flyout; for now the affordance is
+                    // visible but clicking it just no-ops.
+                    label: format!("{label} ▸"),
                     separator: false,
                     enabled: true,
                 },
