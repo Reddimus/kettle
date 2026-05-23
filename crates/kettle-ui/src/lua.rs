@@ -136,6 +136,14 @@ pub enum LuaEvent {
     /// activity-watch plugins, and per-pane theme overlays
     /// that need to react to focus changes.
     PaneFocus(Option<u64>, u64),
+    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
+    /// title-change event hook). Emitted when a pane's title
+    /// changes — via OSC 0/2 (shell-issued), inline edit
+    /// (`Action::EditPaneTitle`), reset (TermEvent::ResetTitle),
+    /// or cycle-655 remote-context derivation. Payload:
+    /// (pane_id, new_title). Used by status-bar plugins and
+    /// title-mirroring plugins.
+    TitleChanged(u64, String),
 }
 
 impl LuaEvent {
@@ -149,6 +157,7 @@ impl LuaEvent {
             LuaEvent::Bell(_) => "bell",
             LuaEvent::Output(_, _) => "output",
             LuaEvent::PaneFocus(_, _) => "pane_focus",
+            LuaEvent::TitleChanged(_, _) => "title_changed",
         }
     }
 }
@@ -554,6 +563,9 @@ impl LuaEngine {
                             };
                             cb.call((prev_val, *cur))
                         }
+                        LuaEvent::TitleChanged(pane_id, title) => {
+                            cb.call((*pane_id, title.as_str()))
+                        }
                     };
                     if let Err(e) = call_result {
                         log::warn!("lua event {name} callback {i}: {e}");
@@ -843,6 +855,32 @@ mod tests {
         assert_eq!(eng.eval_str("return history[3]").unwrap(), "17->42");
         // Name resolves correctly (script-facing).
         assert_eq!(LuaEvent::PaneFocus(None, 1).name(), "pane_focus");
+    }
+
+    /// Cycle 704 drift guard. `LuaEvent::TitleChanged(pane_id,
+    /// title)` emits to Lua as `(pane_id, title_string)` so
+    /// plugins can mirror titles into status bars.
+    #[test]
+    fn title_changed_event_emits_pane_id_and_title() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "titles = {}
+             kettle.on('title_changed', function(id, t)
+                titles[#titles + 1] = id .. ':' .. t
+             end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::TitleChanged(7, "kettle".into()));
+        eng.fire_event(&LuaEvent::TitleChanged(7, "$ vim main.rs".into()));
+        eng.fire_event(&LuaEvent::TitleChanged(13, "ssh prod".into()));
+        assert_eq!(eng.eval_str("return #titles").unwrap(), "3");
+        assert_eq!(eng.eval_str("return titles[1]").unwrap(), "7:kettle");
+        assert_eq!(eng.eval_str("return titles[2]").unwrap(), "7:$ vim main.rs");
+        assert_eq!(eng.eval_str("return titles[3]").unwrap(), "13:ssh prod");
+        assert_eq!(
+            LuaEvent::TitleChanged(0, String::new()).name(),
+            "title_changed"
+        );
     }
 
     #[test]

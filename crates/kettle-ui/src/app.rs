@@ -1207,6 +1207,15 @@ pub struct App {
     /// against `self.mux.active_focus()` each redraw; emit on
     /// boundary-cross.
     last_emitted_focus: Option<u64>,
+    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
+    /// `LuaEvent::TitleChanged`). Snapshot of the last title we
+    /// emitted a `title_changed` event for, keyed by pane id.
+    /// Diffed against `mux.panes[].title` each redraw; emit on
+    /// boundary-cross. Entries for closed panes drop on next
+    /// tick (we only iterate live panes — closed ids never get
+    /// re-checked, so the map self-prunes on close+reopen of
+    /// the same id since `Pane::id` is monotonic).
+    last_emitted_titles: std::collections::HashMap<u64, String>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -1610,6 +1619,7 @@ impl App {
             last_schedule_decision: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,
+            last_emitted_titles: std::collections::HashMap::new(),
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -3167,6 +3177,7 @@ impl App {
         self.poll_remote_contexts();
         self.poll_theme_schedule();
         self.poll_focus_event();
+        self.poll_title_event();
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into self.mux.panes when spawning a new tab.
@@ -5223,6 +5234,33 @@ impl App {
         self.last_emitted_focus = Some(cur_id);
         if let Some(eng) = self.lua_engine.as_ref() {
             eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
+        }
+    }
+
+    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
+    /// `LuaEvent::TitleChanged`). Walk live panes, diff each
+    /// title against `self.last_emitted_titles`, emit on any
+    /// boundary cross. One pass site, regardless of how many
+    /// title-mutating sites exist in App.
+    ///
+    /// O(n_panes) per redraw. Even 100 panes is trivial — a
+    /// hash lookup + string compare per entry. Future cycles
+    /// can add a "dirty-title" bitset on Mux if pane counts
+    /// grow into the thousands.
+    fn poll_title_event(&mut self) {
+        let Some(eng) = self.lua_engine.as_ref() else {
+            return;
+        };
+        let mut changes: Vec<(u64, String)> = Vec::new();
+        for (id, p) in self.mux.panes.iter() {
+            let last = self.last_emitted_titles.get(id);
+            if last.map(|s| s.as_str()) != Some(p.title.as_str()) {
+                changes.push((*id, p.title.clone()));
+            }
+        }
+        for (id, title) in changes {
+            self.last_emitted_titles.insert(id, title.clone());
+            eng.fire_event(&crate::LuaEvent::TitleChanged(id, title));
         }
     }
 

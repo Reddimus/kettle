@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 704 — **`LuaEvent::TitleChanged` (Terminator plugin
+              sub-cycle: title-change event hook)**:
+              Bucket D rescue (plugin system). Terminator's
+              status-bar / title-mirroring plugins watch for
+              title changes via VTE's `window-title-changed`
+              signal. cycle 704 lands the kettle equivalent.
+              Adds:
+                - new `LuaEvent::TitleChanged(u64, String)`
+                  variant — payload is (pane_id, new_title).
+                - emits to Lua as `(pane_id, title_string)`.
+                - `App::poll_title_event(&mut self)` polled per
+                  redraw — walks `mux.panes` and diffs against
+                  `App::last_emitted_titles: HashMap<u64,
+                  String>`. One pass site, captures changes
+                  from ALL 4 title-mutating call sites (OSC 0/2
+                  via TermEvent::SetTitle, inline edit via
+                  `Action::EditPaneTitle`, reset via
+                  TermEvent::ResetTitle, remote-context
+                  derivation via cycle-655). O(n_panes) per
+                  redraw; trivial up to 100+ panes.
+                - script-facing name is `title_changed`,
+                  registered via `kettle.on('title_changed',
+                  function(id, t) … end)`.
+              Drift guard `title_changed_event_emits_pane_id
+              _and_title` walks 3 title events + asserts the
+              event name string.
+              Audit row updated: 6/7 LuaEvents shipped
+              (startup, tab_add, tab_close, bell, output,
+              pane_focus, title_changed); `url_clicked` is the
+              remaining gap. Workspace tests 400 → 401.
+
   cycle 703 — **`LuaEvent::PaneFocus` (Terminator plugin
               sub-cycle: focus event hook)**:
               Bucket D rescue (plugin system). Terminator's
