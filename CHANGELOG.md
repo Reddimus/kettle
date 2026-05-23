@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 703 — **`LuaEvent::PaneFocus` (Terminator plugin
+              sub-cycle: focus event hook)**:
+              Bucket D rescue (plugin system). Terminator's
+              plugins often want to react to focus changes
+              (status-bar updates, activity-watch suppression
+              when active, per-pane theme overlays).
+              cycle 703 adds:
+                - new `LuaEvent::PaneFocus(Option<u64>, u64)`
+                  variant — payload is `(previous_focused_pane_id,
+                  new_focused_pane_id)`. `previous = None`
+                  signals the first focus after startup so
+                  plugins can seed their state.
+                - emits to Lua as `(prev|nil, cur)` so user
+                  scripts can write `if prev == nil then …`.
+                - `App::poll_focus_event(&mut self)` polled per
+                  redraw tick — diff against
+                  `App::last_emitted_focus: Option<u64>`. One
+                  diff site captures focus changes from ALL
+                  sources (keybind, mouse click, new tab, close
+                  tab, remote-control IPC) — future cycles
+                  won't have to wire each path individually.
+                - script-facing name is `pane_focus`, registered
+                  via `kettle.on('pane_focus', function(prev, cur)
+                  … end)`.
+              Drift guard `pane_focus_event_emits_optional_prev
+              _and_current` walks 3 focus events (nil→42, 42→17,
+              17→42) + asserts the event name string. Workspace
+              tests 399 → 400. Audit row for Bucket-D Plugin
+              system updated from "TODO" to "in-progress" with a
+              per-plugin porting status cross-reference.
+
   cycle 702 — **`Action::SendNewline` (Terminator key_send_newline)**:
               Writes a literal `\n` to the focused pane's PTY.
               Useful for shell line-editors that consume Enter

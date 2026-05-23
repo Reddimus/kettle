@@ -128,6 +128,14 @@ pub enum LuaEvent {
     /// coalesced byte chunk, not every individual chunk from a
     /// busy build.
     Output(u64, Vec<u8>),
+    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
+    /// focus event hook). Emitted when keyboard focus moves
+    /// between panes (within a tab, across tabs, or window
+    /// restore). Payload: (previous_focused_pane_id_or_nil,
+    /// new_focused_pane_id). Used by status-bar plugins,
+    /// activity-watch plugins, and per-pane theme overlays
+    /// that need to react to focus changes.
+    PaneFocus(Option<u64>, u64),
 }
 
 impl LuaEvent {
@@ -140,6 +148,7 @@ impl LuaEvent {
             LuaEvent::TabClose(_) => "tab_close",
             LuaEvent::Bell(_) => "bell",
             LuaEvent::Output(_, _) => "output",
+            LuaEvent::PaneFocus(_, _) => "pane_focus",
         }
     }
 }
@@ -533,6 +542,18 @@ impl LuaEngine {
                             // can string.byte / string.sub them).
                             cb.call((*pane_id, bytes.as_slice()))
                         }
+                        LuaEvent::PaneFocus(prev, cur) => {
+                            // Map Option<u64> -> mlua::Value (Nil or
+                            // Integer) so user code can write
+                            // `function(prev, cur) if prev == nil ...`
+                            // The cur id is always non-nil; nil only
+                            // signals "first focus after startup".
+                            let prev_val: mlua::Value = match prev {
+                                Some(id) => mlua::Value::Integer(*id as i64),
+                                None => mlua::Value::Nil,
+                            };
+                            cb.call((prev_val, *cur))
+                        }
                     };
                     if let Err(e) = call_result {
                         log::warn!("lua event {name} callback {i}: {e}");
@@ -795,6 +816,33 @@ mod tests {
         assert_eq!(eng.eval_str("return tabs_seen[2]").unwrap(), "2");
         // Firing an event with no subscribers is a no-op.
         eng.fire_event(&LuaEvent::Bell(7));
+    }
+
+    /// Cycle 703 drift guard. `LuaEvent::PaneFocus(prev_opt, cur)`
+    /// emits to Lua as `(prev|nil, cur)` so plugins can branch on
+    /// the first focus after startup (`prev == nil`) vs.
+    /// subsequent focus changes.
+    #[test]
+    fn pane_focus_event_emits_optional_prev_and_current() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "history = {}
+             kettle.on('pane_focus', function(prev, cur)
+                history[#history + 1] = (prev or 'nil') .. '->' .. cur
+             end)",
+        )
+        .expect("eval");
+        // First focus after startup: prev is None / Lua nil.
+        eng.fire_event(&LuaEvent::PaneFocus(None, 42));
+        // Subsequent focus change: prev is the previous pane id.
+        eng.fire_event(&LuaEvent::PaneFocus(Some(42), 17));
+        eng.fire_event(&LuaEvent::PaneFocus(Some(17), 42));
+        assert_eq!(eng.eval_str("return #history").unwrap(), "3");
+        assert_eq!(eng.eval_str("return history[1]").unwrap(), "nil->42");
+        assert_eq!(eng.eval_str("return history[2]").unwrap(), "42->17");
+        assert_eq!(eng.eval_str("return history[3]").unwrap(), "17->42");
+        // Name resolves correctly (script-facing).
+        assert_eq!(LuaEvent::PaneFocus(None, 1).name(), "pane_focus");
     }
 
     #[test]

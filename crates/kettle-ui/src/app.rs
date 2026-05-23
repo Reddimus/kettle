@@ -1199,6 +1199,14 @@ pub struct App {
     /// repeated `ToggleZoom` taps from other code paths don't
     /// accidentally undo this.
     scaled_zoom_prev_font_size: Option<f32>,
+    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
+    /// `LuaEvent::PaneFocus`). The pane id we last fired the
+    /// focus-change event for. `None` until the first
+    /// `poll_focus_event` tick — that first tick emits with
+    /// `prev = None` so plugins can seed their state. Diff
+    /// against `self.mux.active_focus()` each redraw; emit on
+    /// boundary-cross.
+    last_emitted_focus: Option<u64>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -1601,6 +1609,7 @@ impl App {
             last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
             last_schedule_decision: None,
             scaled_zoom_prev_font_size: None,
+            last_emitted_focus: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -3157,6 +3166,7 @@ impl App {
         self.drain_events();
         self.poll_remote_contexts();
         self.poll_theme_schedule();
+        self.poll_focus_event();
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into self.mux.panes when spawning a new tab.
@@ -5190,6 +5200,32 @@ impl App {
     /// State on `App::last_schedule_decision` means a single
     /// boundary fires the swap once; sub-cycles can stretch the
     /// throttling later if needed.
+    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
+    /// `LuaEvent::PaneFocus`). Detect focus boundary crossings —
+    /// from any source (keybind, mouse click, new tab, close tab,
+    /// remote-control IPC) — and emit a single `PaneFocus` event
+    /// per crossing.
+    ///
+    /// Polled from `redraw()` per tick rather than wiring every
+    /// focus-changing call site because (a) there are 6+
+    /// such sites today and (b) future cycles will add more.
+    /// One diff site = one drift guard, not N.
+    ///
+    /// First tick after startup emits with `previous = None` so
+    /// plugins can seed their state.
+    fn poll_focus_event(&mut self) {
+        let current = self.mux.active_focus();
+        let Some(cur_id) = current else { return };
+        if self.last_emitted_focus == Some(cur_id) {
+            return;
+        }
+        let prev = self.last_emitted_focus;
+        self.last_emitted_focus = Some(cur_id);
+        if let Some(eng) = self.lua_engine.as_ref() {
+            eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
+        }
+    }
+
     fn poll_theme_schedule(&mut self) {
         let Some(schedule) = self.cfg.theme_schedule else {
             return;
