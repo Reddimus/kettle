@@ -494,7 +494,7 @@ const CLOSED_TAB_RING_CAP: usize = 10;
 /// Lands the type now so the cycle-642 `Action::GroupTab` etc.
 /// dispatch can be wired against the final shape ahead of the
 /// refactor.
-#[allow(dead_code)] // Tab/All/Group consumed by future named-groups sub-cycles.
+#[allow(dead_code)] // All + Group are consumed by upcoming GroupTab/GroupWindow/CreateGroup dispatch arms.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastScope {
     #[default]
@@ -544,7 +544,13 @@ pub struct Mux {
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
     pub search: SearchState,
-    pub broadcast: bool,
+    /// Cycle 679 (sub-cycle 3 of named-groups design):
+    /// migrated from `bool` to `BroadcastScope`. The cycle-178
+    /// per-tab broadcast = `BroadcastScope::Tab`; old "off" =
+    /// `Off`. New variants: `All` (window-wide), `Group(name)`
+    /// (cross-tab named group). Callers that just want a
+    /// yes/no should use `Mux::is_broadcast_on()`.
+    pub broadcast: BroadcastScope,
     /// Cycle 378: set when a LuaEngine subscribes at App startup.
     /// Controls whether spawn_pane attaches the output sidechannel
     /// to new PTYs (zero-cost when false: no per-PTY-read alloc).
@@ -563,7 +569,7 @@ impl Mux {
             panes: HashMap::new(),
             active: 0,
             search: SearchState::default(),
-            broadcast: false,
+            broadcast: BroadcastScope::Off,
             lua_output_subscribed: false,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
             next_id: 1,
@@ -1511,15 +1517,50 @@ impl Mux {
     /// Sessions" defaults per-window; kitty's `send_text` targets all
     /// windows in the current tab. We follow that convention.
     pub fn broadcast_write(&mut self, bytes: &[u8]) {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return;
-        };
-        let ids = tab.root.leaf_ids();
+        // Cycle 679 (named-groups sub-cycle 3): respect the new
+        // BroadcastScope enum. Off short-circuits; Tab keeps the
+        // cycle-178 active-tab behavior; All targets every pane
+        // window-wide; Group(name) targets cross-tab matches.
+        let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
                 p.term.write(bytes);
             }
         }
+    }
+
+    /// Cycle 679: is broadcast active in any scope (Tab/All/Group)?
+    /// Most callers just need a yes/no — this preserves the old
+    /// `bool` ergonomics post-migration.
+    pub fn is_broadcast_on(&self) -> bool {
+        !matches!(self.broadcast, BroadcastScope::Off)
+    }
+
+    /// Cycle 679: compute the pane IDs that should receive a
+    /// broadcast given the current `self.broadcast` scope. Returns
+    /// an empty Vec when scope is Off. Used by `broadcast_write`
+    /// and `broadcast_paste`.
+    fn broadcast_target_ids(&self) -> Vec<u64> {
+        let panes_in_focused_tab: Vec<u64> = self
+            .tabs
+            .get(self.active)
+            .map(|t| t.root.leaf_ids())
+            .unwrap_or_default();
+        let all_with_groups: Vec<(u64, Option<&str>)> = self
+            .panes
+            .iter()
+            .map(|(id, p)| (*id, p.group_name.as_deref()))
+            .collect();
+        let focused = panes_in_focused_tab.first().copied().unwrap_or(0);
+        if matches!(self.broadcast, BroadcastScope::Off) {
+            return Vec::new();
+        }
+        compute_broadcast_targets(
+            &self.broadcast,
+            focused,
+            &panes_in_focused_tab,
+            &all_with_groups,
+        )
     }
 
     /// Snap every pane in the active tab's broadcast set back to the
@@ -1531,10 +1572,9 @@ impl Mux {
     /// scrolled-back pane stays pinned to history). Same scoping as
     /// `broadcast_write` — active tab's leaves only, never other tabs.
     pub fn broadcast_scroll_to_bottom(&mut self) {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return;
-        };
-        let ids = tab.root.leaf_ids();
+        // Cycle 679 (named-groups sub-cycle 3): scope-aware
+        // target set, same as broadcast_write / broadcast_paste.
+        let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id)
                 && let Ok(mut t) = p.term.term.lock()
@@ -1558,10 +1598,12 @@ impl Mux {
     /// auto-execute attack inside vim. Pure modulo the writes; the
     /// per-pane wrap is the only logic here.
     pub fn broadcast_paste(&mut self, text: &str) {
-        let Some(tab) = self.tabs.get(self.active) else {
+        // Cycle 679 (named-groups sub-cycle 3): route through the
+        // scope-aware target computation (same as broadcast_write).
+        let ids = self.broadcast_target_ids();
+        if ids.is_empty() {
             return;
-        };
-        let ids = tab.root.leaf_ids();
+        }
         // Build the two possible payloads lazily — only when we hit the
         // first pane that needs each variant. With a 4 MiB clipboard
         // paste and 5 panes (or more, for shells-broadcast-on-CI
@@ -2596,11 +2638,12 @@ mod node_tests {
         // this baseline.
         let m = Mux::new();
         assert!(
-            !m.broadcast,
+            !m.is_broadcast_on(),
             "Mux::new must start with broadcast disabled; \
              enabling at startup mirrors keystrokes across panes \
              without the user opting in"
         );
+        assert_eq!(m.broadcast, BroadcastScope::Off);
     }
 
     #[test]

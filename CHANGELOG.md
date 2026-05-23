@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 679 — **named-groups sub-cycle 3: `mux.broadcast`
+              migrated from `bool` to `BroadcastScope`**:
+              the named-groups core refactor. Field type
+              change rippled through 5 call sites:
+                - `broadcast: bool` → `broadcast: BroadcastScope`
+                  on `Mux` (default `Off`)
+                - new `Mux::is_broadcast_on()` accessor
+                  preserves the old bool ergonomics for
+                  yes/no callers (TabBar broadcast indicator,
+                  paste-respects-broadcast check, clear-
+                  scrollback broadcast, edit-overlay key
+                  handler)
+                - new private `Mux::broadcast_target_ids()`
+                  computes the recipient set via cycle-678
+                  `compute_broadcast_targets`; consumed by
+                  `broadcast_write`, `broadcast_paste`,
+                  `broadcast_scroll_to_bottom`
+                - `Action::ToggleBroadcastAll` sets
+                  `BroadcastScope::Tab` (preserving cycle-178
+                  per-tab semantics — the "All" misnaming
+                  was tech-debt)
+                - `Action::ToggleBroadcastOff` sets
+                  `BroadcastScope::Off`
+              All existing per-tab broadcast behavior
+              preserved. `Group(name)` + `All` variants
+              now reachable for the upcoming GroupTab /
+              GroupWindow / CreateGroup dispatch wiring
+              (cycle-642 surface). Workspace tests 392 → 392
+              (existing tests still pass; cycle-678 drift
+              guard covers the new helper).
+              Named-groups port: **3/8** sub-cycles complete.
+
   cycle 678 — **named-groups sub-cycle 2: `BroadcastScope`
               enum + `compute_broadcast_targets` pure helper**:
               lands the core data type the

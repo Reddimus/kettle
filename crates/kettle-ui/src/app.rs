@@ -1936,7 +1936,7 @@ impl App {
             segments,
             new_tab: (sw - plus_w, y, plus_w, height),
             // Cycle 178: broadcast indicator on the active tab.
-            broadcast: self.mux.broadcast,
+            broadcast: self.mux.is_broadcast_on(),
             // Hover-on-✕ chip: renderer paints a red highlight behind
             // the close glyph; UI's `sync_cursor_icon` flips the OS
             // cursor to Pointer at the same time.
@@ -2016,7 +2016,7 @@ impl App {
             y: 0.0,
             segments,
             new_tab: (strip_x, plus_y, strip_w, height),
-            broadcast: self.mux.broadcast,
+            broadcast: self.mux.is_broadcast_on(),
             hovered_close_idx: self.hovered_close_idx,
             // Drag-cursor preview is x-only in v1; vertical drag
             // reorder is sub-cycle 6 of the design.
@@ -2305,7 +2305,7 @@ impl App {
         // `BRACKETED_PASTE` decision (different panes may have
         // different mode state), so the wrap is per-pane, not a
         // single shared payload.
-        if self.mux.broadcast {
+        if self.mux.is_broadcast_on() {
             self.mux.broadcast_paste(text);
             return;
         }
@@ -3991,8 +3991,19 @@ impl App {
                 self.mux.search.index = 0;
                 self.search_revealed = None; // re-reveal on this new search
             }
-            Action::ToggleBroadcastAll => self.mux.broadcast = true,
-            Action::ToggleBroadcastOff => self.mux.broadcast = false,
+            Action::ToggleBroadcastAll => {
+                // Cycle 679: cycle-178 "broadcast-all" is actually
+                // per-tab (the action's misnaming was a known
+                // tech-debt). The Tab variant preserves the
+                // existing UX exactly. The new All / Group
+                // variants are reachable via the upcoming
+                // GroupTab/GroupWindow/CreateGroup actions
+                // (cycle 642 surface, dispatch follow-up).
+                self.mux.broadcast = crate::mux::BroadcastScope::Tab;
+            }
+            Action::ToggleBroadcastOff => {
+                self.mux.broadcast = crate::mux::BroadcastScope::Off;
+            }
             Action::ToggleZoom => {
                 self.mux.toggle_zoom();
                 self.resize_all();
@@ -4018,7 +4029,7 @@ impl App {
                 // not just the focused one. The user pressing
                 // clear_history with broadcast on intends "clean
                 // slate for all the panes I'm typing into."
-                if self.mux.broadcast {
+                if self.mux.is_broadcast_on() {
                     self.mux.broadcast_write(b"\x1b[3J");
                 } else if let Some(p) = self.mux.focused() {
                     p.term.write(b"\x1b[3J");
@@ -6385,7 +6396,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // so a broadcast set containing one shell + one vim
                 // doesn't break either of them.
                 let text = format!("{} ", shell_quote_path(&path));
-                if self.mux.broadcast {
+                if self.mux.is_broadcast_on() {
                     self.mux.broadcast_paste(&text);
                 } else {
                     // Read the focused pane's BRACKETED_PASTE state first
@@ -6647,7 +6658,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // close, mouse focus); typing is the last
                     // user-driven path that still needed it.
                     self.reset_blink_phase();
-                    if self.mux.broadcast {
+                    if self.mux.is_broadcast_on() {
                         self.mux.broadcast_write(&bytes);
                         // `scroll-on-keystroke` (Ghostty / Alacritty
                         // default) snaps the viewport back to the
