@@ -280,7 +280,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |
-| `auto_theme.py` | Switch theme on time of day / system | C | cycle-X theme cycling + a `light-theme` / `dark-theme` config + sunrise/sunset trigger |
+| `auto_theme.py` | Switch theme on time of day / system | A | cycle-616 `light-theme` + `dark-theme` config keys + `Action::ToggleLightDark` runtime swap (`toggle_light_dark` keybind alias). Sunrise/sunset auto-detect deferred to a follow-up cycle. |
 | `testplugin.py` | Example for development | E | dev-only |
 
 ## Gap table
@@ -392,7 +392,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
 | `logger.py` (log session to file) | plugins | ❌ | new action `ToggleSessionLog` + a per-pane `log-to-file = PATH` |
 | ~~`dir_open.py`~~ (open cwd in file manager) | plugins | ✅ cycle-607 — `Action::OpenCwdInFileManager` builds `file://{cwd}` via `open_url()` (which uses the `open` crate) | cycle-607 |
-| `auto_theme.py` (light/dark switching) | plugins | ❌ | new config keys + sunrise/sunset / system-theme detection |
+| ~~`auto_theme.py`~~ (light/dark switching) | plugins | ✅ cycle-616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` runtime swap (manual; sunrise/sunset auto-detect is a follow-up) | cycle-616 |
 | `cell_width` / `cell_height` (per-character cell scaling) | config.py | ❌ | new config keys; font-metric override |
 | `palette = solarized_dark` (named preset) | config.py | 🟡 kettle has ~500 themes; named palette presets are subset | new config-key syntax `palette = solarized_dark` (alias for full hex set) |
 | Multiple grouping modes + auto-cleanup | config.py | ❌ | named groups + `autoclean_groups` config key |
@@ -517,7 +517,7 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 26. `run-cmd-on-match` trigger variant (C). One cycle.
 27. ✅ Cycle 611 — `menu-item = LABEL = CMD` config key + cycle-375 Lua `kettle.add_menu_item`.
 28. ✅ Cycle 607 — `Action::OpenCwdInFileManager` (file:// URL via `open` crate).
-29. Auto theme switching (C; light/dark + sunrise/sunset). One cycle.
+29. ✅ Cycle 616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` runtime swap. (Sunrise/sunset auto-detect deferred; manual chord covers the day-to-day case.)
 30. `backspace-binding` / `delete-binding` (C; escape encoding). One cycle.
 31. Named palette presets (`palette = solarized_dark`) (C). One cycle.
 32. ✅ Cycle 604 — `disable-mousewheel-zoom = true/false` (Ctrl+wheel font zoom opt-out).

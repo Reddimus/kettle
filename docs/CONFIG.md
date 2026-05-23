@@ -100,6 +100,8 @@ per-key audit against Terminator's source.
 | `background-darkness` | float 0..1 | `1.0` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark) |
 | `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
 | `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
+| `light-theme` | theme name | `""` | Terminator `auto_theme` parity. Theme that `Action::ToggleLightDark` switches **to** when leaving the dark variant (and stays-on when no chord yet). Empty = action no-ops on the light side. Case-insensitive bundled-name lookup (stored as the canonical bundle name when matched, otherwise stored verbatim trimmed) |
+| `dark-theme` | theme name | `""` | Terminator `auto_theme` parity. Theme that `Action::ToggleLightDark` switches **to** when leaving the light variant — and the default landing when current is a third-party theme. Empty = action no-ops on the dark side |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `putty-paste-style` | bool | `false` | Right-click pastes (PuTTY convention) |

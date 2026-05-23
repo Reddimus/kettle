@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 616 — **`plugins/auto_theme.py` parity (manual toggle)**:
+                - new config keys `light-theme = <name>` and
+                  `dark-theme = <name>` (kebab + underscore both
+                  accepted; case-insensitive bundled-name lookup
+                  stores the canonical form)
+                - new `Action::ToggleLightDark` (`toggle_light_dark`
+                  / `toggle-light-dark` / `toggle_theme_variant` /
+                  `toggle-theme-variant`) — runtime swaps the
+                  current theme between the two configured ones:
+                    - current == dark → switch to light
+                    - current == light → switch to dark
+                    - third-party current → default to dark
+                    - only one configured → one-way switch
+                    - neither configured → no-op + warn
+                Sunrise/sunset auto-detection is a follow-up; the
+                manual chord covers the bulk of the auto_theme.py
+                use case (day-to-day variant flipping). Pure helper
+                `pick_light_dark_target` is unit-testable; drift
+                guard `pick_light_dark_target_round_trips` covers
+                the 7 input shapes. Workspace tests 354 → 356.
+
   cycle 615 — **Doc-truth refresh: `docs/TERMINATOR-AUDIT.md`**
               flipped 9 rows from ❌/🟡 to ✅, citing the
               cycles that closed them (604/606/607/609/611/

@@ -566,6 +566,17 @@ pub struct Config {
     /// `force_no_bell`): suppress every bell flavor. Same as
     /// kettle's `bell = off` but as a separate bool flag.
     pub force_no_bell: bool,
+    /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+    /// theme name to switch to on `Action::ToggleLightDark`
+    /// when the current theme matches `dark_theme`. Empty
+    /// string = unset (action is a no-op).
+    pub light_theme: String,
+    /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+    /// theme name to switch to on `Action::ToggleLightDark`
+    /// when the current theme matches `light_theme`. Empty
+    /// string = unset (action is a no-op). If neither is
+    /// set, the toggle keybind silently no-ops.
+    pub dark_theme: String,
     /// Cycle 340 (Terminator parity, terminatorlib/config.py:101
     /// `icon_bell`): show the bell icon in the per-pane titlebar
     /// when a bell rings. No-op until the Bucket-D titlebar lands.
@@ -872,6 +883,8 @@ impl Default for Config {
             geometry_hinting: false,
             extra_styling: true,
             force_no_bell: false,
+            light_theme: String::new(),
+            dark_theme: String::new(),
             icon_bell: true,
             show_titlebar: true,
             title_hide_sizetext: false,
@@ -1806,6 +1819,20 @@ impl Config {
                 "force-no-bell" | "force_no_bell" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.force_no_bell = b;
+                    }
+                }
+                "light-theme" | "light_theme" => {
+                    if let Some(canonical) = Theme::find_name(&e.value) {
+                        cfg.light_theme = canonical.to_string();
+                    } else if !e.value.trim().is_empty() {
+                        cfg.light_theme = e.value.trim().to_string();
+                    }
+                }
+                "dark-theme" | "dark_theme" => {
+                    if let Some(canonical) = Theme::find_name(&e.value) {
+                        cfg.dark_theme = canonical.to_string();
+                    } else if !e.value.trim().is_empty() {
+                        cfg.dark_theme = e.value.trim().to_string();
                     }
                 }
                 "icon-bell" | "icon_bell" => {
@@ -4419,6 +4446,47 @@ mod config_tests {
         let cfg = Config::parse_text("bell = visual\n");
         assert!(!cfg.force_no_bell);
         assert_eq!(cfg.bell, BellMode::Visual);
+    }
+
+    /// Cycle 616 drift guard. `light-theme` / `dark-theme` config
+    /// keys store the *canonical* bundled name when the user-typed
+    /// value matches one (so the toggle action can do exact-name
+    /// matching against `cfg.theme_name`); both kebab + underscore
+    /// spellings are accepted; an empty / whitespace-only value is
+    /// ignored (so commenting-out via `light-theme = ` doesn't
+    /// stick a stray empty string).
+    #[test]
+    fn light_and_dark_theme_parse_canonical_and_aliases() {
+        // Lowercased input for a bundled theme → stored *canonical*
+        // (so the runtime toggle's case-sensitive equality match
+        // against `cfg.theme_name` works).
+        let cfg = Config::parse_text(
+            "light-theme = tokyonight day\n\
+             dark-theme = tokyonight night\n",
+        );
+        assert_eq!(cfg.light_theme, "TokyoNight Day");
+        assert_eq!(cfg.dark_theme, "TokyoNight Night");
+        // Underscore spelling (Terminator convention) works too.
+        let cfg = Config::parse_text(
+            "light_theme = TokyoNight Day\n\
+             dark_theme = TokyoNight Night\n",
+        );
+        assert_eq!(cfg.light_theme, "TokyoNight Day");
+        assert_eq!(cfg.dark_theme, "TokyoNight Night");
+        // Unknown user-typed theme name stored verbatim (trimmed).
+        // (kettle's runtime fallback in `Theme::by_name` will land
+        // on the default theme, but storing the user's literal
+        // string preserves the surface for --check-config diagnostics.)
+        let cfg = Config::parse_text("light-theme =   my-custom-fork  \n");
+        assert_eq!(cfg.light_theme, "my-custom-fork");
+        // Empty/whitespace-only value leaves the field at default
+        // (empty string), so a future `light-theme = ` doesn't
+        // override a previously set value to nothing.
+        let cfg = Config::parse_text(
+            "light-theme = TokyoNight Day\n\
+             light-theme =   \n",
+        );
+        assert_eq!(cfg.light_theme, "TokyoNight Day");
     }
 
     /// Cycle 611 drift guard for the --check-config malformed-value

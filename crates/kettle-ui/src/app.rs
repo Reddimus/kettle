@@ -96,6 +96,45 @@ fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
     }
 }
 
+/// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+/// pick the theme to switch to on `Action::ToggleLightDark`.
+///
+/// Rules (case-insensitive):
+///   - both `light` and `dark` set:
+///       - current matches `dark`  → return `light`
+///       - current matches `light` → return `dark`
+///       - otherwise               → return `dark` (default landing)
+///   - only one set: return that one (so a half-configured user
+///     still gets a one-way switch).
+///   - neither set: return `None`; dispatch logs a warn.
+///
+/// Pure — unit-testable without constructing a Config or App.
+fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<String> {
+    let cur = current.trim().to_ascii_lowercase();
+    let l = light.trim();
+    let d = dark.trim();
+    match (l.is_empty(), d.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(l.to_string()),
+        (true, false) => Some(d.to_string()),
+        (false, false) => {
+            // Round-trip current ↔ {light, dark}. The "current is
+            // a third-party theme" branch is collapsed into the
+            // dark-default arm (cur == l ⇒ d, else ⇒ d would trip
+            // clippy::if_same_then_else): we only need to check
+            // whether current matches *light* explicitly, and
+            // everything else (including current==dark and
+            // third-party) ends up at dark — but dark→light needs
+            // its own arm so the round-trip works.
+            if cur == d.to_ascii_lowercase() {
+                Some(l.to_string())
+            } else {
+                Some(d.to_string())
+            }
+        }
+    }
+}
+
 /// Cap an OSC 52 clipboard payload so a hostile program can't make the
 /// terminal allocate/set an unbounded clipboard. Truncates on a UTF-8
 /// char boundary at or below `max` bytes (xterm/kitty also bound this).
@@ -3519,6 +3558,26 @@ impl App {
                     w.request_redraw();
                 }
             }
+            Action::ToggleLightDark => {
+                if let Some(next) = pick_light_dark_target(
+                    &self.cfg.theme_name,
+                    &self.cfg.light_theme,
+                    &self.cfg.dark_theme,
+                ) {
+                    self.cfg.theme_name = next.clone();
+                    self.cfg.theme = kettle_config::Theme::by_name(&next);
+                    self.save_session();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else {
+                    log::warn!(
+                        "toggle-light-dark: needs both light-theme and dark-theme in config (current: light={:?} dark={:?})",
+                        self.cfg.light_theme,
+                        self.cfg.dark_theme,
+                    );
+                }
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft => {
                 self.mux.move_active_tab(-1);
@@ -6364,5 +6423,51 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 616 drift guard. `pick_light_dark_target` is the
+    /// pure helper behind `Action::ToggleLightDark` — the policy
+    /// must round-trip current ↔ {light, dark} cleanly, default
+    /// to `dark` on a third-party current theme, and silently
+    /// no-op when neither config key is set.
+    #[test]
+    fn pick_light_dark_target_round_trips() {
+        use super::pick_light_dark_target;
+        // Round-trip: current==dark → switch to light.
+        assert_eq!(
+            pick_light_dark_target("TokyoNight Night", "TokyoNight Day", "TokyoNight Night")
+                .as_deref(),
+            Some("TokyoNight Day"),
+        );
+        // Round-trip: current==light → switch to dark.
+        assert_eq!(
+            pick_light_dark_target("TokyoNight Day", "TokyoNight Day", "TokyoNight Night")
+                .as_deref(),
+            Some("TokyoNight Night"),
+        );
+        // Case-insensitive match on `current`.
+        assert_eq!(
+            pick_light_dark_target("tokyonight night", "TokyoNight Day", "TokyoNight Night")
+                .as_deref(),
+            Some("TokyoNight Day"),
+        );
+        // Current is a third-party theme: default to dark.
+        assert_eq!(
+            pick_light_dark_target("Catppuccin Mocha", "TokyoNight Day", "TokyoNight Night")
+                .as_deref(),
+            Some("TokyoNight Night"),
+        );
+        // Only light set: one-way switch to light.
+        assert_eq!(
+            pick_light_dark_target("Catppuccin Mocha", "TokyoNight Day", "").as_deref(),
+            Some("TokyoNight Day"),
+        );
+        // Only dark set: one-way switch to dark.
+        assert_eq!(
+            pick_light_dark_target("Catppuccin Latte", "", "TokyoNight Night").as_deref(),
+            Some("TokyoNight Night"),
+        );
+        // Neither set: no-op.
+        assert_eq!(pick_light_dark_target("anything", "", ""), None);
     }
 }

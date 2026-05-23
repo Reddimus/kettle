@@ -251,6 +251,14 @@ pub enum Action {
     /// Cycle 342 Terminator parity (key_reset_clear): Reset (RIS)
     /// + ClearHistory composed.
     ResetAndClear,
+    /// Cycle 616 Terminator parity (`plugins/auto_theme.py`):
+    /// runtime toggle between the configured `light-theme` and
+    /// `dark-theme`. If the current theme matches `dark_theme`,
+    /// switches to `light_theme`; otherwise switches to `dark_theme`.
+    /// If neither config key is set the action no-ops (logged at
+    /// `warn`). Distinct from `NextTheme` / `PrevTheme` which walk
+    /// the full bundled list.
+    ToggleLightDark,
     /// Cycle 342 Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -426,6 +434,11 @@ pub fn action_names() -> Vec<&'static str> {
         "reset_zoom_all",
         "reset_clear",
         "reset_and_clear",
+        // Cycle 616 — auto_theme.py runtime toggle.
+        "toggle_light_dark",
+        "toggle-light-dark",
+        "toggle_theme_variant",
+        "toggle-theme-variant",
         "page_up_half",
         "page_down_half",
         "scroll_page_up_half",
@@ -561,6 +574,10 @@ impl Action {
             "zoom_out_all" | "zoom-out-all" => ZoomOutAll,
             "zoom_normal_all" | "zoom-normal-all" | "reset_zoom_all" => ZoomNormalAll,
             "reset_clear" | "reset-clear" | "reset_and_clear" | "reset-and-clear" => ResetAndClear,
+            "toggle_light_dark"
+            | "toggle-light-dark"
+            | "toggle_theme_variant"
+            | "toggle-theme-variant" => ToggleLightDark,
             "page_up_half" | "page-up-half" | "scroll_page_up_half" => ScrollPageUpHalf,
             "page_down_half" | "page-down-half" | "scroll_page_down_half" => ScrollPageDownHalf,
             "paste_selection" | "paste-selection" | "paste_primary" => PastePrimary,

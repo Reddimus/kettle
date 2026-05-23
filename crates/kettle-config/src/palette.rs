@@ -68,6 +68,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Edit pane broadcast group", EditPaneGroup),
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
+        ("Toggle light/dark theme", ToggleLightDark),
         ("Reset terminal", Reset),
         ("Clear scrollback", ClearHistory),
         ("Reload config", ReloadConfig),
@@ -198,6 +199,7 @@ mod tests {
             HintMode,
             NextTheme,
             PrevTheme,
+            ToggleLightDark,
             OpenContextMenu,
             UndoCloseTab,
             DuplicateTab,
@@ -280,6 +282,7 @@ mod tests {
                 | HintMode
                 | NextTheme
                 | PrevTheme
+                | ToggleLightDark
                 | OpenContextMenu
                 | UndoCloseTab
                 | DuplicateTab
