@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 634 — **`docs/TERMINATOR-THEME-SUBMENU-DESIGN.md` —
+              Bucket D design doc for the right-click theme +
+              profile submenu (Terminator
+              `terminal_popup_menu.py`)**: today's cycle-245
+              context menu flat-lists items. Submenu requires:
+                - new `ContextMenuItem::Submenu { label, items }`
+                  recursive variant
+                - new `SubmenuState` + hover-delay state machine
+                  (~250 ms GNOME-standard)
+                - second-panel renderer + window-edge clipping
+                  (flip to left when right would overflow)
+                - keyboard nav (`→` opens, `←` closes)
+                - populated from `Theme::list()` (~512 themes)
+                  and `Config::list_profiles()`
+              9 sub-cycles, +6-8 estimated tests. Audit row
+              promoted from C/❌ to D with cross-link.
+              Explicit Bucket E carveouts: nested-nested
+              submenus (single level only), search-within-
+              submenu (use cycle-329 palette instead), keyboard-
+              only accelerator (follow-up). No code change.
+
   cycle 633 — **`docs/TERMINATOR-VERTICAL-TABS-DESIGN.md` —
               Bucket D design doc for `tab-position = left/right`
               (vertical tab strip)**: cycle 331/628 wired the
