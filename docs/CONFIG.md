@@ -100,6 +100,44 @@ per-key audit against Terminator's source.
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib |
 
+### Parsed-but-currently-no-op keys
+
+These Terminator-parity keys parse cleanly + appear in
+`--check-config` enumerations but no kettle code consumes them
+today. They're kept in the parser for forward-compatibility:
+copying a Terminator config to kettle doesn't error on them, and
+a future cycle wiring the missing behavior reads them here
+without a parser change. Setting any of these in a kettle config
+has no runtime effect today.
+
+| Key | What Terminator does with it |
+|---|---|
+| `ask-before-closing` | When to show the close-confirmation dialog (always / multiple-terminals / never) |
+| `always-split-with-profile` | New splits inherit the parent pane's profile |
+| `autoclean-groups` | Remove empty broadcast groups automatically |
+| `broadcast-default` | Scope when broadcast is enabled (all / group / off). Previously mis-mapped to startup state; corrected so kettle no longer starts with broadcast on by default |
+| `cell-width` / `cell-height` | Font cell-grid pixel size overrides |
+| `cursor-color-default` | Use the system / terminal cursor color rather than a config override |
+| `detachable-tabs` | Allow tabs to be dragged out into separate windows. kettle implements this end-to-end via `Action::MoveTabToNewWindow`; the config toggle isn't wired (the feature is always available) |
+| `disable-mousewheel-zoom` | Disable Ctrl+wheel font-size change |
+| `extra-styling` | Render bold/italic with the styled-font features even when palette lacks the variants |
+| `geometry-hinting` | GTK-specific window-size step constraints |
+| `handle-size` | Split-divider grab-width in px |
+| `hide-from-taskbar` | Suppress the window from the taskbar / task switcher |
+| `homogeneous-tabbar` | Equal-width tab segments |
+| `http-proxy` | Pass-through HTTP proxy for any HTTP fetches the binary makes (kettle doesn't make any today) |
+| `inactive-color-offset` | Dim the colors of non-focused panes |
+| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` for clipboard-source distinction |
+| `scroll-tabbar` | Allow horizontal scroll across many tab segments |
+| `smart-copy` | Auto-copy on text-selection completion (kettle's `copy-on-select` is the implemented variant) |
+| `split-to-group` | New splits join the parent's broadcast group |
+| `sticky` | Pin the window above other windows (kettle's `always-on-top` is the implemented variant) |
+| `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides |
+| `focus` | Focus-follows-mouse mode (click / sloppy / system) — kettle uses click-focus exclusively |
+
+A future cycle wiring any of the above moves the row out of this
+table + into the main `Terminator-parity keys` table above.
+
 ## Keybind grammar
 
 `trigger` = `+`-joined modifiers and one key. Recognized modifier names:
