@@ -30,8 +30,12 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Reddimus/kettle"
+homepage = "https://github.com/Reddimus/kettle"
+readme = "README.md"
 authors = ["kettle contributors"]
 description = "A fast, cross-platform GPU terminal emulator combining the best of Ghostty, Terminator, kitty, Alacritty and WezTerm"
+keywords = ["terminal", "terminal-emulator", "tui", "gpu", "wgpu"]
+categories = ["command-line-utilities"]
 
 # Workspace-wide dependency policy (enforced in CI):
 #
