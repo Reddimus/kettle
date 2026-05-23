@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 731 — **Fix: macOS sticky no-op replaces removed winit API**:
+              Cycle-730's CI run surfaced a pre-existing macOS build
+              break: `crates/kettle-ui/src/app.rs:7039` called
+              `window.set_visible_on_all_workspaces(true)` which winit
+              0.30 dropped from `WindowExtMacOS`. The macOS CI job
+              had been red on cycles 718-730 (verified in the GitHub
+              Actions history) but no maintainer had hit it locally
+              because the macOS dev path was inactive after the
+              cycle-558 partial-release incident.
+              Fix: replace the broken call with a `log::info!`
+              message explaining that `sticky = true` is currently a
+              no-op on macOS (same Bucket-E status as X11/Wayland —
+              winit doesn't expose the `_NET_WM_STATE_STICKY` /
+              `NSWindowCollectionBehavior.canJoinAllSpaces` knob, and
+              re-implementing via `objc2` + raw NSWindow handles is
+              a heavy dep for one config key). Comment cites the
+              cycle-730 audit + names `objc2` as the path forward.
+              No behavior change on Linux/Windows; macOS users with
+              `sticky = true` now get a debuggable log line instead
+              of a silent compile-error CI failure. CI matrix should
+              go green on all three OSes for the first time since
+              cycle 718.
+
   cycle 730 — **Production-grade Windows 11 audit: ProcessTree trait
               + cross-platform Justfile + PowerShell shell integration
               + bench.ps1**:

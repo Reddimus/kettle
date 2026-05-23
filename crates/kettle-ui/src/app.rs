@@ -7029,14 +7029,30 @@ impl ApplicationHandler<UserEvent> for App {
         // X11/Wayland remain Bucket E — winit 0.30 doesn't expose
         // `_NET_WM_STATE_STICKY` on the cross-platform API and
         // would need raw-window-handle direct atom writes (heavy
-        // dep for one config key). A user copying a Terminator
-        // config that sets `sticky = true` gets the intended
-        // behavior on macOS; on other platforms the value parses
-        // without effect.
+        // dep for one config key).
+        //
+        // Cycle 730: macOS joined Bucket E too. winit 0.30 dropped
+        // the `WindowExtMacOS::set_visible_on_all_workspaces` method
+        // that the original sticky impl relied on; rebuilding it
+        // needs `objc2` + raw NSWindow handle (NSWindowCollectionBehavior
+        // with `.canJoinAllSpaces`). Heavy dep for one config key,
+        // same trade-off as X11/Wayland. Pre-730 this branch was
+        // breaking the macOS CI build (E0599: method not found on
+        // Arc<Window>) — the cycle-729 commit went out red on macOS
+        // because no maintainer hit it locally. Cycle-730 stubs the
+        // branch with a `log::info` so a user copying a Terminator
+        // config that sets `sticky = true` sees a debuggable
+        // message instead of silent no-op. Re-adding the feature
+        // proper is a separate cycle once the objc2 dep is on the
+        // table.
         #[cfg(target_os = "macos")]
         if self.cfg.sticky {
-            use winit::platform::macos::WindowExtMacOS;
-            window.set_visible_on_all_workspaces(true);
+            log::info!(
+                "kettle: `sticky = true` is currently a no-op on macOS \
+                 (winit 0.30 dropped the underlying API; re-implementing \
+                 via objc2 is a tracked follow-up). The window appears \
+                 on the current Space only."
+            );
         }
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
