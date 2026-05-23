@@ -426,8 +426,10 @@ do not re-litigate without explicit user request.
   ~/.config/kettle/config`. A preferences GUI would be ~5,000 LoC of GTK-
   equivalent winit overlay work, plus ongoing maintenance for every new
   config key. The first-launch bootstrap + the cycle-194-era
-  `--check-config` validate-on-save covers the discoverability use case
-  at ~1/100th the implementation cost.
+  `--check-config` validate-on-save + cycle-696
+  `Action::EditConfig` (one-keystroke open of the resolved config file in
+  the OS's registered text-editor handler) cover the discoverability +
+  edit use cases at ~1/100th the implementation cost.
 
 - **`extra_styling`** (`config.py`). GTK CSS theming. kettle's rendering
   is wgpu+glyphon, not GTK; user customization is via the existing
@@ -435,14 +437,6 @@ do not re-litigate without explicit user request.
 
 - **GTK Glade XML files** (`*.glade`). UI definitions for the preferences
   GUI. N/A; kettle has no preferences GUI.
-
-- **`scaled_zoom` (Ctrl+Shift+Z)** aspect-preserving zoom. GTK-specific
-  behavior derived from VTE's cell-size model. kettle's `ToggleZoom`
-  (Ctrl+Shift+X) covers the general use case.
-
-- **`F1 help`** opens man page in browser. kettle ships
-  `man kettle` (post-install) + `kettle --help`; no need for a separate
-  browser-launching action.
 
 - **`debugserver.py`** (DEBUG TCP server). Internal maintainer tooling.
   kettle's tracing surface is `RUST_LOG=trace kettle` per env_logger
