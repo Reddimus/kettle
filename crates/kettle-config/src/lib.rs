@@ -188,10 +188,30 @@ pub enum TabBarMode {
 }
 
 /// Where the tab bar sits.
+///
+/// Cycle 647 (sub-cycle 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+/// docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)):
+/// added `Left` and `Right` variants. The parser already accepted
+/// the values since cycle 331 + cycle 628 but routed them to a
+/// `log::warn` + fallback to `Top`. Now they store the user's
+/// chosen orientation; the render-layer change to actually draw
+/// the strip vertically lands in sub-cycles 2-6 of the vertical-
+/// tabs design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarPos {
     Top,
     Bottom,
+    Left,
+    Right,
+}
+
+impl TabBarPos {
+    /// Cycle 647: is this a vertical-strip orientation?
+    /// Helper for the upcoming `App::content_rect` branch + the
+    /// `paint_tab_bar` orientation dispatch.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, TabBarPos::Left | TabBarPos::Right)
+    }
 }
 
 /// Cycle 295 (iTerm2 / kitty parity): status-bar position. A thin
@@ -1805,14 +1825,8 @@ impl Config {
                     match lowered.as_str() {
                         "bottom" => cfg.tab_bar_pos = TabBarPos::Bottom,
                         "hidden" => cfg.tab_bar = TabBarMode::Off,
-                        "left" | "right" => {
-                            log::warn!(
-                                "tab-bar-position = {lowered} requested but vertical \
-                                 tab bars aren't yet implemented; falling through to top \
-                                 (see docs/TERMINATOR-AUDIT.md Bucket C)"
-                            );
-                            cfg.tab_bar_pos = TabBarPos::Top;
-                        }
+                        "left" => cfg.tab_bar_pos = TabBarPos::Left,
+                        "right" => cfg.tab_bar_pos = TabBarPos::Right,
                         _ => cfg.tab_bar_pos = TabBarPos::Top,
                     }
                 }
@@ -3815,16 +3829,16 @@ mod config_tests {
         // top/left/right/bottom/hidden; kettle maps them as:
         //   - top/bottom: native.
         //   - hidden: alias to `tab-bar = off`.
-        //   - left/right: accepted by --check-config (so a copied
-        //     Terminator config doesn't fail), but the runtime falls
-        //     through to top with a log::warn (vertical tab bars
-        //     are Bucket C in docs/TERMINATOR-AUDIT.md).
+        //   - left/right: cycle 647 promoted from warn-fallback-to-top
+        //     to actual `TabBarPos::Left` / `TabBarPos::Right` storage.
+        //     The render-layer change to draw vertical strips lands in
+        //     sub-cycles 2-6 of TERMINATOR-VERTICAL-TABS-DESIGN.md.
         let hidden = Config::parse_text("tab-bar-position = hidden");
         assert_eq!(hidden.tab_bar, TabBarMode::Off);
         let left = Config::parse_text("tab-bar-position = left");
-        assert_eq!(left.tab_bar_pos, TabBarPos::Top);
+        assert_eq!(left.tab_bar_pos, TabBarPos::Left);
         let right = Config::parse_text("tab-bar-position = right");
-        assert_eq!(right.tab_bar_pos, TabBarPos::Top);
+        assert_eq!(right.tab_bar_pos, TabBarPos::Right);
         // detect_malformed_values must NOT flag any of the five
         // Terminator values — that's what guarantees Terminator
         // users can copy their config without --check-config errors.
@@ -4820,6 +4834,33 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 647 drift guard. `TabBarPos::is_vertical` + the
+    /// parser. Sub-cycle 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
+    #[test]
+    fn tab_bar_pos_left_right_parse_and_classify() {
+        // is_vertical classification.
+        assert!(!TabBarPos::Top.is_vertical());
+        assert!(!TabBarPos::Bottom.is_vertical());
+        assert!(TabBarPos::Left.is_vertical());
+        assert!(TabBarPos::Right.is_vertical());
+        // Parser routes the values to the new variants.
+        let cfg = Config::parse_text("tab-bar-position = left\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Left);
+        let cfg = Config::parse_text("tab-bar-position = right\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Right);
+        // Terminator-spelled alias still works.
+        let cfg = Config::parse_text("tab-position = left\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Left);
+        let cfg = Config::parse_text("tab_position = right\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Right);
+        // Top + Bottom unchanged.
+        let cfg = Config::parse_text("tab-bar-position = top\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
+        let cfg = Config::parse_text("tab-bar-position = bottom\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
     }
 
     /// Cycle 641 drift guard. `theme-mode` config parsing (sub-cycle

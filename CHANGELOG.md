@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 647 — **vertical-tabs sub-cycle 1: `TabBarPos::Left`
+              + `Right` variants**: previously the parser
+              accepted `tab-bar-position = left/right` since
+              cycle 331/628 but `log::warn`'d and fell through
+              to `Top`. Now the values store the actual
+              orientation; the render-layer change to draw
+              vertical strips lands in sub-cycles 2-6 of
+              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
+              Also: new `TabBarPos::is_vertical()` helper for
+              the upcoming `content_rect` branch + paint_tab_bar
+              orientation dispatch. Non-exhaustive match arms
+              in `cursor_in_tab_bar_band` + `tab_bar()` updated
+              to handle Left/Right as no-y-band-hit fallthroughs
+              (the rest of the renderer still uses the y-band-
+              based geometry until the vertical strip lands).
+              Drift guard `tab_bar_pos_left_right_parse_and_classify`
+              covers parser routing for both Terminator-spelled
+              aliases + the classification helper. Updated the
+              older cycle-628 drift guard to reflect the new
+              parser behavior. Workspace tests 377 → 378.
+
   cycle 646 — **remote.py sub-cycle 5: sysinfo process-tree
               walk**: sysinfo 0.32 added as a kettle-remote
               dep (default-features disabled; only the

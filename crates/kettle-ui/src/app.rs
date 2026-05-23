@@ -392,9 +392,17 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     if bar_h <= 0.0 {
         return false;
     }
+    // Cycle 647: Left/Right (vertical strip) don't use the y-band
+    // check at all — hit-testing is x-axis-based. Until the render
+    // layer fully wires the vertical strip (sub-cycles 2-6 of
+    // [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+    // ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)) those
+    // values fall through to "no hit on the y-band" so the rest
+    // of the y-band-dependent code stays correct.
     match pos {
         TabBarPos::Top => y >= 0.0 && y < bar_h,
         TabBarPos::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
+        TabBarPos::Left | TabBarPos::Right => false,
     }
 }
 
@@ -1588,8 +1596,14 @@ impl App {
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
         let (sw, sh) = (w as f32, h as f32);
+        // Cycle 647: vertical strip rendering (Left / Right) is
+        // designed in [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+        // ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md). Until
+        // those sub-cycles land, Left + Right route to the same
+        // y = 0.0 as Top (the user's strip configuration parses +
+        // stores correctly; only the layout doesn't honor it yet).
         let y = match self.cfg.tab_bar_pos {
-            TabBarPos::Top => 0.0,
+            TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
             TabBarPos::Bottom => sh - height,
         };
         let titles = self.mux.tab_titles();
