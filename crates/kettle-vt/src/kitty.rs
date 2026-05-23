@@ -59,6 +59,19 @@ const MAX_IN_FLIGHT_SLOTS: usize = 32;
 /// captured.
 const MAX_FRAMES_PER_IMAGE: usize = 256;
 
+/// Cycle 581: cap on the number of completed (`store`) images kept
+/// around for later placement. Each entry holds an `ImageData` Arc
+/// whose payload can be up to MAX_IMAGE_DIM² × 4 = 256 MiB (cycle
+/// 576), so 1000 distinct successful transmissions = up to 256 GB
+/// resident. 64 sits well above any realistic terminal usage (a
+/// terminal showing icons + a couple animations rarely transmits
+/// more than a dozen images; even chafa's slideshow mode resets
+/// each frame). Past the cap, new `a=T` completions are dropped:
+/// the image data is decoded (work was done) but not added to
+/// `store`, so it can be drawn at-cursor but can't be replaced
+/// later via `a=p,i=...`.
+const MAX_STORED_IMAGES: usize = 64;
+
 #[derive(Default)]
 struct Acc {
     control: String,
@@ -549,7 +562,14 @@ impl KittyState {
             return KittyOut::None;
         };
         if id != 0 {
-            self.store.insert(id, img.clone());
+            // Cycle 581: cap stored-image count. An update to an
+            // already-present id is always allowed (replaces in
+            // place — no growth); a brand-new id past saturation is
+            // refused so an attacker can't grow `store` indefinitely
+            // by completing distinct `i=` transmissions.
+            if self.store.contains_key(&id) || self.store.len() < MAX_STORED_IMAGES {
+                self.store.insert(id, img.clone());
+            }
         }
         // `U=1` (possibly combined with `a=T`): store + register a virtual
         // placement, but draw nothing at the cursor.
@@ -608,6 +628,12 @@ impl KittyState {
     #[cfg(test)]
     fn in_flight_len_for_test(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// Test-only accessor for the cycle-581 store slot cap drift guard.
+    #[cfg(test)]
+    fn store_len_for_test(&self) -> usize {
+        self.store.len()
     }
 
     /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
@@ -949,6 +975,36 @@ mod tests {
         // — these are compile-time invariants of the constant itself.
         const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
         const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+    }
+
+    /// Cycle 581 drift guard: completing more than `MAX_STORED_IMAGES`
+    /// distinct `a=T` transmissions must not grow `store` past the
+    /// cap. An update to an already-stored id is still accepted
+    /// (replaces in place; no growth).
+    #[test]
+    fn kitty_stored_images_cap_holds_against_distinct_id_flood() {
+        let mut k = KittyState::default();
+        // Fill the store with MAX_STORED_IMAGES distinct ids.
+        for id in 1..=super::MAX_STORED_IMAGES as u32 {
+            k.feed(&format!("a=T,i={id},f=32,s=1,v=1;{PX}"));
+        }
+        assert_eq!(k.store_len_for_test(), super::MAX_STORED_IMAGES);
+        // One more distinct id: refused; map size unchanged.
+        let overflow = super::MAX_STORED_IMAGES as u32 + 1;
+        k.feed(&format!("a=T,i={overflow},f=32,s=1,v=1;{PX}"));
+        assert_eq!(
+            k.store_len_for_test(),
+            super::MAX_STORED_IMAGES,
+            "distinct id {overflow} past saturation must be refused"
+        );
+        // Update to an existing id: accepted (replaces in place);
+        // map size still unchanged.
+        k.feed("a=T,i=1,f=32,s=1,v=1;AQIDBA==");
+        assert_eq!(
+            k.store_len_for_test(),
+            super::MAX_STORED_IMAGES,
+            "update to existing id must replace in place (no growth)"
+        );
     }
 
     /// Cycle 580 drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`

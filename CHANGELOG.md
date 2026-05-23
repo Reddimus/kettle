@@ -46,6 +46,27 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 581 — **Kitty stored-image cap.** Sixth link in the
+              cycle-576..580 kitty resource-cap chain. The
+              `store: HashMap<u32, ImageData>` of completed
+              transmissions was unbounded — each entry holds an
+              `ImageData` Arc whose payload can be up to 256 MiB
+              (the cycle-576 cap), so completing 1000 distinct
+              `a=T,i=N,m=0` transmissions could pin up to 256 GB
+              resident. New `MAX_STORED_IMAGES = 64` (sits well
+              above any realistic terminal usage — icons +
+              animations rarely transmit more than a dozen
+              images). Updates to already-stored ids still
+              replace in place (no growth); brand-new ids past
+              saturation are dropped — the decoded image can
+              still be drawn at-cursor on the completing
+              transmission but can't be replaced later via
+              `a=p,i=…`. Drift guard
+              `kitty_stored_images_cap_holds_against_distinct_id_flood`
+              fills 64 ids, fires a 65th (refused), then updates
+              an existing id (accepted, no growth). Workspace
+              tests 330 → 331 (+ 1 ignored).
+
   cycle 580 — **Kitty per-image frame cap.** Each successful `a=f`
               frame transmission appends a `Frame` (carrying an
               `ImageData` Arc) to `frames[id]`; chaining 100 000+
