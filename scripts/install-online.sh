@@ -11,7 +11,7 @@
 #
 # Or with a pinned version (recommended for reproducible installs):
 #
-#   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_VERSION=v1.40.0 sh
+#   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_VERSION=v1.41.0 sh
 #
 # Or with a custom install prefix (e.g. system-wide):
 #
