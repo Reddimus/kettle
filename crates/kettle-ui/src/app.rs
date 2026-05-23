@@ -3588,25 +3588,15 @@ impl App {
                     t.scroll_display(Scroll::Delta(dir));
                 }
             }
-            // Cycle 345: paste primary selection (X11 primary
-            // clipboard). arboard's get_text() reads the regular
-            // clipboard; macOS / Windows / Wayland don't have a
-            // separate primary selection so fall through to
-            // get_text. log::warn on read failure.
-            Action::PastePrimary => {
-                if let Some(cb) = self.clipboard.as_mut() {
-                    match cb.get_text() {
-                        Ok(s) => {
-                            if let Some(p) = self.mux.focused() {
-                                p.term.write(s.as_bytes());
-                            }
-                        }
-                        Err(e) => log::warn!("paste-primary: clipboard read failed: {e}"),
-                    }
-                } else {
-                    log::warn!("paste-primary: clipboard unavailable");
-                }
-            }
+            // Cycle 345: paste primary selection (X11 primary clipboard).
+            // arboard's get_text() reads the regular clipboard; macOS / Windows
+            // / Wayland don't have a separate primary selection, so X11 primary
+            // and the regular clipboard are equivalent through arboard's
+            // current surface — funnel through `paste_clipboard` so the
+            // primary path gets the same LOCAL_PASTE_MAX clamp, bracketed-
+            // paste wrap, and broadcast scoping as Action::Paste (cycle 574:
+            // the inline impl was bypassing all three).
+            Action::PastePrimary => self.paste_clipboard(),
             // Cycle 345: in-process Quake toggle. Same tri-state
             // logic as cycle-319's --toggle remote command:
             //   hidden → show + focus

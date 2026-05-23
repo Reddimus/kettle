@@ -46,6 +46,22 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 574 — **Paste safety bug fix.** `Action::PastePrimary`
+              (cycle 345) was reading the clipboard and writing
+              raw bytes directly to the focused pane's PTY,
+              bypassing all three of the safety nets that
+              `Action::Paste` honors: the 4 MiB
+              `LOCAL_PASTE_MAX` runaway clamp, the bracketed-
+              paste wrap (so vim / neovim / fzf / mc paste
+              correctly when BRACKETED_PASTE is enabled —
+              the same fix cycle 182 made for drag-drop), and
+              broadcast scoping (so group-input keybind
+              honors `paste-primary` like it honors `paste`).
+              Fix: delegate `PastePrimary` to `paste_clipboard()`
+              — arboard has no separate primary-selection API,
+              so the two clipboards are equivalent through our
+              current surface anyway.
+
 ## [1.44.0] — 2026-05-22
 
 Recovery release. The cycle-553 release.yml gate added in v1.43.0
