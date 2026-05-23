@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 657 — **Deploy: redeployed local kettle with the live
+              remote-session detector** (cycle 656). Binary at
+              `~/.local/bin/kettle` reports `1.45.1 (798ea71)`.
+              `ssh <host>` in a pane will now update the pane
+              title to `ssh user@host` within ~200ms; same for
+              docker/podman/kubectl exec. End-to-end user-
+              visible behavior for remote.py port (sub-cycles
+              1-6 of 7) is live for testing.
+
   cycle 656 — **remote.py sub-cycle 6: App-side poll loop**:
               the remote-session detector now actually runs.
               New `App::poll_remote_contexts` called from
