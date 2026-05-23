@@ -130,6 +130,18 @@ if [[ -f "${MAN_SRC}" ]]; then
   install -Dm644 "${MAN_SRC}" "${MAN_DIR}/kettle.1"
 fi
 
+# 3c) Cycle 530: drop a fresh copy of this install.sh into
+# ${PREFIX}/share/kettle/ so `${PREFIX}/share/kettle/install.sh
+# --uninstall` always points at the version that matched the
+# binary. Without this, a contributor running `scripts/install.sh`
+# from the repo would leave any pre-existing
+# ${PREFIX}/share/kettle/install.sh stale (e.g., from the cycle-
+# 253 tarball-install flow), and a later `--uninstall` would run
+# a different version of the script than the binary it's removing.
+# Works in both tarball and repo modes: ${SCRIPT_DIR}/install.sh
+# = the script that's currently running.
+install -Dm755 "${SCRIPT_DIR}/install.sh" "${PREFIX}/share/kettle/install.sh"
+
 # 4) Refresh caches so GNOME/KDE pick the new entry up immediately.
 # Both tools no-op silently if absent.
 if command -v update-desktop-database >/dev/null 2>&1; then
