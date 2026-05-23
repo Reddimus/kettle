@@ -352,7 +352,9 @@ pub enum Action {
     /// row-padding strip + image::ImageBuffer save) and cycle 689
     /// (per-pane crop via focused-pane rect + toast notification
     /// via `fire_notify`). PNG lands at the cycle-650
-    /// `session_screenshot_path` (cache_dir/<unix>-<pid>.png).
+    /// `session_screenshot_path` (`<cache_dir>/<unix>-<pid>.png`,
+    /// with the angle-bracket placeholders inside a code span so
+    /// rustdoc doesn't read them as HTML tags).
     TakeScreenshot,
     /// Cycle 642 Terminator parity (sub-cycle 1 of
     /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](

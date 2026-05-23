@@ -79,6 +79,7 @@ gauntlet:
     cargo build --workspace --all-targets
     cargo test --workspace
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     @echo ""
     @echo "GAUNTLET PASSED — same gate CI runs on every PR. Safe to push."
 

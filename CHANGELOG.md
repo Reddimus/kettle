@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 728 — **Fix: rustdoc regression + close local-gauntlet
+              gap with CI's doc gate**:
+              Cycle-722's `<unix>-<pid>.png` placeholder in a doc
+              comment (and a separately-introduced
+              `Option<RemoteContext>` + `argv[0]` in kettle-remote)
+              are parsed by rustdoc as unclosed HTML tags. Local
+              clippy/test gauntlet doesn't run rustdoc lints, so
+              the regression slipped past pre-commit and only
+              surfaced in CI's `cargo doc -D warnings` step
+              (every push from cycle 722 onward failed CI).
+              Fixes:
+                - wrap the angle-bracket placeholders in code
+                  spans (`\`<unix>\`-\`<pid>\``).
+                - same for `Option<RemoteContext>` and `argv[0]`
+                  in kettle-remote's `detect_container` /
+                  `detect_ssh` docs.
+                - add `RUSTDOCFLAGS="-D warnings" cargo doc
+                  --workspace --no-deps` to the `Justfile`
+                  gauntlet recipe + the `.githooks/pre-commit`
+                  hook. Closes the cycle-X
+                  CONTRIBUTING.md promise that "a green
+                  `just gauntlet` locally is the same gate
+                  every PR runs in CI" — pre-728 it was
+                  almost-the-same (missing the doc gate).
+              No behavior change; workspace tests stay at 424.
+              CI will now go green on main + the 3 open
+              Dependabot PRs (#1 actions/checkout@v6, #2
+              actions/upload-artifact@v7, #3
+              softprops/action-gh-release@v3) will re-run
+              against a clean main + can merge cleanly.
+
   cycle 727 — **Comprehensive production-grade audit pass (724-727)**:
               Closes the Stop-hook ask for `entire-terminal`
               analysis with three parallel Explore agents

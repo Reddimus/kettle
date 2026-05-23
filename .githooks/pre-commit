@@ -69,10 +69,18 @@ if [ -n "$shell_changes" ] && command -v shellcheck >/dev/null 2>&1; then
     shellcheck $shell_changes
 fi
 
-echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test ..." >&2
+echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test + cargo doc ..." >&2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Cycle 728: rustdoc gate. Pre-728 the local gauntlet skipped
+# `cargo doc -D warnings`; cycle-722's `<unix>-<pid>` placeholder
+# in a doc comment slipped past local clippy (which doesn't run
+# rustdoc lints) and only failed in CI's `cargo doc` step. The
+# CONTRIBUTING.md promise was that local gauntlet = CI gate; this
+# closes that gap. Catches `rustdoc::invalid-html-tags` +
+# `rustdoc::broken-intra-doc-links` at commit time.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 elapsed=$(($(date +%s) - start_sec))
 # Render 0s as "<1s" so an incremental rebuild that completed
 # faster than seconds-resolution doesn't print a misleading "(0s)".

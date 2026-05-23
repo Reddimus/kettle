@@ -139,7 +139,7 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
 /// sub-cycle 5 will supply it) and returns `Some(Ssh { host, user })`
 /// if the argv shape matches an `ssh` invocation, else `None`.
 ///
-/// Recognized argv[0] values: `ssh`, `sshpass`. (`autossh` is a
+/// Recognized `argv[0]` values: `ssh`, `sshpass`. (`autossh` is a
 /// reasonable extension; deferred to follow-up.)
 ///
 /// Host extraction:
@@ -220,7 +220,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
 /// The container token is the first non-option argv element after
 /// the `exec` / `attach` subcommand (skipping `-flag value` pairs).
 ///
-/// Pure — argv-in, Option<RemoteContext>-out. Unit-testable.
+/// Pure — argv-in, `Option<RemoteContext>`-out. Unit-testable.
 pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     let exe = argv.first()?.split('/').next_back().unwrap_or("");
     let runtime = match exe {
