@@ -6,6 +6,63 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.39.0] — 2026-05-22
+
+Doc-accuracy release. Justfile + CONTRIBUTING got a `gauntlet-strict`
+recipe for release-cut pre-flight, three field doc-comments in
+`app.rs` corrected to reflect post-helper-extraction reality, and
+the cycle-471 helper rustdoc gained a maintenance note for future
+contributors.
+
+  cycle 478 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries extended
+              to v1.38.0 (cycles 411-475, 7 releases, 65 cycles).
+
+  cycle 479 — `Justfile` gained `just gauntlet-strict` — chains
+              gauntlet + deny + machete for release-cut pre-flight.
+              Daily-iter contributors still use plain `just
+              gauntlet`; the strict variant catches stale supply-
+              chain ignores + unused deps before tagging.
+
+  cycle 480 — `CONTRIBUTING.md` "Releasing" flow documents
+              `just gauntlet-strict` as step 3 between CHANGELOG
+              commit + `scripts/release.sh`. Drive-by caught
+              a duplicate "step 4" numbering bug.
+
+  cycle 481 — `CONTRIBUTING.md` recipe enumeration lists both
+              `gauntlet` + `gauntlet-strict` (was missing both
+              composite recipes despite naming deny / machete).
+
+  cycle 482 — `CONTRIBUTING.md` enum reordered to match Justfile
+              section order (build/release before gauntlet, not
+              after). Justfile is the source of truth.
+
+  cycle 483 — **Doc-accuracy fix.** `pending_pane_restarts` doc
+              said "respawns into the same pane id slot" — that
+              was cycle-412 intent, but cycle 418 actually shipped
+              spawn-as-new-tab. Doc rewritten to match
+              implementation + cite cycle-452 dedup follow-up.
+
+  cycle 484 — **Doc-accuracy fix.** `lua_engine` field doc listed
+              3 LuaEvent emission sites and named "Mux mutations"
+              directly. Updated to 5-site enumeration with the
+              canonical helper for each (cycles 367/378/424/425)
+              + cross-link to `drain_lua_hook_commands` (cycles
+              426-428, 433).
+
+  cycle 485 — **Verification fix.** Cycle 484 said 
+              `fire_tab_close_event` has 4 call sites; `grep`
+              found 5 (tab-bar ✕-click handler has 2 branches
+              that both fire the helper, plus 3 keyboard /
+              handoff paths). Doc count corrected with "2 click-
+              handler branches" note for future readers.
+
+  cycle 486 — `extra_check_config_lines` rustdoc gained an
+              "Adding a new branch:" maintenance note that
+              names both cycle-471 test guards. Future contri-
+              butors adding an 8th opt-in echo see the test-
+              extension contract without grep-hunting.
+
 ## [1.38.0] — 2026-05-22
 
 Doc-durability release. One more `--check-config` echo (status-bar),
