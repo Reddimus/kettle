@@ -46,6 +46,24 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 584 — **Bg-image decompression-bomb defense.** Companion
+              to cycle 576 (PTY-layer kitty/iTerm2 images) at the
+              renderer crate's user-configurable
+              `background-image` path. `image::open(p) + to_rgba8()`
+              had no dimension or alloc limits; a malicious file
+              masquerading as a 4K wallpaper could OOM kettle on
+              launch via the same PNG/JPEG/GIF/WebP/BMP
+              decompression-bomb shape. Switched to
+              `image::ImageReader::open(p).with_guessed_format()`
+              + `reader.limits(MAX_BG_IMAGE_DIM=8192,
+              MAX_BG_IMAGE_BYTES=256 MiB)`. Threat model is
+              weaker than the PTY path (config-file source, not
+              attacker-controlled at runtime) but the defensive
+              pattern is the same. Drift guard
+              `rejects_oversized_dimensions` writes an 8193 × 1
+              RGBA PNG to a temp file and asserts decode returns
+              None. Workspace tests 332 → 333.
+
   cycle 582 — **Kitty per-id derivative-map saturation sweep.**
               Final link in the cycle-576..581 kitty
               resource-cap chain. The store cap from cycle 581

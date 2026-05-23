@@ -24,6 +24,17 @@
 
 use std::path::Path;
 
+/// Cycle 584 decompression-bomb defense for the user-configured
+/// `background-image` path. The bg-image source is a config-file
+/// path (not attacker-controlled at the PTY layer), so the threat
+/// model is weaker than the kitty graphics path that motivated
+/// cycle 576 — but a malicious download masquerading as a 4K
+/// wallpaper could still OOM kettle on launch via the same
+/// PNG/JPEG/GIF/WebP/BMP decompression-bomb shape. Reuse the
+/// same per-axis + total-alloc envelope as `kettle_vt::image`.
+const MAX_BG_IMAGE_DIM: u32 = 8192;
+const MAX_BG_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Decoded RGBA image ready for texture upload. Width/height in
 /// pixels; data is tightly-packed RGBA8 (4 bytes per pixel).
 #[derive(Debug, Clone)]
@@ -143,7 +154,34 @@ pub fn decode_bg_image(path: &str) -> Option<BgImage> {
         log::warn!("background-image: file not found: {}", p.display());
         return None;
     }
-    match image::open(p) {
+    // Cycle 584: bound the decoder against PNG/JPEG/GIF/WebP/BMP
+    // decompression bombs. `image::open` is a convenience wrapper
+    // that decodes the whole DynamicImage; an attacker-supplied
+    // file with header dimensions of 2^31 × 2^31 would OOM during
+    // decode without these limits. Same envelope as cycle 576's
+    // PTY-layer fix in kettle-vt; surfaces a `log::warn` on
+    // exceedance and returns None (the bg-image just doesn't load).
+    let reader = match image::ImageReader::open(p) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("background-image open {}: {e}", p.display());
+            return None;
+        }
+    };
+    let reader = match reader.with_guessed_format() {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("background-image format-detect {}: {e}", p.display());
+            return None;
+        }
+    };
+    let mut reader = reader;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_BG_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_BG_IMAGE_DIM);
+    limits.max_alloc = Some(MAX_BG_IMAGE_BYTES);
+    reader.limits(limits);
+    match reader.decode() {
         Ok(img) => {
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
@@ -225,6 +263,29 @@ mod tests {
         // Spot-check: first pixel should be (0, 0, 255, 255) per
         // the encoding formula above.
         assert_eq!(&decoded.rgba[..4], &[0, 0, 255, 255]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Cycle 584 drift guard: bg-image decoder must reject a PNG
+    /// whose dimensions exceed `MAX_BG_IMAGE_DIM`, even though the
+    /// `image` crate is happy to keep decoding. Encodes a tiny
+    /// 8193 × 1 PNG (one px past the per-axis cap, ~32 KB on disk)
+    /// and asserts decode_bg_image returns None. Catches the
+    /// regression where a future refactor drops `reader.limits(...)`.
+    #[test]
+    fn rejects_oversized_dimensions() {
+        let w = (MAX_BG_IMAGE_DIM + 1) as usize;
+        let h = 1usize;
+        // Black RGBA: w * 1 * 4 = ~32 KB at width 8193.
+        let buf = vec![0u8; w * h * 4];
+        let img = image::RgbaImage::from_raw(w as u32, h as u32, buf).expect("rgba buffer");
+        let dir = std::env::temp_dir();
+        let path = dir.join("kettle-bg-image-cycle584-oversize.png");
+        img.save(&path).expect("write oversize png");
+        assert!(
+            decode_bg_image(path.to_str().unwrap()).is_none(),
+            "decode_bg_image must reject width {w} (cap {MAX_BG_IMAGE_DIM})"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
