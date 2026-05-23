@@ -155,8 +155,29 @@ install -Dm755 "${SCRIPT_DIR}/install.sh" "${PREFIX}/share/kettle/install.sh"
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${APP_DIR}" 2>/dev/null || true
 fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-  gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+# Cycle 540: only run gtk-update-icon-cache when the target dir has
+# an index.theme file. Without one, gtk-update-icon-cache prints "No
+# theme index file." (suppressed by 2>/dev/null) but still creates
+# an empty/broken cache file (~584 bytes). That broken cache stops
+# GNOME Shell from falling back to file-system icon scanning, so
+# the kettle icon doesn't show in the Activities Super-key search
+# even though the PNG/SVG files are correctly in place.
+#
+# The user-local hicolor dir (${PREFIX}/share/icons/hicolor/) is
+# meant to inherit the system /usr/share/icons/hicolor/index.theme;
+# no per-user index needs to exist. Skipping the cache call here
+# lets GNOME do directory scanning, which finds kettle.{png,svg}
+# correctly. If a future use case adds a custom theme with its own
+# index.theme, this guard lets the cache call fire for that theme.
+if command -v gtk-update-icon-cache >/dev/null 2>&1 \
+    && [ -f "${ICON_BASE}/index.theme" ]; then
+  gtk-update-icon-cache -f "${ICON_BASE}" 2>/dev/null || true
+fi
+# Clean up the broken empty cache cycle-253-era installs left in
+# ${ICON_BASE}/icon-theme.cache (only safe to remove when the dir
+# has no index.theme — otherwise it's a real cache for a real theme).
+if [ ! -f "${ICON_BASE}/index.theme" ] && [ -f "${ICON_BASE}/icon-theme.cache" ]; then
+  rm -f "${ICON_BASE}/icon-theme.cache"
 fi
 
 cat <<MSG
