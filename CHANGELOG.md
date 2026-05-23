@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 645 — **remote.py sub-cycle 4: Container detector**:
+              new `pub fn detect_container(argv: &[String]) ->
+              Option<RemoteContext>` covers the four container-
+              runtime exec argv shapes:
+                - `docker exec [-it] <container> <cmd> …`
+                - `podman exec [-it] <container> <cmd> …`
+                - `kubectl exec [-it] [-n ns] <pod> -- <cmd>`
+                - `lxc-attach [-n] <name>` (the `-n VALUE` is
+                  the container; specially-cased extraction)
+              Skips known value-taking flags (`-n` / `-u` /
+              `-c` / `-w` / `-e`), GNU `--flag=value` forms,
+              and the kubectl `--` separator. Returns None for
+              non-container argv (`docker ps`, `docker build`),
+              for `docker exec` with no container, and for
+              empty argv. Drift guard walks 11 input shapes.
+              Workspace tests 376 → 377.
+
   cycle 644 — **remote.py sub-cycle 3: SSH detector**: new
               `pub fn detect_ssh(argv: &[String]) -> Option<
               RemoteContext>` in `kettle-remote`. Pure — takes
