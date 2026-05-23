@@ -1344,13 +1344,14 @@ deliverables table. Highlights:
 - [x] 20 new `Action::*` variants fully wired end-to-end (cycles 342,
       384, 407).
 
-## v1.32.0 → v1.42.0 — post-sweep production polish (cycles 411-543, shipped)
+## v1.32.0 → v1.43.0 — post-sweep production polish (cycles 411-553, shipped)
 
-One hundred twenty-one cycles + eleven releases hardening the
+One hundred thirty-one cycles + twelve releases hardening the
 plugin contract, ergonomics, doc-accuracy, doc-durability,
 build-time infrastructure (opt-in pre-commit hook + shellcheck
-gate), crates.io metadata polish, and Linux-install icon-cache
-correctness around the v1.8.0 → v1.31.0 sweep. See
+gate), crates.io metadata polish, Linux-install icon-cache
+correctness, and packaging-template version lockstep enforcement
+around the v1.8.0 → v1.31.0 sweep. See
 `docs/TERMINATOR-AUDIT.md`'s post-sweep section for the full
 breakdown.
 

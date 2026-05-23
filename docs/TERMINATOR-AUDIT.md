@@ -578,11 +578,11 @@ same UX, or an explicit Bucket-E rationale for paradigm-divergent features
 adoption variant of detachable tabs — a kettle-internal optimization,
 not a missing Terminator feature.
 
-## Post-sweep polish (cycles 411-543, v1.32.0 → v1.42.0, 11 releases)
+## Post-sweep polish (cycles 411-553, v1.32.0 → v1.43.0, 12 releases)
 
-After the Terminator-parity sweep landed at v1.31.0, cycles 411-543 ran
+After the Terminator-parity sweep landed at v1.31.0, cycles 411-553 ran
 a production-grade hardening pass on the new surfaces. One hundred
-twenty-one cycles, eleven tagged releases, +14 tests, plus a UX-
+thirty-one cycles, twelve tagged releases, +14 tests, plus a UX-
 observability sweep that surfaced all 7 Terminator-parity opt-in
 keys in `--check-config`, plus a doc-durability sweep that scrubbed
 internal cycle refs from every user-facing surface and extended the
@@ -606,7 +606,8 @@ prevented GNOME from resolving Icon=kettle in user-local installs):
                               v1.39.0 (cycles 478-486) ·
                               v1.40.0 (cycles 489-497) ·
                               v1.41.0 (cycles 511-521) ·
-                              v1.42.0 (cycles 524-543)
+                              v1.42.0 (cycles 524-543) ·
+                              v1.43.0 (cycles 547-553)
   Plugin-contract bug fixes   6 silent event-bypass sites covered:
                               remote-control new-tab → TabAdd
                               (cycle 423); 3 close_tab paths →

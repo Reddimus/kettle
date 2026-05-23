@@ -147,7 +147,7 @@ Comparative analysis behind these choices (with citations) is in
 
 The v1.8.0 → v1.31.0 sweep added four major subsystems. Each has its
 own design doc; the architectural integration is summarized here.
-Cycles 411-543 (v1.32.0 → v1.42.0) hardened the plugin contract,
+Cycles 411-553 (v1.32.0 → v1.43.0) hardened the plugin contract,
 extended drift guards, surfaced opt-in keys via `--check-config`
 echo lines, scrubbed internal cycle refs from every user-facing
 doc surface (incl. binary stdout), corrected 3 stale field
