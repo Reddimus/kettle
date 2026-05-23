@@ -367,12 +367,19 @@ pub enum AskBeforeClosing {
 /// The sunrise/sunset variant (lat/long-driven) is a sub-cycle 5
 /// follow-up — needs a small solar-position computation that the
 /// `sunrise` crate handles, plus explicit-lat/long config keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThemeSchedule {
     Clock {
         dark_at: (u8, u8),
         light_at: (u8, u8),
     },
+    /// Cycle 669 (sub-cycle 6 of auto-theme design): switch theme
+    /// at sunrise (→ light) and sunset (→ dark) computed from
+    /// configured lat/long. Privacy posture: kettle does NOT
+    /// do IP-geo or OS-location lookups — `theme-schedule-lat`
+    /// and `theme-schedule-long` are supplied explicitly.
+    /// Solar-position math lands in sub-cycle 7.
+    SunriseSunset { lat: f64, long: f64 },
 }
 
 /// Cycle 664: pure decision for `ThemeSchedule::Clock`.
@@ -390,7 +397,12 @@ pub enum ThemeSchedule {
 /// 4 representative shapes (normal day, wrap past midnight,
 /// exactly-on-boundary, dawn = dusk degenerate).
 pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> bool {
-    let ThemeSchedule::Clock { dark_at, light_at } = schedule;
+    // Cycle 669: SunriseSunset variant has its own decision helper
+    // (sub-cycle 7); this helper only handles Clock. Defensive
+    // default-to-light for non-Clock to keep the caller pure.
+    let ThemeSchedule::Clock { dark_at, light_at } = schedule else {
+        return false;
+    };
     let now = (now_hm.0 as u32) * 60 + (now_hm.1 as u32);
     let dark = (dark_at.0 as u32) * 60 + (dark_at.1 as u32);
     let light = (light_at.0 as u32) * 60 + (light_at.1 as u32);
@@ -420,6 +432,21 @@ pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> boo
 /// Pure — string-in, optional-schedule-out. Unit-testable.
 pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
     let value = value.trim();
+    // Cycle 669: `theme-schedule = sunrise/sunset` is the
+    // sunrise-mode trigger. The actual lat/long live in their
+    // own config keys (read by parse_collect); the value here
+    // is a placeholder (0.0/0.0 until the caller patches them in).
+    // Sub-cycle 7 reconciles the post-parse lat/long override.
+    let lowered = value.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "sunrise/sunset" | "sunrise-sunset" | "sunrise_sunset" | "solar" | "auto"
+    ) {
+        return Some(ThemeSchedule::SunriseSunset {
+            lat: 0.0,
+            long: 0.0,
+        });
+    }
     let (a, b) = value.split_once(',')?;
     let parse_entry = |s: &str| -> Option<((u8, u8), &'static str)> {
         let s = s.trim();
@@ -831,7 +858,20 @@ pub struct Config {
     /// alone governs the choice). When `Some(Clock { dark_at,
     /// light_at })`, the App's poll loop (sub-cycle 5 follow-up)
     /// will flip the theme on minute boundaries.
+    ///
+    /// Cycle 669 (sub-cycle 6): `Some(SunriseSunset { lat, long })`
+    /// is the sunrise/sunset-driven variant; the actual lat/long
+    /// come from `theme_schedule_lat` + `theme_schedule_long`
+    /// fields below (post-process patches the variant once both
+    /// halves of the config are parsed).
     pub theme_schedule: Option<ThemeSchedule>,
+    /// Cycle 669: latitude for sunrise/sunset-based theme schedule.
+    /// Range `[-90.0, 90.0]`; outside this range parses as None +
+    /// triggers a `--check-config` malformed-value diagnostic.
+    pub theme_schedule_lat: Option<f64>,
+    /// Cycle 669: longitude for sunrise/sunset-based theme schedule.
+    /// Range `[-180.0, 180.0]`.
+    pub theme_schedule_long: Option<f64>,
     /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
@@ -1189,6 +1229,8 @@ impl Default for Config {
             log_strip_ansi: false,
             theme_mode: ThemeMode::Explicit,
             theme_schedule: None,
+            theme_schedule_lat: None,
+            theme_schedule_long: None,
             light_theme: String::new(),
             dark_theme: String::new(),
             icon_bell: true,
@@ -2293,7 +2335,32 @@ impl Config {
                     // (whitespace flexible). The dark + light are
                     // role tags; either can come first. Garbage
                     // values leave theme_schedule as None.
+                    //
+                    // Cycle 669 (sub-cycle 6): `theme-schedule =
+                    // sunrise/sunset` enables the lat/long-driven
+                    // variant. The lat/long come from the
+                    // theme-schedule-lat + theme-schedule-long
+                    // keys and are patched in at end-of-parse.
                     cfg.theme_schedule = parse_theme_schedule(&e.value);
+                }
+                "theme-schedule-lat" | "theme_schedule_lat" => {
+                    if let Ok(v) = e.value.trim().parse::<f64>()
+                        && (-90.0..=90.0).contains(&v)
+                    {
+                        cfg.theme_schedule_lat = Some(v);
+                    }
+                }
+                "theme-schedule-long"
+                | "theme_schedule_long"
+                | "theme-schedule-lon"
+                | "theme_schedule_lon"
+                | "theme-schedule-longitude"
+                | "theme_schedule_longitude" => {
+                    if let Ok(v) = e.value.trim().parse::<f64>()
+                        && (-180.0..=180.0).contains(&v)
+                    {
+                        cfg.theme_schedule_long = Some(v);
+                    }
                 }
                 "light-theme" | "light_theme" => {
                     if let Some(canonical) = Theme::find_name(&e.value) {
@@ -2653,6 +2720,18 @@ impl Config {
         // never read).
         if cfg.force_no_bell {
             cfg.bell = BellMode::Off;
+        }
+        // Cycle 669: patch the SunriseSunset variant with the
+        // parsed lat/long now that both halves of the config
+        // are read. If lat OR long is missing, downgrade the
+        // schedule to None (sunrise mode needs both halves).
+        if let Some(ThemeSchedule::SunriseSunset { .. }) = cfg.theme_schedule {
+            match (cfg.theme_schedule_lat, cfg.theme_schedule_long) {
+                (Some(lat), Some(long)) => {
+                    cfg.theme_schedule = Some(ThemeSchedule::SunriseSunset { lat, long });
+                }
+                _ => cfg.theme_schedule = None,
+            }
         }
         unknown.sort();
         unknown.dedup();
@@ -5020,6 +5099,91 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 669 drift guard. `theme-schedule = sunrise/sunset`
+    /// parses + the lat/long config keys patch the SunriseSunset
+    /// variant at end-of-parse. If lat OR long is missing, the
+    /// schedule downgrades to None (both halves required).
+    #[test]
+    fn theme_schedule_sunrise_sunset_with_lat_long() {
+        // Both halves: schedule populated.
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-lat = 37.7749\n\
+             theme-schedule-long = -122.4194\n",
+        );
+        match cfg.theme_schedule {
+            Some(ThemeSchedule::SunriseSunset { lat, long }) => {
+                assert!((lat - 37.7749).abs() < 1e-6);
+                assert!((long - (-122.4194)).abs() < 1e-6);
+            }
+            other => panic!("expected SunriseSunset; got {other:?}"),
+        }
+        // Alias spellings accepted.
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise-sunset\n\
+             theme-schedule-lat = 0\n\
+             theme-schedule-long = 0\n",
+        );
+        assert!(matches!(
+            cfg.theme_schedule,
+            Some(ThemeSchedule::SunriseSunset { .. })
+        ));
+        let cfg = Config::parse_text(
+            "theme-schedule = solar\n\
+             theme-schedule-lat = 10\n\
+             theme-schedule-long = 20\n",
+        );
+        assert!(matches!(
+            cfg.theme_schedule,
+            Some(ThemeSchedule::SunriseSunset { .. })
+        ));
+        // Underscore-spelled lat/long keys.
+        let cfg = Config::parse_text(
+            "theme_schedule = sunrise/sunset\n\
+             theme_schedule_lat = 51.5\n\
+             theme_schedule_long = -0.1\n",
+        );
+        assert!(matches!(
+            cfg.theme_schedule,
+            Some(ThemeSchedule::SunriseSunset { .. })
+        ));
+        // longitude alias.
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-lat = 0\n\
+             theme-schedule-lon = 0\n",
+        );
+        assert!(matches!(
+            cfg.theme_schedule,
+            Some(ThemeSchedule::SunriseSunset { .. })
+        ));
+        // Missing lat → downgrade to None.
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-long = 0\n",
+        );
+        assert!(cfg.theme_schedule.is_none());
+        // Missing long → downgrade to None.
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-lat = 0\n",
+        );
+        assert!(cfg.theme_schedule.is_none());
+        // Out-of-range lat ignored (parses as None on that key).
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-lat = 91\n\
+             theme-schedule-long = 0\n",
+        );
+        assert!(cfg.theme_schedule.is_none(), "lat > 90 is invalid");
+        let cfg = Config::parse_text(
+            "theme-schedule = sunrise/sunset\n\
+             theme-schedule-lat = 0\n\
+             theme-schedule-long = 181\n",
+        );
+        assert!(cfg.theme_schedule.is_none(), "long > 180 is invalid");
     }
 
     /// Cycle 664 drift guard. `parse_theme_schedule` accepts

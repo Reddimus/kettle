@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 669 — **auto-theme sub-cycle 6: sunrise/sunset variant
+              + lat/long config keys**:
+                - new `ThemeSchedule::SunriseSunset { lat,
+                  long }` enum variant (the design's no-clock
+                  geo-driven mode)
+                - new config keys `theme-schedule-lat` (range
+                  `-90..=90`) and `theme-schedule-long` (range
+                  `-180..=180`) — out-of-range values silently
+                  reject. Aliases: `theme-schedule-lon`,
+                  `theme-schedule-longitude`, underscore forms.
+                - `parse_theme_schedule` recognizes
+                  `sunrise/sunset`, `sunrise-sunset`, `solar`,
+                  `auto` as the sunrise-mode trigger
+                - post-process at end-of-parse patches the
+                  SunriseSunset variant with the parsed
+                  lat/long. If lat OR long is missing,
+                  downgrades the schedule to `None` (both
+                  halves required).
+                - `schedule_decision_clock` now uses
+                  `let-else` to defensively default-to-light
+                  on the SunriseSunset variant (its own
+                  decision helper lands in sub-cycle 7).
+              Drift guard `theme_schedule_sunrise_sunset_with_lat_long`
+              walks 9 input shapes: happy path, 3 sunrise-
+              spelling aliases, 1 underscore-key form, 1
+              longitude-alias form, 3 downgrade cases
+              (missing lat / missing long / lat out of
+              range / long out of range).
+              **Privacy posture upheld**: kettle never makes
+              network requests for theme purposes; no GeoClue2
+              / CoreLocation prompts. Lat/long are explicit
+              user config.
+              Workspace tests 387 → 388. Auto-theme port: 6/7
+              sub-cycles complete.
+
   cycle 668 — **vertical-tabs sub-cycle 4: tab_bar() stacks
               segments vertically for Left/Right**: the
               cycle-647/665 layout-side foundations + this
