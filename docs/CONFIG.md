@@ -44,6 +44,9 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
+| `handle-size` | int -1–50 px | `-1` | Split-divider stroke width. `-1` = use the theme default (1 px). Higher values give a chunkier divider — useful on high-DPI displays where 1 px is hard to see |
+| `geometry-hinting` | bool | `false` | When `true`, request that the window manager resize the kettle window in steps that match the font cell grid (so a resize always lands on integral rows/columns instead of mid-cell pixel offsets). Best-effort: respected by X11 + Windows window managers via winit; ignored on Wayland (compositor manages sizing) |
+| `focus` | `click`\|`sloppy`\|`system` | `click` | Focus-follows-mouse policy. `click` (default) — focus on click. `sloppy` — focus on cursor movement; pane under the cursor becomes focused without clicking. `system` — kettle treats this as `click` (winit doesn't expose the OS-level focus policy, so the OS-managed mode falls back to explicit-click behavior) |
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS window title template — placeholders `{title}` (active pane title), `{cwd}` (active pane cwd), `{tab}` (1-based tab index); `{{`/`}}` escape literal braces |
 | `tab-format` (`tab-title-format`) | string | `{n}: {title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). The trailing `✕` close button is appended by the renderer |
@@ -121,8 +124,6 @@ has no runtime effect today.
 | `cursor-color-default` | Use the system / terminal cursor color rather than a config override |
 | `detachable-tabs` | Allow tabs to be dragged out into separate windows. kettle implements this end-to-end via `Action::MoveTabToNewWindow`; the config toggle isn't wired (the feature is always available) |
 | `extra-styling` | Render bold/italic with the styled-font features even when palette lacks the variants |
-| `geometry-hinting` | GTK-specific window-size step constraints |
-| `handle-size` | Split-divider grab-width in px |
 | `hide-from-taskbar` | Suppress the window from the taskbar / task switcher |
 | `homogeneous-tabbar` | Equal-width tab segments |
 | `http-proxy` | Pass-through HTTP proxy for any HTTP fetches the binary makes (kettle doesn't make any today) |
@@ -133,7 +134,6 @@ has no runtime effect today.
 | `split-to-group` | New splits join the parent's broadcast group |
 | `sticky` | Pin the window above other windows (kettle's `always-on-top` is the implemented variant) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides |
-| `focus` | Focus-follows-mouse mode (click / sloppy / system) — kettle uses click-focus exclusively |
 
 A future cycle wiring any of the above moves the row out of this
 table + into the main `Terminator-parity keys` table above.
