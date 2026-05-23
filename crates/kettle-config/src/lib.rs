@@ -1571,12 +1571,17 @@ impl Config {
                         }
                     }
                 }
-                "background" => {
+                "background" | "background-color" | "background_color" => {
+                    // Cycle 623 (Terminator parity): kettle's canonical key
+                    // is `background`; `background-color` + `background_color`
+                    // are accepted as compatibility aliases so a Terminator
+                    // config copies in without rename. Same for `foreground`
+                    // and the cursor / fullscreen keys below.
                     if let Some(c) = Rgb::parse(&e.value) {
                         cfg.theme.background = c;
                     }
                 }
-                "foreground" => {
+                "foreground" | "foreground-color" | "foreground_color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
                         cfg.theme.foreground = c;
                     }
@@ -1655,14 +1660,17 @@ impl Config {
                         cfg.background_opacity = v.clamp(0.0, 1.0);
                     }
                 }
-                "cursor-style" => {
+                "cursor-style" | "cursor-shape" | "cursor_shape" => {
+                    // Cycle 623 (Terminator parity): Terminator's
+                    // `cursor_shape` is kettle's `cursor-style`. Same
+                    // enum values (`block` / `underline` / `bar`).
                     cfg.cursor_style = match e.value.to_ascii_lowercase().as_str() {
                         "underline" => CursorStyle::Underline,
                         // `beam` is Alacritty's name for the same
                         // vertical-bar cursor; cycle 142 added the
                         // alias so Alacritty refugees don't get a
                         // silent Block fallback.
-                        "bar" | "beam" => CursorStyle::Bar,
+                        "bar" | "beam" | "ibeam" | "i-beam" => CursorStyle::Bar,
                         _ => CursorStyle::Block,
                     }
                 }
@@ -1677,7 +1685,11 @@ impl Config {
                 // `scroll-on-output`, `mouse-hide-while-typing`) accept
                 // the standard true/false aliases. Bad values keep the
                 // current value (no silent flip).
-                "cursor-style-blink" => {
+                "cursor-style-blink" | "cursor-blink" | "cursor_blink" => {
+                    // Cycle 623 (Terminator parity, config.py:165
+                    // `cursor_blink`): Terminator's bool maps to
+                    // kettle's `cursor-style-blink`. Default true
+                    // matches both.
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.cursor_blink = b;
                     }
@@ -1973,6 +1985,18 @@ impl Config {
                         "hidden" => WindowState::Hidden,
                         _ => WindowState::Normal,
                     };
+                }
+                "full-screen" | "full_screen" => {
+                    // Cycle 623 (Terminator parity, config.py:159
+                    // `full_screen`): Terminator splits "should start
+                    // fullscreen" into its own bool while kettle uses
+                    // `window-state = fullscreen`. Compat alias: when
+                    // `full_screen = true`, override window_state to
+                    // Fullscreen. `false` is a no-op (doesn't override
+                    // a separately-set window-state).
+                    if let Some(true) = parse_bool(&e.value) {
+                        cfg.window_state = WindowState::Fullscreen;
+                    }
                 }
                 "geometry-hinting" | "geometry_hinting" => {
                     if let Some(b) = parse_bool(&e.value) {
@@ -4704,6 +4728,75 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 623 drift guard. Terminator-spelling aliases for kettle's
+    /// canonical color / cursor / fullscreen keys. A user copying a
+    /// Terminator config should bind these without rename.
+    #[test]
+    fn terminator_color_cursor_aliases_parse() {
+        // Background + foreground aliases.
+        let cfg = Config::parse_text(
+            "background-color = #112233\n\
+             foreground-color = #ddeeff\n",
+        );
+        assert_eq!(
+            cfg.theme.background,
+            Rgb {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33
+            }
+        );
+        assert_eq!(
+            cfg.theme.foreground,
+            Rgb {
+                r: 0xdd,
+                g: 0xee,
+                b: 0xff
+            }
+        );
+        // Underscore form also works.
+        let cfg = Config::parse_text(
+            "background_color = #001100\n\
+             foreground_color = #ffeedd\n",
+        );
+        assert_eq!(
+            cfg.theme.background,
+            Rgb {
+                r: 0x00,
+                g: 0x11,
+                b: 0x00
+            }
+        );
+        assert_eq!(
+            cfg.theme.foreground,
+            Rgb {
+                r: 0xff,
+                g: 0xee,
+                b: 0xdd
+            }
+        );
+        // cursor-shape (Terminator) maps to cursor_style (kettle).
+        let cfg = Config::parse_text("cursor-shape = ibeam\n");
+        assert_eq!(cfg.cursor_style, CursorStyle::Bar);
+        let cfg = Config::parse_text("cursor_shape = underline\n");
+        assert_eq!(cfg.cursor_style, CursorStyle::Underline);
+        let cfg = Config::parse_text("cursor-shape = block\n");
+        assert_eq!(cfg.cursor_style, CursorStyle::Block);
+        // cursor-blink (Terminator) maps to cursor_blink (kettle).
+        let cfg = Config::parse_text("cursor-blink = false\n");
+        assert!(!cfg.cursor_blink);
+        let cfg = Config::parse_text("cursor_blink = true\n");
+        assert!(cfg.cursor_blink);
+        // full-screen = true → WindowState::Fullscreen.
+        let cfg = Config::parse_text("full-screen = true\n");
+        assert_eq!(cfg.window_state, WindowState::Fullscreen);
+        let cfg = Config::parse_text("full_screen = true\n");
+        assert_eq!(cfg.window_state, WindowState::Fullscreen);
+        // full-screen = false is a no-op (doesn't override existing).
+        let cfg = Config::parse_text("window-state = maximise\nfull-screen = false\n");
+        assert_eq!(cfg.window_state, WindowState::Maximise);
     }
 
     /// Cycle 622 drift guard. `parse_trigger_with_command` is the

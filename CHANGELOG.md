@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 623 — **Terminator color / cursor / fullscreen key
+              aliases (Terminator config copies in unchanged)**:
+                - `background-color` / `background_color` → kettle's
+                  canonical `background` key
+                - `foreground-color` / `foreground_color` → kettle's
+                  canonical `foreground` key
+                - `cursor-shape` / `cursor_shape` → kettle's
+                  `cursor-style` (`block` / `underline` / `bar`;
+                  also accepts `ibeam` / `i-beam` for Terminator's
+                  spelling of the vertical bar)
+                - `cursor-blink` / `cursor_blink` → kettle's
+                  `cursor-style-blink`
+                - `full-screen` / `full_screen = true` → sets
+                  `window_state` to `Fullscreen` (false is a no-op
+                  to preserve a separately-set window-state)
+              All canonical key behaviors unchanged; just additional
+              spelling acceptance. Drift guard
+              `terminator_color_cursor_aliases_parse` walks 11 input
+              shapes. Workspace tests 366 → 367.
+
   cycle 622 — **`plugins/run_cmd_on_match.py` parity**:
                 - `trigger = REGEX :: cmd arg1 arg2` extends
                   cycle-289 trigger syntax with a `::` separator.
