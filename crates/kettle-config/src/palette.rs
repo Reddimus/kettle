@@ -143,6 +143,7 @@ mod tests {
             InsertPaneNumber,
             InsertPanePadded,
             InsertPaneName,
+            OpenCwdInFileManager,
         ];
         // Enumerate every Action variant explicitly via this exhaustive
         // list; if a future variant is added the match below fails to
@@ -211,6 +212,7 @@ mod tests {
             InsertPaneNumber,
             InsertPanePadded,
             InsertPaneName,
+            OpenCwdInFileManager,
             NextProfile,
             PrevProfile,
             ZoomInAll,
@@ -292,6 +294,7 @@ mod tests {
                 | InsertPaneNumber
                 | InsertPanePadded
                 | InsertPaneName
+                | OpenCwdInFileManager
                 | NextProfile
                 | PrevProfile
                 | ZoomInAll

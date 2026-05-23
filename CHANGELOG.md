@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 607 — **`Action::OpenCwdInFileManager`** (Terminator parity,
+              `terminatorlib/plugins/dir_open.py` → `CurrDirOpen`
+              menu item). New action that reads the focused pane's
+              OSC-7-reported cwd, builds `file://<cwd>`, and
+              routes through the existing `open_url` machinery —
+              re-uses the cycle-374 Lua URL-handler dispatch,
+              cycle-X `custom-url-handler` config override, and
+              `kettle_core::links::is_safe_url` allowlist for
+              free (identical shape to clicking a `file://...`
+              hyperlink in pane output). Falls back to a
+              `log::info` hint about `kettle --shell-integration
+              bash` when no OSC 7 cwd is available. Aliases:
+              `open_cwd`, `open-cwd`, `open_cwd_in_file_manager`,
+              `open-cwd-in-file-manager`. Drift guard:
+              `from_name_accepts_open_cwd_in_file_manager_aliases`.
+              Workspace tests 347 → 348.
+
   cycle 606 — **`Action::InsertPaneName`** (Terminator parity,
               `terminatorlib/plugins/insert_term_name.py`). New
               action that sends the focused pane's title to the

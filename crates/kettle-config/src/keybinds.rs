@@ -224,6 +224,15 @@ pub enum Action {
     /// came from, or for keyboard-driven copy-the-current-title
     /// workflows.
     InsertPaneName,
+    /// Cycle 607 Terminator parity (`dir_open.py` plugin →
+    /// `CurrDirOpen` menu item): open the focused pane's current
+    /// working directory in the OS file manager. Builds a
+    /// `file://<cwd>` URI and routes through the existing
+    /// `Action::OpenUrl` machinery (cycle 374) so the
+    /// `is_safe_url` allowlist + custom-url-handler + Lua hook
+    /// path all apply consistently — exactly like clicking a
+    /// `file://...` hyperlink in pane output.
+    OpenCwdInFileManager,
     /// Cycle 342 Terminator parity (key_next_profile): cycle to the
     /// next named profile at runtime.
     NextProfile,
@@ -524,6 +533,9 @@ impl Action {
             "insert_padded" | "insert-padded" | "insert_pane_padded" => InsertPanePadded,
             "insert_name" | "insert-name" | "insert_pane_name" | "insert-pane-name"
             | "insert_term_name" | "insert-term-name" => InsertPaneName,
+            "open_cwd" | "open-cwd" | "open_cwd_in_file_manager" | "open-cwd-in-file-manager" => {
+                OpenCwdInFileManager
+            }
             "next_profile" | "next-profile" => NextProfile,
             "previous_profile" | "previous-profile" | "prev_profile" | "prev-profile" => {
                 PrevProfile
@@ -1278,6 +1290,27 @@ mod tests {
         // will reject — not unbind).
         for tok in ["copy", "no_action", "disabled", "off", "x"] {
             assert!(!is_unbind_token(tok), "{tok:?} should NOT be unbind");
+        }
+    }
+
+    /// Cycle 607 drift guard: each alias for the open-cwd-in-file-
+    /// manager action round-trips. Terminator's `dir_open.py`
+    /// plugin only exposes a menu item (no keybind name), so the
+    /// kettle-native `open_cwd` short form is the canonical spelling
+    /// — the longer forms exist for explicitness in config files
+    /// and a `--list-keybinds`-style display.
+    #[test]
+    fn from_name_accepts_open_cwd_in_file_manager_aliases() {
+        for s in [
+            "open_cwd",
+            "open-cwd",
+            "open_cwd_in_file_manager",
+            "open-cwd-in-file-manager",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::OpenCwdInFileManager)),
+                "alias {s:?} should parse to OpenCwdInFileManager"
+            );
         }
     }
 

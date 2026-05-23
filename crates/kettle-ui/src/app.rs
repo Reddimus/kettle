@@ -3607,6 +3607,31 @@ impl App {
                     p.term.write(title.as_bytes());
                 }
             }
+            // Cycle 607 Terminator parity (`dir_open.py` plugin →
+            // `CurrDirOpen` menu item). Open the focused pane's
+            // current working directory in the OS file manager.
+            // Builds `file://<cwd>` and routes through `open_url`
+            // so the cycle-374 Lua URL-handler dispatch + the
+            // cycle-X custom-url-handler config + the
+            // `is_safe_url` allowlist (which accepts `file://`
+            // without `..`) all apply consistently. Identical
+            // shape to clicking a `file://...` hyperlink in pane
+            // output — re-uses the safety policy for free.
+            Action::OpenCwdInFileManager => {
+                if let Some(cwd) = self
+                    .mux
+                    .focused()
+                    .and_then(|p| p.term.current_dir())
+                    .filter(|s| !s.is_empty())
+                {
+                    self.open_url(&format!("file://{cwd}"));
+                } else {
+                    log::info!(
+                        "Action::OpenCwdInFileManager: focused pane has no OSC 7 cwd \
+                         — set up shell integration with `kettle --shell-integration bash`"
+                    );
+                }
+            }
             // Cycle 345: half-page scroll. Same shape as cycle-X's
             // ScrollPageUp/Down handler but with half the row count.
             // Pull the row count from the focused pane's grid
