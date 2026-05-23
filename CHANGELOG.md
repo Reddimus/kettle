@@ -46,6 +46,23 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 586 — **Config-file read cap.** Companion to cycles 584
+              (bg-image) and 585 (session.json). `Config::
+              load_from_with_diagnostics` previously called
+              `std::fs::read_to_string(path)` unbounded — a
+              swap-attack on `~/.config/kettle/config` could OOM
+              kettle on launch. Cheap metadata pre-check against
+              `MAX_CONFIG_BYTES = 1 MiB` (~20× over the bundled
+              10 KB example, ~100× over typical user configs)
+              before any allocation; past the cap the function
+              falls through to `Config::default()` with a
+              `log::warn`. Drift guard
+              `load_from_with_diagnostics_rejects_oversize_config`
+              writes a 2 MiB file of legitimate config lines
+              (verifies the size gate fires BEFORE parsing —
+              even valid payload past the cap is refused).
+              Workspace tests 334 → 335.
+
   cycle 585 — **Session.json read-into-memory cap.** `session::
               load_from_path` previously called
               `std::fs::read_to_string(p)` with no size cap. A

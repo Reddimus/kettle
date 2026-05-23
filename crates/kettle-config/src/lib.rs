@@ -998,7 +998,26 @@ impl Config {
     /// `--check-config` flow) can use this directly. Missing file or read
     /// error → `(default(), [], [])`, same fallthrough as `load_from`,
     /// since the user already gets the error logged by `load_from`.
+    ///
+    /// Cycle 586: bound the read at 1 MiB. Real configs top out around 50
+    /// KB (the bundled `docs/kettle.example.config` is 10 KB); 1 MiB is
+    /// a ~20× margin over the bundled example and ~100× over typical
+    /// user configs while staying small enough to detect a swap-attack
+    /// blob before any allocation. Same defense-in-depth shape as cycle
+    /// 585 (session.json) and cycle 584 (bg-image).
     pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
+        const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > MAX_CONFIG_BYTES
+        {
+            log::warn!(
+                "config file {} is {} bytes (cap {MAX_CONFIG_BYTES}); \
+                 refusing to load — using defaults",
+                path.display(),
+                meta.len()
+            );
+            return (Config::default(), Vec::new(), Vec::new());
+        }
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 let (cfg, unknown) = Self::parse_collect(&text);
@@ -3499,6 +3518,41 @@ mod config_tests {
             "malformed: {malformed:?}"
         );
         // Cleanup; ignore failures (race-safe).
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Cycle 586 drift guard: an oversized config file (swap-attack
+    /// scenario; out of strict SECURITY.md scope but defense-in-depth)
+    /// must be refused via the metadata pre-check rather than read
+    /// into RAM. Asserts the 1 MiB cap is enforced and the function
+    /// falls through to Config::default() rather than allocating.
+    #[test]
+    fn load_from_with_diagnostics_rejects_oversize_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "kettle-load-from-diag-oversize-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("kettle.conf");
+        // Write a 2 MiB file (1 MiB over the cap). Content is
+        // valid-looking config lines so the test verifies the size
+        // gate fires BEFORE any parsing happens — even a perfectly
+        // legitimate config payload past the cap is refused.
+        let line = "font-size = 14\n";
+        let copies = (2 * 1024 * 1024) / line.len() + 1;
+        let oversize: String = line.repeat(copies);
+        std::fs::write(&path, &oversize).expect("write oversize config");
+        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&path);
+        // Defaults returned; no parsing happened.
+        let default_cfg = Config::default();
+        assert_eq!(cfg.font_size, default_cfg.font_size);
+        assert!(unknown.is_empty(), "no diagnostics past the cap");
+        assert!(malformed.is_empty(), "no diagnostics past the cap");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }
