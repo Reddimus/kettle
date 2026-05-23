@@ -87,6 +87,27 @@ pub enum BellMode {
     Both,
 }
 
+/// Cycle 641 (Terminator parity, `plugins/auto_theme.py`, sub-cycle 1
+/// of [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md)):
+/// theme-mode policy.
+///
+/// - `Explicit` — use the `theme = …` value as kettle has always
+///   done. Default; cycle-616 behavior unchanged.
+/// - `Light` — always use `light-theme`.
+/// - `Dark` — always use `dark-theme`.
+/// - `Auto` — follow the OS dark-mode preference at launch.
+///   Sub-cycle 2 wires the `dark-light` crate to actually
+///   subscribe; v1 of the *enum* just accepts the value so a
+///   Terminator config copies in clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    #[default]
+    Explicit,
+    Light,
+    Dark,
+    Auto,
+}
+
 /// Cycle 617 (Terminator parity, terminatorlib/config.py:117
 /// `case_sensitive`): scrollback-search case-sensitivity mode.
 ///
@@ -634,6 +655,13 @@ pub struct Config {
     /// Default false preserves cycle-621 raw-stream behavior
     /// (the log is `cat`-replayable in a terminal).
     pub log_strip_ansi: bool,
+    /// Cycle 641 (Terminator parity, `plugins/auto_theme.py`):
+    /// theme-mode policy. Default `Explicit` preserves cycle-616
+    /// "use the `theme = …` value" behavior. `Light` / `Dark` /
+    /// `Auto` are the Terminator AutoTheme modes; sub-cycle 2+ of
+    /// the auto-theme design will wire `Auto` to the OS dark-mode
+    /// subscribe.
+    pub theme_mode: ThemeMode,
     /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
@@ -989,6 +1017,7 @@ impl Default for Config {
             extra_styling: true,
             force_no_bell: false,
             log_strip_ansi: false,
+            theme_mode: ThemeMode::Explicit,
             light_theme: String::new(),
             dark_theme: String::new(),
             icon_bell: true,
@@ -2081,6 +2110,17 @@ impl Config {
                     if let Some(b) = parse_bool(&e.value) {
                         terminator_urgent_bell = Some(b);
                     }
+                }
+                "theme-mode" | "theme_mode" => {
+                    // Cycle 641 (Terminator parity, `plugins/auto_theme.py`).
+                    // Sub-cycle 1 of auto-theme design — surface only;
+                    // sub-cycle 2 wires the dark-light crate subscribe.
+                    cfg.theme_mode = match e.value.trim().to_ascii_lowercase().as_str() {
+                        "light" => ThemeMode::Light,
+                        "dark" => ThemeMode::Dark,
+                        "auto" | "system" | "follow-system" | "follow_system" => ThemeMode::Auto,
+                        _ => ThemeMode::Explicit,
+                    };
                 }
                 "light-theme" | "light_theme" => {
                     if let Some(canonical) = Theme::find_name(&e.value) {
@@ -4780,6 +4820,38 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 641 drift guard. `theme-mode` config parsing (sub-cycle
+    /// 1 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)). Default
+    /// preserves cycle-616 behavior (`Explicit`); the 3 Terminator
+    /// modes parse cleanly; aliases for `Auto` accommodate user
+    /// muscle memory.
+    #[test]
+    fn theme_mode_parses_terminator_values() {
+        use ThemeMode::*;
+        assert_eq!(Config::default().theme_mode, Explicit);
+        for (input, want) in [
+            ("theme-mode = explicit", Explicit),
+            ("theme-mode = light", Light),
+            ("theme-mode = dark", Dark),
+            ("theme-mode = auto", Auto),
+            ("theme-mode = system", Auto),
+            ("theme-mode = follow-system", Auto),
+            ("theme-mode = follow_system", Auto),
+            // Underscore key.
+            ("theme_mode = dark", Dark),
+            ("theme_mode = AUTO", Auto),
+            // Unknown value → default Explicit.
+            ("theme-mode = garbage", Explicit),
+        ] {
+            let cfg = Config::parse_text(&format!("{input}\n"));
+            assert_eq!(
+                cfg.theme_mode, want,
+                "input {input:?} should produce {want:?}"
+            );
+        }
     }
 
     /// Cycle 638 drift guard. `AskBeforeClosing::should_prompt` is

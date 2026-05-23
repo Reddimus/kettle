@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 641 — **auto-theme sub-cycle 1: `ThemeMode` enum +
+              `theme-mode` config key**: new `ThemeMode {
+              Explicit, Light, Dark, Auto }` enum on Config
+              (default `Explicit` preserves cycle-616 behavior).
+              Parser arm accepts kebab + underscore key spellings
+              and 4 alias values for `Auto` (`auto` / `system` /
+              `follow-system` / `follow_system`). Sub-cycle 2 of
+              [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md)
+              wires the `dark-light` crate subscribe; for now
+              this just lets a Terminator config copy in
+              cleanly without --check-config warnings. Drift
+              guard `theme_mode_parses_terminator_values` walks
+              10 input shapes. Workspace tests 372 → 373.
+
   cycle 640 — **terminalshot.py sub-cycle 1:
               `Action::TakeScreenshot` surface**: new Action
               variant + 4 aliases (`take_screenshot`,
