@@ -4235,6 +4235,9 @@ impl App {
             // so steady-state reloads (same family / same size) are free.
             r.set_font_family(new.font_family.clone());
             r.set_font_size(new.font_size);
+            // Cycle 636: pick up cell-width/cell-height changes too.
+            // Setter is a no-op when unchanged.
+            r.set_cell_scale(new.cell_width, new.cell_height);
         }
         // Cycle 290: re-compile triggers from the freshly-loaded config
         // BEFORE assigning, while `new` is still owned. Recompile

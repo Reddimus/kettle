@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 636 — **`cell_width` / `cell_height` renderer wiring
+              (Terminator parity, config.py)**: the config keys
+              were parsed (and clamped to [0.5, 3.0]) since
+              cycles 343-356 but didn't actually scale the
+              measured cell metrics. Now:
+                - Renderer gains `pub cell_scale_w: f32` +
+                  `pub cell_scale_h: f32` fields (default 1.0)
+                - constructor multiplies `measure_cell` results
+                  by these before storing `cell_w` / `cell_h`
+                - `remeasure_cell` (called on font-family /
+                  font-size change) preserves the scale
+                - new `pub fn set_cell_scale(w, h)` setter
+                  (no-op when unchanged; triggers re-measure)
+                - app.rs `reload_config` calls it alongside
+                  `set_font_family` + `set_font_size`
+              So a user with `cell-height = 1.5` now actually
+              gets 50% line spacing on next reload. Workspace
+              tests stay 370 (no new drift guard — the
+              multiplier is a one-line scale; behavior covered
+              by the existing measure_cell tests + the lint+
+              build gauntlet exercising the new fields).
+
   cycle 635 — **Audit doc reconciliation (round 5)**: 7 more
               audit rows reclassified:
                 - `inactive_color_offset` → ✅ shipped (both

@@ -386,6 +386,15 @@ pub struct Renderer {
     metrics: Metrics,
     pub cell_w: f32,
     pub cell_h: f32,
+    /// Cycle 636 (Terminator parity, `cell_width` / `cell_height`):
+    /// multiplicative scale applied to the measured cell metrics.
+    /// `(1.0, 1.0)` is the default — measured dimensions unchanged.
+    /// `(1.0, 1.5)` would space lines 50% taller; useful for users
+    /// with strong vision needs or fonts whose default leading is
+    /// too tight. Range clamped to `[0.5, 3.0]` at the config-parse
+    /// layer (kettle-config/src/lib.rs:cell-width/cell-height arms).
+    pub cell_scale_w: f32,
+    pub cell_scale_h: f32,
     pub scale: f32,
 }
 
@@ -492,6 +501,13 @@ impl Renderer {
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
+        // Cycle 636: honor cfg.cell_width / cell_height multipliers
+        // (Terminator parity). Values are pre-clamped to [0.5, 3.0]
+        // at parse time so the cell can't degenerate to 0 here.
+        let cell_scale_w = cfg.cell_width.max(0.01);
+        let cell_scale_h = cfg.cell_height.max(0.01);
+        let cell_w = cell_w * cell_scale_w;
+        let cell_h = cell_h * cell_scale_h;
 
         let quads = QuadPipeline::new(&device, format);
         let overlay_quads = QuadPipeline::new(&device, format);
@@ -530,6 +546,8 @@ impl Renderer {
             metrics,
             cell_w,
             cell_h,
+            cell_scale_w,
+            cell_scale_h,
             scale,
         })
     }
@@ -600,8 +618,29 @@ impl Renderer {
         let m = self.metrics;
         let mut measure = TextBuffer::new(&mut self.font_system, m);
         let (cw, ch) = measure_cell(&mut self.font_system, &mut measure, &family, m);
-        self.cell_w = cw;
-        self.cell_h = ch;
+        // Cycle 636: apply the configured cell_width/cell_height
+        // multipliers AFTER measurement so a font-family or font-
+        // size change preserves the user's chosen scale.
+        self.cell_w = cw * self.cell_scale_w.max(0.01);
+        self.cell_h = ch * self.cell_scale_h.max(0.01);
+    }
+
+    /// Cycle 636 (Terminator parity, `cell_width` / `cell_height`):
+    /// update the cell-scale multipliers + re-measure. Called by the
+    /// App's `reload_config` path when the user reloads with a new
+    /// `cell-width` / `cell-height` value. No-op when the requested
+    /// scale matches the current one.
+    pub fn set_cell_scale(&mut self, w: f32, h: f32) {
+        let w = w.max(0.01);
+        let h = h.max(0.01);
+        if (self.cell_scale_w - w).abs() < f32::EPSILON
+            && (self.cell_scale_h - h).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.cell_scale_w = w;
+        self.cell_scale_h = h;
+        self.remeasure_cell();
     }
 
     /// Render a full frame of tiled panes plus the tab bar and search overlay.
