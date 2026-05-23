@@ -212,16 +212,23 @@ Flow:
 1. Land your changes on `main`.
 2. Add a `## [X.Y.Z] — YYYY-MM-DD` section to `CHANGELOG.md`
    describing what changed since the previous version. Commit it.
-3. Run `scripts/release.sh X.Y.Z`. It refuses to proceed if the
+3. Run `just gauntlet-strict` to verify every CI workflow's
+   check (fmt / clippy / build / test / doc / cargo-deny /
+   cargo-machete) passes locally first. The plain `just
+   gauntlet` mirrors every-PR CI; the `-strict` variant adds
+   the supply-chain CI workflows that run on Cargo.lock
+   changes, so a release-cut catches stale-ignore / unused-dep
+   issues before tagging.
+4. Run `scripts/release.sh X.Y.Z`. It refuses to proceed if the
    working tree is dirty, if the CHANGELOG section is missing,
    if the tag already exists, or if VERSION isn't strict semver.
    On success: commits the bump + creates the annotated tag.
-4. Sanity-check the commit + tag, then push:
+5. Sanity-check the commit + tag, then push:
        git push origin main && git push origin vX.Y.Z
-5. The release workflow builds + uploads the three platform
+6. The release workflow builds + uploads the three platform
    tarballs + their `.sha256` sidecars. Watch it with:
        gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-6. Verify the install path resolves:
+7. Verify the install path resolves:
        KETTLE_VERSION=vX.Y.Z sh scripts/install-online.sh
 
 Patch vs minor vs major: kettle follows semver loosely — a new
