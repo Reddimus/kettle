@@ -705,6 +705,51 @@ pub struct TitleEditState {
     pub input: String,
 }
 
+/// Cycle 648 (sub-cycle 2 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
+/// the action a confirmed modal will dispatch when the user accepts.
+///
+/// First user is the cycle-637 `ask_before_closing` flow
+/// (`Action::CloseWindow` / `CloseTab` / `ClosePane`). Future cycles
+/// add `KillProcess`, `DiscardLayout`, `ResetConfig` etc. — the
+/// enum is intentionally extensible.
+#[allow(dead_code)] // sub-cycle 5 wires the dispatch usage.
+#[allow(clippy::enum_variant_names)] // close-family prefix is intentional
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Close the entire window (every tab + every pane).
+    CloseWindow,
+    /// Close the focused tab (every pane in the tab).
+    CloseTab,
+    /// Close the focused pane.
+    ClosePane,
+}
+
+/// Cycle 648: which buttons a confirm modal shows. v1 is just
+/// the two-button [Cancel] / [Confirm] shape; future cycles can
+/// add a third "Apply to all" or similar without rippling.
+#[allow(dead_code)] // sub-cycle 3/4 wire renderer + keyboard nav.
+#[derive(Debug, Clone)]
+pub enum ConfirmButton {
+    /// Dismiss the modal without action. Always the safe default.
+    Cancel,
+    /// Dispatch the dialog's `on_confirm` action. `destructive: true`
+    /// renders the button with the accent-red color (Close/Delete);
+    /// `false` uses the standard accent (OK/Apply).
+    Confirm { label: String, destructive: bool },
+}
+
+/// Cycle 648: live state for an open confirm dialog. `focus_idx`
+/// points into `buttons` and the renderer / keyboard nav follow it.
+#[allow(dead_code)] // sub-cycle 3-5 wire the consumers.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialogState {
+    pub prompt: String,
+    pub buttons: Vec<ConfirmButton>,
+    pub focus_idx: usize,
+    pub on_confirm: ConfirmAction,
+}
+
 struct ContextMenuState {
     anchor: (f32, f32),
     items: Vec<ContextMenuItem>,
@@ -812,6 +857,15 @@ pub struct App {
     /// an inline overlay. Enter applies + clears; Esc cancels +
     /// clears; printable chars append; Backspace removes one.
     editing_title: Option<TitleEditState>,
+    /// Cycle 648 (sub-cycle 2 of confirm-dialog design): when `Some`,
+    /// a confirm modal is open. Keyboard input routes to modal
+    /// dispatch (`Tab` cycles `focus_idx`, `Enter` confirms, `Esc`
+    /// cancels) and the renderer paints the centered modal panel
+    /// over a dimming backdrop. State landed now; sub-cycle 3 wires
+    /// the renderer, sub-cycle 4 wires keyboard nav, sub-cycle 5
+    /// wires the dispatch interception for `Action::CloseWindow`.
+    #[allow(dead_code)] // wiring lands in sub-cycle 3-5.
+    confirm_dialog: Option<ConfirmDialogState>,
     window_focused: bool,
     /// True while the OS mouse cursor is hidden because the user is typing
     /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
@@ -1247,6 +1301,7 @@ impl App {
             hint_state: None,
             context_menu: None,
             editing_title: None,
+            confirm_dialog: None,
             window_focused: true,
             mouse_hidden: false,
             last_cursor_icon: None,

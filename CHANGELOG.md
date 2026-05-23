@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 648 — **confirm-dialog sub-cycle 2: `ConfirmDialogState`
+              + `ConfirmAction` + `ConfirmButton` types**:
+              the state shapes that sub-cycles 3-5 will consume.
+              Builds on cycle-638's `should_prompt` helper.
+                - `pub enum ConfirmAction { CloseWindow, CloseTab,
+                  ClosePane }` — extensible enum the
+                  `maybe_confirm_then` dispatch wrapper will
+                  carry. Future cycles add `KillProcess`,
+                  `DiscardLayout`, `ResetConfig`.
+                - `pub enum ConfirmButton { Cancel, Confirm {
+                  label, destructive } }` — two-button v1
+                  shape; destructive=true renders red-accent.
+                - `pub struct ConfirmDialogState { prompt,
+                  buttons, focus_idx, on_confirm }` — owned by
+                  `App::confirm_dialog: Option<…>`.
+              `#[allow(dead_code)]` on the types + the field
+              until the consumers land in sub-cycle 3 (renderer)
+              and sub-cycle 5 (dispatch interception). This
+              cycle landed the data model so the renderer + the
+              dispatch can be written against the final shape
+              without churn. Workspace tests stay 378.
+
   cycle 647 — **vertical-tabs sub-cycle 1: `TabBarPos::Left`
               + `Right` variants**: previously the parser
               accepted `tab-bar-position = left/right` since
