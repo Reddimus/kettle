@@ -46,6 +46,24 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 577 — **Overflow-safe `ImageData::new`.** The validation
+              `rgba.len() != (width as usize * height as usize *
+              4)` would panic on debug builds and silently wrap
+              on release for adversarial header values — a
+              kitty `f=32,s=4294967295,v=4294967295` payload
+              hits `u32::MAX² × 4` ≈ 7.4 × 10¹⁹ bytes, which
+              overflows `u64::MAX` ≈ 1.8 × 10¹⁹ on 64-bit. The
+              cycle-576 `from_encoded` cap funnels the *encoded*
+              path safely, but the raw `ImageData::new` surface
+              (used by the kitty `f=32` raw-RGBA branch) lacked
+              the same guard. Switched to `checked_mul`; the
+              oversize case now returns a clean `None`. New test
+              `new_rejects_overflowing_dimensions_without_panic`
+              walks the u32-saturated boundary so a future
+              refactor that drops the `checked_mul` fails the
+              gauntlet rather than the binary silently wrapping.
+              Workspace tests 326 → 327.
+
   cycle 576 — **Decompression-bomb defense for terminal-embedded
               images.** `ImageData::from_encoded` — the entry
               point for Kitty graphics `f=100` (PNG) and iTerm2

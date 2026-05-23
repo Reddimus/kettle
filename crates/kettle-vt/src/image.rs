@@ -42,7 +42,24 @@ pub struct ImageData {
 
 impl ImageData {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<ImageData> {
-        if width == 0 || height == 0 || rgba.len() != (width as usize * height as usize * 4) {
+        // Cycle 577: checked arithmetic. The previous unchecked
+        // `width as usize * height as usize * 4` would panic on debug
+        // and silently wrap on release for adversarial header values
+        // (e.g. a kitty `f=32,s=4294967295,v=4294967295` payload). The
+        // overflow is reachable on 64-bit: `u32::MAX² × 4` ≈ 7.4×10¹⁹
+        // bytes, well above `u64::MAX`. With `checked_mul` the
+        // oversize case becomes a clean `None` return, identical UX
+        // to the existing `rgba.len()` mismatch path. Cycle 576's
+        // 8192-px `from_encoded` cap funnels the encoded path safely;
+        // this guard covers the *raw* `ImageData::new` surface for any
+        // future caller.
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|wh| wh.checked_mul(4))?;
+        if rgba.len() != expected {
             return None;
         }
         Some(ImageData {
@@ -182,6 +199,26 @@ mod tests {
         assert_eq!((s.width, s.height), (2, 3));
         assert!(s.rgba.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
         assert!(ImageData::solid(0, 4, [0; 4]).is_none());
+    }
+
+    /// Cycle 577: `ImageData::new` must not panic or wrap on adversarial
+    /// `width × height × 4` arithmetic. Tests `u32::MAX × u32::MAX × 4`
+    /// (which overflows `u64::MAX` ≈ 1.8 × 10¹⁹ on 64-bit) returns
+    /// cleanly — no panic in debug, no silent acceptance in release.
+    /// Without `checked_mul` this would panic on debug builds and
+    /// silently compare against a wrapped value on release.
+    #[test]
+    fn new_rejects_overflowing_dimensions_without_panic() {
+        // u32::MAX × u32::MAX × 4 = 7.4 × 10¹⁹ — overflows u64.
+        // Empty rgba can never equal the (unrepresentable) expected
+        // size, so the only correct answer is None.
+        assert!(ImageData::new(u32::MAX, u32::MAX, vec![]).is_none());
+        // The intermediate product u32::MAX × u32::MAX = 1.8 × 10¹⁹
+        // already saturates u64; the `* 4` step is what tips it over.
+        // Cover the boundary just below as well.
+        assert!(ImageData::new(u32::MAX, 1, vec![]).is_none());
+        // Sanity: a sane construction still works.
+        assert!(ImageData::new(2, 2, vec![0; 16]).is_some());
     }
 
     /// Cycle 576 drift guard for the decompression-bomb defense in
