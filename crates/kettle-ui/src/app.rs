@@ -152,6 +152,30 @@ fn spawn_trigger_command(argv: &[String]) {
     }
 }
 
+/// Cycle 650 (sub-cycle 2 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
+/// ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): build the
+/// per-pane screenshot path. Lives under `<cache>/kettle/shots/`
+/// (mirrors cycle-621 logger path scheme); falls back to
+/// `./kettle-shots/` when no cache dir resolves.
+///
+/// File name shape: `kettle-<unix-secs>-<pid>.png`. Sub-cycle 3+
+/// of the terminalshot design will call this from
+/// `Action::TakeScreenshot` dispatch + queue a wgpu readback
+/// request keyed on the path.
+///
+/// Pure modulo `unix_secs` + `cache_dir` — caller pins both.
+#[allow(dead_code)] // sub-cycle 4 wires the dispatch usage.
+fn session_screenshot_path(
+    unix_secs: u64,
+    pid: u32,
+    cache_dir: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let dir = cache_dir
+        .map(|p| p.to_path_buf().join("kettle").join("shots"))
+        .unwrap_or_else(|| std::path::PathBuf::from("kettle-shots"));
+    dir.join(format!("kettle-{unix_secs}-{pid}.png"))
+}
+
 /// Cycle 621 (Terminator parity, `plugins/logger.py`): build the
 /// per-pane session-log path. Lives under `<cache>/kettle/logs/`
 /// (XDG-respecting via env probe; falls back to `./kettle-logs/`
@@ -6769,6 +6793,28 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 650 drift guard. `session_screenshot_path` is the
+    /// pure helper behind `Action::TakeScreenshot`. Mirrors the
+    /// cycle-621 `session_log_path` shape.
+    #[test]
+    fn session_screenshot_path_under_cache_kettle_shots() {
+        use super::session_screenshot_path;
+        let cache = std::path::Path::new("/home/u/.cache");
+        let p = session_screenshot_path(1_716_422_400, 1234, Some(cache));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/home/u/.cache/kettle/shots/kettle-1716422400-1234.png")
+        );
+        // Relative fallback when no cache dir resolves.
+        let p = session_screenshot_path(1_716_422_400, 1234, None);
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("kettle-shots/kettle-1716422400-1234.png")
+        );
+        // .png extension is fixed (vs the cycle-621 .log shape).
+        assert_eq!(p.extension().and_then(|s| s.to_str()), Some("png"));
     }
 
     /// Cycle 621 drift guard. `session_log_path` is the pure helper

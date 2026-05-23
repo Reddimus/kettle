@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 650 — **terminalshot sub-cycle 2:
+              `session_screenshot_path` pure helper**: mirrors
+              cycle-621's `session_log_path` shape. Lives under
+              `<cache>/kettle/shots/kettle-<secs>-<pid>.png`
+              with relative `./kettle-shots/` fallback when no
+              cache dir resolves. Sub-cycle 3-5 of
+              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](docs/TERMINATOR-TERMINALSHOT-DESIGN.md)
+              will call this from `Action::TakeScreenshot`
+              dispatch + queue a wgpu readback request keyed
+              on the path. Drift guard
+              `session_screenshot_path_under_cache_kettle_shots`
+              covers XDG path shape + relative-fallback +
+              .png extension. Workspace tests 379 → 380.
+
   cycle 649 — **auto-theme sub-cycle 2: `resolve_theme_for_mode`
               pure helper**: picks the next theme name given the
               `ThemeMode` + `light_theme` / `dark_theme` config +
