@@ -5,6 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+# Cycle 597: cancel superseded runs on the same ref so a burst of
+# pushes (rebase, quick fix-up, force-push to a PR branch) only
+# consumes CI minutes for the latest commit. PRs and pushes to main
+# get a stable concurrency group keyed by branch ref. Saves real
+# budget on every PR with >1 push — important per the cycle-444 /
+# 558 GitHub Actions budget exhaustion. `cancel-in-progress: true`
+# is safe here because CI is purely diagnostic (no deploys, no
+# state-mutating side effects).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
