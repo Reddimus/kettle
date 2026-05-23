@@ -131,6 +131,12 @@ pub struct Terminal {
     /// the reader). When `None`, no-op cost on the hot path —
     /// just a Mutex lock + Option check per buf read.
     pub log_file: Arc<Mutex<Option<std::fs::File>>>,
+    /// Cycle 625: when `true`, the logger strips ANSI escape
+    /// sequences (CSI / OSC / single-char ESC) from the bytes
+    /// before writing — leaving plain-text-searchable logs.
+    /// Default `false` preserves the cycle-621 raw-stream
+    /// behavior (replayable via `cat <log>` in a terminal).
+    pub log_strip_ansi: Arc<Mutex<bool>>,
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
@@ -395,6 +401,12 @@ impl Terminal {
         // clone and writes raw PTY bytes when Some.
         let log_file: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(None));
         let log_file_for_struct = log_file.clone();
+        // Cycle 625 (Terminator parity): when true, strip ANSI
+        // escape sequences from the bytes before writing to the
+        // log file. Default false preserves cycle-621 raw-stream
+        // behavior.
+        let log_strip_ansi: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let log_strip_ansi_for_struct = log_strip_ansi.clone();
 
         let reader_thread = {
             let term = term.clone();
@@ -408,6 +420,7 @@ impl Terminal {
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
             let log_file = log_file.clone();
+            let log_strip_ansi = log_strip_ansi.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
@@ -430,7 +443,13 @@ impl Terminal {
                                     && let Some(f) = guard.as_mut()
                                 {
                                     use std::io::Write as _;
-                                    let _ = f.write_all(&buf[..n]);
+                                    let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
+                                    if strip {
+                                        let cleaned = strip_ansi_bytes(&buf[..n]);
+                                        let _ = f.write_all(&cleaned);
+                                    } else {
+                                        let _ = f.write_all(&buf[..n]);
+                                    }
                                 }
                                 // Cycle 378: ship raw PTY bytes to the
                                 // App via the output_tx sidechannel
@@ -658,6 +677,7 @@ impl Terminal {
             cwd: cwd_cell,
             argv: argv.to_vec(),
             log_file: log_file_for_struct,
+            log_strip_ansi: log_strip_ansi_for_struct,
             cell_px,
         })
     }
@@ -962,6 +982,71 @@ impl EventProxy {
 
 /// The kitty image-id bits a placeholder cell's foreground color carries:
 /// a 256-palette index is the low byte, a truecolor spec is the low 24
+/// Cycle 625 (Terminator parity, `plugins/logger.py` extension):
+/// strip ANSI escape sequences from a byte slice. Handles:
+///   - CSI (Control Sequence Introducer): `ESC [ params final`
+///     where final is in `0x40..=0x7e`.
+///   - OSC (Operating System Command): `ESC ] ... terminator`
+///     where terminator is BEL (0x07) or ST (`ESC \\`).
+///   - Single-char ESC: `ESC X` for any other X.
+///   - Bare ESC at end of buffer: dropped (assumes split-across-
+///     reads is fine; the next chunk's continuation would be
+///     dropped too, but the reader does line-buffered logging
+///     so a stray ESC is an acceptable corner case).
+///
+/// Plain printable bytes + newlines pass through. Pure — no
+/// state across calls (good enough for byte-block stripping;
+/// callers needing perfect stripping across read boundaries
+/// can buffer first).
+pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b != 0x1b {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        // ESC at end of buffer → drop.
+        if i + 1 >= input.len() {
+            break;
+        }
+        match input[i + 1] {
+            b'[' => {
+                // CSI: scan until terminator in 0x40..=0x7e.
+                i += 2;
+                while i < input.len() && !(0x40..=0x7e).contains(&input[i]) {
+                    i += 1;
+                }
+                if i < input.len() {
+                    i += 1; // consume terminator
+                }
+            }
+            b']' => {
+                // OSC: scan until BEL or ESC\.
+                i += 2;
+                while i < input.len() {
+                    if input[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {
+                // Single-char ESC (like ESC c reset).
+                i += 2;
+            }
+        }
+    }
+    out
+}
+
 /// bits, and the 16 ANSI named colors map to indices 0..=15
 /// (`graphics-protocol.rst:589`). Non-id named slots (default fg/bg/cursor)
 /// have no id → 0.
@@ -1115,6 +1200,40 @@ mod home_dir_tests {
             home_dir_fallback(from(&[("HOME", ""), ("USERPROFILE", ""), ("APPDATA", ""),])),
             None,
         );
+    }
+
+    /// Cycle 625 drift guard. `strip_ansi_bytes` is the pure ANSI-
+    /// strip helper behind `log_strip_ansi`. Verify:
+    ///   - CSI sequences (SGR / cursor moves / etc.) are removed
+    ///   - OSC sequences (title, hyperlink, OSC 7) are removed,
+    ///     terminated by either BEL or ESC\
+    ///   - Single-char ESC (ESC c full-reset) is removed
+    ///   - Plain printable bytes + newlines pass through
+    #[test]
+    fn strip_ansi_bytes_removes_csi_osc_and_single_esc() {
+        use super::strip_ansi_bytes;
+        // CSI SGR around plain text: "hello world".
+        let s = b"\x1b[31mhello\x1b[0m world";
+        assert_eq!(strip_ansi_bytes(s), b"hello world");
+        // OSC 0 (set title) terminated by BEL.
+        let s = b"prefix \x1b]0;my-title\x07 suffix";
+        assert_eq!(strip_ansi_bytes(s), b"prefix  suffix");
+        // OSC 8 (hyperlink) terminated by ESC\\.
+        let s = b"\x1b]8;;http://example/\x1b\\link text\x1b]8;;\x1b\\";
+        assert_eq!(strip_ansi_bytes(s), b"link text");
+        // Single-char ESC (full reset).
+        let s = b"\x1bcclean";
+        assert_eq!(strip_ansi_bytes(s), b"clean");
+        // Newlines + tabs pass through.
+        let s = b"line1\nline2\tindent\n";
+        assert_eq!(strip_ansi_bytes(s), b"line1\nline2\tindent\n");
+        // Bare ESC at the very end of buffer is dropped (matches
+        // the documented split-across-reads limitation).
+        let s = b"trail\x1b";
+        assert_eq!(strip_ansi_bytes(s), b"trail");
+        // Plain ASCII passes through unchanged.
+        let s = b"no escapes here";
+        assert_eq!(strip_ansi_bytes(s), b"no escapes here");
     }
 }
 

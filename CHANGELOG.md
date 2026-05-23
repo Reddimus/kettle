@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 625 — **`log-strip-ansi` config — plain-text session
+              logs**:
+                - extends cycle-621 logger.py parity. When the
+                  per-pane session log is open
+                  (`Action::ToggleSessionLog`), the reader thread
+                  honors `log-strip-ansi = true` and removes CSI
+                  / OSC / single-char ESC sequences before
+                  writing — gives a grep-friendly log file.
+                  `false` (default) preserves the raw-stream
+                  behavior (cat-replayable in a terminal).
+                - new pure helper `kettle_core::strip_ansi_bytes`
+                  is the strip impl. State-free byte-block strip
+                  (good enough for the line-buffered reader);
+                  documented split-across-reads limitation in
+                  doc comments.
+                - new per-Terminal `Arc<Mutex<bool>>
+                  log_strip_ansi` flag the reader thread reads
+                  on each write. Action::ToggleSessionLog
+                  propagates `cfg.log_strip_ansi` to it at
+                  file-open time.
+              Drift guard `strip_ansi_bytes_removes_csi_osc_and_single_esc`
+              covers 7 input shapes including OSC terminated by
+              BEL vs ESC\\, single-char ESC, bare-ESC-at-end.
+              Workspace tests 367 → 368.
+
   cycle 624 — **Doc-truth refresh:
               `docs/TERMINATOR-AUDIT.md` (round 3)**:
               flipped 9 more stale rows to ✅, citing the cycles

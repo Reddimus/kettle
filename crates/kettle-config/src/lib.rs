@@ -605,6 +605,12 @@ pub struct Config {
     /// `force_no_bell`): suppress every bell flavor. Same as
     /// kettle's `bell = off` but as a separate bool flag.
     pub force_no_bell: bool,
+    /// Cycle 625 (Terminator parity extension, `plugins/logger.py`):
+    /// when true, the per-pane session log strips ANSI escape
+    /// sequences (CSI / OSC / single-char ESC) before writing.
+    /// Default false preserves cycle-621 raw-stream behavior
+    /// (the log is `cat`-replayable in a terminal).
+    pub log_strip_ansi: bool,
     /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
@@ -959,6 +965,7 @@ impl Default for Config {
             geometry_hinting: false,
             extra_styling: true,
             force_no_bell: false,
+            log_strip_ansi: false,
             light_theme: String::new(),
             dark_theme: String::new(),
             icon_bell: true,
@@ -2011,6 +2018,11 @@ impl Config {
                 "force-no-bell" | "force_no_bell" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.force_no_bell = b;
+                    }
+                }
+                "log-strip-ansi" | "log_strip_ansi" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.log_strip_ansi = b;
                     }
                 }
                 "visible-bell" | "visible_bell" => {

@@ -3794,6 +3794,12 @@ impl App {
                             Ok(f) => {
                                 log::info!("toggle-session-log: writing to {}", path.display());
                                 *guard = Some(f);
+                                // Cycle 625: propagate the config's
+                                // strip-ANSI choice to the reader
+                                // thread's per-Terminal flag.
+                                if let Ok(mut strip) = pane.term.log_strip_ansi.lock() {
+                                    *strip = self.cfg.log_strip_ansi;
+                                }
                             }
                             Err(e) => log::warn!(
                                 "toggle-session-log: open {} failed: {e}",
