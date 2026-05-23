@@ -1491,4 +1491,46 @@ mod tests {
                 .any(|l| l == "status-bar: Bottom")
         );
     }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn extra_check_config_lines_no_internal_cycle_refs() {
+        // Cycle 537 drift guard. `kettle --check-config` output is
+        // user-facing — internal "cycle N" / "cycle-N" references
+        // shouldn't leak into it (same anti-pattern the cycle-179
+        // drift guard catches in markdown docs, but for binary
+        // runtime output). Cycle 536 caught one in the triggers
+        // echo ("cycle-289 Urgency action") that the cycle-179
+        // file-scan didn't reach.
+        //
+        // Build a cfg that triggers EVERY echo branch + assert no
+        // resulting line matches "cycle " or "cycle-" followed by
+        // a digit.
+        let mut cfg = kettle_config::Config::default();
+        cfg.accent_color = Some(kettle_config::Rgb {
+            r: 0,
+            g: 0xd4,
+            b: 0xff,
+        });
+        cfg.force_no_bell = true;
+        cfg.triggers.push(kettle_config::OutputTrigger {
+            pattern: "error:.*".into(),
+            action: kettle_config::TriggerAction::Urgency,
+        });
+        cfg.lua_sandbox = kettle_config::LuaSandbox::Trusted;
+        cfg.background_image = "/tmp/wp.jpg".into();
+        cfg.borderless = true;
+        cfg.status_bar = kettle_config::StatusBarMode::Bottom;
+        for line in extra_check_config_lines(&cfg) {
+            let lower = line.to_ascii_lowercase();
+            for needle in ["cycle ", "cycle-"] {
+                if let Some(pos) = lower.find(needle)
+                    && let Some(next) = lower.as_bytes().get(pos + needle.len())
+                    && next.is_ascii_digit()
+                {
+                    panic!("internal cycle ref leaked into --check-config output: {line:?}");
+                }
+            }
+        }
+    }
 }
