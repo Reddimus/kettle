@@ -407,3 +407,32 @@ jobs:
           key: msrv-1.89
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+
+  # Cycle 723 (2026-05-23): nightly early-warning job. Catches
+  # upcoming rustc breaking changes weeks before they hit stable so
+  # we have lead time to fix transitively (e.g. an MSRV-floor bump
+  # from a dep, a new lint that flips to deny-by-default). Linux-only
+  # to conserve runner minutes (matches the cycle-444 budget rule);
+  # `continue-on-error: true` means a nightly regression warns but
+  # doesn't block PR merges.
+  nightly:
+    name: nightly (early warning)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace

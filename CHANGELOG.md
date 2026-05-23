@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 723 — **CI hygiene: nightly early-warning + release pretest gate**:
+              Closes the last two CI/CD items from the cycle-718
+              audit. No build-time changes; both adds are
+              Linux-only to keep the cycle-444 GitHub Actions
+              budget healthy.
+              1. **Nightly job** added to `.github/workflows/ci.yml`.
+                 Runs `cargo build --workspace --all-targets` +
+                 `cargo test --workspace` on `dtolnay/rust-toolchain@nightly`.
+                 `continue-on-error: true` so a nightly
+                 regression warns but doesn't block PR merges —
+                 the goal is multi-week lead time before a
+                 breaking rustc change reaches stable. Cached
+                 separately via `key: nightly` so it doesn't
+                 evict the main stable cache.
+              2. **`pretest` job** added to
+                 `.github/workflows/release.yml`. Runs `cargo
+                 test --workspace` on Linux before the per-OS
+                 `package` matrix kicks off. The package job
+                 now `needs: pretest` — a red test on the
+                 tagged commit blocks the ~30-40 min per-OS
+                 release builds before they consume runner
+                 minutes. cycle-558 incident recovery
+                 (release-must-complete) is preserved: this
+                 just gates *entry* to the release matrix,
+                 it doesn't add cancel-in-progress.
+              No code change; workspace tests unchanged at
+              424. actionlint CI gate validates the YAML on
+              the next push.
+
   cycle 722 — **Production polish: doc + dead-code + magic-number sweep**:
               Picks up the medium-priority audit items that
               cycle 718 deferred. No behavior change anywhere;

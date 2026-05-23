@@ -9,9 +9,40 @@ permissions:
   contents: write
 
 jobs:
+  # Cycle 723 (2026-05-23): test-before-release gate. Before
+  # release.yml started running `cargo test` the package job built
+  # release artifacts blindly — if the tagged commit was a broken
+  # one (rare, but possible if a hotfix branch was tagged without
+  # ci.yml having run on it yet), we'd ship broken binaries. The
+  # Linux-only quick gauntlet here is ~5 min and runs before the
+  # ~30-40 min per-OS package builds; cheap insurance.
+  pretest:
+    name: pretest (release gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-pretest
+      - run: cargo test --workspace
+
   package:
     name: package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Cycle 723: package only runs after pretest passes. A red
+    # `cargo test --workspace` blocks the per-OS builds before
+    # they consume runner minutes.
+    needs: pretest
     # Cycle 600 budget cap. Release builds compile in --release mode
     # (slow), bundle assets, hash, and upload — real time runs
     # ~25-40 min per OS. 75 min is ~2× headroom for a slow runner
