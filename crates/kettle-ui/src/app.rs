@@ -817,6 +817,13 @@ enum ContextMenuClick {
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
+    /// Cycle 685 (Terminator parity, sub-cycle 2 of
+    /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// theme picked from the right-click "Theme ▸" submenu.
+    /// Dispatch sets cfg.theme_name + cfg.theme and triggers a
+    /// redraw (same path as cycle-3514 `NextTheme`).
+    SetTheme(String),
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -857,10 +864,23 @@ enum ContextMenuItem {
     /// Lands the type now so the renderer + dispatch can
     /// compile against the final shape ahead of the
     /// interaction wiring.
-    #[allow(dead_code)] // sub-cycle 2 populates from append_theme_submenu_items.
     Submenu {
         label: String,
+        // `items` is the nested item list the sub-cycle-3 flyout
+        // renderer will surface. v1 stores them but doesn't paint;
+        // gated so clippy stays clean until the flyout lands.
+        #[allow(dead_code)]
         items: Vec<ContextMenuItem>,
+    },
+    /// Cycle 685 (Terminator parity, sub-cycle 2 of theme-submenu
+    /// design): a theme-choice leaf row used inside a
+    /// `Submenu { label: "Theme", … }`. Clicking dispatches
+    /// `ContextMenuClick::SetTheme(theme)` which swaps the
+    /// current theme to the named one.
+    #[allow(dead_code)] // sub-cycle 3 wires the flyout-side click dispatch.
+    ThemeChoice {
+        label: String,
+        theme: String,
     },
 }
 
@@ -3570,6 +3590,32 @@ impl App {
     /// the reconnect to land in a new pane, or hit the entry
     /// directly to reconnect in-place after the original session
     /// exits.
+    /// Cycle 685 (sub-cycle 2 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// append a `Submenu { "Theme", … }` entry populated from
+    /// `Theme::list()`. The flyout-render side (sub-cycle 3)
+    /// will surface the submenu items in a side panel; for now
+    /// the parent menu shows "Theme ▸" and clicking it logs an
+    /// info nudge (cycle 684).
+    fn append_theme_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        let theme_names = kettle_config::Theme::list();
+        if theme_names.is_empty() {
+            return;
+        }
+        items.push(ContextMenuItem::Separator);
+        let inner: Vec<ContextMenuItem> = theme_names
+            .into_iter()
+            .map(|name| ContextMenuItem::ThemeChoice {
+                label: name.to_string(),
+                theme: name.to_string(),
+            })
+            .collect();
+        items.push(ContextMenuItem::Submenu {
+            label: "Theme".to_string(),
+            items: inner,
+        });
+    }
+
     fn append_remote_menu_items(&mut self, items: &mut Vec<ContextMenuItem>) {
         let Some(pane) = self.mux.focused() else {
             return;
@@ -3622,6 +3668,10 @@ impl App {
         // session reconnect entry when the focused pane has a
         // detected SSH/Docker/Podman/kubectl context.
         self.append_remote_menu_items(&mut items);
+        // Cycle 685 (theme-submenu sub-cycle 2): append the
+        // Theme submenu populated from Theme::list(). The flyout
+        // open machinery lands in sub-cycle 3.
+        self.append_theme_submenu_items(&mut items);
         // Highlight the first enabled non-separator item.
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
@@ -3635,7 +3685,8 @@ impl App {
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
-                | ContextMenuItem::Submenu { .. } => row_h,
+                | ContextMenuItem::Submenu { .. }
+                | ContextMenuItem::ThemeChoice { .. } => row_h,
             })
             .sum();
         let max_chars = items
@@ -3647,6 +3698,11 @@ impl App {
                 // Cycle 684: submenu rows show "label ▸" so the
                 // max-width budget needs +2 for the suffix.
                 ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
+                // Cycle 685: ThemeChoice surfaces only inside an
+                // open submenu flyout (sub-cycle 3); the parent
+                // menu's width budget shouldn't grow for choices
+                // the user can't directly see.
+                ContextMenuItem::ThemeChoice { .. } => None,
                 _ => None,
             })
             .max()
@@ -3716,7 +3772,8 @@ impl App {
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
-                | ContextMenuItem::Submenu { .. } => row_h,
+                | ContextMenuItem::Submenu { .. }
+                | ContextMenuItem::ThemeChoice { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 match item {
@@ -3740,6 +3797,14 @@ impl App {
                             "Submenu '{label}' click: flyout wiring lands in sub-cycle 3 of TERMINATOR-THEME-SUBMENU-DESIGN.md"
                         );
                         return None;
+                    }
+                    ContextMenuItem::ThemeChoice { theme, .. } => {
+                        // Cycle 685: clicked inside a Theme flyout
+                        // (sub-cycle 3 will wire the flyout open;
+                        // until then this row isn't rendered in
+                        // the parent panel — see the projection
+                        // arm above).
+                        return Some(ContextMenuClick::SetTheme(theme.clone()));
                     }
                     _ => return None,
                 }
@@ -3766,7 +3831,8 @@ impl App {
                 ContextMenuItem::Item { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
-                | ContextMenuItem::Submenu { .. } => row_h,
+                | ContextMenuItem::Submenu { .. }
+                | ContextMenuItem::ThemeChoice { .. } => row_h,
             })
             .sum();
         let max_chars = menu
@@ -3821,6 +3887,15 @@ impl App {
                     label: format!("{label} ▸"),
                     separator: false,
                     enabled: true,
+                },
+                // Cycle 685: ThemeChoice rows are flyout-only.
+                // Sub-cycle 3 will surface them in a side panel
+                // when the user opens the Theme submenu. Until
+                // then they're not rendered in the parent menu.
+                ContextMenuItem::ThemeChoice { .. } => ContextMenuRow {
+                    label: String::new(),
+                    separator: true, // skip visually for now
+                    enabled: false,
                 },
             })
             .collect();
@@ -6187,6 +6262,18 @@ impl ApplicationHandler<UserEvent> for App {
                                 let mut bytes = command.into_bytes();
                                 bytes.push(b'\n');
                                 p.term.write(&bytes);
+                            }
+                        }
+                        // Cycle 685 (theme-submenu sub-cycle 2):
+                        // theme picked from a Theme submenu
+                        // flyout. Same swap path as the cycle-
+                        // 3514 NextTheme action.
+                        ContextMenuClick::SetTheme(name) => {
+                            self.cfg.theme_name = name.clone();
+                            self.cfg.theme = kettle_config::Theme::by_name(&name);
+                            self.save_session();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
                             }
                         }
                     }

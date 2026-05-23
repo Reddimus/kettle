@@ -6,6 +6,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 685 — **theme-submenu sub-cycle 2: populate Theme
+              submenu + SetTheme dispatch**: data layer for
+              the cycle-634 design's Theme submenu now lands.
+                - new `ContextMenuItem::ThemeChoice { label,
+                  theme }` leaf variant
+                - new `ContextMenuClick::SetTheme(String)`
+                  click outcome
+                - new `App::append_theme_submenu_items` walks
+                  `Theme::list()` (~512 bundled themes) and
+                  produces a `Submenu { label: "Theme", items:
+                  vec![ThemeChoice...] }`
+                - `open_context_menu` calls it after remote
+                  + lua + config-file items
+                - dispatch sets `cfg.theme_name` + `cfg.theme`
+                  + saves session + redraws (same path as
+                  cycle-3514 NextTheme)
+              ThemeChoice projections are flyout-only (hidden
+              in the parent menu's renderer-side row list)
+              until sub-cycle 3 wires the second-panel
+              flyout. For now the user sees "Theme ▸" in the
+              right-click menu and a click logs the
+              "flyout-wiring-pending" info nudge from cycle
+              684. Workspace tests stay 392 (the data path
+              compiles + the existing renderer regression
+              tests cover the projection arm).
+              Theme-submenu port: **2/9** sub-cycles
+              complete.
+
   cycle 684 — **theme-submenu sub-cycle 1: `ContextMenuItem::
               Submenu` recursive variant**. Adds the data
               type that sub-cycles 2-9 of
