@@ -936,20 +936,27 @@ impl App {
         // App can fire LuaEvent::Output. Set before the Mux moves
         // into the struct.
         let lua_output_subscribed = lua_engine.is_some();
-        // Cycle 357 (Terminator parity, terminatorlib/config.py:71
-        // `broadcast_default`): seed the mux's broadcast flag from
-        // config BEFORE the cfg moves into the struct.
-        let initial_broadcast = !matches!(
-            initial_cfg.broadcast_default,
-            kettle_config::BroadcastDefault::Off
-        );
+        // Cycle 560 (BUG FIX): cycle 357 misread Terminator's
+        // `broadcast_default` config key. The Terminator semantics
+        // are: when the user ENABLES broadcast (via a chord), what
+        // scope applies — `all` / `group` / `off`. The default value
+        // `group` does NOT mean "broadcast is on at startup". But
+        // cycle 357 mapped `!matches!(broadcast_default, Off)` to
+        // `initial_broadcast = true`, so every new kettle window
+        // started with broadcast ON. Users typing in one pane saw
+        // their keystrokes mirrored across every other pane in the
+        // tab — the bug the cycle-560 user-report flagged.
+        //
+        // Correct mapping: broadcast STATE always starts off. The
+        // `broadcast_default` config still governs scope decisions
+        // elsewhere (the cycle-178 per-tab broadcast set, the
+        // cycle-406 named-group code).
         let mut app = App {
             cfg: initial_cfg,
             window: None,
             renderer: None,
             mux: {
                 let mut m = Mux::new();
-                m.broadcast = initial_broadcast;
                 m.lua_output_subscribed = lua_output_subscribed;
                 m
             },

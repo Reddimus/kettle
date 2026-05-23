@@ -2166,6 +2166,29 @@ mod node_tests {
     }
 
     #[test]
+    fn mux_new_starts_with_broadcast_off() {
+        // Cycle 560 drift guard. A fresh Mux MUST start with
+        // broadcast disabled. The cycle-357 bug seeded broadcast=true
+        // from `broadcast_default = group` (the default), so every
+        // kettle window started broadcasting input across all panes
+        // in the active tab — users typing in one pane saw the
+        // input mirrored everywhere.
+        //
+        // The fix (cycle 560) removed the bad seeding in App::new;
+        // this guard pins the Mux::new contract so a future App-
+        // side re-introduction of broadcast-on-startup gets caught
+        // by the App-side construction path being out of sync with
+        // this baseline.
+        let m = Mux::new();
+        assert!(
+            !m.broadcast,
+            "Mux::new must start with broadcast disabled; \
+             enabling at startup mirrors keystrokes across panes \
+             without the user opting in"
+        );
+    }
+
+    #[test]
     fn extract_and_insert_tab_roundtrip() {
         // Cycle 398 drift guard. extract_tab → insert_tab
         // reproduces the same tab + the active idx tracks
