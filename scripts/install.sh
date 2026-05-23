@@ -78,7 +78,15 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${ICON_BASE}/48x48/apps/kettle.png" \
     "${ICON_BASE}/64x64/apps/kettle.png" \
     "${ICON_BASE}/128x128/apps/kettle.png" \
-    "${ICON_BASE}/256x256/apps/kettle.png"
+    "${ICON_BASE}/256x256/apps/kettle.png" \
+    "${PREFIX}/share/kettle/install.sh"
+  # Cycle 531: remove ${PREFIX}/share/kettle/ if it ends up empty
+  # after the install.sh copy is gone. `rmdir` is non-recursive +
+  # only succeeds on empty dirs — so a future addition (e.g.,
+  # `${PREFIX}/share/kettle/themes/`) wouldn't be silently nuked,
+  # but the bare cycle-530 dir gets cleaned up cleanly. Failure
+  # is harmless: a user with extra files in there keeps them.
+  rmdir "${PREFIX}/share/kettle" 2>/dev/null || true
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APP_DIR}" 2>/dev/null || true
   fi
