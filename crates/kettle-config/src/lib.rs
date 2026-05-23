@@ -2025,6 +2025,20 @@ impl Config {
                         cfg.log_strip_ansi = b;
                     }
                 }
+                "audible-bell" | "audible_bell" => {
+                    // Cycle 626 (Terminator parity, config.py:214
+                    // `audible_bell`): kettle ships no audio bell
+                    // surface yet (visual + window-attention only),
+                    // so this key parses but is otherwise a Bucket E
+                    // documented no-op. Accepting it keeps a
+                    // Terminator config file copy-clean (no
+                    // unknown-key warning at --check-config time).
+                    // If a user wants the bell to fire, they should
+                    // set `bell = attention` / `bell = visual` or
+                    // the cycle-619 `urgent_bell` / `visible_bell`
+                    // compat aliases.
+                    let _ = parse_bool(&e.value);
+                }
                 "visible-bell" | "visible_bell" => {
                     // Cycle 619 (Terminator parity, config.py:215).
                     // Terminator splits bell into two orthogonal
@@ -4740,6 +4754,36 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 626 drift guard. Terminator's `audible_bell` doesn't
+    /// map to anything kettle ships (no audio surface yet), so the
+    /// parser accepts the key without setting anything. The drift
+    /// guard locks in two outcomes:
+    ///   - the key is recognized (no unknown-key warning would
+    ///     appear in cycle-179's user-doc-drift surface), and
+    ///   - the rest of the config is unaffected (no spillover
+    ///     into the unified `bell` mode).
+    #[test]
+    fn audible_bell_parses_as_documented_noop() {
+        // Default bell mode is Both; audible-bell shouldn't change it.
+        let cfg = Config::parse_text("audible-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Both);
+        // Underscore spelling also accepted.
+        let cfg = Config::parse_text("audible_bell = false\n");
+        assert_eq!(cfg.bell, BellMode::Both);
+        // Combined with the bell key, the canonical `bell =` arm
+        // wins (audible-bell is a documented no-op).
+        let cfg = Config::parse_text("bell = visual\naudible-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Visual);
+        // The cycle-296 unknown-key surface should NOT flag this
+        // key. (We test by asking detect_malformed_values for the
+        // diagnostic list — `audible-bell` should not appear.)
+        let bad = Config::detect_malformed_values("audible-bell = true\n");
+        assert!(
+            !bad.iter().any(|m| m.contains("audible-bell")),
+            "audible-bell shouldn't trip --check-config (got: {bad:?})"
+        );
     }
 
     /// Cycle 623 drift guard. Terminator-spelling aliases for kettle's

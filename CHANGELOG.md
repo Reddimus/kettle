@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 626 — **`audible_bell` accepted as documented no-op
+              (Terminator config.py:214)**: kettle ships no audio
+              bell surface yet (visual flash + window urgency only),
+              so the key parses but is otherwise a Bucket E
+              documented no-op. Lets a Terminator config copy
+              cleanly without --check-config warnings; users who
+              want a bell should use `bell = …` or the cycle-619
+              `visible_bell` / `urgent_bell` compat aliases. Drift
+              guard `audible_bell_parses_as_documented_noop`
+              locks in the no-op (combined with the canonical
+              `bell =` precedence rule). Workspace tests 368 → 369.
+
   cycle 625 — **`log-strip-ansi` config — plain-text session
               logs**:
                 - extends cycle-621 logger.py parity. When the
