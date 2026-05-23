@@ -37,6 +37,16 @@ use crate::image::{ImageData, Placed};
 /// image cap in `ImageData::from_encoded`.
 const MAX_KITTY_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
 
+/// Cycle 579: cap on concurrent in-flight kitty image transmissions
+/// keyed by `i=`. Without it, a hostile PTY emitter can send 100 000+
+/// distinct `i=` values, each with one small `m=1` chunk that never
+/// receives its terminating `m=0`, and grow the `in_flight` HashMap
+/// without bound. 32 sits well above any realistic client (kitty,
+/// ueberzug, and chafa typically interleave one or two transmissions);
+/// past that, new ids are refused until the existing slots complete or
+/// are evicted by the per-slot cap above.
+const MAX_IN_FLIGHT_SLOTS: usize = 32;
+
 #[derive(Default)]
 struct Acc {
     control: String,
@@ -492,6 +502,12 @@ impl KittyState {
         // Transmit (optionally + display): only the *first* chunk carries the
         // full control; continuation chunks carry just `m` (and maybe `q`).
         let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
+        // Cycle 579: refuse new transmissions once the in-flight map
+        // is saturated. A continuation chunk for an existing slot is
+        // always allowed — only brand-new ids count against the cap.
+        if !self.in_flight.contains_key(&id) && self.in_flight.len() >= MAX_IN_FLIGHT_SLOTS {
+            return KittyOut::None;
+        }
         let exceeded = {
             let acc = self.in_flight.entry(id).or_default();
             if acc.control.is_empty() {
@@ -567,6 +583,12 @@ impl KittyState {
     /// The relative-placement relation for `(image id, placement id)`.
     pub fn relative_placement(&self, id: u32, placement: u32) -> Option<&RelativePlacement> {
         self.rel.get(&(id, placement))
+    }
+
+    /// Test-only accessor for the cycle-579 in-flight slot cap drift guard.
+    #[cfg(test)]
+    fn in_flight_len_for_test(&self) -> usize {
+        self.in_flight.len()
     }
 
     /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
@@ -908,6 +930,44 @@ mod tests {
         // — these are compile-time invariants of the constant itself.
         const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
         const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+    }
+
+    /// Cycle 579 drift guard: a hostile PTY emitter that fires
+    /// `MAX_IN_FLIGHT_SLOTS + 1` distinct `i=` values (each with a
+    /// single `m=1` chunk that never receives its `m=0` terminator)
+    /// must not grow the `in_flight` HashMap past the cap. Brand-new
+    /// ids past the saturation point are refused; continuation chunks
+    /// for already-tracked ids still work.
+    #[test]
+    fn kitty_in_flight_slot_cap_refuses_new_ids_past_saturation() {
+        let mut k = KittyState::default();
+        // Fill MAX_IN_FLIGHT_SLOTS distinct ids, each with an `m=1`
+        // chunk so the slot is held open.
+        for id in 1..=super::MAX_IN_FLIGHT_SLOTS as u32 {
+            k.feed(&format!("a=T,i={id},f=32,s=1,v=1,m=1;AQID"));
+        }
+        assert_eq!(
+            k.in_flight_len_for_test(),
+            super::MAX_IN_FLIGHT_SLOTS,
+            "first MAX_IN_FLIGHT_SLOTS distinct ids should all be tracked"
+        );
+        // One more distinct id is refused without growing the map.
+        let overflow_id = super::MAX_IN_FLIGHT_SLOTS as u32 + 1;
+        k.feed(&format!("a=T,i={overflow_id},f=32,s=1,v=1,m=1;AQID"));
+        assert_eq!(
+            k.in_flight_len_for_test(),
+            super::MAX_IN_FLIGHT_SLOTS,
+            "id {overflow_id} past the saturation point must be refused"
+        );
+        // A continuation chunk for an already-tracked id still works.
+        // (Verify by feeding the final m=0 chunk for id=1 and checking
+        // the slot is removed — completed.)
+        k.feed("i=1,m=0;BA==");
+        assert_eq!(
+            k.in_flight_len_for_test(),
+            super::MAX_IN_FLIGHT_SLOTS - 1,
+            "completing id=1 should free a slot"
+        );
     }
 
     /// Cycle 578 behavioral drift guard: a single chunk whose payload

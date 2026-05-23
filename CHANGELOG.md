@@ -46,6 +46,26 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 579 — **Kitty in-flight slot cap.** Complement to cycle
+              578. The cycle-578 per-slot byte cap stops any
+              *single* chunked transmission from OOMing the host,
+              but the `in_flight: HashMap<u32, Acc>` itself was
+              keyless growth: an attacker can send 100 000+
+              distinct `i=` values with one `m=1` chunk each (no
+              terminating `m=0`), each slot holding a few bytes,
+              and slowly fill the host's heap with HashMap
+              overhead alone. New constant
+              `MAX_IN_FLIGHT_SLOTS = 32` (well above any real
+              client; kitty + ueberzug + chafa interleave 1-2
+              transmissions). Past the cap, brand-new ids are
+              refused (`KittyOut::None`); continuation chunks
+              for already-tracked ids still work. Drift guard
+              `kitty_in_flight_slot_cap_refuses_new_ids_past_
+              saturation` fills 32 slots, fires a 33rd id and
+              asserts the map didn't grow, then completes one
+              and asserts the slot frees. Workspace tests 328
+              → 329 (+ 1 ignored).
+
   cycle 578 — **Kitty chunked-transmission cap.** Both kitty
               graphics accumulators in `KittyState::feed` (the
               regular `a=T,m=1` chunked image and the `a=f,m=1`
