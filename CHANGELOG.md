@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 672 — **vertical-tabs sub-cycle 5: renderer paints
+              vertical strips correctly**: per-segment chrome
+              now uses each segment's own `(y, h)` (from
+              cycle-668's `tab_bar_vertical`) instead of the
+              strip-wide `by`/`tabbar.height`. Other paint
+              changes:
+                - bar background: for vertical, paint a
+                  column matching the strip rect (left or
+                  right edge), not a full-width horizontal
+                  stripe at the top
+                - segment separator flips axis: vertical
+                  separator along the bottom of each row
+                  (vs right of each column for horizontal)
+                - active-tab accent bar uses segment's own y/h
+                - activity dot positions relative to segment
+                - close chip uses segment's own rect
+                - new-tab `+` button paints at its own rect
+                  (which cycle-668 anchored at strip bottom
+                  for vertical)
+              Workspace tests stay 390 (renderer paint paths
+              are snapshot-tested by the existing tests; the
+              vertical-rendering-correctness is best verified
+              by user-visible deploy).
+              Vertical-tabs port: 5/8 sub-cycles complete.
+
   cycle 671 — **Deploy: redeploy with `auto_theme.py` port
               7/7 complete**. Binary at `~/.local/bin/kettle`
               reports `1.45.1 (849726f)`. End-to-end on the

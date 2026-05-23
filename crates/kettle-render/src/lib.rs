@@ -966,11 +966,32 @@ impl Renderer {
         // Tab bar background + per-segment chrome (text added later).
         if tabbar.height > 0.0 {
             let by = tabbar.y;
-            quads.push(rect(0.0, by, sw, tabbar.height, theme.palette[8], 1.0));
+            // Cycle 672 (vertical-tabs sub-cycle 5): when the strip
+            // is vertical (TabBarPos::Left/Right), paint the bar
+            // background as a column matching the strip rect
+            // instead of a full-width horizontal stripe.
+            if cfg.tab_bar_pos.is_vertical() {
+                // Derive the strip's x + width from the first
+                // segment (cycle-668 hands us correct per-segment
+                // rects). new_tab anchors at the same x/w.
+                let (sx, _, swid, _) = tabbar
+                    .segments
+                    .first()
+                    .map(|s| s.rect)
+                    .unwrap_or(tabbar.new_tab);
+                quads.push(rect(sx, 0.0, swid, sh, theme.palette[8], 1.0));
+            } else {
+                quads.push(rect(0.0, by, sw, tabbar.height, theme.palette[8], 1.0));
+            }
             for s in &tabbar.segments {
-                let (x, _, w, _) = s.rect;
+                // Cycle 672 (vertical-tabs sub-cycle 5): use the
+                // segment's own y/h (from cycle 668) instead of
+                // the strip-wide `by`/`tabbar.height`. For
+                // horizontal layouts the values match; for
+                // vertical they're per-row.
+                let (x, seg_y, w, seg_h) = s.rect;
                 if s.active {
-                    quads.push(rect(x, by, w, tabbar.height, default_bg, 1.0));
+                    quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
                     // Active accent bar on the left edge.
                     // Cycle 178: when broadcast / group-input mode is on,
                     // use a warning-yellow accent (theme palette index 3,
@@ -989,17 +1010,18 @@ impl Renderer {
                         // back to palette[4] when unset.
                         cfg.accent_color.unwrap_or(theme.palette[4])
                     };
-                    quads.push(rect(x, by, 2.0, tabbar.height, accent, 1.0));
+                    quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
                 }
-                // Thin separator on the right of each segment.
-                quads.push(rect(
-                    x + w - 1.0,
-                    by,
-                    1.0,
-                    tabbar.height,
-                    theme.background,
-                    0.5,
-                ));
+                // Thin separator on the right (horizontal) or
+                // bottom (vertical) of each segment. For vertical,
+                // the cycle-668 layout stacks rows top-to-bottom,
+                // so the separator goes ALONG the bottom edge of
+                // each row instead of the right edge.
+                if cfg.tab_bar_pos.is_vertical() {
+                    quads.push(rect(x, seg_y + seg_h - 1.0, w, 1.0, theme.background, 0.5));
+                } else {
+                    quads.push(rect(x + w - 1.0, seg_y, 1.0, seg_h, theme.background, 0.5));
+                }
                 // Activity indicator dot (cycle 246) — a small disc-
                 // approximation in the lower-left of any *inactive*
                 // segment whose tab has produced output (cyan) or
@@ -1020,9 +1042,9 @@ impl Renderer {
                     TabActivity::Normal => None,
                 };
                 if let Some(c) = dot_color {
-                    let r = (tabbar.height * 0.18).clamp(3.0, 6.0);
+                    let r = (seg_h * 0.18).clamp(3.0, 6.0);
                     let dx = x + 6.0;
-                    let dy = by + tabbar.height - r * 2.0 - 4.0;
+                    let dy = seg_y + seg_h - r * 2.0 - 4.0;
                     // Render the dot as a small square — wgpu doesn't
                     // have a circle primitive here and a 4×4 / 6×6
                     // square at high opacity reads as a "bullet" at
@@ -1075,9 +1097,11 @@ impl Renderer {
                     ));
                 }
             }
-            // New-tab (+) button background.
-            let (nx, _, nw, _) = tabbar.new_tab;
-            quads.push(rect(nx, by, nw, tabbar.height, theme.palette[8], 1.0));
+            // New-tab (+) button background. Cycle 672: use the
+            // new_tab rect's own y/h (which cycle-668 set to the
+            // strip-bottom row for vertical layouts).
+            let (nx, ny, nw, nh) = tabbar.new_tab;
+            quads.push(rect(nx, ny, nw, nh, theme.palette[8], 1.0));
             // Cycle 255: drag-in-progress ghost. While the user holds a
             // left button down on the tab bar (cycle 249), paint a
             // translucent overlay copy of the active segment centered
