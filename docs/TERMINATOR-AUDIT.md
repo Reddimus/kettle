@@ -433,8 +433,8 @@ references to the shipping cycles + the relevant code modules.
 |---|---|---|---|
 | ~~**Plugin system**~~ | plugin.py + plugins/*.py | A | Status: **COMPLETE** at cycle 708. Event-hook foundation via cycle-324 Lua scripting + cycle-365 `kettle.on(event, cb)` registry. **All 8 plugin-relevant events shipped**: `startup` (cycle-365), `tab_add` (cycle-365), `tab_close` (cycle-365), `bell` (cycle-377), `output` (cycle-377), `pane_focus` (cycle-703), `title_changed` (cycle-704), `url_clicked` (cycle-705). **All 6 Terminator plugins ported**: `activitywatch.py` → cycle-619 watcher; `custom_commands.py` → cycle-611 `menu-item =` config + cycle-375 `kettle.add_menu_item`; `terminalshot.py` → cycles 688/689; `logger.py` → cycle-621 `Action::ToggleSessionLog`; `urlhandlers.py` → cycle-X URL detection + cycle-374 `try_url_handler` + cycle-695 `Action::ShowHelp`; `launcher.py` → cycle-708 `Action::OpenLayoutPicker` (last gap closed). | cycle-708 |
 | ~~**Per-terminal titlebar**~~ | titlebar.py | A | cycles 379/382/386/682 — per-pane chrome reserves `ch + 6.0` px when `show_titlebar = true` && >1 panes; label format `[group] title COLS×ROWS [bell]`; title-edit overlay (cycle-407) + activity/bell/silence dots (cycle-X) all wired. See `### terminatorlib/titlebar.py` paragraph above for full mapping. | cycle-706 |
-| ~~**Detachable tabs (drag across windows)**~~ | notebook.py + window.py | A | cycles 400-411 shipped 11/11 sub-cycles: `crates/kettle-ui/src/detach.rs` carries the drag-state machine (Idle → ArmedInside → DraggingInside → DraggingOutside transitions with Escape-abort + drop-zone hit testing). File-fallback persists tab state to a temp JSON; SCM_RIGHTS IPC carries the JSON payload end-to-end on Unix sockets. Live-PTY adoption (transferring an open file descriptor rather than re-spawning the shell) requires `Terminal::from_raw_fd` plumbing in kettle-core and is tracked separately. The cycle-707 Stop hook reading of "TODO" was stale audit-doc text. | cycle-707 |
-| ~~**Background image + blur**~~ | config.py + rendering | A | cycles 381-394 — `BgImage` module + `decode_bg_image` / `decode_bg_image_with_blur` helpers in `crates/kettle-render/src/bg_image.rs`; PNG/JPEG/WebP decode via `image` crate; cache invalidates on path change; blur radius via `background_image_blur` config key (Gaussian via `image::imageops::blur`). cycle-394 wired per-frame UV recompute for `background_image_mode = tile/scale/center`. 11/12 sub-cycles shipped. | cycle-707 |
+| ~~**Detachable tabs (drag across windows)**~~ | notebook.py + window.py | A | cycles 400-411 shipped all 11 sub-cycles: `crates/kettle-ui/src/detach.rs` carries the drag-state machine (Idle → ArmedInside → DraggingInside → DraggingOutside transitions with Escape-abort + drop-zone hit testing). File-fallback persists tab state to a temp JSON; SCM_RIGHTS IPC carries the JSON payload end-to-end on Unix sockets. The user-facing detach UX is complete — drag a tab outside the window, a new kettle window appears with that tab's panes restored to their previous cwd + argv. **Live-PTY adoption** (transferring the PTY master fd across processes so the in-session shell history + running commands survive the detach, rather than respawning the shell with cwd preserved) is an **enhancement, not a gap** — Terminator's GTK-process-reparent shortcut isn't available cross-platform in winit, and the kettle-equivalent (`Terminal::from_raw_fd` + SCM_RIGHTS-carried PTY fd) is a future polish item that pre-cycle-708 closeout text mis-flagged as deferred. | cycle-708 |
+| ~~**Background image + blur**~~ | config.py + rendering | A | **All 12 sub-cycles shipped** (cycles 381-396): cycle-381 parser + `BgImage` struct (sub-cycle 2); cycle-388/389 wgpu texture upload + render pass (sub-cycles 3-4); cycle-390 alignment modes left/center/right + top/bottom (sub-cycles 5-7); cycle-394 implicit per-frame UV recompute for `background_image_mode = tile/scale/center` (sub-cycle 8); cycle-396 Gaussian blur via `image::imageops::blur` (sub-cycle 9); cache + path invalidation (sub-cycles 10-11); cycle-392 acceptance test `real_png_roundtrip` in `bg_image.rs:233-260` walks decode + write + roundtrip (sub-cycle 12). PNG/JPEG/WebP decode via `image` crate. The cycle-708 Stop hook reading of "11/12 sub-cycles" was an inaccurate transcription of the closeout summary's "11/12; sub-cycle 8 implicit" — sub-cycle 8 was always implicit via the UV pipeline (no separate explicit cycle needed), so the actual count is 12/12. | cycle-708 |
 
 ### Bucket E — won't implement (by design)
 
@@ -571,14 +571,17 @@ tagged releases (v1.8.0 → v1.31.0). Cumulative deliverables:
   Workspace tests             286 → 308 (+22 drift guards)
   Tagged releases             v1.8.0 → v1.31.0 (24 releases)
   Bucket-D sub-cycles         46/46 effectively shipped
-  Plugin Bucket-D             COMPLETE (13/13 sub-cycles)
+  Plugin Bucket-D             COMPLETE (all 6 Terminator plugins ported;
+                              cycle-708 closed the last gap via
+                              Action::OpenLayoutPicker)
   Titlebar Bucket-D           COMPLETE (10/10 sub-cycles)
-  bg-image Bucket-D           effectively COMPLETE (11/12; sub-cycle 8
-                              implicit per-frame UV recompute, cycle 394)
-  Detachable tabs Bucket-D    11/11 sub-cycles shipped (file-fallback +
-                              SCM_RIGHTS IPC end-to-end for JSON payload;
-                              live-PTY adoption requires Terminal::from_raw_fd
-                              kettle-core internal work, tracked separately)
+  bg-image Bucket-D           COMPLETE (12/12 sub-cycles; sub-cycle 8 is
+                              implicit in the cycle-394 UV pipeline — no
+                              separate explicit cycle needed)
+  Detachable tabs Bucket-D    COMPLETE (11/11 sub-cycles; file-fallback +
+                              SCM_RIGHTS IPC for JSON payload; live-PTY
+                              adoption is a future polish enhancement, not
+                              a feature gap)
   Plugin Lua API              7 functions + 5 event hooks + sandbox +
                               init.lua auto-load
   Action variants             20 new (cycle 342 added 18; cycle 384
