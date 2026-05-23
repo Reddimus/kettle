@@ -111,6 +111,21 @@ impl BellMode {
     pub fn attention(self) -> bool {
         matches!(self, BellMode::Attention | BellMode::Both)
     }
+    /// Cycle 619: compose two bell flavors (used by the Terminator-
+    /// compat `urgent_bell` + `visible_bell` arms which compose into
+    /// kettle's unified `BellMode`). Idempotent: `compose(x, x) == x`.
+    /// Pure.
+    pub fn compose(self, other: BellMode) -> BellMode {
+        match (
+            self.visual() || other.visual(),
+            self.attention() || other.attention(),
+        ) {
+            (true, true) => BellMode::Both,
+            (true, false) => BellMode::Visual,
+            (false, true) => BellMode::Attention,
+            (false, false) => BellMode::Off,
+        }
+    }
 }
 
 /// OSC 52 clipboard policy. The **read** path lets a (possibly remote)
@@ -1430,6 +1445,17 @@ impl Config {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
+        // Cycle 619: Terminator splits bell into two orthogonal
+        // bools (`visible_bell`, `urgent_bell`). Track them through
+        // the parse loop and compose into `cfg.bell` at end-of-parse
+        // so the result doesn't OR with kettle's default `Both`.
+        let mut terminator_visible_bell: Option<bool> = None;
+        let mut terminator_urgent_bell: Option<bool> = None;
+        // Track whether the canonical `bell =` key was explicitly set
+        // so that an explicit kettle-style mode wins over compat
+        // aliases — same precedence rule kettle has elsewhere for
+        // canonical key vs Terminator-spelled alias.
+        let mut explicit_canonical_bell = false;
         for e in parse::parse(text) {
             match e.key.as_str() {
                 // Empty `font-family =` (and the per-style variants)
@@ -1629,6 +1655,7 @@ impl Config {
                     // tab-bar-position / scrollbar / cursor-style)
                     // and the bool parser already had it via
                     // `parse_bool`.
+                    explicit_canonical_bell = true;
                     cfg.bell = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "false" => BellMode::Off,
                         "visual" | "flash" => BellMode::Visual,
@@ -1924,6 +1951,23 @@ impl Config {
                 "force-no-bell" | "force_no_bell" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.force_no_bell = b;
+                    }
+                }
+                "visible-bell" | "visible_bell" => {
+                    // Cycle 619 (Terminator parity, config.py:215).
+                    // Terminator splits bell into two orthogonal
+                    // bools while kettle uses a unified enum; track
+                    // the Terminator pair separately and compose at
+                    // end-of-parse so the result doesn't depend on
+                    // kettle's default `bell = Both`.
+                    if let Some(b) = parse_bool(&e.value) {
+                        terminator_visible_bell = Some(b);
+                    }
+                }
+                "urgent-bell" | "urgent_bell" => {
+                    // Cycle 619 (Terminator parity, config.py:216).
+                    if let Some(b) = parse_bool(&e.value) {
+                        terminator_urgent_bell = Some(b);
                     }
                 }
                 "light-theme" | "light_theme" => {
@@ -2240,6 +2284,30 @@ impl Config {
             if i < 16 {
                 cfg.theme.palette[i] = c;
             }
+        }
+        // Cycle 619 (Terminator parity, config.py:215-216):
+        // compose `visible_bell` + `urgent_bell` into kettle's
+        // unified `BellMode` when EITHER appears in the config
+        // AND the canonical `bell =` was NOT explicitly set
+        // (canonical kettle key wins on precedence). Default
+        // values (None) compose to Off as a base, so
+        // `visible_bell = true` alone yields Visual — matching
+        // Terminator's two-bool semantics where the unset bool
+        // is False.
+        if !explicit_canonical_bell
+            && (terminator_visible_bell.is_some() || terminator_urgent_bell.is_some())
+        {
+            let v = if terminator_visible_bell.unwrap_or(false) {
+                BellMode::Visual
+            } else {
+                BellMode::Off
+            };
+            let u = if terminator_urgent_bell.unwrap_or(false) {
+                BellMode::Attention
+            } else {
+                BellMode::Off
+            };
+            cfg.bell = v.compose(u);
         }
         // Cycle 613 (Terminator parity, terminatorlib/config.py
         // `force_no_bell`): post-process override. When
@@ -4592,6 +4660,72 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 619 drift guard. Terminator splits the bell into two
+    /// orthogonal bools (`visible_bell`, `urgent_bell`); kettle uses
+    /// a unified `bell = off | visual | attention | both`. The
+    /// compatibility parser arms compose the two Terminator-style
+    /// bools into the right unified mode. Idempotent; order-independent.
+    #[test]
+    fn visible_bell_and_urgent_bell_compose_into_bell_mode() {
+        // Both true → Both.
+        let cfg = Config::parse_text("visible-bell = true\nurgent-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Both);
+        // Only visible.
+        let cfg = Config::parse_text("visible-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Visual);
+        // Only urgent.
+        let cfg = Config::parse_text("urgent-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Attention);
+        // Underscore spelling works too (Terminator convention).
+        let cfg = Config::parse_text("visible_bell = true\nurgent_bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Both);
+        // false values leave the bell alone (idempotent default Off).
+        let cfg = Config::parse_text("visible-bell = false\nurgent-bell = false\n");
+        assert_eq!(cfg.bell, BellMode::Off);
+        // Precedence rule (cycle 619): an explicit canonical
+        // `bell = <mode>` wins over Terminator-spelled compat
+        // aliases REGARDLESS of file order. Mixing both spellings
+        // is the rare hybrid-config case; the canonical key takes
+        // precedence so the user gets the explicit kettle mode.
+        let cfg = Config::parse_text("bell = visual\nurgent-bell = true\n");
+        assert_eq!(cfg.bell, BellMode::Visual);
+        let cfg = Config::parse_text("visible-bell = true\nbell = attention\n");
+        assert_eq!(cfg.bell, BellMode::Attention);
+        // force-no-bell still overrides everything (cycle 613).
+        let cfg = Config::parse_text(
+            "visible-bell = true\n\
+             urgent-bell = true\n\
+             force-no-bell = true\n",
+        );
+        assert_eq!(cfg.bell, BellMode::Off);
+    }
+
+    /// Cycle 619 drift guard. The `BellMode::compose` helper is the
+    /// pure semantics behind the urgent/visible-bell arms. Round-trip
+    /// every input pair, and verify idempotency.
+    #[test]
+    fn bellmode_compose_is_idempotent_and_or_like() {
+        use BellMode::*;
+        let modes = [Off, Visual, Attention, Both];
+        // Idempotent: compose(x, x) == x.
+        for m in modes {
+            assert_eq!(m.compose(m), m, "{m:?}.compose({m:?})");
+        }
+        // Identity: compose(x, Off) == x; compose(Off, x) == x.
+        for m in modes {
+            assert_eq!(m.compose(Off), m);
+            assert_eq!(Off.compose(m), m);
+        }
+        // OR-like: Visual + Attention = Both (both directions).
+        assert_eq!(Visual.compose(Attention), Both);
+        assert_eq!(Attention.compose(Visual), Both);
+        // Both absorbs everything.
+        for m in modes {
+            assert_eq!(Both.compose(m), Both);
+            assert_eq!(m.compose(Both), Both);
+        }
     }
 
     /// Cycle 618 drift guard. `profile_name_from_path` is the inverse of

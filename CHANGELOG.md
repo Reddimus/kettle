@@ -6,6 +6,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 619 — **`visible_bell` + `urgent_bell` compat parsing
+              (Terminator config.py:215-216)**:
+                - new parser arms map Terminator's two-bool bell
+                  split into kettle's unified `BellMode`. Compose
+                  semantics: `Off + Visual = Visual`, `Off +
+                  Attention = Attention`, `Visual + Attention =
+                  Both`. Order-independent (composes at end-of-
+                  parse).
+                - precedence: explicit canonical `bell = <mode>`
+                  wins over the Terminator aliases regardless of
+                  file order — kettle key takes precedence on
+                  hybrid configs.
+                - `force-no-bell = true` still overrides everything
+                  (cycle 613 chain unchanged).
+                - new `BellMode::compose(other)` pure helper
+                  (OR-like, idempotent, with identity = Off).
+              Drift guards:
+                - `visible_bell_and_urgent_bell_compose_into_bell_mode`
+                  walks 8 input shapes including canonical-precedence
+                  + force-no-bell chain
+                - `bellmode_compose_is_idempotent_and_or_like`
+                  exhaustively round-trips all 4×4 input pairs +
+                  proves the algebra (idempotence, identity = Off,
+                  Both absorbs)
+              Workspace tests 360 → 362.
+
   cycle 618 — **Profile-cycling refactor (Terminator
               `key_next_profile` / `key_previous_profile`)**:
                 - new pub fn `Config::list_profiles()` enumerates
