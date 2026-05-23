@@ -4311,6 +4311,34 @@ impl App {
                 self.mux.toggle_zoom();
                 self.resize_all();
             }
+            // Cycle 696 Terminator parity (`key_preferences` /
+            // `key_preferences_keybindings`). Terminator's GUI
+            // Preferences dialog is config-file-driven for
+            // kettle, so the preferences keybind opens the user's
+            // config file in $EDITOR (or any registered handler
+            // via `open::that_detached`). If no config file is
+            // loaded — kettle started with `--config` pointing
+            // at a missing path, or no profile resolved — falls
+            // back to `Config::default_path()`. Closes the
+            // "preferences GUI is a paradigm choice" Bucket E
+            // rationale by making the equivalent UX one
+            // keystroke away.
+            Action::EditConfig => {
+                let path = self
+                    .config_path
+                    .clone()
+                    .or_else(kettle_config::Config::default_path);
+                if let Some(path) = path {
+                    if let Err(e) = open::that_detached(&path) {
+                        log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
+                    }
+                } else {
+                    log::warn!(
+                        "Action::EditConfig: no config path resolved \
+                         (set $XDG_CONFIG_HOME or pass --config)"
+                    );
+                }
+            }
             // Cycle 695 Terminator parity (`key_help`).
             // Terminator's F1 opens its HTML manual via xdg-open;
             // kettle opens its README at the canonical GitHub URL

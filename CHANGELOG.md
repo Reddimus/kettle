@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 696 — **`Action::EditConfig` (Terminator key_preferences)**:
+              Terminator's `key_preferences` /
+              `key_preferences_keybindings` open Terminator's
+              GUI Preferences dialog. kettle is config-file-
+              driven, so cycle 696 ships the equivalent as a
+              one-keystroke shortcut to edit the resolved config
+              file: `Action::EditConfig` opens
+              `App::config_path` (or `Config::default_path()`
+              fallback if no config loaded) via
+              `open::that_detached`, which respects the OS's
+              registered text-editor handler ($EDITOR, BBEdit,
+              Notepad, etc).
+              Reachable from cycle-104 command palette + 7
+              keybind name aliases: `preferences`,
+              `preferences_keybindings`, `preferences-keybindings`,
+              `edit_config`, `edit-config`, `open_config`,
+              `open-config`. cycle-117 palette completeness
+              drift guard enforces registry coverage.
+              Drift guard `from_name_accepts_edit_config_aliases`
+              walks all 7 aliases.
+              Closes the "preferences GUI is a paradigm choice"
+              Bucket E rationale by making the equivalent UX one
+              keystroke away. Audit row promoted from E → A.
+              Workspace tests 395 → 396.
+
   cycle 695 — **`Action::ShowHelp` (Terminator key_help / F1)**:
               Terminator's F1 opens its HTML manual via
               `terminal.key_help` → `open_url(manual_lookup())`.

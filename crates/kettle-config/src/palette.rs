@@ -28,6 +28,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Zoom / unzoom pane", ToggleZoom),
         ("Scaled zoom (zoom + 1.5x font)", ScaledZoom),
         ("Open kettle help / README", ShowHelp),
+        ("Edit config file in $EDITOR", EditConfig),
         ("Focus next pane", FocusNext),
         ("Focus previous pane", FocusPrev),
         ("New window", NewWindow),
@@ -194,6 +195,7 @@ mod tests {
             ToggleZoom,
             ScaledZoom,
             ShowHelp,
+            EditConfig,
             IncreaseFontSize,
             DecreaseFontSize,
             ResetFontSize,
@@ -289,6 +291,7 @@ mod tests {
                 | ToggleZoom
                 | ScaledZoom
                 | ShowHelp
+                | EditConfig
                 | IncreaseFontSize
                 | DecreaseFontSize
                 | ResetFontSize

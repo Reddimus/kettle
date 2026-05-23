@@ -124,7 +124,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | Super+1 | insert_number | — | C (sends pane's index as text input) |
 | Super+0 | insert_padded | — | C (zero-padded pane index) |
 | (unbound) | next_profile / previous_profile | — | C (runtime profile cycling; kettle has `--profile NAME` launch-time only) |
-| (unbound) | preferences / preferences_keybindings | — | E (preferences GUI; paradigm choice) |
+| (unbound) | preferences / preferences_keybindings | A | cycle-696 — `Action::EditConfig` opens the user's resolved config file (`App::config_path` → `Config::default_path` fallback) via `open::that_detached`, which respects the OS's registered text editor handler. Closes the "preferences GUI is a paradigm choice" Bucket E rationale by making the equivalent UX one keystroke away. 7 keybind name aliases: `preferences`, `preferences_keybindings`, `preferences-keybindings`, `edit_config`, `edit-config`, `open_config`, `open-config`. Drift guard `from_name_accepts_edit_config_aliases` covers all 7. |
 | F1 | help | A | cycle-695 — `Action::ShowHelp` opens the kettle README on GitHub via `open::that_detached` (the same cross-platform dispatch path cycle-X URL clicks already use). Reachable from cycle-104 palette + 5 name aliases (`help`, `show_help`, `show-help`, `open_help`, `open-help`). Drift guard `from_name_accepts_show_help_aliases` covers all five. |
 | (unbound) | page_up/down/_half | — | A (kettle has `ScrollPageUp/Down`; half-page is B) |
 | (unbound) | line_up/down | `ScrollLineUp/Down` | A |

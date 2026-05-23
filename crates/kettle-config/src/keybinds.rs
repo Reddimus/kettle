@@ -173,6 +173,17 @@ pub enum Action {
     /// cycle-X URL clicks already use, so it works on
     /// Linux/macOS/Windows without spawning a per-platform helper.
     ShowHelp,
+    /// Cycle 696 Terminator parity (`key_preferences` /
+    /// `key_preferences_keybindings`). Terminator's GUI
+    /// Preferences dialog is config-file-driven for kettle, so
+    /// the preferences keybind opens the user's config file in
+    /// $EDITOR (fallback: `open::that_detached` lets the OS pick
+    /// the default text editor). Closes the "preferences GUI is
+    /// a paradigm choice" Bucket E rationale by making the
+    /// equivalent UX one keystroke away. Writes the path of the
+    /// active config file to that pane's PTY too in case the
+    /// user wants to switch editors mid-session.
+    EditConfig,
     /// Cycle 693 Terminator parity (`key_scaled_zoom`).
     /// Terminator's "scaled zoom" maximizes the active pane AND
     /// scales the font proportionally so text fills the larger
@@ -449,6 +460,8 @@ pub fn action_names() -> Vec<&'static str> {
         "scaled_zoom",
         "help",
         "show_help",
+        "preferences",
+        "edit_config",
         "increase_font_size",
         "zoom_in",
         "decrease_font_size",
@@ -637,6 +650,13 @@ impl Action {
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
+            "preferences"
+            | "preferences_keybindings"
+            | "preferences-keybindings"
+            | "edit_config"
+            | "edit-config"
+            | "open_config"
+            | "open-config" => EditConfig,
             "increase_font_size" | "zoom_in" => IncreaseFontSize,
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
@@ -1539,6 +1559,27 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::InsertPaneName)),
                 "alias {s:?} should parse to InsertPaneName"
+            );
+        }
+    }
+
+    /// Cycle 696 drift guard. Terminator's `key_preferences`
+    /// and `key_preferences_keybindings` both resolve to
+    /// `Action::EditConfig` via the documented aliases.
+    #[test]
+    fn from_name_accepts_edit_config_aliases() {
+        for s in [
+            "preferences",
+            "preferences_keybindings",
+            "preferences-keybindings",
+            "edit_config",
+            "edit-config",
+            "open_config",
+            "open-config",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::EditConfig)),
+                "alias {s:?} should parse to EditConfig"
             );
         }
     }
