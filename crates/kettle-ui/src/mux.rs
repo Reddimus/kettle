@@ -494,7 +494,9 @@ const CLOSED_TAB_RING_CAP: usize = 10;
 /// Lands the type now so the cycle-642 `Action::GroupTab` etc.
 /// dispatch can be wired against the final shape ahead of the
 /// refactor.
-#[allow(dead_code)] // All + Group are consumed by upcoming GroupTab/GroupWindow/CreateGroup dispatch arms.
+// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`. The
+// All + Group variants are now consumed by the cycle-679/681/682
+// GroupTab + GroupWindow + CreateGroup dispatch arms in app.rs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastScope {
     #[default]
@@ -520,7 +522,9 @@ pub enum BroadcastScope {
 /// group)` pairs covering every pane in every tab. The caller
 /// is responsible for assembling it (a one-liner over
 /// `self.panes.iter()`).
-#[allow(dead_code)] // consumed by future named-groups sub-cycles (the broadcast_write migration)
+// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+// `compute_broadcast_targets` is the impl behind the public
+// `Mux::broadcast_targets` (called from app.rs).
 pub fn compute_broadcast_targets(
     scope: &BroadcastScope,
     focused_pane: u64,
@@ -715,14 +719,11 @@ impl Mux {
     /// Cycle 397 (Terminator parity, detachable-tabs Bucket-D
     /// sub-cycle 2): serialize ONE tab (by index) to the same
     /// STab wire format that session.json uses. Returns None when
-    /// the index is out-of-range. Used by the future detachable-
-    /// tabs path (cycle-363 design doc sub-cycles 7+8) to wire
-    /// up cross-process tab handoff via JSON-over-Unix-socket.
-    /// For now: pure-data utility callable from drift guards.
-    /// `#[allow(dead_code)]` because the cross-process IPC caller
-    /// is the multi-week thread (sub-cycles 7+8); this API ships
-    /// as the foundation those cycles consume.
-    #[allow(dead_code)]
+    /// the index is out-of-range. Used by the detachable-tabs path
+    /// (cycle-400-411 design doc) to wire cross-process tab handoff
+    /// via JSON-over-Unix-socket. Called from `App::on_tab_detach`
+    /// at app.rs:1562 and `App::serialize_tab_for_handoff` at
+    /// app.rs:5832 (cycle 411).
     pub fn serialize_tab(&self, idx: usize) -> Option<STab> {
         let t = self.tabs.get(idx)?;
         Some(STab {
@@ -1251,6 +1252,15 @@ impl Mux {
     /// transferring or dropping those Pane refs.
     ///
     /// Returns None for out-of-range idx.
+    ///
+    /// Cycle 720 (2026-05-23): the `#[allow(dead_code)]` covered
+    /// the period before the cycle-411 SCM_RIGHTS IPC actually
+    /// landed. Today this is exercised by `mux::tests` round-trip
+    /// drift guards (extract→insert restores the tab state) — the
+    /// IPC integration ships under a feature gate the binary
+    /// activates via `--tab-handoff-fd`. Production consumes
+    /// `serialize_tab` directly; this helper stays available for
+    /// the upcoming live-PTY adoption work.
     #[allow(dead_code)]
     pub fn extract_tab(&mut self, idx: usize) -> Option<Tab> {
         if idx >= self.tabs.len() {

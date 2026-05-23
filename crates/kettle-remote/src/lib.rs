@@ -4,11 +4,20 @@
 //! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)):
 //! crate skeleton + `RemoteContext` type + `detect_remote` stub.
 //!
-//! - Sub-cycle 3 will add the SSH detector
-//!   ([`SshSession::matches`]).
-//! - Sub-cycle 4 will add the Container detector
-//!   ([`ContainerSession::matches`]) for Docker / Podman / kubectl / lxc.
-//! - Sub-cycle 5 will wire the process-tree walk via sysinfo.
+//! Sub-cycle ledger (closed):
+//!
+//! - Cycle 644 (sub-cycle 3) — SSH detector
+//!   (`detect_ssh` covering 11 argv shapes; see `tests` module).
+//! - Cycle 645 (sub-cycle 4) — Container detector
+//!   (`detect_container` for Docker / Podman / kubectl / lxc;
+//!   11 argv shapes).
+//! - Cycle 646 (sub-cycle 5) — process-tree BFS via sysinfo
+//!   (`detect_remote_with(child_pid, &mut System)`).
+//! - Cycle 658 (sub-cycle 7) — `clone_session_command` +
+//!   `clone_session_label` (Clone Session menu item).
+//! - Cycle 720 (2026-05-23): re-wrote the original
+//!   "sub-cycle 3 *will* ship" forward-looking comments now that
+//!   the foundations all landed at cycles 644-658.
 
 #![forbid(unsafe_code)]
 

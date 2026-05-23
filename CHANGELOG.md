@@ -6,6 +6,61 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 722 — **Production polish: doc + dead-code + magic-number sweep**:
+              Picks up the medium-priority audit items that
+              cycle 718 deferred. No behavior change anywhere;
+              workspace tests stay at 424.
+              **Cycle 719 — `docs/CONFIG.md` for the cycle-717
+              Preferences submenu**: `cursor-style-blink` row
+              now lists `cursor-blink` / `cursor_blink` as the
+              short aliases the Preferences submenu writes
+              back. New section "Editing the config from inside
+              kettle" cross-references each visible toggle to
+              its config key + documents the atomic write
+              (preserves comments / blanks / order; first
+              toggle saves a `.bak` snapshot).
+              **Cycle 720 — stale `#[allow(dead_code)]` audit**.
+              Removed 6 stale gates whose deferred work has
+              shipped:
+                - `BroadcastScope::All` / `::Group` enum (mux.rs)
+                  — consumed by cycle-679/681/682 dispatch.
+                - `compute_broadcast_targets` (mux.rs) — called
+                  from production `broadcast_targets`.
+                - `Mux::serialize_tab` — called from
+                  `App::on_tab_detach` (cycle 411).
+                - `session_screenshot_path` — called from
+                  `Action::TakeScreenshot` dispatch (cycle 689).
+                - `ContextMenuItem::Submenu.items` — consumed by
+                  cycle-687 drill-in dispatch.
+                - `ThemeChoice` / `ProfileChoice` — flyout-side
+                  click dispatch landed at cycle 687/688.
+              Kept the gates that are still test-only
+              (`extract_tab` + `insert_tab` for the live-PTY
+              adoption follow-up, `content_rect_for` for the
+              cycle-651 layout-math drift guards,
+              `VERTICAL_TAB_STRIP_W` as the documented
+              fallback). All retained gates now reference the
+              concrete test or design doc instead of "future
+              sub-cycle".
+              **Cycle 721 — magic numbers → `kettle_render::menu`
+              constants**. The 12.0/8.0/40.0/180.0/80.0 layout
+              literals duplicated across 16 sites in app.rs +
+              lib.rs collapse to a single `pub mod menu` in
+              kettle-render exporting `ROW_PAD`, `SEP_H`,
+              `H_PAD`, `MIN_W`, `PANEL_BREATHING`. App-side hot
+              paths (`context_menu_geometry`, `menu_row_at_cursor`,
+              `context_menu_click_action`, `step_context_menu_highlight`,
+              `scroll_context_menu`) now import the names. Test
+              fixtures keep literals (their assertions pin
+              specific pixel values).
+              **Cycle 722 — stale sub-cycle promises pinned**.
+              Comments like "sub-cycle 3 will add the SSH
+              detector" rewritten to the concrete shipping
+              cycles. kettle-remote module doc, keybinds.rs
+              TakeScreenshot/GroupTab/GroupWindow/UngroupTab
+              docs now cite cycles 644-689 instead of
+              "later sub-cycles".
+
   cycle 718 — **Production-grade polish: workspace deps + doc sync**:
               Three real bugs / gaps surfaced by the post-C9
               audit pass, fixed in one cycle.

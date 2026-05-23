@@ -228,11 +228,13 @@ fn confirm_dialog_keypress(
 
 /// Cycle 665 (sub-cycle 3 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
 /// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): default
-/// strip width for vertical (Left / Right) tab bars. The design
-/// doc proposes 180 px as the "sidebar default" (Firefox-style
-/// sidebar feel). A future cycle adds a `tab-bar-width` config
-/// override (sub-cycle 7 of the design).
-#[allow(dead_code)] // kept for legacy test/api compat; production uses cfg.tab_bar_width
+/// strip width for vertical (Left / Right) tab bars when the
+/// config doesn't supply one. The cycle-673 `tab-bar-width`
+/// config key supersedes this in production; this constant is
+/// the documented Firefox-sidebar-style fallback (180 px) the
+/// cycle-651 + cycle-665 unit-tested layout helpers use when
+/// invoked without an app-level cfg handle.
+#[allow(dead_code)] // doc-only reference + cycle-651 test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
 /// Cycle 651 + 665 (sub-cycles 2 + 3 of vertical-tabs design):
@@ -249,7 +251,7 @@ pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 /// Pure — no `&self`, no renderer, no winit. Drives the `App::area`
 /// method (which now wraps this helper) so vertical-strip wiring
 /// can be unit-tested without constructing a full App.
-#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper is kept for cycle-651 tests + future no-cfg callers
+#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper drives the cycle-651 layout-math drift guards (app.rs:9411+)
 fn content_rect_for(
     surface: (u32, u32),
     tab_bar_h: f32,
@@ -313,7 +315,9 @@ fn content_rect_for_with_strip(
 /// request keyed on the path.
 ///
 /// Pure modulo `unix_secs` + `cache_dir` — caller pins both.
-#[allow(dead_code)] // sub-cycle 4 wires the dispatch usage.
+// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+// Called from `Action::TakeScreenshot` dispatch at app.rs ~5426
+// since cycle 689 (per-pane crop + toast notification).
 fn session_screenshot_path(
     unix_secs: u64,
     pid: u32,
@@ -886,10 +890,11 @@ enum ContextMenuItem {
     /// interaction wiring.
     Submenu {
         label: String,
-        // `items` is the nested item list the sub-cycle-3 flyout
-        // renderer will surface. v1 stores them but doesn't paint;
-        // gated so clippy stays clean until the flyout lands.
-        #[allow(dead_code)]
+        // `items` is the nested item list. Consumed by the cycle-687
+        // drill-in dispatch (`ContextMenuClick::DrillIntoSubmenu`)
+        // at app.rs ~7345 — clicking a Submenu row pushes the
+        // parent items onto `drill_stack` and replaces them with
+        // the submenu's items.
         items: Vec<ContextMenuItem>,
     },
     /// Cycle 685 (Terminator parity, sub-cycle 2 of theme-submenu
@@ -897,7 +902,8 @@ enum ContextMenuItem {
     /// `Submenu { label: "Theme", … }`. Clicking dispatches
     /// `ContextMenuClick::SetTheme(theme)` which swaps the
     /// current theme to the named one.
-    #[allow(dead_code)] // sub-cycle 3 wires the flyout-side click dispatch.
+    // Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+    // The flyout-side click dispatch landed at cycle 687/688.
     ThemeChoice {
         label: String,
         theme: String,
@@ -907,7 +913,8 @@ enum ContextMenuItem {
     /// … }`. Clicking dispatches
     /// `ContextMenuClick::SetProfile(profile)` which switches the
     /// active profile (`App::config_path` + reload_config).
-    #[allow(dead_code)] // sub-cycle 3 wires the flyout-side click dispatch.
+    // Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+    // The flyout-side click dispatch landed at cycle 687/688.
     ProfileChoice {
         label: String,
         profile: String,
@@ -4206,8 +4213,8 @@ impl App {
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
-        let row_h = ch + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         let panel_h: f32 = items
             .iter()
             .map(|it| match it {
@@ -4241,7 +4248,7 @@ impl App {
             })
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + 40.0).max(180.0);
+        let panel_w = (max_chars * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
         let (sw, sh) = self
             .renderer
             .as_ref()
@@ -4277,8 +4284,8 @@ impl App {
             return;
         };
         let (_, ch) = self.cell_px();
-        let row_h = ch as f32 + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = self.context_menu.as_mut() else {
             return;
         };
@@ -4315,8 +4322,8 @@ impl App {
             return;
         };
         let (_, ch) = self.cell_px();
-        let row_h = ch as f32 + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = self.context_menu.as_mut() else {
             return;
         };
@@ -4364,8 +4371,8 @@ impl App {
             return None;
         }
         let (_, ch) = self.cell_px();
-        let row_h = ch as f32 + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: row-walk starts at scroll_offset; only the
         // visible slice is hit-tested. Off-by-one is handled by
         // find_menu_row_y's half-open interval [y, y+h).
@@ -4411,8 +4418,8 @@ impl App {
             return None;
         }
         let (_, ch) = self.cell_px();
-        let row_h = ch as f32 + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: skip the scrolled-off rows above scroll_offset
         // before walking. `row_y` starts at the panel top; iteration
         // begins at item `scroll_offset`.
@@ -4477,8 +4484,8 @@ impl App {
         let menu = self.context_menu.as_ref()?;
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
-        let row_h = ch + 12.0;
-        let sep_h = 8.0_f32;
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
         // Natural height: sum every row + separator.
         let natural_h: f32 = menu
             .items
@@ -4501,7 +4508,7 @@ impl App {
                 (w as f32, h as f32)
             })
             .unwrap_or((800.0, 600.0));
-        let max_h = (surface_h - 80.0).max(row_h);
+        let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING).max(row_h);
         let panel_h = natural_h.min(max_h);
         let max_chars = menu
             .items
@@ -4515,7 +4522,7 @@ impl App {
             })
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + 40.0).max(180.0);
+        let panel_w = (max_chars * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
         Some((menu.anchor, (panel_w, panel_h)))
     }
 

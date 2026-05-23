@@ -347,11 +347,12 @@ pub enum Action {
     /// Cycle 640 Terminator parity (`plugins/terminalshot.py`,
     /// sub-cycle 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
     /// docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): trigger a live-
-    /// window screenshot of the focused pane. v1 dispatch logs
-    /// a TODO; later sub-cycles wire the wgpu surface readback +
-    /// PNG encode + toast notification. The action + alias surface
-    /// lands now so a user can bind a chord ahead of the renderer
-    /// work.
+    /// window screenshot of the focused pane. Fully wired since
+    /// cycle 688 (wgpu surface readback + BGRA→RGBA conversion +
+    /// row-padding strip + image::ImageBuffer save) and cycle 689
+    /// (per-pane crop via focused-pane rect + toast notification
+    /// via `fire_notify`). PNG lands at the cycle-650
+    /// `session_screenshot_path` (cache_dir/<unix>-<pid>.png).
     TakeScreenshot,
     /// Cycle 642 Terminator parity (sub-cycle 1 of
     /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
@@ -362,16 +363,20 @@ pub enum Action {
     /// is the Terminator-spelled alias.
     CreateGroup,
     /// Cycle 642 Terminator parity. Assign every pane in the
-    /// focused tab to a named broadcast group (prompts via the
-    /// title-edit overlay). v1 dispatch logs a TODO; sub-cycle 4
-    /// of the named-groups design wires the bulk-apply path.
+    /// focused tab to a named broadcast group. Wired since cycle
+    /// 679 — opens the cycle-407 title-edit overlay with
+    /// `TitleEditScope::Group` + bulk-apply on confirm. cycle-683
+    /// also surfaces the action via the right-click context menu.
     GroupTab,
     /// Cycle 642 Terminator parity. Assign every pane in the
-    /// focused window to a named broadcast group. Same stub
-    /// status as `GroupTab`.
+    /// focused window to a named broadcast group. Same wiring as
+    /// `GroupTab` (cycle 679/683) but with a window-wide scope.
     GroupWindow,
     /// Cycle 642 Terminator parity. Bulk-clear the group on every
-    /// pane in the focused tab. Sub-cycle 5 wires the implementation.
+    /// pane in the focused tab. Wired since cycle 679 — walks
+    /// `mux.panes_in_focused_tab()` and clears `pane.group_name`
+    /// on each. Same dispatch surface as the cycle-683 right-click
+    /// "Ungroup This Tab" entry.
     UngroupTab,
     /// Cycle 642 Terminator parity. Bulk-clear the group on every
     /// pane in the focused window.

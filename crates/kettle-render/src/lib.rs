@@ -83,6 +83,35 @@ pub struct LinkRect {
     pub hover: bool,
 }
 
+// Cycle 721 (2026-05-23): named constants for the right-click
+// context-menu chrome. Pre-721 these magic numbers (12.0 row-pad,
+// 8.0 sep-h, 40.0 horiz-pad, 180.0 min-w, 80.0 surface-breathing)
+// were duplicated across 16 sites in `kettle-render/src/lib.rs` +
+// `kettle-ui/src/app.rs`; the duplication made the cycle-682 +
+// cycle-714 layout-math changes a 16-line search-and-replace
+// instead of a 1-line edit. Re-exported so `kettle-ui` can pull
+// them in via `use kettle_render::menu;` instead of redeclaring.
+pub mod menu {
+    /// Vertical padding inside each context-menu row. Cell-height +
+    /// MENU_ROW_PAD = total row height (~28-32 px on default cell
+    /// metrics — a comfortable click target).
+    pub const ROW_PAD: f32 = 12.0;
+    /// Separator row height. Smaller than a regular row so the menu
+    /// reads as grouped without wasting vertical space.
+    pub const SEP_H: f32 = 8.0;
+    /// Horizontal padding inside the panel: `max_chars * cw + H_PAD`.
+    /// Gives the longest label breathing room and lets short labels
+    /// (Copy) still feel like a real menu surface.
+    pub const H_PAD: f32 = 40.0;
+    /// Minimum panel width — overrides the chars-based math when the
+    /// longest label is tiny.
+    pub const MIN_W: f32 = 180.0;
+    /// Top + bottom breathing room reserved when clamping the panel
+    /// height to the surface (cycle 714 scrollable submenus). Keeps
+    /// the menu from kissing the window edge.
+    pub const PANEL_BREATHING: f32 = 80.0;
+}
+
 /// One quick-select hint label drawn over the focused pane at a grid cell.
 #[derive(Clone)]
 pub struct HintLabel {

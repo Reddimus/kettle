@@ -36,7 +36,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `background-opacity` | float | `1.0` | 0..1 |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` accepted as Alacritty-spelled alias for `bar` |
-| `cursor-style-blink` | bool | `true` | |
+| `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the cycle-717 Preferences submenu writes back |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read |
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
@@ -152,6 +152,32 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 | `scroll-tabbar` | Horizontal-scroll across many tab segments | Needs scrollable tab-bar UI for many-tab cases |
 | `split-to-group` | New splits join the parent's broadcast group | Needs named broadcast groups (Bucket D) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
+
+## Editing the config from inside kettle (cycle-717 Preferences submenu)
+
+Most of the keys above can be toggled at runtime via right-click → **Preferences ▸**.
+The submenu surfaces five common toggles + an `Advanced…` row that opens the
+config file in `$EDITOR` for everything else:
+
+| Submenu row | Config key written |
+|---|---|
+| Scrollbar (radio: always/auto/hidden) | `scrollbar` |
+| Cursor blink (✓) | `cursor-blink` |
+| Copy on select (✓) | `copy-on-select` |
+| Bell (radio: off/visual/attention/both) | `bell` |
+| Mouse-hide while typing (✓) | `mouse-hide-while-typing` |
+| Font size + / − | (live-only; `font-size` not auto-persisted yet) |
+| Advanced… | opens `~/.config/kettle/config` in `$EDITOR` |
+
+Each click both mutates the running `Config` (the change takes effect
+immediately) and atomically rewrites the matching line in the config file via
+the cycle-716 `persist_config_toggle` helper. The atomic write preserves every
+existing comment, blank line, and key order byte-for-byte — only the targeted
+`key = value` line is replaced (or appended if it doesn't exist yet).
+
+On the first toggle in any session, kettle saves a snapshot of the pre-edit
+file at `~/.config/kettle/config.bak` so you can roll back to your hand-edited
+state.
 
 ## Keybind grammar
 
