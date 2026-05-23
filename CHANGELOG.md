@@ -6,6 +6,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.40.0 polish, mostly tightening the cycle-494 pre-commit
+hook UX after first use exposed minor rough edges.
+
+  cycle 501 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries
+              extended to v1.40.0 (cycles 411-497, 9 releases,
+              87 cycles).
+
+  cycle 502 — Pre-commit hook logs elapsed gauntlet time
+              (`pre-commit: PASSED (47s)`) so contributors
+              don't misread cold-cargo-cache delay as a hung
+              hook.
+
+  cycle 503 — Renamed `start_ns` → `start_sec` (cycle 502
+              stored seconds, not nanoseconds).
+
+  cycle 504 — Per-branch test assertion order aligned with
+              `extra_check_config_lines` helper-body order
+              (accent / force_no_bell / triggers / lua_sandbox
+              / background_image / window-flags / status-bar).
+
+  cycle 505 — `extra_check_config_lines_empty_for_default_config`
+              binds the helper result once so the assertion +
+              failure-message reference the same value.
+
+  cycle 506 — Hook renders sub-second runs as `(<1s)` instead
+              of `(0s)`.
+
+  cycle 507 — Timing-comment refined "~30s" → "30-90s on a
+              cold cache" + a `<5s warm-cache incremental`
+              counterweight.
+
+  cycle 508 — Wall-clock-jumped-backward edge case (NTP
+              correction, manual clock set, container time
+              jump) renders as `<1s` rather than the
+              misleading `(-1s)`.
+
 ## [1.40.0] — 2026-05-22
 
 Pre-commit hook infrastructure. The session caught two of its own
