@@ -8,13 +8,18 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A fast, cross-platform, GPU-accelerated terminal emulator written in Rust —
-combining the best ideas of **Ghostty**, **Terminator**, **kitty**,
-**Alacritty** and **WezTerm** into one tool.
+**Works out of the box** — bundled Nerd Font, ~512 themes, Terminator
+keybinds, right-click Preferences. **GPU-accelerated** with `wgpu` so
+splits and scrollback stay smooth on busy panes. **Cross-platform**:
+one binary on Linux, macOS, and Windows 11.
+
+A fast, GPU-accelerated terminal emulator written in Rust — combining
+the best ideas of **Ghostty**, **Terminator**, **kitty**, **Alacritty**
+and **WezTerm** into one tool.
 
 ![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
-> **Status: v1.44.x — production-ready** on Linux, macOS and Windows 11.
+> **Status: v1.45.x — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
@@ -164,6 +169,16 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
 
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
+
+> **Tip — right-click anywhere in a pane** for the context menu: Copy /
+> Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled
+> themes), **Profile ▸**, and the cycle-717 **Preferences ▸** submenu
+> with one-click toggles for scrollbar mode, cursor blink, copy-on-select,
+> bell mode, mouse-hide, and font size. Settings persist atomically to
+> `~/.config/kettle/config` with a backup at `config.bak`. The menu
+> supports keyboard mnemonics (single letter) and typeahead
+> (multi-char prefix) — see [docs/CONFIG.md](docs/CONFIG.md)
+> "Editing the config from inside kettle" for the full toggle map.
 
 ## Configuration
 

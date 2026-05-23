@@ -112,8 +112,49 @@ renderer, so the menu pass reuses already-cached glyphs.
 - Output floods are coalesced by `request_redraw` (≤1 frame/vsync). Per-pane
   registries (`images`, `virtuals`, `anims`, `relatives`, `prompts`, `cwd`)
   are `Arc<Mutex<…>>` snapshotted cheaply for rendering; a running kitty
-  animation schedules a ~30 fps redraw tick (otherwise idle). The extractor
-  caps in-flight sequences (64 MiB) so a hostile stream can't hang or OOM.
+  animation schedules a ~30 fps redraw tick (otherwise idle, no CPU). The
+  extractor caps in-flight sequences (64 MiB) so a hostile stream can't hang
+  or OOM — the cap is security-relevant: an SSH session into a 256 MiB
+  container can otherwise OOM-kill kettle by emitting unbounded image data.
+- **Lua VM (cycle 324)** is parked on the App struct (single-threaded
+  `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
+  but kettle never clones it across threads. Event hooks
+  (`LuaEvent::Startup` / `TabAdd` / `TabClose` / `Bell` / `Output` /
+  `PaneFocus` / `TitleChanged` / `UrlClicked` — cycles 365-705) fire
+  synchronously on the App thread; Lua side-effects (`SendText`,
+  `ExecAction`, `Notify`, `SetTheme`) queue onto
+  `LuaEngine.pending: Arc<Mutex<Vec<LuaCommand>>>` and are drained
+  back to the App's dispatcher each tick. A broken Lua plugin
+  `log::warn`s and is skipped — it never aborts the terminal
+  (cycle-365 "broken plugin can't take down kettle" contract).
+- **Broadcast fan-out** (cycle 678 `BroadcastScope` enum) is App-side
+  input dispatch, not a separate thread: on every keystroke the App
+  walks `compute_broadcast_targets(scope, focus, in_tab, all)` and
+  writes the encoded bytes to each target pane's PTY. The reader
+  threads of the receiving panes pick up the echo through their
+  normal byte-stream path.
+- **Allocation hot-paths (cycle 727 audit)**: `App::drain_events`
+  has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
+  Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the
+  byte slice into a fresh `Vec<u8>` for the Lua callback (no
+  shared ownership because mlua's `IntoLuaMulti` consumes the
+  argument); `ContextMenuRow.label` clones the visible row text
+  each frame the menu is open (~512 clones/frame in the worst
+  case — Theme submenu drilled-in). The menu allocation is bounded
+  by user interaction (only allocates while the menu is OPEN) so
+  the steady-state allocator pressure is zero. A `Cow<'static, str>`
+  refactor of `ContextMenuRow.label` is the natural next step if
+  this ever shows up in a profile; today it's not measurable
+  against winit's per-frame work.
+- **Synchronization primitives audit (cycle 724)**: ~13 `unsafe`
+  blocks total, all FFI (libc `sendmsg/recvmsg/SCM_RIGHTS`, signal
+  setup, `pre_exec` for fd-3 plumbing, `UnixStream::from_raw_fd`
+  adoption). Each is ≤10 lines, narrowly scoped, with a doc comment
+  citing the ownership contract. No `transmute`, no raw-pointer
+  abstractions, no `Send`/`Sync` impls outside the foreign-fd
+  protocols. Per-pane `Arc<Mutex<...>>` are contended only on PTY
+  read or App snapshot; lock-hold times are O(bytes) — measured at
+  cycle X to stay under 100 µs per drain even on fast scrolling.
 
 ## Why the extractor sits *in front of* the VT engine
 
@@ -164,6 +205,27 @@ index.theme stopped GNOME's icon resolution) — see
 [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md)'s post-sweep section
 for that polish run.
 
+Cycles 554-723 (v1.44.0 → current) added the cycle-643
+`kettle-remote` crate (SSH / Docker / Podman / kubectl / lxc
+detection via sysinfo process-tree walk, surfaced as a per-pane
+title prefix + right-click "Clone session" entry), the cycle-678
+named-broadcast-groups subsystem (`BroadcastScope` enum + per-tab
+/ per-window / cross-tab named scopes), the cycle-687 right-click
+context-menu drill-in submenu UX (Theme + Profile + cycle-717
+Preferences), the cycle-665 vertical tab strips, and the
+cycle-688 wgpu surface-readback screenshot path. Cycles 711-717
+ran the user-facing right-click menu polish: hover-to-highlight,
+disabled-row hiding, scrollable submenus (~512 themes fit
+without overflowing), mnemonics + 750ms typeahead, atomic
+config write-back via `persist_config_toggle`, and the
+Preferences ▸ submenu wiring 13 runtime toggles to the
+cycle-716 atomic-write helper. Cycles 718-723 closed out the
+post-audit punch list: workspace-deps Cargo.toml refactor,
+stale-version + stale-cycle-comment scrubs, magic-number
+constants centralized in `kettle_render::menu`, 6 obsolete
+`#[allow(dead_code)]` gates removed, CI nightly early-warning
+job + release.yml pretest gate.
+
 ### Plugin system (cycles 324, 365-378)
 
 ```mermaid
@@ -172,7 +234,7 @@ flowchart TD
     A --> B["LuaEngine"]
     B -->|registers| C["kettle.on / notify / set_theme<br/>send_text / exec_action<br/>add_url_handler / add_menu_item"]
     B --> D["App.lua_engine"]
-    D -->|fire_event| E["Startup · Bell ·<br/>TabAdd · TabClose ·<br/>Output(bytes)"]
+    D -->|fire_event| E["Startup · Bell · TabAdd · TabClose ·<br/>Output(bytes) ·<br/>PaneFocus(prev?, cur) (cycle 703) ·<br/>TitleChanged(pane, str) (cycle 704) ·<br/>UrlClicked(uri) (cycle 705)"]
     D --> F["LuaCommand queue"]
     F -->|drain| G["App dispatch:<br/>SendText · ExecAction ·<br/>Notify · SetTheme"]
 ```

@@ -74,6 +74,23 @@ for cmd in curl tar uname mktemp; do
   fi
 done
 
+# Cycle 725: detect the SHA-256 verifier UP FRONT, not after the
+# download. On a minimal container image (e.g. `docker run -it ubuntu`)
+# `sha256sum` lives in `coreutils` which may be missing; pre-cycle-725
+# the script would download the ~5 MB tarball, hit the verify step,
+# print "SHA-256 verification FAILED" and exit — making it look like
+# a corrupted download. Bail BEFORE download so the user fixes the
+# right problem (`apt-get install coreutils` etc).
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  echo "kettle install-online.sh: missing 'sha256sum' (Linux) or 'shasum -a 256' (macOS)." >&2
+  echo "Install it via your distro's package manager and re-run:" >&2
+  echo "  Debian/Ubuntu: sudo apt-get install -y coreutils" >&2
+  echo "  Fedora/RHEL:   sudo dnf install -y coreutils" >&2
+  echo "  Alpine:        sudo apk add coreutils" >&2
+  echo "  macOS:         already included with the OS (no install needed)" >&2
+  exit 1
+fi
+
 # --- Resolve target version + URL ----------------------------------
 if [ "$VERSION" = "latest" ]; then
   # The /releases/latest endpoint redirects to /releases/tag/<tag>.

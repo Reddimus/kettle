@@ -6,6 +6,66 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 727 — **Comprehensive production-grade audit pass (724-727)**:
+              Closes the Stop-hook ask for `entire-terminal`
+              analysis with three parallel Explore agents
+              auditing concurrency/unsafe, README/install UX,
+              and ARCHITECTURE completeness. Findings + actions:
+              **Cycle 724** — concurrency / unsafe / clippy
+              allow-gate audit. All 11 unsafe blocks (in
+              `fd_transport.rs` for SCM_RIGHTS, `main.rs` for
+              SIGPIPE setup, `app.rs` for `pre_exec` fd-3 +
+              UnixStream adoption) are ≤10 lines, narrowly
+              scoped, with ownership-contract docs. No
+              `transmute`, no raw-pointer abstractions. 20
+              `#[allow(clippy::*)]` gates all justified
+              (`too_many_arguments` on domain-anchored
+              lifecycle methods, two `field_reassign_with_default`
+              for 2-line Config init patterns). Threading
+              topology: N reader threads (one per pane) →
+              event loop on App; Lua VM parked Send+Sync but
+              never cloned to threads; wgpu Device+Queue used
+              only on the App thread. No Mutex overkill found.
+              Result documented as a new "Synchronization
+              primitives audit" subsection in ARCHITECTURE.md.
+              **Cycle 725** — README + INSTALL UX. Opening
+              paragraph rewritten to lead with "Works out of
+              the box" + "GPU-accelerated" + "Cross-platform"
+              (per audit feedback: prior copy buried the
+              value prop). New keybindings-table footnote
+              telling users to right-click for the Preferences
+              ▸ submenu. Stale `v1.44.x` status line bumped
+              to v1.45.x. `scripts/install-online.sh`:
+              SHA-256-tool preflight check moved BEFORE
+              download so a coreutils-less container fails
+              immediately with an actionable apt/dnf/apk hint
+              instead of looking like a corrupted download.
+              `docs/kettle.example.config`: new "Quick-find
+              index" at the top — 14 search keywords → block
+              landings (Theme, Fonts, Cursor, Window, Tabs,
+              etc.) so new users find what they want without
+              scrolling 200+ lines.
+              **Cycle 726** — ARCHITECTURE.md deep refresh.
+              Threading model section expanded with Lua VM
+              parking semantics + broadcast fan-out
+              clarification + memory caps on the extractor.
+              Plugin-flow mermaid extended with the cycle-703
+              PaneFocus + cycle-704 TitleChanged + cycle-705
+              UrlClicked events. Terminator-parity timeline
+              extended through cycles 554-723.
+              **Cycle 727** — allocation-pattern audit.
+              Hot-path allocations counted (5 in drain_events,
+              7 in redraw) and all verified load-bearing —
+              `LuaEvent::Output` requires a fresh Vec for
+              mlua's `IntoLuaMulti`; `ContextMenuRow.label`
+              clones only while the menu is open. Documented
+              as steady-state-zero pressure in ARCHITECTURE.md
+              with a Cow refactor flagged as a profile-driven
+              follow-up.
+              No code-behavior changes; workspace tests stay
+              at 424. Documents an architectural baseline so
+              future PRs can land against a recorded contract.
+
   cycle 723 — **CI hygiene: nightly early-warning + release pretest gate**:
               Closes the last two CI/CD items from the cycle-718
               audit. No build-time changes; both adds are
