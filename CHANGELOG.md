@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 640 — **terminalshot.py sub-cycle 1:
+              `Action::TakeScreenshot` surface**: new Action
+              variant + 4 aliases (`take_screenshot`,
+              `take-screenshot`, `terminalshot`, `screenshot`)
+              from
+              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](docs/TERMINATOR-TERMINALSHOT-DESIGN.md).
+              Dispatch arm logs a TODO pointing at the headless
+              `--screenshot=PATH` fallback for now; sub-cycles
+              2-6 wire the wgpu surface readback + PNG encode +
+              toast notification. Palette includes the action so
+              it's discoverable via cycle-329 command palette.
+              Drift guard `from_name_accepts_take_screenshot_aliases`
+              walks all 4 spellings. Workspace tests 371 → 372.
+
   cycle 639 — **remote.py sub-cycle 1: `Terminal::child_pid()`
               accessor**: new public method on `kettle_core::
               Terminal` returns the PTY child's OS pid via

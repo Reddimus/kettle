@@ -267,6 +267,15 @@ pub enum Action {
     /// When on, closes the file. Per-pane state (per-tab and
     /// per-window). No-op + warn when the cache dir can't be created.
     ToggleSessionLog,
+    /// Cycle 640 Terminator parity (`plugins/terminalshot.py`,
+    /// sub-cycle 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
+    /// docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): trigger a live-
+    /// window screenshot of the focused pane. v1 dispatch logs
+    /// a TODO; later sub-cycles wire the wgpu surface readback +
+    /// PNG encode + toast notification. The action + alias surface
+    /// lands now so a user can bind a chord ahead of the renderer
+    /// work.
+    TakeScreenshot,
     /// Cycle 342 Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -454,6 +463,11 @@ pub fn action_names() -> Vec<&'static str> {
         "start-logger",
         "stop_logger",
         "stop-logger",
+        // Cycle 640 — terminalshot.py runtime trigger.
+        "take_screenshot",
+        "take-screenshot",
+        "terminalshot",
+        "screenshot",
         "page_up_half",
         "page_down_half",
         "scroll_page_up_half",
@@ -595,6 +609,7 @@ impl Action {
             | "toggle-theme-variant" => ToggleLightDark,
             "toggle_session_log" | "toggle-session-log" | "start_logger" | "start-logger"
             | "stop_logger" | "stop-logger" => ToggleSessionLog,
+            "take_screenshot" | "take-screenshot" | "terminalshot" | "screenshot" => TakeScreenshot,
             "page_up_half" | "page-up-half" | "scroll_page_up_half" => ScrollPageUpHalf,
             "page_down_half" | "page-down-half" | "scroll_page_down_half" => ScrollPageDownHalf,
             "paste_selection" | "paste-selection" | "paste_primary" => PastePrimary,
@@ -1368,6 +1383,26 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::PrevTab)),
                 "alias {s:?} should parse to PrevTab"
+            );
+        }
+    }
+
+    /// Cycle 640 drift guard: every alias for `take_screenshot`
+    /// parses to `Action::TakeScreenshot`. Terminator's
+    /// `terminalshot.py` is the source of the `terminalshot` spelling;
+    /// `screenshot` and `take-screenshot` are kettle-style short
+    /// forms.
+    #[test]
+    fn from_name_accepts_take_screenshot_aliases() {
+        for s in [
+            "take_screenshot",
+            "take-screenshot",
+            "terminalshot",
+            "screenshot",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::TakeScreenshot)),
+                "alias {s:?} should parse to TakeScreenshot"
             );
         }
     }

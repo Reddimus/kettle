@@ -3809,6 +3809,21 @@ impl App {
                     }
                 }
             }
+            Action::TakeScreenshot => {
+                // Cycle 640 (sub-cycle 1 of terminalshot design).
+                // Surface only — dispatch logs a stub so a user
+                // who binds the chord sees a clear "not yet wired"
+                // message instead of the action silently doing
+                // nothing. Sub-cycles 2-6 of
+                // [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
+                // ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)
+                // wire the wgpu surface readback + PNG encode +
+                // toast.
+                log::info!(
+                    "take_screenshot: queued (wgpu readback wiring lands in a follow-up sub-cycle; \
+                     for now use --screenshot=PATH or --screenshot-menu=PATH for the headless path)"
+                );
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft => {
                 self.mux.move_active_tab(-1);
