@@ -396,6 +396,29 @@ pub struct Renderer {
     pub cell_scale_w: f32,
     pub cell_scale_h: f32,
     pub scale: f32,
+    /// Cycle 654 (sub-cycle 3 of
+    /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)):
+    /// when `Some`, the next `render_frame` call should also do a
+    /// surface-readback into a staging buffer + dispatch a PNG
+    /// encode off-thread. v1 of this field is the storage only —
+    /// sub-cycle 4 wires the actual readback. `App::dispatch`
+    /// for `Action::TakeScreenshot` (cycle 640) sets this via
+    /// `set_pending_screenshot()` after computing the path via
+    /// the cycle-650 `session_screenshot_path` helper.
+    pub pending_screenshot: Option<ScreenshotRequest>,
+}
+
+/// Cycle 654: a queued screenshot request. Sub-cycle 4 of
+/// terminalshot design will consume this in `render_frame`.
+#[derive(Debug, Clone)]
+pub struct ScreenshotRequest {
+    /// Where to save the PNG. Caller already computed this via
+    /// `session_screenshot_path(unix_secs, pid, cache_dir)`.
+    pub out_path: std::path::PathBuf,
+    /// If `Some`, crop the captured frame to this pixel rect
+    /// (the focused pane's geometry). If `None`, capture the
+    /// whole window.
+    pub crop: Option<(f32, f32, f32, f32)>,
 }
 
 impl Renderer {
@@ -549,6 +572,7 @@ impl Renderer {
             cell_scale_w,
             cell_scale_h,
             scale,
+            pending_screenshot: None,
         })
     }
 
@@ -623,6 +647,22 @@ impl Renderer {
         // size change preserves the user's chosen scale.
         self.cell_w = cw * self.cell_scale_w.max(0.01);
         self.cell_h = ch * self.cell_scale_h.max(0.01);
+    }
+
+    /// Cycle 654 (sub-cycle 3 of terminalshot design): queue a
+    /// screenshot request to be honored on the next `render_frame`.
+    /// Replaces any pending request — only the latest one wins on
+    /// rapid-fire triggers. The renderer consumes + clears this slot
+    /// during the next paint.
+    pub fn set_pending_screenshot(&mut self, req: ScreenshotRequest) {
+        self.pending_screenshot = Some(req);
+    }
+
+    /// Cycle 654: peek + clear. Sub-cycle 4 will call this from
+    /// inside `render_frame` after the wgpu surface is presented +
+    /// the copy_texture_to_buffer is issued.
+    pub fn take_pending_screenshot(&mut self) -> Option<ScreenshotRequest> {
+        self.pending_screenshot.take()
     }
 
     /// Cycle 636 (Terminator parity, `cell_width` / `cell_height`):

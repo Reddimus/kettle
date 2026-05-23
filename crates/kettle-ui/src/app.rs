@@ -3995,19 +3995,29 @@ impl App {
                 }
             }
             Action::TakeScreenshot => {
-                // Cycle 640 (sub-cycle 1 of terminalshot design).
-                // Surface only — dispatch logs a stub so a user
-                // who binds the chord sees a clear "not yet wired"
-                // message instead of the action silently doing
-                // nothing. Sub-cycles 2-6 of
-                // [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
-                // ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)
-                // wire the wgpu surface readback + PNG encode +
-                // toast.
-                log::info!(
-                    "take_screenshot: queued (wgpu readback wiring lands in a follow-up sub-cycle; \
-                     for now use --screenshot=PATH or --screenshot-menu=PATH for the headless path)"
-                );
+                // Cycle 654 (sub-cycle 3 of terminalshot design).
+                // Computes the output path via cycle-650
+                // session_screenshot_path + queues a request on
+                // the renderer's pending_screenshot slot.
+                // Sub-cycle 4 wires the actual wgpu readback +
+                // PNG encode + write to out_path; for now the
+                // request sits unread until that sub-cycle lands.
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let cache = cache_dir_from_env(|k| std::env::var(k).ok());
+                    let path = session_screenshot_path(secs, std::process::id(), cache.as_deref());
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    log::info!("take_screenshot: queued → {}", path.display());
+                    renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
+                        out_path: path,
+                        crop: None,
+                    });
+                }
             }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft => {

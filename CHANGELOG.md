@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 654 — **terminalshot sub-cycle 3: `ScreenshotRequest`
+              + `Renderer::pending_screenshot` slot**: queues
+              a screenshot request on the renderer for the next
+              `render_frame` to honor. Surfaces:
+                - new `pub struct ScreenshotRequest { out_path,
+                  crop: Option<Rect> }` in kettle-render
+                - new `pub pending_screenshot: Option<...>`
+                  field on `Renderer`
+                - new `pub fn set_pending_screenshot(req)` +
+                  `pub fn take_pending_screenshot() -> Option`
+                - `Action::TakeScreenshot` dispatch (cycle 640)
+                  now computes the out path via cycle-650
+                  `session_screenshot_path` + queues a real
+                  `ScreenshotRequest` instead of just logging.
+                  v1 has `crop: None` (whole window); sub-cycle
+                  6 wires per-pane crop.
+              Sub-cycle 4 wires the actual wgpu surface readback
+              + PNG encode inside `render_frame`; for now the
+              request sits unread on the slot until that
+              sub-cycle lands (no user-visible change yet, but
+              the dispatch path now reaches the renderer with
+              real state). Workspace tests stay 382.
+
   cycle 653 — **Deploy verification: install latest build to
               `~/.local/bin/kettle`** via `./scripts/install.sh`.
               The local binary now matches commit 82a827f
@@ -13,11 +36,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
               `--version`. Smoke-checked `--check-config`:
               loads defaults cleanly, picks up the bundled
               TokyoNight Night theme + JetBrainsMono Nerd Font.
-              Honors the user's standing instruction
-              ("[Keep local kettle current](memory/feedback_keep_local_kettle_current.md)"
-              — run install.sh after every meaningful build).
-              No code change; this cycle is the explicit
-              deployment step the /goal hook called out.
+              Honors the user's standing instruction to keep the
+              local kettle install current (run install.sh after
+              every meaningful build; in-place overwrite). No code
+              change; this cycle is the explicit deployment step
+              the /goal hook called out.
 
   cycle 652 — **confirm-dialog sub-cycle 4: keyboard-nav pure
               helper**: `confirm_dialog_keypress(current_focus,
