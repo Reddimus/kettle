@@ -49,7 +49,7 @@ jobs:
     # 5 min is generous and still well below the 360-min default.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Download the actionlint binary via the upstream-maintained
       # install script and run it. Matches the canonical README
       # recipe — avoids the docker:// overhead on the runner and
