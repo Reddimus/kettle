@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 692 — **`palette = NAME` named-preset alias**:
+              Terminator accepts `palette = solarized_dark`
+              as a shorthand that picks the whole 16-slot
+              palette + cursor + selection colors at once.
+              kettle ships ~512 bundled themes (Ghostty +
+              iTerm2 + WezTerm corpora) which are a strict
+              superset, so the parser now treats
+              `palette = NAME` (no `=` after) as an alias
+              for `theme = NAME`. Two-step match:
+                1. direct `Theme::find_name(value)` —
+                   handles kettle-spelled names verbatim
+                2. underscore→space fallback — handles
+                   Terminator's `solarized_dark` convention
+                   by trying "solarized dark" as the lookup
+              Unknown names leave theme unchanged (default
+              preserved). Per-slot `palette = N=#hex` form
+              still works (no regression).
+              Drift guard `palette_named_preset_alias` walks
+              4 inputs: direct match, underscore-→space,
+              per-slot N=#hex preserved, unknown→default.
+              Audit row promoted from E → A with cross-link.
+              Workspace tests 392 → 393.
+
   cycle 691 — **`hide_from_taskbar` wired on Windows**:
               winit 0.30 only exposes `with_skip_taskbar`
               on Windows (`WindowAttributesExtWindows`).

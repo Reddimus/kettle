@@ -1995,6 +1995,32 @@ impl Config {
                         && let (Ok(i), Some(c)) = (i.trim().parse(), Rgb::parse(h.trim()))
                     {
                         explicit_palette.push((i, c));
+                    } else if !e.value.contains('=') {
+                        // Cycle 692 (Terminator parity, palette
+                        // named-preset alias): Terminator accepts
+                        // `palette = solarized_dark` as a named
+                        // preset that picks the whole 16-slot
+                        // palette + cursor + selection colors at
+                        // once. kettle ships ~512 themes which
+                        // are a strict superset of those presets,
+                        // so we treat `palette = NAME` as a
+                        // shorthand for `theme = NAME` (best-
+                        // effort: `solarized_dark` → `Solarized
+                        // Darcula` or the closest bundled match
+                        // via the cycle-176 case-insensitive
+                        // find_name).
+                        let v = e.value.trim();
+                        // Try direct match first, then underscore
+                        // → space (Terminator uses `_`; kettle
+                        // bundled names use spaces).
+                        let candidate = Theme::find_name(v).or_else(|| {
+                            let spaced = v.replace('_', " ");
+                            Theme::find_name(&spaced)
+                        });
+                        if let Some(name) = candidate {
+                            cfg.theme_name = name.to_string();
+                            cfg.theme = Theme::by_name(name);
+                        }
                     }
                 }
                 "search-foreground" => {
@@ -5219,6 +5245,36 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 692 drift guard. `palette = NAME` (no `=` after)
+    /// is a Terminator named-palette alias that kettle treats as
+    /// `theme = NAME`. Underscore-spelled inputs (Terminator
+    /// convention) get a `_` → ` ` fallback to match kettle's
+    /// bundled theme names.
+    #[test]
+    fn palette_named_preset_alias() {
+        // Direct match (kettle native spelling).
+        let cfg = Config::parse_text("palette = TokyoNight Night\n");
+        assert_eq!(cfg.theme_name, "TokyoNight Night");
+        // Underscore form → bundled name via space fallback.
+        let cfg = Config::parse_text("palette = tokyonight_night\n");
+        assert_eq!(cfg.theme_name, "TokyoNight Night");
+        // The cycle-X palette = N=#hex form still works for
+        // per-slot overrides (no regression).
+        let cfg = Config::parse_text("palette = 4=#001122\n");
+        assert_eq!(
+            cfg.theme.palette[4],
+            Rgb {
+                r: 0,
+                g: 0x11,
+                b: 0x22
+            }
+        );
+        // Unknown name leaves theme alone (default).
+        let default = Config::default();
+        let cfg = Config::parse_text("palette = some_made_up_palette\n");
+        assert_eq!(cfg.theme_name, default.theme_name);
     }
 
     /// Cycle 673 drift guard. `tab-bar-width` config key parses
