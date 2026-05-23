@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.43.0] — 2026-05-22
+
 Post-v1.42.0 packaging-drift cleanup. Three template files
 (flake.nix, PKGBUILD, kettle.rb) had identical 39-release
 version-string drift discovered + closed in one sweep, with
