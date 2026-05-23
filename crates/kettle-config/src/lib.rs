@@ -2729,12 +2729,28 @@ impl Config {
                         cfg.scroll_on_output = b;
                     }
                 }
-                "mouse-hide-while-typing" | "mouse-hide" => {
+                // Cycle 698 Terminator parity
+                // (terminatorlib/config.py:249 `mouse_autohide`):
+                // VTE auto-hides the pointer while typing. kettle's
+                // existing `mouse_hide_while_typing` semantics
+                // match exactly, so the Terminator key is accepted
+                // as an alias.
+                "mouse-hide-while-typing" | "mouse-hide" | "mouse_autohide" | "mouse-autohide" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.mouse_hide_while_typing = b;
                     }
                 }
-                "word-delimiters" | "selection-word-chars" | "semantic-escape-chars" => {
+                // Cycle 698 adds Terminator parity
+                // (terminatorlib/config.py `word_chars`): the
+                // VTE per-profile "characters that count as part
+                // of a word for double-click selection". Maps
+                // 1:1 onto kettle's existing `word-delimiters`
+                // (Alacritty / WezTerm naming).
+                "word-delimiters"
+                | "selection-word-chars"
+                | "semantic-escape-chars"
+                | "word_chars"
+                | "word-chars" => {
                     cfg.word_delimiters = e.value.clone();
                 }
                 "font-feature" => {
@@ -4973,6 +4989,18 @@ mod config_tests {
             Config::parse_text("semantic-escape-chars = ()[]{}").word_delimiters,
             "()[]{}"
         );
+        // Cycle 698 Terminator parity: VTE's per-profile
+        // `word_chars` config key maps 1:1 onto kettle's
+        // `word-delimiters`. Both spellings (underscore +
+        // hyphen) parse.
+        assert_eq!(
+            Config::parse_text("word_chars = abcXYZ").word_delimiters,
+            "abcXYZ"
+        );
+        assert_eq!(
+            Config::parse_text("word-chars = abcXYZ").word_delimiters,
+            "abcXYZ"
+        );
     }
 
     #[test]
@@ -4984,6 +5012,11 @@ mod config_tests {
         assert!(!Config::parse_text("mouse-hide-while-typing = false").mouse_hide_while_typing);
         // Short `mouse-hide` alias also works.
         assert!(!Config::parse_text("mouse-hide = false").mouse_hide_while_typing);
+        // Cycle 698: Terminator `mouse_autohide` (terminatorlib
+        // config.py:249) is accepted as an alias (both
+        // underscore + hyphen spellings).
+        assert!(!Config::parse_text("mouse_autohide = false").mouse_hide_while_typing);
+        assert!(!Config::parse_text("mouse-autohide = false").mouse_hide_while_typing);
     }
 
     #[test]

@@ -295,7 +295,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 |---|---|---|---|
 | `scrollback_lines` / `scrollback_infinite` | config.py | ✅ `scrollback-limit` accepts integer + `infinite`/`unlimited`/`0` | cycle-X |
 | `copy_on_selection` | config.py | ✅ `copy-on-select` config key | cycle-X |
-| `mouse_autohide` | config.py | ✅ `mouse-hide-while-typing` config key | cycle-X |
+| `mouse_autohide` | config.py | ✅ `mouse-hide-while-typing` config key (cycle-698 also accepts `mouse_autohide` / `mouse-autohide` as direct aliases — drift-guarded in `mouse_hide_while_typing_default_and_parse`) | cycle-698 |
 | `scroll_on_keystroke` | config.py | ✅ same name | cycle-X |
 | `scroll_on_output` | config.py | ✅ same name | cycle-X |
 | `cursor_shape` (block/ibeam/underline) | config.py | ✅ `cursor-style` accepts block/bar/beam/underline | cycle-X |
@@ -306,7 +306,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `font` | config.py | ✅ `font-family` + `font-size` | cycle-X |
 | `audible_bell` / `visible_bell` / `urgent_bell` | config.py | ✅ `bell = off/visual/attention/both` | cycle-X |
 | `background_color` opacity (via `background_darkness`) | config.py | ✅ `background-opacity` | cycle-X |
-| `word_chars` (double-click word boundaries) | config.py | ✅ `word-delimiters` | cycle-X |
+| `word_chars` (double-click word boundaries) | config.py | ✅ `word-delimiters` (cycle-698 also accepts `word_chars` / `word-chars` as direct aliases — same write target) | cycle-698 |
 | ~~`tab_position` (top/bottom/left/right/hidden)~~ | config.py | A | cycles 331/628/647/665/668/672/673 — 7/8 sub-cycles complete end-to-end + deployed: `TabBarPos::Left`/`Right` variants; `content_rect_for_with_strip` carves the configured strip width; `tab_bar_vertical` stacks segments; renderer paints vertical strips (column-shaped bg + per-segment chrome with own y/h + axis-flipped separators); `cursor_in_tab_bar` x-axis hit-test for vertical; new `tab-bar-width` config key clamped to `[40, 600]`. Sub-cycle 6 (drag-reorder y-axis) deferred to a polish cycle — horizontal drag-reorder already works (cycle-249); the y-axis flip is the same shape and lands when a user files a real need. | cycle-673 |
 | `broadcast_default = group` (per-tab broadcast) | config.py | ✅ per-tab broadcast via `Super+G` | cycle-X |
 | `scrollbar_position = right/hidden` | config.py | ✅ `scrollbar = always/auto/never` | cycle-X |

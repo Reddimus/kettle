@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 698 — **Terminator config-key aliases: `mouse_autohide`
+              + `word_chars`**:
+              Both keys map 1:1 onto pre-existing kettle config
+              targets but had previously required the kettle
+              spelling (`mouse-hide-while-typing` /
+              `word-delimiters`). Cycle 698 adds the Terminator
+              spelling as a direct alias at the parser level so
+              an unmodified Terminator config is friendly out of
+              the box.
+                - `mouse_autohide` / `mouse-autohide` →
+                  `mouse_hide_while_typing` (VTE auto-hides the
+                  pointer while typing; same semantics).
+                - `word_chars` / `word-chars` →
+                  `word_delimiters` (double-click word boundary
+                  character set).
+              Drift guard assertions added to
+              `mouse_hide_while_typing_default_and_parse` and
+              the word-delimiters parser test.
+              Audit rows updated with cycle-698 cross-link.
+              Workspace tests unchanged at 396 (assertions
+              extend existing tests rather than add new ones).
+
   cycle 696 — **`Action::EditConfig` (Terminator key_preferences)**:
               Terminator's `key_preferences` /
               `key_preferences_keybindings` open Terminator's
