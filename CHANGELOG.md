@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 678 — **named-groups sub-cycle 2: `BroadcastScope`
+              enum + `compute_broadcast_targets` pure helper**:
+              lands the core data type the
+              [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)
+              hinges on.
+                - `pub enum BroadcastScope { Off, Tab, All,
+                  Group(String) }` — the cycle-178 per-tab
+                  `mux.broadcast: bool` represents `Off|Tab`;
+                  future sub-cycles will migrate it to this
+                  richer enum
+                - `pub fn compute_broadcast_targets(scope,
+                  focused_pane, panes_in_focused_tab,
+                  all_panes_with_groups) -> Vec<u64>` — pure
+                  helper computing the recipient set
+              `#[allow(dead_code)]` gates the enum + fn until
+              the broadcast_write migration consumes them.
+              Drift guard `compute_broadcast_targets_matrix`
+              walks 5 scope shapes including the cross-tab
+              named-group case. Workspace tests 391 → 392.
+              Named-groups port: **2/8** sub-cycles complete.
+
   cycle 677 — **Audit doc: Bucket D close-out summary
               (cycles 614-677)**: new section in
               `docs/TERMINATOR-AUDIT.md` summarizing the

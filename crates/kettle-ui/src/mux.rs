@@ -484,6 +484,61 @@ pub struct ClosedTab {
 /// standard is 8-10; we keep 10 to amortize accidental close-bursts.
 const CLOSED_TAB_RING_CAP: usize = 10;
 
+/// Cycle 678 (sub-cycle 2 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)): the
+/// broadcast-scope enum the design proposes. The existing
+/// `mux.broadcast: bool` represents `Off | Tab`; future cycles
+/// will migrate it to this richer enum so `Group(name)`
+/// (scope-by-name-across-tabs) becomes expressible.
+///
+/// Lands the type now so the cycle-642 `Action::GroupTab` etc.
+/// dispatch can be wired against the final shape ahead of the
+/// refactor.
+#[allow(dead_code)] // Tab/All/Group consumed by future named-groups sub-cycles.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BroadcastScope {
+    #[default]
+    Off,
+    /// Cycle-178 per-tab broadcast: every pane in the focused
+    /// tab receives input. Today's `mux.broadcast = true`
+    /// behavior.
+    Tab,
+    /// Window-wide: every pane in every tab receives input.
+    All,
+    /// Named group: every pane whose `Pane::group_name` matches
+    /// receives input. Span across tabs is what makes named
+    /// groups distinct from per-tab broadcast.
+    Group(String),
+}
+
+/// Cycle 678: pure helper that computes the set of pane IDs that
+/// should receive a broadcast for the given scope. Pure — takes
+/// `(scope, focused_pane_id, panes_in_focused_tab, all_panes_with_groups)`
+/// and returns the target list. Unit-testable.
+///
+/// `all_panes_with_groups` is a slice of `(pane_id, Option<&str>
+/// group)` pairs covering every pane in every tab. The caller
+/// is responsible for assembling it (a one-liner over
+/// `self.panes.iter()`).
+#[allow(dead_code)] // consumed by future named-groups sub-cycles (the broadcast_write migration)
+pub fn compute_broadcast_targets(
+    scope: &BroadcastScope,
+    focused_pane: u64,
+    panes_in_focused_tab: &[u64],
+    all_panes_with_groups: &[(u64, Option<&str>)],
+) -> Vec<u64> {
+    match scope {
+        BroadcastScope::Off => vec![focused_pane],
+        BroadcastScope::Tab => panes_in_focused_tab.to_vec(),
+        BroadcastScope::All => all_panes_with_groups.iter().map(|(id, _)| *id).collect(),
+        BroadcastScope::Group(name) => all_panes_with_groups
+            .iter()
+            .filter(|(_, g)| g.as_deref() == Some(name.as_str()))
+            .map(|(id, _)| *id)
+            .collect(),
+    }
+}
+
 pub struct Mux {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
@@ -1621,6 +1676,59 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    /// Cycle 678 drift guard. `compute_broadcast_targets` is the
+    /// pure helper that maps a `BroadcastScope` + focused pane +
+    /// tab + window state to the set of target pane IDs.
+    /// Sub-cycle 2 of named-groups design.
+    #[test]
+    fn compute_broadcast_targets_matrix() {
+        let in_tab = vec![1u64, 2, 3];
+        let all = vec![
+            (1u64, Some("fleet")),
+            (2u64, Some("fleet")),
+            (3u64, None),
+            (4u64, Some("misc")),
+            (5u64, Some("fleet")),
+        ];
+        // Off: only the focused pane receives.
+        assert_eq!(
+            compute_broadcast_targets(&BroadcastScope::Off, 2, &in_tab, &all),
+            vec![2]
+        );
+        // Tab: every pane in the focused tab.
+        assert_eq!(
+            compute_broadcast_targets(&BroadcastScope::Tab, 2, &in_tab, &all),
+            vec![1, 2, 3]
+        );
+        // All: every pane window-wide.
+        assert_eq!(
+            compute_broadcast_targets(&BroadcastScope::All, 2, &in_tab, &all),
+            vec![1, 2, 3, 4, 5]
+        );
+        // Group("fleet"): every pane tagged "fleet", regardless of tab.
+        assert_eq!(
+            compute_broadcast_targets(
+                &BroadcastScope::Group("fleet".to_string()),
+                2,
+                &in_tab,
+                &all
+            ),
+            vec![1, 2, 5]
+        );
+        // Group with no matches → empty.
+        assert!(
+            compute_broadcast_targets(
+                &BroadcastScope::Group("nonexistent".to_string()),
+                2,
+                &in_tab,
+                &all
+            )
+            .is_empty()
+        );
+        // Default scope is Off.
+        assert_eq!(BroadcastScope::default(), BroadcastScope::Off);
+    }
 
     #[test]
     fn tab_title_falls_back_to_cwd_basename() {
