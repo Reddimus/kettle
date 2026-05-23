@@ -1038,6 +1038,31 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 /// field (no description), so the inner predicate is simpler.
 /// Pure — separated from `layout_picker_key` so a drift guard
 /// can exercise it without touching App state.
+/// Cycle 712 (Terminator menu UX, hover-to-highlight). Walk the
+/// vertical pixel layout of a context-menu's rows and return the
+/// row index containing `cursor_y`, or `None` if the cursor landed
+/// on a separator (visual gap) or beyond the last row. Pure so the
+/// arithmetic + the separator-skip contract is unit-tested without
+/// standing up an App + a winit window. `kinds[i] = true` flags row
+/// `i` as a separator (uses `sep_h` instead of `row_h`).
+pub(crate) fn find_menu_row_y(
+    cursor_y: f32,
+    anchor_y: f32,
+    row_h: f32,
+    sep_h: f32,
+    kinds: &[bool],
+) -> Option<usize> {
+    let mut row_y = anchor_y;
+    for (idx, &is_sep) in kinds.iter().enumerate() {
+        let h = if is_sep { sep_h } else { row_h };
+        if cursor_y >= row_y && cursor_y < row_y + h {
+            return if is_sep { None } else { Some(idx) };
+        }
+        row_y += h;
+    }
+    None
+}
+
 pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
     let q = q.trim().to_ascii_lowercase();
     if q.is_empty() {
@@ -3932,6 +3957,53 @@ impl App {
     /// still feels distinct from "select this menu item." Returns
     /// `None` if the click missed the panel, hit a separator, or hit a
     /// disabled row; the caller then either dismisses (left-click
+    /// Cycle 712 (Terminator menu UX, hover-to-highlight).
+    /// Return the row index under the cursor when the context menu
+    /// is open, `None` if the cursor is outside the panel OR landed
+    /// on a separator. Thin wrapper around the pure `find_menu_row_y`
+    /// helper so the row-walk is unit-testable without standing up an
+    /// App. Used by `update_menu_highlight_from_cursor` on every
+    /// `CursorMoved` so the highlight tracks the pointer the way every
+    /// desktop menu does (GTK / macOS NSMenu / Windows).
+    fn menu_row_at_cursor(&self) -> Option<usize> {
+        let menu = self.context_menu.as_ref()?;
+        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry()?;
+        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+        if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
+            return None;
+        }
+        let (_, ch) = self.cell_px();
+        let row_h = ch as f32 + 12.0;
+        let sep_h = 8.0_f32;
+        let kinds: Vec<bool> = menu
+            .items
+            .iter()
+            .map(|it| matches!(it, ContextMenuItem::Separator))
+            .collect();
+        find_menu_row_y(py, ay, row_h, sep_h, &kinds)
+    }
+
+    /// Cycle 712. Set `menu.highlight` to whichever row the cursor is
+    /// over right now; no-op when the cursor is outside the panel or
+    /// on a separator. Called from `CursorMoved`. Requests a redraw
+    /// only when the highlight actually changed so we don't churn the
+    /// GPU on every sub-pixel motion event.
+    fn update_menu_highlight_from_cursor(&mut self) {
+        let Some(idx) = self.menu_row_at_cursor() else {
+            return;
+        };
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        if menu.highlight == idx {
+            return;
+        }
+        menu.highlight = idx;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// outside) or falls through to the regular click handling
     /// (right-click → re-open at the new point).
     fn context_menu_click_action(&self, bcode: u8) -> Option<ContextMenuClick> {
@@ -6597,6 +6669,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor();
                 self.sync_cursor_icon();
+                // Cycle 712 (Terminator menu UX, hover-to-highlight):
+                // cursor over a context-menu row immediately updates
+                // the highlight. Matches GTK/NSMenu/Win32 menu
+                // conventions; before this cycle the highlight only
+                // moved via keyboard so the menu felt unresponsive to
+                // mouse users. Cheap: no-op when the menu is closed.
+                if self.context_menu.is_some() {
+                    self.update_menu_highlight_from_cursor();
+                }
                 // Cycle 360 (Terminator parity, terminatorlib/config.py:73
                 // `focus = sloppy`): focus-follows-mouse. The pane
                 // under the cursor becomes focused on every cursor
@@ -7514,8 +7595,68 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{rank_layouts, selection_kind};
+    use super::{find_menu_row_y, rank_layouts, selection_kind};
     use kettle_core::SelectionType;
+
+    /// Cycle 712 drift guard. Hover-to-highlight walks `find_menu_row_y`
+    /// on every `CursorMoved`; pin the contract so a render-layout
+    /// change can't silently drop separator handling, off-by-one the
+    /// last row, or break the out-of-bounds contract.
+    #[test]
+    fn hover_updates_menu_highlight_skipping_separators() {
+        // Menu layout: 4 rows with a separator between row 1 (Item)
+        // and row 3 (Item):
+        //   row 0 (Item)      [anchor + 0   .. anchor + row_h]
+        //   row 1 (Item)      [anchor + 24  .. anchor + 48]
+        //   row 2 (Separator) [anchor + 48  .. anchor + 56]
+        //   row 3 (Item)      [anchor + 56  .. anchor + 80]
+        let anchor_y = 100.0;
+        let row_h = 24.0;
+        let sep_h = 8.0;
+        let kinds = [false, false, true, false];
+        // Cursor squarely inside row 0.
+        assert_eq!(
+            find_menu_row_y(anchor_y + 10.0, anchor_y, row_h, sep_h, &kinds),
+            Some(0)
+        );
+        // Cursor on the edge between row 0 and row 1: lands on row 1
+        // (half-open interval [y, y+h)).
+        assert_eq!(
+            find_menu_row_y(anchor_y + row_h, anchor_y, row_h, sep_h, &kinds),
+            Some(1)
+        );
+        // Cursor inside row 1.
+        assert_eq!(
+            find_menu_row_y(anchor_y + 30.0, anchor_y, row_h, sep_h, &kinds),
+            Some(1)
+        );
+        // Cursor inside the separator — None (don't highlight a
+        // visual-only gap).
+        assert_eq!(
+            find_menu_row_y(anchor_y + 50.0, anchor_y, row_h, sep_h, &kinds),
+            None
+        );
+        // Cursor inside row 3 (after the separator).
+        assert_eq!(
+            find_menu_row_y(anchor_y + 60.0, anchor_y, row_h, sep_h, &kinds),
+            Some(3)
+        );
+        // Cursor above the panel.
+        assert_eq!(
+            find_menu_row_y(anchor_y - 1.0, anchor_y, row_h, sep_h, &kinds),
+            None
+        );
+        // Cursor below the last row.
+        assert_eq!(
+            find_menu_row_y(anchor_y + 1000.0, anchor_y, row_h, sep_h, &kinds),
+            None
+        );
+        // Empty menu: always None.
+        assert_eq!(
+            find_menu_row_y(anchor_y + 10.0, anchor_y, row_h, sep_h, &[]),
+            None
+        );
+    }
 
     /// Cycle 708 drift guard. `rank_layouts` filters layout names by
     /// every lower-cased query token; empty query returns identity.

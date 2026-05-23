@@ -6,6 +6,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 712 — **Right-click menu: mouse hover-to-highlight**:
+              Context-menu UX sub-cycle C3. Before this cycle the
+              highlight only moved via keyboard nav; sliding the
+              cursor over rows did nothing, which felt unresponsive
+              to mouse users used to GTK/NSMenu/Win32 conventions.
+              Now: cursor over a context-menu row immediately
+              updates `menu.highlight`; cursor over a separator
+              (visual gap) is ignored. Disabled rows still highlight
+              on hover — the dispatcher rejects the click, but the
+              highlight shows the row the cursor is over (matches
+              GTK). Only requests a redraw when the highlight
+              actually changes — no GPU churn on sub-pixel motion.
+              New pure helper:
+                `pub(crate) fn find_menu_row_y(cursor_y, anchor_y,
+                  row_h, sep_h, kinds: &[bool]) -> Option<usize>`
+              Live wiring:
+                - `App::menu_row_at_cursor(&self) -> Option<usize>`
+                  thin wrapper that builds the `kinds` mask from
+                  `menu.items` and delegates.
+                - `App::update_menu_highlight_from_cursor(&mut self)`
+                  called from `CursorMoved` (only when the menu is
+                  open — no-op otherwise).
+              Drift guard `hover_updates_menu_highlight_skipping_separators`
+              walks 8 cases: inside-row, edge-between-rows,
+              separator, after-separator, above-panel, below-panel,
+              empty-menu, single-row.
+              Workspace tests 407 → 408.
+
   cycle 711 — **Tooling: `just menu-shot` repro harness for the
               right-click context menu**:
               Context-menu UX overhaul (C3-C9 in the plan) needs
