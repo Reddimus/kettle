@@ -790,7 +790,20 @@ impl Renderer {
                 // where:
                 //   - [WxH] is shown unless cfg.title_hide_sizetext
                 //   - [●] is shown when cfg.icon_bell && pv.bell
-                let mut label = format!("  {title}");
+                // Cycle 682 (named-groups sub-cycle 6): when
+                //   `pane.group_name = Some("fleet")`, prepend
+                //   the group pill: "  [fleet] TITLE …".
+                //   The render-side bracket gives it a visual
+                //   weight without needing a separate quad
+                //   shape (sub-cycle 7 can promote to a real
+                //   colored chip).
+                let mut label = String::new();
+                if let Some(g) = &pv.group_name
+                    && !g.is_empty()
+                {
+                    label.push_str(&format!("  [{g}]"));
+                }
+                label.push_str(&format!("  {title}"));
                 if !cfg.title_hide_sizetext {
                     label.push_str(&format!("  {}x{}", pv.size_cols, pv.size_rows));
                 }

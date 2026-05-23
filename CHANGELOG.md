@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 682 — **named-groups sub-cycle 6: `[group_name]`
+              pill on pane titlebar**: pane titlebar now
+              prepends `[name]` when `pane.group_name` is
+              Some. Visual cue that the pane belongs to a
+              broadcast group, identical across all panes
+              with the same group name.
+              Format: `  [fleet]  TITLE  cols×rows  🔔`
+              (group pill before title, sizetext after as
+              before, bell glyph last).
+              Empty group_name silently skipped (no
+              `[empty]` artifact). Sub-cycle 7 can promote
+              this to a real colored quad chip; v1 ships
+              the text-only treatment for immediate UX.
+              Workspace tests stay 392 (cycle-117 palette
+              drift guard + cycle-678 BroadcastScope
+              drift guards cover the data path; this is
+              renderer-only paint).
+              **Named-groups port: 6/8** sub-cycles
+              complete. Coloured chip (sub-cycle 6.5) +
+              audit-doc finalization (sub-cycle 8) + cross-
+              window groups (Bucket E per design) remain.
+
   cycle 681 — **named-groups sub-cycle 5: `ToggleBroadcastGroup`
               + `ToggleBroadcastWindow` actions — broadcast
               scope is end-to-end live**.
