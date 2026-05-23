@@ -58,6 +58,80 @@ pub fn detect_remote(_child_pid: u32) -> Option<RemoteContext> {
     None
 }
 
+/// Cycle 644 (sub-cycle 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): SSH-session
+/// detector. Takes a process's argv (as the sysinfo walk in
+/// sub-cycle 5 will supply it) and returns `Some(Ssh { host, user })`
+/// if the argv shape matches an `ssh` invocation, else `None`.
+///
+/// Recognized argv[0] values: `ssh`, `sshpass`. (`autossh` is a
+/// reasonable extension; deferred to follow-up.)
+///
+/// Host extraction:
+///   - `ssh host`                            → host=host, user=None
+///   - `ssh user@host`                       → host=host, user=Some(user)
+///   - `ssh -p 22 user@host`                 → same
+///   - `ssh -o StrictHostKeyChecking=no host` → host=host
+///   - `sshpass -p secret ssh user@host`     → host=host, user=Some(user)
+///
+/// The detector skips `-flag value` and `-flag=value` and `--flag=value`
+/// prefixes to find the first non-option argv element. That element is
+/// the target (potentially `user@host`).
+///
+/// Pure — takes a `&[String]` slice; unit-testable without spawning
+/// anything.
+pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
+    let exe = argv.first()?.split('/').next_back().unwrap_or("");
+    if exe != "ssh" && exe != "sshpass" {
+        return None;
+    }
+    // sshpass wraps ssh — find the `ssh` inside its argv.
+    let inner_start = if exe == "sshpass" {
+        argv.iter()
+            .position(|a| a == "ssh" || a.ends_with("/ssh"))?
+            + 1
+    } else {
+        1
+    };
+    let mut i = inner_start;
+    let mut target: Option<&str> = None;
+    while i < argv.len() {
+        let a = &argv[i];
+        if let Some(s) = a.strip_prefix("--")
+            && s.contains('=')
+        {
+            i += 1;
+            continue;
+        }
+        if let Some(s) = a.strip_prefix('-')
+            && !s.is_empty()
+        {
+            // `-o foo=bar` / `-p 22` / `-l user` style: skip a value.
+            let needs_value = matches!(
+                s,
+                "o" | "p" | "l" | "i" | "b" | "c" | "F" | "L" | "R" | "D" | "W"
+            );
+            if needs_value && i + 1 < argv.len() {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        target = Some(a.as_str());
+        break;
+    }
+    let raw = target?;
+    let (user, host) = match raw.split_once('@') {
+        Some((u, h)) if !u.is_empty() && !h.is_empty() => (Some(u.to_string()), h.to_string()),
+        _ => (None, raw.to_string()),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(RemoteContext::Ssh { host, user })
+}
+
 /// Cycle 643: format a `RemoteContext` as a one-line title string
 /// for use in the pane-title surface (Terminator's pattern).
 ///
@@ -152,5 +226,74 @@ mod tests {
         assert!(detect_remote(0).is_none());
         assert!(detect_remote(1).is_none());
         assert!(detect_remote(u32::MAX).is_none());
+    }
+
+    /// Cycle 644 drift guard. `detect_ssh` walks argv shapes that
+    /// match real-world ssh invocations.
+    #[test]
+    fn detect_ssh_recognizes_common_argv_shapes() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // ssh host
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "box.example.com"])),
+            Some(RemoteContext::Ssh {
+                host: "box.example.com".into(),
+                user: None,
+            })
+        );
+        // ssh user@host
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "me@box"])),
+            Some(RemoteContext::Ssh {
+                host: "box".into(),
+                user: Some("me".into()),
+            })
+        );
+        // ssh -p 22 user@host
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-p", "22", "alice@h.example"])),
+            Some(RemoteContext::Ssh {
+                host: "h.example".into(),
+                user: Some("alice".into()),
+            })
+        );
+        // ssh -o StrictHostKeyChecking=no host
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-o", "StrictHostKeyChecking=no", "h"])),
+            Some(RemoteContext::Ssh {
+                host: "h".into(),
+                user: None,
+            })
+        );
+        // ssh -l user host (kettle-supplied user via -l)
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-l", "bob", "h"])),
+            Some(RemoteContext::Ssh {
+                host: "h".into(),
+                user: None, // -l user goes into ssh-internal state; we don't extract it
+            })
+        );
+        // sshpass -p secret ssh user@host
+        assert_eq!(
+            detect_ssh(&argv(&["sshpass", "-p", "secret", "ssh", "carol@h"])),
+            Some(RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("carol".into()),
+            })
+        );
+        // Absolute-path argv[0].
+        assert_eq!(
+            detect_ssh(&argv(&["/usr/bin/ssh", "box"])),
+            Some(RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+            })
+        );
+        // Non-SSH argv → None.
+        assert!(detect_ssh(&argv(&["vim", "ssh.txt"])).is_none());
+        assert!(detect_ssh(&argv(&["bash"])).is_none());
+        assert!(detect_ssh(&argv(&[])).is_none());
+        // ssh with no target (just flags) → None.
+        assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
     }
 }

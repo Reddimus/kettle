@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 644 — **remote.py sub-cycle 3: SSH detector**: new
+              `pub fn detect_ssh(argv: &[String]) -> Option<
+              RemoteContext>` in `kettle-remote`. Pure — takes
+              the process's argv (as sub-cycle 5's sysinfo walk
+              will supply), returns `Some(Ssh { host, user })`
+              for argv shapes that match real ssh invocations:
+                - `ssh box`
+                - `ssh user@host`
+                - `ssh -p 22 user@host`
+                - `ssh -o StrictHostKeyChecking=no host`
+                - `ssh -l user host`
+                - `sshpass -p secret ssh user@host`
+                - `/usr/bin/ssh box` (absolute argv[0])
+              Skips `-o foo=bar` / `-p 22` / `-l user` value
+              args correctly. Returns `None` for non-ssh argv
+              (vim, bash, …) and for ssh with no target
+              (e.g. `ssh -V`). Drift guard walks 11 real-world
+              shapes. Workspace tests 375 → 376.
+
   cycle 643 — **remote.py sub-cycle 2: `kettle-remote` crate
               skeleton + `RemoteContext` type**: new workspace
               member `crates/kettle-remote/`. Isolated from
