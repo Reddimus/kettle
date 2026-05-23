@@ -49,9 +49,13 @@ if [ -z "$non_doc" ]; then
     exit 0
 fi
 
-# Code paths touched — run the quality gate.
+# Code paths touched — run the quality gate. Cycle 502: log
+# elapsed time so a contributor running a slow-clippy commit
+# knows it's the linter taking ~30s, not a hung hook.
+start_ns=$(date +%s)
 echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test ..." >&2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-echo "pre-commit: PASSED" >&2
+elapsed=$(($(date +%s) - start_ns))
+echo "pre-commit: PASSED (${elapsed}s)" >&2
