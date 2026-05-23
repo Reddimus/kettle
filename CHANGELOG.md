@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 688 — **terminalshot sub-cycle 4: wgpu surface
+              readback — live screenshots ship**. Last
+              remaining heavy work on the cycle-630
+              terminalshot design.
+              Surface config gains `COPY_SRC` usage flag
+              (cycle-654 set up the slot; this cycle lights
+              it up). New private
+              `Renderer::capture_live_surface(frame, req)`
+              runs BEFORE `frame.present()` on a screenshot-
+              pending frame:
+                1. allocate a staging buffer sized to
+                   `padded_bytes_per_row * height` (wgpu's
+                   256-byte alignment)
+                2. `copy_texture_to_buffer` from swap-chain
+                   texture into the staging buffer
+                3. `device.poll(wait_indefinitely)` to
+                   ensure the copy completes
+                4. `map_async` + read the mapped range
+                5. strip the 256-byte row padding +
+                   convert BGRA → RGBA if needed
+                6. apply optional crop from `req.crop`
+                7. `image::ImageBuffer::save(req.out_path)`
+              Synchronous (poll-wait) implementation — a
+              future polish can move the encode off-thread.
+              `cfg.crop = None` captures the whole window;
+              sub-cycle 6 of the design will compute the
+              focused-pane rect for true per-pane capture.
+              Workspace tests stay 392 (the path is
+              best-effort I/O; manual e2e is the test).
+              **terminalshot port: 4/7 → effectively
+              live**. Sub-cycles 5-7 (toast notification +
+              per-pane crop + audit-doc) are polish on top
+              of a working capture.
+
   cycle 687 — **theme-submenu sub-cycle 3: drill-in submenu
               UI**. Replaces the cycle-684 "click logs info"
               no-op with a real, interactive drill-in:

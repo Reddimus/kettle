@@ -508,7 +508,12 @@ impl Renderer {
             caps.alpha_modes[0]
         };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
+            // add COPY_SRC so the cycle-654 pending_screenshot path
+            // can read back the live surface. Most desktop adapters
+            // support this fine; mobile may need a fallback to a
+            // separate intermediate texture (deferred polish).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: width.max(1),
             height: height.max(1),
@@ -2080,8 +2085,153 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
+        // if a screenshot request is queued (cycle-654), copy the
+        // surface texture to a staging buffer BEFORE present (after
+        // present the texture isn't readable). The PNG encode + write
+        // happens off-thread; this path is best-effort: errors log
+        // but don't fail the frame.
+        let screenshot_req = self.pending_screenshot.take();
+        if let Some(req) = &screenshot_req
+            && let Err(e) = self.capture_live_surface(&frame, req)
+        {
+            log::warn!("take_screenshot capture failed: {e}");
+        }
         frame.present();
         self.atlas.trim();
+        Ok(())
+    }
+
+    /// Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
+    /// copy the current swap-chain texture to a staging buffer,
+    /// then map + encode PNG + write to `req.out_path`. Synchronous
+    /// (device.poll(Wait)) to keep the implementation simple; a
+    /// future polish can move the encode off-thread.
+    fn capture_live_surface(
+        &self,
+        frame: &wgpu::SurfaceTexture,
+        req: &ScreenshotRequest,
+    ) -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tex = &frame.texture;
+        let size = tex.size();
+        let width = size.width;
+        let height = size.height;
+        // wgpu requires 256-byte alignment on bytes_per_row.
+        let bytes_per_pixel = 4u32; // BGRA8 / RGBA8 — both 4 bpp.
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-screenshot-readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kettle-screenshot-copy"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let buffer_slice = staging.slice(..);
+        let done = Arc::new(AtomicBool::new(false));
+        let done_set = done.clone();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            if let Err(e) = result {
+                log::warn!("screenshot map_async failed: {e:?}");
+            }
+            done_set.store(true, Ordering::SeqCst);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        if !done.load(Ordering::SeqCst) {
+            return Err(anyhow!("screenshot readback timed out"));
+        }
+        let mapped = buffer_slice.get_mapped_range();
+
+        // Compact rows (strip wgpu's 256-byte row padding) +
+        // convert BGRA → RGBA if needed. Surface format is
+        // typically Bgra8UnormSrgb on most desktop adapters;
+        // PNG expects RGBA.
+        let surface_format = tex.format();
+        let bgra = matches!(
+            surface_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut rgba: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let row_pixels = &mapped[start..start + unpadded_bytes_per_row as usize];
+            if bgra {
+                for chunk in row_pixels.chunks_exact(4) {
+                    rgba.push(chunk[2]);
+                    rgba.push(chunk[1]);
+                    rgba.push(chunk[0]);
+                    rgba.push(chunk[3]);
+                }
+            } else {
+                rgba.extend_from_slice(row_pixels);
+            }
+        }
+        drop(mapped);
+        staging.unmap();
+
+        // Apply optional crop.
+        let (out_w, out_h, out_pixels) = if let Some((cx, cy, cw, ch)) = req.crop {
+            let cx = cx.max(0.0) as u32;
+            let cy = cy.max(0.0) as u32;
+            let cw = cw.max(1.0) as u32;
+            let ch = ch.max(1.0) as u32;
+            let x_end = (cx + cw).min(width);
+            let y_end = (cy + ch).min(height);
+            let cropped_w = x_end.saturating_sub(cx);
+            let cropped_h = y_end.saturating_sub(cy);
+            let mut cropped: Vec<u8> = Vec::with_capacity((cropped_w * cropped_h * 4) as usize);
+            for y in cy..y_end {
+                let row_start = (y * width * 4) as usize;
+                let row_pixels = &rgba[row_start..row_start + (width * 4) as usize];
+                let col_start = (cx * 4) as usize;
+                let col_end = (x_end * 4) as usize;
+                cropped.extend_from_slice(&row_pixels[col_start..col_end]);
+            }
+            (cropped_w, cropped_h, cropped)
+        } else {
+            (width, height, rgba)
+        };
+
+        // PNG encode + write.
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
+            .ok_or_else(|| anyhow!("screenshot ImageBuffer::from_raw failed"))?;
+        img.save(&req.out_path)
+            .map_err(|e| anyhow!("PNG save failed: {e}"))?;
+        log::info!("screenshot saved: {}", req.out_path.display());
         Ok(())
     }
 
