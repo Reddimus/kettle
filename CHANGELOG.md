@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 659 — **Deploy: redeployed local kettle with the full
+              remote.py port (sub-cycles 1-7 of 7
+              complete)**. Binary at `~/.local/bin/kettle`
+              reports `1.45.1 (81b1fa6)`. End-to-end remote-
+              session detection is now live + user-discoverable:
+              the pane title updates within ~200ms of running
+              ssh/docker/podman/kubectl/lxc-attach, and
+              right-clicking exposes the "Reconnect" /
+              "Re-attach" menu entry to re-establish.
+
   cycle 658 — **remote.py sub-cycle 7: right-click "Reconnect"
               menu entry — completes the remote.py port**.
               When the focused pane has a detected remote
