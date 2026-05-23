@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 609 — **`smart-copy = false` honor.** Terminator parity
+              (`terminal.py:real_copy_clipboard` +
+              `config.py:smart_copy`). Pre-cycle-609 kettle
+              hardcoded the smart_copy=true behavior (skip the
+              clipboard write when no selection); the
+              `smart-copy` config key was a documented no-op.
+              Now: `smart-copy = false` clobbers the clipboard
+              with an empty string on every Ctrl+Shift+C with
+              no selection — Terminator's deliberate UX choice
+              for users who prefer "Copy means the clipboard
+              now reflects the current selection (even empty)"
+              over the smart heuristic. New pure helper
+              `copy_clipboard_decision(selection, smart_copy)`
+              exposes the policy for unit-testing without a
+              clipboard fixture. Drift guard
+              `copy_clipboard_decision_smart_vs_clobber` walks
+              the four (selection × smart_copy) combinations.
+              CONFIG.md `smart-copy` row moved out of "Parsed-
+              but-currently-no-op keys" into the main table.
+              Workspace tests 348 → 349.
+
   cycle 608 — **`docs/examples/init.lua` sample script.** New
               documented Lua example covering the full
               `kettle.*` API surface — introspection,

@@ -44,6 +44,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
+| `smart-copy` | bool | `true` | `true` (default + Terminator default): `Action::Copy` preserves the existing clipboard when there's no selection. `false`: clobber the clipboard with empty text on every Ctrl+Shift+C — for users who prefer "Copy means the clipboard now reflects the current selection, even when empty" over the smart heuristic. Distinct from `copy-on-select` (which controls auto-copy when text selection completes) |
 | `handle-size` | int -1–50 px | `-1` | Split-divider stroke width. `-1` = use the theme default (1 px). Higher values give a chunkier divider — useful on high-DPI displays where 1 px is hard to see |
 | `geometry-hinting` | bool | `false` | When `true`, request that the window manager resize the kettle window in steps that match the font cell grid (so a resize always lands on integral rows/columns instead of mid-cell pixel offsets). Best-effort: respected by X11 + Windows window managers via winit; ignored on Wayland (compositor manages sizing) |
 | `focus` | `click`\|`sloppy`\|`system` | `click` | Focus-follows-mouse policy. `click` (default) — focus on click. `sloppy` — focus on cursor movement; pane under the cursor becomes focused without clicking. `system` — kettle treats this as `click` (winit doesn't expose the OS-level focus policy, so the OS-managed mode falls back to explicit-click behavior) |
@@ -130,7 +131,6 @@ has no runtime effect today.
 | `inactive-color-offset` | Dim the colors of non-focused panes |
 | `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` for clipboard-source distinction |
 | `scroll-tabbar` | Allow horizontal scroll across many tab segments |
-| `smart-copy` | Auto-copy on text-selection completion (kettle's `copy-on-select` is the implemented variant) |
 | `split-to-group` | New splits join the parent's broadcast group |
 | `sticky` | Pin the window above other windows (kettle's `always-on-top` is the implemented variant) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides |

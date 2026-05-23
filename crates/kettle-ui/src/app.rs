@@ -44,6 +44,33 @@ fn wheel_lines(delta: &winit::event::MouseScrollDelta, multiplier: f32) -> i32 {
     (raw * m).round() as i32
 }
 
+/// Cycle 609 (Terminator parity, `terminal.py:real_copy_clipboard` +
+/// `config.py:smart_copy`): pure decision for what `Action::Copy` should
+/// write to the clipboard.
+///
+///   * `selection` — `Some(s)` when the user actually has text
+///     selected; `None` when the pane has no active selection.
+///   * `smart_copy` — `cfg.smart_copy`. `true` (default) preserves
+///     the existing clipboard if there's no selection; `false`
+///     clobbers it with an empty string (Terminator's
+///     deliberate-UX-choice mode).
+///
+/// Returns:
+///   * `Some(s)` → write `s` to the clipboard (the new content).
+///   * `None`    → don't touch the clipboard at all.
+///
+/// The `Some("")` case is the clobber path — the caller writes
+/// the empty string AND treats the action as "no real copy" for
+/// the `clear_select_on_copy` follow-up (no selection existed to
+/// clear). Pure; unit-testable without a clipboard fixture.
+fn copy_clipboard_decision(selection: Option<&str>, smart_copy: bool) -> Option<String> {
+    match (selection, smart_copy) {
+        (Some(s), _) => Some(s.to_string()),
+        (None, false) => Some(String::new()),
+        (None, true) => None,
+    }
+}
+
 /// Cycle 604 (Terminator parity, `key_zoom_in` / `key_zoom_out` via
 /// Ctrl+wheel): pure decision for whether the wheel notch should resize
 /// the font.
@@ -3111,14 +3138,40 @@ impl App {
             Action::ResizeUp => self.mux.resize_focus(Dir::Vertical, -0.03),
             Action::ResizeDown => self.mux.resize_focus(Dir::Vertical, 0.03),
             Action::Copy => {
+                // Cycle 609 (Terminator parity, terminatorlib/config.py
+                // `smart_copy` + terminal.py:real_copy_clipboard):
+                //   smart_copy = true  (default) → if no selection, skip
+                //     the clipboard write so the existing clipboard
+                //     content is preserved. Lets a user Ctrl+Shift+C
+                //     without losing a previous copy when they forgot
+                //     to highlight first.
+                //   smart_copy = false → always trigger the copy. If
+                //     there's no selection, write empty — this CLOBBERS
+                //     the clipboard. Deliberate UX choice for users who
+                //     want Ctrl+Shift+C to consistently mean "the
+                //     clipboard now reflects the current selection
+                //     (empty or not)" without smart heuristics.
+                // Pre-cycle-609 kettle hardcoded smart_copy = true.
+                let selection_text = self.mux.focused().and_then(|p| {
+                    p.term
+                        .term
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.selection_to_string())
+                });
+                let payload =
+                    copy_clipboard_decision(selection_text.as_deref(), self.cfg.smart_copy);
                 let mut copied = false;
-                if let Some(p) = self.mux.focused()
-                    && let Ok(t) = p.term.term.lock()
-                    && let Some(sel) = t.selection_to_string()
+                if let Some(s) = payload
                     && let Some(cb) = &mut self.clipboard
                 {
-                    let _ = cb.set_text(sel);
-                    copied = true;
+                    let had_selection = !s.is_empty();
+                    let _ = cb.set_text(s);
+                    // Only treat it as a "real" copy when something was
+                    // actually selected — the smart_copy = false
+                    // clobber path writes empty but shouldn't clear a
+                    // (nonexistent) selection.
+                    copied = had_selection;
                 }
                 // Cycle 333 (Terminator parity, terminatorlib/config.py:91
                 // `clear_select_on_copy`): if the config asked, drop the
@@ -5654,6 +5707,34 @@ mod tests {
         assert_eq!(wheel_lines(&pix, 1.0), 3);
         // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
         assert_eq!(wheel_lines(&one, -5.0), 0);
+    }
+
+    /// Cycle 609 drift guard: pin the `copy_clipboard_decision`
+    /// policy. The four cases enumerate every (selection ×
+    /// smart_copy) combination so a future refactor that inverts
+    /// the smart_copy semantics or drops the empty-clobber case
+    /// fires this test before the regression ships.
+    #[test]
+    fn copy_clipboard_decision_smart_vs_clobber() {
+        use super::copy_clipboard_decision;
+        // Selection present + smart_copy = true: copy the selection.
+        assert_eq!(
+            copy_clipboard_decision(Some("hello"), true).as_deref(),
+            Some("hello")
+        );
+        // Selection present + smart_copy = false: still copy
+        // (smart_copy only affects the no-selection branch).
+        assert_eq!(
+            copy_clipboard_decision(Some("hello"), false).as_deref(),
+            Some("hello")
+        );
+        // No selection + smart_copy = true (kettle default + Terminator
+        // default): preserve existing clipboard — return None so the
+        // caller skips the set_text call.
+        assert_eq!(copy_clipboard_decision(None, true), None);
+        // No selection + smart_copy = false: clobber clipboard with
+        // empty string. Terminator's deliberate-UX-choice mode.
+        assert_eq!(copy_clipboard_decision(None, false).as_deref(), Some(""));
     }
 
     /// Cycle 604 drift guard: pin the `should_zoom_font` policy. The
