@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 624 — **Doc-truth refresh:
+              `docs/TERMINATOR-AUDIT.md` (round 3)**:
+              flipped 9 more stale rows to ✅, citing the cycles
+              that closed them (335, 342, 345, 347, 350, 613,
+              617). Plus reclassified `scroll_tabbar` to Bucket
+              E with rationale (kettle's cycle-620 layout has
+              overflow fallback; wheel-cycles-tabs gesture is
+              the kitty/iTerm2 convention not the Terminator
+              one). Tests still 367/367.
+
   cycle 623 — **Terminator color / cursor / fullscreen key
               aliases (Terminator config copies in unchanged)**:
                 - `background-color` / `background_color` → kettle's

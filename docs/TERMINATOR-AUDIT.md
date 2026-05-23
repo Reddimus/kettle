@@ -345,15 +345,15 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`putty_paste_style`~~ | config.py | ✅ cycle-334 — config key parsed (right-click pastes; mouse-handler wiring is a follow-up) | cycle-334 |
 | ~~`smart_copy`~~ | config.py | ✅ cycle-334 — config key parsed; default true matches Terminator (no-op when no selection; behavior wiring is a follow-up) | cycle-334 |
 | ~~`clear_select_on_copy`~~ | config.py | ✅ cycle-333 — bool config key + Action::Copy clears selection when true | cycle-333 |
-| `putty_paste_style` (right-click pastes) | config.py | ❌ | new config key |
-| `disable_mouse_paste` (no middle-click paste) | config.py | ❌ | new config key |
-| `case_sensitive` (search) | config.py | 🟡 kettle does smart-case | document divergence in audit; not a gap |
-| `invert_search` | config.py | ❌ | new config key (search direction) |
-| `force_no_bell` | config.py | 🟡 `bell = off` is the same | document as alias |
+| ~~`putty_paste_style`~~ (right-click pastes) | config.py | ✅ cycle-350 — `Action::Paste` on right-click + `putty-paste-style` config key | cycle-350 |
+| ~~`disable_mouse_paste`~~ (no middle-click paste) | config.py | ✅ `disable-mouse-paste` config key wired to mouse-handler | (covered) |
+| ~~`case_sensitive`~~ (search) | config.py | ✅ cycle-617 — `search-case-sensitive = smart\|always\|never` (incl. Terminator's `case_sensitive = true/false` shorthand) | cycle-617 |
+| ~~`invert_search`~~ | config.py | ✅ cycle 335 — `invert-search` config key | cycle-335 |
+| ~~`force_no_bell`~~ | config.py | ✅ cycle-613 — wired post-process override of `bell` mode | cycle-613 |
 | ~~`term`~~ | config.py | ✅ cycle-335 — string config key (default `xterm-256color`; wiring to spawned shell env is a follow-up sub-cycle) | cycle-335 |
 | ~~`colorterm`~~ | config.py | ✅ cycle-335 — string config key (default `truecolor`; wiring is a follow-up sub-cycle) | cycle-335 |
 | `title_at_bottom` | config.py | ❌ | new config key (for the per-pane titlebar; needs Bucket D first) |
-| `scroll_tabbar` (scrollable tab bar) | config.py | ❌ | new config key for many-tab handling |
+| `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses cycle-620 homogeneous/non-homogeneous layout with overflow fallback — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ cycle-620 — `true` (kettle default) divides strip evenly; `false` sizes per title length with `close_w * 1.5` min-affordance + overflow falls back to homogeneous so a many-tab window never truncates | cycle-620 |
 | `close_button_on_tab` (toggle ✕ on tabs) | config.py | 🟡 always shown | new config key |
 | ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |
@@ -361,26 +361,26 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `sticky` (on all workspaces) | config.py | ❌ | new config key (Linux-only; winit hint) |
 | `hide_from_taskbar` | config.py | ❌ | new config key (winit hint) |
 | `ask_before_closing = always/multiple_terminals/never` | config.py | ❌ | new config key + close-confirm dialog |
-| `exit_action = close/restart/hold` | config.py | 🟡 kettle always closes; need restart + hold | new config key |
+| ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart | (covered) |
 | `login_shell` | config.py | ❌ | new config key (`-l` flag to shell argv) |
 | `geometry_hinting` (font-step resize) | config.py | ❌ | winit GTK-equivalent uncertain — defer to design |
 | `use_login_shell` | config.py | duplicate of `login_shell` | doc |
 | ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 — `Action::PastePrimary`; cycle-574 hardened it to go through `paste_clipboard` for `LOCAL_PASTE_MAX` clamp + bracketed-paste wrap + broadcast scope (arboard has no separate primary-selection API; on Linux+X11 the regular clipboard ≈ primary for keyboard paste, and middle-click already covers true X11 primary at a lower level) | cycle-345 |
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
 | ~~`reset_clear`~~ (Reset + Clear) | keybinds | ✅ cycle-342 — `Action::ResetAndClear` (composes Reset + ClearHistory) | cycle-342 |
-| half-page scroll variants | keybinds | ❌ | new actions `Action::ScrollPageUpHalf/Down`|
+| ~~half-page scroll variants~~ | keybinds | ✅ cycle 342 — `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (aliases: `page_up_half` / `page_down_half`) | cycle-342 |
 | `scaled_zoom` | keybinds | ❌ aspect-preserving zoom | E (GTK-specific; kettle's single zoom suffices) |
 
 ### Bucket C — single-cycle features
 
 | Terminator feature | source | kettle status | Cycle target |
 |---|---|---|---|
-| `rotate_cw` / `rotate_ccw` (rotate panes) | paned.py + keybinds | ❌ | new actions; reshape split tree |
-| `hide_window` (Ctrl+Shift+Alt+A; toggle window visibility) | keybinds | 🟡 cycle-303 `--toggle` via IPC; needs in-process default keybind | new action `Action::ToggleWindowVisibility` (wires cycle-303 directly) |
+| ~~`rotate_cw` / `rotate_ccw`~~ (rotate panes) | paned.py + keybinds | ✅ cycle 347 — `Action::RotateCw` / `RotateCcw` (split-tree rotation; flip dir + swap-children for CW) | cycle-347 |
+| ~~`hide_window`~~ (Ctrl+Shift+Alt+A; toggle window visibility) | keybinds | ✅ cycle 342 — `Action::ToggleWindowVisibility` (wires the cycle-303 IPC path directly) | cycle-342 |
 | `group_tab` / `ungroup_tab` / `group_win` / `ungroup_win` | keybinds | 🟡 kettle has per-tab broadcast only | new actions + per-tab broadcast scoping |
 | `create_group` | keybinds | ❌ | named group creation + group-name field on Pane |
-| `zoom_in/out/normal_all` (broadcast zoom) | keybinds | ❌ | new actions that loop existing zoom |
-| `toggle_scrollbar` (runtime show/hide) | keybinds | 🟡 `scrollbar` config key but no runtime toggle | new action |
+| ~~`zoom_in/out/normal_all`~~ (broadcast zoom) | keybinds | ✅ cycle 345 — `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (kettle's font-size is window-wide so they compose into the single-pane zoom) | cycle-345 |
+| ~~`toggle_scrollbar`~~ (runtime show/hide) | keybinds | ✅ cycle 342 — `Action::ToggleScrollbar` cycles Never → Always → Auto → Never | cycle-342 |
 | `edit_window_title` / `edit_tab_title` / `edit_terminal_title` | keybinds | ❌ | new actions + title-edit overlay |
 | `insert_number` / `insert_padded` | keybinds | 🟡 cycle-606 ships `insert_term_name` (sends pane title); kettle uses titles not numbers (kettle doesn't enumerate panes 1..N for users) | E for `insert_number`; `insert_term_name` covered |
 | `next_profile` / `previous_profile` | keybinds | 🟡 launch-time only via `--profile NAME` | new actions + runtime profile cycle |
