@@ -463,6 +463,12 @@ pub struct Config {
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
+    ///
+    /// NOTE (cycle 563): parsed but currently no-op — kettle-ui
+    /// doesn't consume this field yet. Users setting
+    /// `ask-before-closing = always` see the same behavior as
+    /// `never`. Field kept for forward-compat; a future cycle
+    /// wiring the confirm-on-close dialog reads it here.
     pub ask_before_closing: AskBeforeClosing,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:81
     /// `close_button_on_tab`): show ✕ on tabs.
@@ -535,6 +541,11 @@ pub struct Config {
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:73
     /// `focus`): focus mode — click (default), sloppy (focus
     /// follows mouse), system (use the desktop's focus mode).
+    ///
+    /// NOTE (cycle 563): parsed but currently no-op — kettle-ui
+    /// uses click-focus exclusively. Sloppy / system modes
+    /// aren't wired yet. Field kept for forward-compat; a future
+    /// cycle wiring focus-follows-mouse reads it here.
     pub focus: FocusMode,
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:74
     /// `handle_size`): split-divider grab width in px. -1 means
