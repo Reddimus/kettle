@@ -36,7 +36,11 @@
 set -euo pipefail
 
 # Detect doc-only commits (skip the heavy gate for them).
-non_doc=$(git diff --cached --name-only --diff-filter=ACMR \
+# Cycle 496: include D (deletions) in the filter — a commit that
+# ONLY deletes .rs files would otherwise skip the gate, but
+# deleting code can break the build (lost call site, broken
+# import, etc).
+non_doc=$(git diff --cached --name-only --diff-filter=ACMRD \
     | grep -vE '^(CHANGELOG\.md|README\.md|docs/|packaging/|\.github/|\.githooks/|NOTICE|LICENSE|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|deny\.toml|\.gitignore)' \
     || true)
 
