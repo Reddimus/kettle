@@ -2109,6 +2109,18 @@ impl Config {
                 cfg.theme.palette[i] = c;
             }
         }
+        // Cycle 613 (Terminator parity, terminatorlib/config.py
+        // `force_no_bell`): post-process override. When
+        // `force_no_bell = true`, force the bell mode to Off
+        // regardless of the `bell` config key. Equivalent to
+        // setting `bell = off` but uses Terminator's own key
+        // name — copying a Terminator config that sets
+        // `force_no_bell = True` now actually silences the
+        // bell instead of the previous behavior (parsed but
+        // never read).
+        if cfg.force_no_bell {
+            cfg.bell = BellMode::Off;
+        }
         unknown.sort();
         unknown.dedup();
         (cfg, unknown)
@@ -4362,9 +4374,9 @@ mod config_tests {
     /// like a list continuation.
     #[test]
     fn command_notify_threshold_parses_and_clamps() {
-        // Default is 5 seconds.
+        // body intentionally not changed by cycle 613; the test
+        // continues below.
         assert_eq!(Config::default().command_notify_threshold_ms, 5_000);
-        // Various aliases all parse.
         for alias in [
             "command-notify-threshold-ms",
             "command-notify-threshold",
@@ -4374,12 +4386,39 @@ mod config_tests {
             let cfg = Config::parse_text(&format!("{alias} = 12000\n"));
             assert_eq!(cfg.command_notify_threshold_ms, 12_000, "alias {alias}");
         }
-        // 0 disables (no clamp upward).
         let cfg = Config::parse_text("command-notify-threshold-ms = 0\n");
         assert_eq!(cfg.command_notify_threshold_ms, 0);
-        // Past the 1-day ceiling clamps.
         let cfg = Config::parse_text("command-notify-threshold-ms = 999999999\n");
         assert_eq!(cfg.command_notify_threshold_ms, 86_400_000);
+    }
+
+    /// Cycle 613 drift guard. `force-no-bell = true` overrides the
+    /// `bell` config key — Terminator-parity hard-off for users
+    /// who want to silence every bell flavor with one key.
+    /// Pre-cycle-613 the key parsed but was a documented no-op.
+    #[test]
+    fn force_no_bell_overrides_bell_mode_to_off() {
+        // `force-no-bell = true` alone → BellMode::Off.
+        let cfg = Config::parse_text("force-no-bell = true\n");
+        assert!(cfg.force_no_bell);
+        assert_eq!(cfg.bell, BellMode::Off);
+        // `force-no-bell = true` AFTER `bell = both` still wins
+        // (the override is post-process, regardless of line order).
+        let cfg = Config::parse_text(
+            "bell = both\n\
+             force-no-bell = true\n",
+        );
+        assert_eq!(cfg.bell, BellMode::Off);
+        // The reverse order: `bell = both` after force-no-bell.
+        let cfg = Config::parse_text(
+            "force-no-bell = true\n\
+             bell = both\n",
+        );
+        assert_eq!(cfg.bell, BellMode::Off);
+        // `force-no-bell = false` is the default and leaves bell alone.
+        let cfg = Config::parse_text("bell = visual\n");
+        assert!(!cfg.force_no_bell);
+        assert_eq!(cfg.bell, BellMode::Visual);
     }
 
     /// Cycle 611 drift guard for the --check-config malformed-value

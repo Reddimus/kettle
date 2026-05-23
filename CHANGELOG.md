@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 613 — **`force-no-bell = true` honors override**
+              (Terminator parity, `config.py:force_no_bell`).
+              Previously the key parsed (since cycle 340) but
+              was a documented no-op — setting
+              `force_no_bell = true` in a config copied from
+              Terminator didn't actually silence the bell.
+              Now: at the end of `parse_collect`, if
+              `force_no_bell` is true, force `cfg.bell =
+              BellMode::Off` regardless of any earlier `bell
+              = ...` line. Wins on both orders (`bell` before
+              or after `force-no-bell`). Drift guard
+              `force_no_bell_overrides_bell_mode_to_off`
+              walks 4 cases (alone, with `bell = both`
+              before, with `bell = both` after, default
+              leaves bell alone). Workspace tests 352 → 353.
+
   cycle 612 — **Long-command desktop notification on OSC 133 D
               (CommandEnd)** — Terminator parity for
               `terminatorlib/plugins/command_notify.py`. When a
