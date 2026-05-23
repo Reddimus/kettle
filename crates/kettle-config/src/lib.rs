@@ -314,6 +314,29 @@ pub enum AskBeforeClosing {
     Never,
 }
 
+impl AskBeforeClosing {
+    /// Cycle 638 (Terminator parity, sub-cycle 1 of
+    /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
+    /// pure-decision helper — does a Close action with `scope_count`
+    /// panes/tabs about to die need the confirm dialog?
+    ///
+    /// Matrix:
+    ///   - `Never`              → never prompt
+    ///   - `Always`             → always prompt
+    ///   - `MultipleTerminals`  → prompt iff scope_count > 1
+    ///
+    /// Sub-cycle 5+ wire this to the `Action::CloseWindow` /
+    /// `CloseTab` / `ClosePane` dispatch. Pure — no `&self` shape
+    /// needed; just the enum + count.
+    pub fn should_prompt(self, scope_count: usize) -> bool {
+        match self {
+            AskBeforeClosing::Never => false,
+            AskBeforeClosing::Always => true,
+            AskBeforeClosing::MultipleTerminals => scope_count > 1,
+        }
+    }
+}
+
 /// When the per-pane scrollback scrollbar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
@@ -4757,6 +4780,31 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 638 drift guard. `AskBeforeClosing::should_prompt` is
+    /// the pure decision behind the confirm-dialog primitive
+    /// (sub-cycle 1 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)).
+    /// Cover all 3 modes × edge-case scope counts (0, 1, 2, large).
+    #[test]
+    fn ask_before_closing_should_prompt_matrix() {
+        use AskBeforeClosing::*;
+        // Never: never prompts, regardless of scope.
+        assert!(!Never.should_prompt(0));
+        assert!(!Never.should_prompt(1));
+        assert!(!Never.should_prompt(2));
+        assert!(!Never.should_prompt(100));
+        // Always: always prompts.
+        assert!(Always.should_prompt(0));
+        assert!(Always.should_prompt(1));
+        assert!(Always.should_prompt(2));
+        assert!(Always.should_prompt(100));
+        // MultipleTerminals: prompts iff scope > 1.
+        assert!(!MultipleTerminals.should_prompt(0));
+        assert!(!MultipleTerminals.should_prompt(1));
+        assert!(MultipleTerminals.should_prompt(2));
+        assert!(MultipleTerminals.should_prompt(100));
     }
 
     /// Cycle 628 drift guard. Terminator's `tab_position` is kettle's

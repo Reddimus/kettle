@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 638 — **confirm-dialog sub-cycle 1: `should_prompt`
+              pure helper**: new `AskBeforeClosing::should_prompt(
+              scope_count) -> bool` method on the existing enum
+              implements the matrix from
+              [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
+                - `Never`              → never prompts
+                - `Always`             → always prompts
+                - `MultipleTerminals`  → prompts iff `scope_count > 1`
+              Pure — no `&self` shape needed, just the enum + count.
+              Sub-cycle 5+ wires it to the close-family dispatch.
+              Drift guard `ask_before_closing_should_prompt_matrix`
+              walks all 3 modes × 4 scope counts (0, 1, 2, 100).
+              Workspace tests 370 → 371.
+
   cycle 637 — **`docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md` —
               Bucket D for `ask_before_closing` + a reusable
               confirm-dialog primitive**: the cycle-343-360
