@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 693 — **`Action::ScaledZoom` (Terminator key_scaled_zoom)**:
+              Terminator's "scaled zoom" maximizes the active
+              pane AND scales the font proportionally so text
+              fills the larger area. kettle pairs
+              `Mux::toggle_zoom` with a 1.5× font-size bump on
+              enter / restore on exit. Saved font size lives in
+              `App::scaled_zoom_prev_font_size: Option<f32>`;
+              `None` means "not currently in scaled zoom" so
+              repeated `ToggleZoom` interactions from other
+              code paths don't accidentally undo the restore.
+              Reachable from:
+                - cycle-104 command palette ("Scaled zoom (zoom
+                  + 1.5x font)")
+                - 3 keybind name aliases: `scaled_zoom`,
+                  `scaled-zoom`, `toggle_scaled_zoom`
+                - cycle-117 palette completeness drift guard
+                  registry (compile fails if any new Action
+                  variant isn't categorized)
+              Drift guard `from_name_accepts_scaled_zoom_aliases`
+              walks all three aliases + asserts bare
+              `toggle_zoom` still parses to the non-scaling
+              `Action::ToggleZoom` (no alias collision).
+              Audit row promoted from E → A with cross-link.
+              Audit doc also flipped a stale Bucket E row for
+              `insert_number` / `insert_padded` (the entries
+              were actually shipped at cycle 342 — only the
+              doc was out of date).
+              Workspace tests 393 → 394.
+
   cycle 692 — **`palette = NAME` named-preset alias**:
               Terminator accepts `palette = solarized_dark`
               as a shorthand that picks the whole 16-slot

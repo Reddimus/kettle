@@ -972,6 +972,17 @@ impl Mux {
         }
     }
 
+    /// Cycle 693. Whether the active tab is currently zoomed (used by
+    /// `Action::ScaledZoom` to decide whether it's the enter-zoom path
+    /// — which scales the font up — or the leave-zoom path — which
+    /// restores the saved size).
+    pub fn is_zoomed(&self) -> bool {
+        self.tabs
+            .get(self.active)
+            .map(|t| t.zoomed)
+            .unwrap_or(false)
+    }
+
     pub fn active_focus(&self) -> Option<u64> {
         self.tabs.get(self.active).map(|t| t.focus)
     }

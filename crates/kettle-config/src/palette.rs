@@ -26,6 +26,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Split automatically", SplitAuto),
         ("Close pane", ClosePane),
         ("Zoom / unzoom pane", ToggleZoom),
+        ("Scaled zoom (zoom + 1.5x font)", ScaledZoom),
         ("Focus next pane", FocusNext),
         ("Focus previous pane", FocusPrev),
         ("New window", NewWindow),
@@ -190,6 +191,7 @@ mod tests {
             ResizeLeft,
             ResizeRight,
             ToggleZoom,
+            ScaledZoom,
             IncreaseFontSize,
             DecreaseFontSize,
             ResetFontSize,
@@ -283,6 +285,7 @@ mod tests {
                 | ResizeLeft
                 | ResizeRight
                 | ToggleZoom
+                | ScaledZoom
                 | IncreaseFontSize
                 | DecreaseFontSize
                 | ResetFontSize

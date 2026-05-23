@@ -97,7 +97,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | Ctrl+Shift+Page_Up | move_tab_left | `MoveTabLeft` | A |
 | F11 | full_screen | `ToggleFullscreen` | A |
 | Ctrl+Shift+X | toggle_zoom | `ToggleZoom` | A |
-| Ctrl+Shift+Z | scaled_zoom | — | E (kettle uses single zoom; aspect-preserving variant is GTK-specific) |
+| Ctrl+Shift+Z | scaled_zoom | A | cycle-693 — `Action::ScaledZoom` toggles `Mux::toggle_zoom` + scales font 1.5× on enter / restores saved size on exit (font tracked via `App::scaled_zoom_prev_font_size: Option<f32>`) |
 | Ctrl+Shift+Alt+A | hide_window | — | C (`Action::ToggleVisibility` via cycle-303 `--toggle` infra) |
 | Super+G | group_all | `ToggleBroadcastAll` (semantic match) | A |
 | Super+Shift+G | ungroup_all | `ToggleBroadcastOff` | A |
@@ -369,7 +369,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
 | ~~`reset_clear`~~ (Reset + Clear) | keybinds | ✅ cycle-342 — `Action::ResetAndClear` (composes Reset + ClearHistory) | cycle-342 |
 | ~~half-page scroll variants~~ | keybinds | ✅ cycle 342 — `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (aliases: `page_up_half` / `page_down_half`) | cycle-342 |
-| `scaled_zoom` | keybinds | ❌ aspect-preserving zoom | E (GTK-specific; kettle's single zoom suffices) |
+| ~~`scaled_zoom`~~ | keybinds | A | cycle-693 — `Action::ScaledZoom` toggles `Mux::toggle_zoom` + scales font 1.5× on enter / restores saved size on exit. Idempotent across other `ToggleZoom` interactions: post-toggle `Mux::is_zoomed()` decides enter vs. leave; saved size lives in `App::scaled_zoom_prev_font_size: Option<f32>`. Palette + 3 name aliases (`scaled_zoom`, `scaled-zoom`, `toggle_scaled_zoom`). Drift guard `from_name_accepts_scaled_zoom_aliases` covers all three. |
 
 ### Bucket C — single-cycle features
 
@@ -382,7 +382,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`zoom_in/out/normal_all`~~ (broadcast zoom) | keybinds | ✅ cycle 345 — `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (kettle's font-size is window-wide so they compose into the single-pane zoom) | cycle-345 |
 | ~~`toggle_scrollbar`~~ (runtime show/hide) | keybinds | ✅ cycle 342 — `Action::ToggleScrollbar` cycles Never → Always → Auto → Never | cycle-342 |
 | ~~`edit_window_title` / `edit_tab_title` / `edit_terminal_title`~~ | keybinds | ✅ cycle 369 — `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` with inline title-edit overlay (`TitleEditState`); cycle 407 added `EditPaneGroup` for the broadcast-group name | cycle-369 |
-| `insert_number` / `insert_padded` | keybinds | 🟡 cycle-606 ships `insert_term_name` (sends pane title); kettle uses titles not numbers (kettle doesn't enumerate panes 1..N for users) | E for `insert_number`; `insert_term_name` covered |
+| ~~`insert_number` / `insert_padded`~~ | keybinds | A | cycle-342 — `Action::InsertPaneNumber` writes the focused pane's index (mux pane-order) to its PTY as ASCII (e.g. `0`/`1`/`2`); `InsertPanePadded` zero-pads to 2 digits (`00`/`01`). Cycle-606 added `InsertPaneName` (sends pane title). All three covered by palette + name aliases (`insert_number` / `insert-number` / `insert_pane_number`, and `_padded` variants). | cycle-342 |
 | ~~`next_profile` / `previous_profile`~~ | keybinds | ✅ cycles 342 + 618 — `Action::NextProfile` / `PrevProfile` cycle `<config>/profiles/*.config` at runtime; cycle 618 refactored to use `Config::list_profiles` + `profile_name_from_path` + pure `pick_next_profile` helper | cycle-618 |
 | Theme presets in right-click menu | terminal_popup_menu.py | D | cycle-634 — multi-cycle design in [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](TERMINATOR-THEME-SUBMENU-DESIGN.md). Adds `ContextMenuItem::Submenu { label, items }`, hover-delay state machine, flyout layout + edge-flip clipping, populated by `Theme::list()` and `Config::list_profiles()`. 9 sub-cycles. |
 | Layout launcher overlay (Alt+L) | layoutlauncher.py | 🟡 — `--layout NAME` launch-time and `Action::ReloadConfig` runtime both work; cycle-329 command palette + cycle-634 right-click theme-submenu design both list layouts as candidate sources for a runtime picker. Bucket E for now (cycle-329 palette covers the picker UX). |
@@ -508,7 +508,7 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 17. `Action::ToggleWindowVisibility` (C; in-process toggle). One cycle.
 18. `Action::ToggleScrollbar` (C; runtime toggle). One cycle.
 19. `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` (C; title-edit overlay). One cycle each (3 total).
-20. ✅ Cycle 606 — `Action::InsertPaneName` (writes pane title to PTY). `insert_number`/`insert_padded` reclassified to Bucket E (kettle doesn't enumerate panes 1..N).
+20. ✅ Cycle 342 + 606 — `Action::InsertPaneNumber` writes the 1-based focused-pane index to its PTY (matches Terminator's `GotoTab` enumeration); `InsertPanePadded` zero-pads to 2 digits. Cycle 606 added `InsertPaneName` (sends pane title). All three reachable from the cycle-104 palette + cycle-692 audit-doc cross-link.
 21. `Action::NextProfile` / `PrevProfile` (C; runtime profile cycle). One cycle.
 22. `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (C; broadcast zoom). One cycle.
 23. Theme submenu in right-click context menu (C). One cycle.

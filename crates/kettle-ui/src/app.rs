@@ -1192,6 +1192,13 @@ pub struct App {
     /// "now's dark"). `None` = haven't checked yet; first check
     /// seeds it without swapping the theme.
     last_schedule_decision: Option<bool>,
+    /// Cycle 693 Terminator parity (`key_scaled_zoom`). When
+    /// `Action::ScaledZoom` enters the zoom state, it saves the
+    /// font size here so the leave-zoom path can restore it
+    /// exactly. `None` means "not currently in scaled zoom" — so
+    /// repeated `ToggleZoom` taps from other code paths don't
+    /// accidentally undo this.
+    scaled_zoom_prev_font_size: Option<f32>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -1593,6 +1600,7 @@ impl App {
             remote_sysinfo: kettle_remote::SysinfoSystem::new(),
             last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
             last_schedule_decision: None,
+            scaled_zoom_prev_font_size: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -4302,6 +4310,31 @@ impl App {
             Action::ToggleZoom => {
                 self.mux.toggle_zoom();
                 self.resize_all();
+            }
+            // Cycle 693 Terminator parity (`key_scaled_zoom`).
+            // Toggle pane zoom + scale the font 1.5× so glyphs
+            // grow with the enlarged pane area, then restore the
+            // saved size on exit. Idempotent across other
+            // `ToggleZoom` interactions: if the user toggles zoom
+            // some other way and then hits ScaledZoom, the second
+            // call still flips state correctly because we look at
+            // the post-toggle zoom flag and pair save/restore via
+            // a single `Option<f32>`.
+            Action::ScaledZoom => {
+                self.mux.toggle_zoom();
+                self.resize_all();
+                let now_zoomed = self.mux.is_zoomed();
+                if let Some(r) = self.renderer.as_mut() {
+                    if now_zoomed {
+                        if self.scaled_zoom_prev_font_size.is_none() {
+                            self.scaled_zoom_prev_font_size = Some(self.cfg.font_size);
+                        }
+                        let new_size = (self.cfg.font_size * 1.5).clamp(6.0, 96.0);
+                        r.set_font_size(new_size);
+                    } else if let Some(prev) = self.scaled_zoom_prev_font_size.take() {
+                        r.set_font_size(prev);
+                    }
+                }
             }
             Action::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;

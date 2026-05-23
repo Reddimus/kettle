@@ -166,6 +166,13 @@ pub enum Action {
     ResizeLeft,
     ResizeRight,
     ToggleZoom,
+    /// Cycle 693 Terminator parity (`key_scaled_zoom`).
+    /// Terminator's "scaled zoom" maximizes the active pane AND
+    /// scales the font proportionally so text fills the larger
+    /// area. Kettle pairs `Mux::toggle_zoom` with a 1.5× font-size
+    /// bump on enter / restore on exit (saved size lives in
+    /// `App::scaled_zoom_prev_font_size`).
+    ScaledZoom,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
@@ -432,6 +439,7 @@ pub fn action_names() -> Vec<&'static str> {
         "resize_right",
         "toggle_split_zoom",
         "toggle_zoom",
+        "scaled_zoom",
         "increase_font_size",
         "zoom_in",
         "decrease_font_size",
@@ -618,6 +626,7 @@ impl Action {
             "resize_left" => ResizeLeft,
             "resize_right" => ResizeRight,
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
+            "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "increase_font_size" | "zoom_in" => IncreaseFontSize,
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
@@ -1522,6 +1531,26 @@ mod tests {
                 "alias {s:?} should parse to InsertPaneName"
             );
         }
+    }
+
+    /// Cycle 693 drift guard. Terminator's `scaled_zoom` keybind
+    /// name (and the spelled aliases) parse to the new
+    /// `Action::ScaledZoom` variant — zoom + 1.5× font scale.
+    #[test]
+    fn from_name_accepts_scaled_zoom_aliases() {
+        for s in ["scaled_zoom", "scaled-zoom", "toggle_scaled_zoom"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::ScaledZoom)),
+                "alias {s:?} should parse to ScaledZoom"
+            );
+        }
+        // Make sure the new variant didn't accidentally swallow
+        // the bare `toggle_zoom` (which must still resolve to the
+        // non-font-scaling variant).
+        assert!(matches!(
+            Action::from_name("toggle_zoom"),
+            Some(Action::ToggleZoom)
+        ));
     }
 
     #[test]
