@@ -6,6 +6,84 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.41.0 polish + a real user-reported bug fix.
+
+  cycle 524 — README + INSTALL.md + scripts/install-online.sh
+              version pins bumped to v1.41.0.
+
+  cycle 525 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries
+              extended to v1.41.0 (cycles 411-521, 10 releases,
+              111 cycles).
+
+  cycle 530 — `scripts/install.sh` now refreshes
+              `${PREFIX}/share/kettle/install.sh` on every
+              install — the matching `--uninstall` script
+              always reflects the version that put the binary
+              there.
+
+  cycle 531 — `--uninstall` removes `${PREFIX}/share/kettle/
+              install.sh` + `rmdir`s the dir if empty.
+              Symmetric with cycle 530.
+
+  cycle 535 — `--check-config` annotates the existing
+              `bell: <Mode>` line with `(force-no-bell
+              overrides)` when force_no_bell is set, so the
+              user doesn't read the configured bell mode and
+              wonder why no bell actually fires. Pairs with
+              the cycle-461 separate "bell: force-no-bell=true"
+              echo line.
+
+  cycle 536 — **User-facing string cleanup.** Cycle 461's
+              triggers echo read `(cycle-289 Urgency action)` —
+              an internal cycle ref in `--check-config` output.
+              Same anti-pattern cycles 474-475 scrubbed from
+              docs / man page (but the cycle-179 file-scan
+              drift guard doesn't reach binary stdout).
+              Replaced with `(window-urgency action)`
+              describing the actual effect.
+
+  cycle 537 — Drift guard for cycle-N refs in
+              `extra_check_config_lines` output. A unit test
+              that builds a config triggering every echo
+              branch + asserts no resulting line matches
+              `cycle <digit>` / `cycle-<digit>`. Workspace
+              tests 321 → 322.
+
+  cycle 539 — Exact-numeric test counts in
+              `docs/TERMINATOR-AUDIT.md` + `docs/ROADMAP.md`
+              bumped 321 → 322.
+
+  cycle 540 — **Real user-reported bug fix.** kettle icon
+              wasn't showing in GNOME Activities / Super-key
+              search even though the PNG/SVG files were
+              correctly in place. Root cause: `scripts/install.sh`
+              ran `gtk-update-icon-cache -f -t ${ICON_BASE}`
+              against a user-local hicolor dir that has no
+              `index.theme`. The "-t" flag (--ignore-theme-index)
+              made gtk-update-icon-cache produce a ~584-byte
+              empty/broken cache file. GNOME trusts that cache
+              and skips file-system fallback scanning — so
+              `Icon=kettle` in the .desktop never resolves.
+
+              Two-part fix:
+              - Only invoke gtk-update-icon-cache when
+                ${ICON_BASE}/index.theme exists (user-local
+                hicolor inherits the system
+                /usr/share/icons/hicolor/index.theme).
+              - Clean up any pre-existing broken cache when
+                no index.theme is present.
+
+              Verified end-to-end: re-running ./scripts/install.sh
+              --skip-build removes the broken cache; GNOME's
+              directory-scan fallback now resolves the icon.
+
+  cycle 543 — Symmetric to cycle-540 fix: `--uninstall` also
+              guards `gtk-update-icon-cache` on index.theme
+              existing + removes the broken cache. Without
+              this, uninstall would re-create a stale cache
+              referencing the just-removed icon files.
+
 ## [1.41.0] — 2026-05-22
 
 Post-v1.40.0 polish — pre-commit hook UX tightens, real-bug
