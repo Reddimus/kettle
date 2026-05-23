@@ -46,6 +46,17 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 593 — **Test race fix follow-up: main.rs config_path test.**
+              `kettle/src/main.rs:config_path_problem_catches_*`
+              still used `kettle-cycle164-{pid}` (PID only, no
+              nanos) — common Linux PIDs are large enough to be
+              unique within a test session, but Windows PIDs
+              cycle quickly and a panicked re-run on the same
+              PID would inherit a stale dir. Added nanos suffix
+              for consistency with the cycle-592 pattern + the
+              rest of the test suite. Workspace tests unchanged
+              at 337.
+
   cycle 592 — **Test race fix: PID + nanos on `/tmp` paths.** Three
               unit tests (`bg_image::real_png_roundtrip`,
               `bg_image::rejects_oversized_dimensions`,

@@ -1008,7 +1008,21 @@ mod tests {
         // defaults — `read_to_string` returned IsADirectory, `load_from_with_diagnostics`
         // logged a warn and used defaults, and the user saw their carefully-
         // crafted theme nowhere with no obvious cue why.
-        let tmp = std::env::temp_dir().join(format!("kettle-cycle164-{}", std::process::id()));
+        // Cycle 593: PID + nanos. Stale directories from a previously
+        // panicked test run (Ctrl+C, OOM, hardware fault) used to
+        // collide with a re-run sharing the same PID — common on
+        // Windows where PIDs cycle quickly and rare-but-real on Linux
+        // CI runners. The nanos suffix means even the same PID gets a
+        // fresh dir. Matches the pattern in session::tests +
+        // config_tests + the cycle-592 bg_image / lua fixes.
+        let tmp = std::env::temp_dir().join(format!(
+            "kettle-cycle164-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         assert_eq!(config_path_problem(&tmp), Some("not a regular file"));
 
