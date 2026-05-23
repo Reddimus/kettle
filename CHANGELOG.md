@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 713 — **Right-click menu: hide disabled rows
+              (Terminator-style)**:
+              Context-menu UX sub-cycle C4. Before this cycle
+              disabled rows rendered greyed-out. Per the user's
+              feedback ("the right-click menu UX doesn't seem to
+              work as intended"), the greyed-out rows added
+              visual clutter — Copy without a selection, Ungroup
+              without a group set, etc. Terminator + GNOME
+              Terminal hide such rows entirely; cycle 713 matches.
+              Now: every visible context-menu row is actionable.
+              Rules:
+                - any `Item { enabled: false, .. }` is dropped
+                  before render.
+                - runs of `Separator`s collapse to one.
+                - leading + trailing separators (orphaned by step 1)
+                  are trimmed.
+                - all-disabled menu collapses to empty (no orphan
+                  chrome).
+              Also: `Ungroup This Tab` row's `enabled` is now
+              computed from `Pane::group_name.is_some_and(!empty)`
+              instead of being hardcoded true — so it appears
+              only when the focused pane actually has a group set.
+              New pure helper `filter_disabled(items) ->
+              Vec<ContextMenuItem>` applied at the end of the
+              `open_context_menu` build phase.
+              Drift guards: 5 cases
+              (`disabled_items_are_hidden_and_separators_collapse`,
+              `consecutive_separators_collapse_and_leading_is_dropped`,
+              `filter_disabled_is_near_identity_when_all_enabled`,
+              `filter_disabled_handles_empty`,
+              `filter_disabled_collapses_all_disabled_to_empty`).
+              Workspace tests 408 → 413.
+
   cycle 712 — **Right-click menu: mouse hover-to-highlight**:
               Context-menu UX sub-cycle C3. Before this cycle the
               highlight only moved via keyboard nav; sliding the

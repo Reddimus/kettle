@@ -1038,6 +1038,44 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 /// field (no description), so the inner predicate is simpler.
 /// Pure — separated from `layout_picker_key` so a drift guard
 /// can exercise it without touching App state.
+/// Cycle 713 (Terminator menu UX, C4). Drop disabled `Item`s from
+/// the context-menu and collapse the separators that would orphan
+/// around them. Pre-cycle-713 disabled rows rendered greyed-out —
+/// after this filter they're hidden entirely, matching Terminator /
+/// GNOME Terminal: only-show-what-you-can-click.
+///
+/// Three passes:
+///   1. drop any `Item { enabled: false }`. Other variants (LuaItem,
+///      ConfigItem, Submenu, Theme/ProfileChoice, Separator) stay.
+///   2. collapse runs of `Separator` to a single one.
+///   3. trim leading + trailing separators (orphaned by step 1).
+///
+/// Pure so the contract is unit-tested without spinning up App.
+fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuItem> {
+    // Step 1: drop disabled Items.
+    let kept: Vec<ContextMenuItem> = items
+        .into_iter()
+        .filter(|it| !matches!(it, ContextMenuItem::Item { enabled: false, .. }))
+        .collect();
+    // Step 2: collapse separator runs. Walk linearly; only push a
+    // Separator when the previous pushed item wasn't already one.
+    let mut collapsed: Vec<ContextMenuItem> = Vec::with_capacity(kept.len());
+    let mut last_was_sep = true; // pretend the "before-start" was a sep so leading sep gets dropped
+    for it in kept {
+        let is_sep = matches!(it, ContextMenuItem::Separator);
+        if is_sep && last_was_sep {
+            continue;
+        }
+        last_was_sep = is_sep;
+        collapsed.push(it);
+    }
+    // Step 3: trim a trailing separator (orphan).
+    if let Some(ContextMenuItem::Separator) = collapsed.last() {
+        collapsed.pop();
+    }
+    collapsed
+}
+
 /// Cycle 712 (Terminator menu UX, hover-to-highlight). Walk the
 /// vertical pixel layout of a context-menu's rows and return the
 /// row index containing `cursor_y`, or `None` if the cursor landed
@@ -3660,17 +3698,28 @@ impl App {
             || self.vi_mode.is_some()
     }
 
-    /// Build the right-click context-menu item list. Copy is enabled
-    /// only when the focused pane has a non-empty selection (matches
-    /// Terminator / GNOME Terminal: the row stays visible but greyed
-    /// out, so the user sees the option exists without it being
-    /// actionable when nothing is selected). All other items are
-    /// always enabled.
+    /// Build the right-click context-menu item list. Each `Item`'s
+    /// `enabled` flag is computed from current state: Copy needs a
+    /// selection; Ungroup needs the focused pane to actually be in a
+    /// group. Cycle 713 wraps the whole list in `filter_disabled` at
+    /// the `open_context_menu` call-site so disabled rows + the
+    /// separators that would orphan them are hidden entirely
+    /// (Terminator-style) rather than shown greyed-out — less visual
+    /// clutter, every visible row is actionable.
     fn context_menu_items(&mut self) -> Vec<ContextMenuItem> {
         let has_selection = self
             .mux
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
+            .unwrap_or(false);
+        // Cycle 713: only enable Ungroup when the focused pane has a
+        // group_name set. Otherwise the row used to greyed-out
+        // confuse new users ("why's that here if I can't click it?");
+        // now it's filtered out entirely until it's actionable.
+        let has_group = self
+            .mux
+            .focused()
+            .map(|p| p.group_name.as_ref().is_some_and(|g| !g.is_empty()))
             .unwrap_or(false);
         vec![
             ContextMenuItem::Item {
@@ -3724,7 +3773,7 @@ impl App {
             ContextMenuItem::Item {
                 label: "Ungroup This Tab",
                 action: Action::UngroupTab,
-                enabled: true,
+                enabled: has_group,
             },
         ]
     }
@@ -3875,6 +3924,12 @@ impl App {
         // for Profile (only appended when ~/.config/kettle/
         // profiles/ has any *.config files).
         self.append_profile_submenu_items(&mut items);
+        // Cycle 713 (Terminator menu UX, C4): drop disabled rows
+        // entirely and collapse the separators that would orphan
+        // around them. Matches Terminator/GNOME's "only show what
+        // you can actually click" convention; every visible row is
+        // actionable.
+        let items = filter_disabled(items);
         // Highlight the first enabled non-separator item.
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
@@ -7595,8 +7650,93 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_menu_row_y, rank_layouts, selection_kind};
+    use super::{ContextMenuItem, filter_disabled, find_menu_row_y, rank_layouts, selection_kind};
+    use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    fn item(label: &'static str, enabled: bool) -> ContextMenuItem {
+        // Any concrete Action works — the filter only looks at the
+        // `enabled` flag + variant kind, not the action payload.
+        ContextMenuItem::Item {
+            label,
+            action: Action::Paste,
+            enabled,
+        }
+    }
+
+    /// Cycle 713 drift guard. Disabled `Item`s are removed entirely
+    /// (Terminator-style "only show what you can click") and
+    /// orphaned/leading/trailing separators collapse so the menu
+    /// never has visual gaps that lead nowhere.
+    #[test]
+    fn disabled_items_are_hidden_and_separators_collapse() {
+        // Mixed: Copy disabled, Paste enabled, separator, Split disabled,
+        // separator, NewTab enabled, separator (trailing).
+        let menu = vec![
+            item("Copy", false),
+            item("Paste", true),
+            ContextMenuItem::Separator,
+            item("Split Right", false),
+            ContextMenuItem::Separator,
+            item("New Tab", true),
+            ContextMenuItem::Separator,
+        ];
+        let got = filter_disabled(menu);
+        // Expected: Paste, separator, New Tab.
+        assert_eq!(got.len(), 3);
+        assert!(matches!(&got[0], ContextMenuItem::Item { label, .. } if *label == "Paste"));
+        assert!(matches!(&got[1], ContextMenuItem::Separator));
+        assert!(matches!(&got[2], ContextMenuItem::Item { label, .. } if *label == "New Tab"));
+    }
+
+    /// Cycle 713: runs of separators collapse to a single one; a
+    /// leading separator (everything-disabled above it) gets dropped.
+    #[test]
+    fn consecutive_separators_collapse_and_leading_is_dropped() {
+        let menu = vec![
+            ContextMenuItem::Separator,
+            ContextMenuItem::Separator,
+            item("OK", true),
+            ContextMenuItem::Separator,
+            ContextMenuItem::Separator,
+            ContextMenuItem::Separator,
+            item("Cancel", true),
+        ];
+        let got = filter_disabled(menu);
+        assert_eq!(got.len(), 3);
+        assert!(matches!(&got[0], ContextMenuItem::Item { label, .. } if *label == "OK"));
+        assert!(matches!(&got[1], ContextMenuItem::Separator));
+        assert!(matches!(&got[2], ContextMenuItem::Item { label, .. } if *label == "Cancel"));
+    }
+
+    /// Cycle 713: filter is identity (modulo trailing separator) when
+    /// nothing is disabled.
+    #[test]
+    fn filter_disabled_is_near_identity_when_all_enabled() {
+        let menu = vec![item("A", true), ContextMenuItem::Separator, item("B", true)];
+        let got = filter_disabled(menu);
+        assert_eq!(got.len(), 3);
+    }
+
+    /// Cycle 713: empty menu stays empty (defensive).
+    #[test]
+    fn filter_disabled_handles_empty() {
+        let got = filter_disabled(vec![]);
+        assert!(got.is_empty());
+    }
+
+    /// Cycle 713: all-disabled menu collapses to empty (no rows, no
+    /// orphan separators).
+    #[test]
+    fn filter_disabled_collapses_all_disabled_to_empty() {
+        let menu = vec![
+            item("X", false),
+            ContextMenuItem::Separator,
+            item("Y", false),
+        ];
+        let got = filter_disabled(menu);
+        assert!(got.is_empty());
+    }
 
     /// Cycle 712 drift guard. Hover-to-highlight walks `find_menu_row_y`
     /// on every `CursorMoved`; pin the contract so a render-layout
