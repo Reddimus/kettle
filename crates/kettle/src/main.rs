@@ -1398,11 +1398,11 @@ mod tests {
         // A future cycle that adds a noisy default-fires echo line
         // would regress this contract.
         let cfg = kettle_config::Config::default();
+        let lines = extra_check_config_lines(&cfg);
         assert_eq!(
-            extra_check_config_lines(&cfg),
+            lines,
             Vec::<String>::new(),
-            "default config emitted echo lines: {:?}",
-            extra_check_config_lines(&cfg)
+            "default config emitted echo lines: {lines:?}"
         );
     }
 
