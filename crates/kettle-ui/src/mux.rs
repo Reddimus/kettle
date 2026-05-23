@@ -148,7 +148,6 @@ pub struct Pane {
     /// descendant, or the poll hasn't run yet. When non-None, the
     /// pane title shows `format_remote_title(...)` and the right-
     /// click menu (sub-cycle 7) exposes a "Clone session" entry.
-    #[allow(dead_code)] // App-side poll loop lands in the next sub-cycle.
     pub remote_context: Option<kettle_remote::RemoteContext>,
 }
 

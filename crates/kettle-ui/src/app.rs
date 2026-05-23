@@ -1048,6 +1048,19 @@ pub struct App {
     /// 100×). Cleared when any trigger fires past a 2-second
     /// quietness window.
     last_trigger_fire: std::time::Instant,
+    /// Cycle 656 (Terminator parity, sub-cycle 6 of
+    /// [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): cached
+    /// `sysinfo::System` owned across ticks so the process-list
+    /// refresh amortizes (sysinfo's internal cache survives between
+    /// `refresh_processes_specifics` calls). Used by the
+    /// per-pane remote-session detector.
+    remote_sysinfo: kettle_remote::SysinfoSystem,
+    /// Cycle 656: throttle the remote-detect poll to ~5 Hz. The
+    /// process-list refresh is fast on Linux (<1 ms) but no need
+    /// to walk every tick — SSH/Docker sessions don't fire-up
+    /// faster than a couple times per second.
+    last_remote_poll: std::time::Instant,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -1446,6 +1459,8 @@ impl App {
             vi_mode: None,
             compiled_triggers: initial_triggers,
             last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            remote_sysinfo: kettle_remote::SysinfoSystem::new(),
+            last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -2878,6 +2893,7 @@ impl App {
 
     fn redraw(&mut self) {
         self.drain_events();
+        self.poll_remote_contexts();
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into self.mux.panes when spawning a new tab.
@@ -4451,6 +4467,42 @@ impl App {
         match &self.startup.layout {
             Some(name) => s.save_layout(name),
             None => s.save(),
+        }
+    }
+
+    /// Cycle 656 (sub-cycle 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): periodic poll of
+    /// every pane's process tree to detect SSH / Docker / Podman /
+    /// kubectl sessions. Throttled to ~5 Hz so a typical 60 Hz
+    /// redraw doesn't refresh sysinfo every frame.
+    ///
+    /// On a detection change (was-None now-Some, or shape change),
+    /// the pane's title is updated to `format_remote_title(...)`.
+    /// On the inverse (was-Some now-None — SSH exited), the title
+    /// is left alone (the shell that re-shows after `ssh exit` is
+    /// already the right OSC-1/2-set title).
+    fn poll_remote_contexts(&mut self) {
+        if self.last_remote_poll.elapsed().as_millis() < 200 {
+            return;
+        }
+        self.last_remote_poll = std::time::Instant::now();
+        let pane_ids: Vec<u64> = self.mux.panes.keys().copied().collect();
+        for id in pane_ids {
+            let Some(pane) = self.mux.panes.get(&id) else {
+                continue;
+            };
+            let Some(pid) = pane.term.child_pid() else {
+                continue;
+            };
+            let detected = kettle_remote::detect_remote_with(pid, &mut self.remote_sysinfo);
+            if let Some(pane) = self.mux.panes.get_mut(&id)
+                && detected != pane.remote_context
+            {
+                if let Some(ctx) = &detected {
+                    pane.title = kettle_remote::format_remote_title(ctx);
+                }
+                pane.remote_context = detected;
+            }
         }
     }
 

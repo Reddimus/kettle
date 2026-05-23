@@ -12,6 +12,12 @@
 
 #![forbid(unsafe_code)]
 
+/// Cycle 656: re-export `sysinfo::System` so kettle-ui can own one
+/// (and pass it to `detect_remote_with`) without pulling sysinfo
+/// in as a direct dep. Keeps sysinfo a transitive-only dep that
+/// kettle-ui doesn't need to track its version of.
+pub use sysinfo::System as SysinfoSystem;
+
 /// Cycle 643: a detected remote-session context.
 ///
 /// Returned by [`detect_remote`] when the pane's process tree

@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 656 — **remote.py sub-cycle 6: App-side poll loop**:
+              the remote-session detector now actually runs.
+              New `App::poll_remote_contexts` called from
+              `redraw()` each tick, throttled to ~5 Hz
+              (200ms minimum spacing). For every pane:
+                1. `pane.term.child_pid()` (cycle 639)
+                2. `kettle_remote::detect_remote_with(pid,
+                   &mut self.remote_sysinfo)` (cycle 646)
+                3. on change: write
+                   `kettle_remote::format_remote_title(ctx)`
+                   to `pane.title`, update
+                   `pane.remote_context`
+              Reused `sysinfo::System` lives on the App
+              (`remote_sysinfo` field) so the process-list
+              refresh amortizes between calls. New re-export
+              `kettle_remote::SysinfoSystem` lets kettle-ui
+              own the type without taking on sysinfo as a
+              direct dep.
+              End-to-end: a user running `ssh user@box` in
+              a pane will see the pane title flip to
+              `ssh user@box` within ~200ms. The same for
+              `docker exec -it foo bash` → `docker: foo`.
+              Drops the cycle-655 `#[allow(dead_code)]` on
+              `Pane::remote_context` (now read). Workspace
+              tests stay 382 (integration testing needs
+              real spawns; cycle-644/645 detectors covered).
+
   cycle 655 — **remote.py sub-cycle 6 prep: `Pane::remote_context`
               field + kettle-ui → kettle-remote dep**: now every
               Pane carries `pub remote_context:
