@@ -184,6 +184,16 @@ pub enum ConfirmKeyResult {
 /// Cycle 652: pure helper that maps a (current_focus, num_buttons,
 /// key) tuple to the next action for the confirm-dialog state
 /// machine. Sub-cycle 5 wires this to the App's winit key handler.
+/// Cycle 662 (sub-cycle 6 of confirm-dialog design): count the
+/// leaf panes in a split-tree node. Used by the `Action::CloseTab`
+/// dispatch to ask `should_prompt(scope_count)`.
+fn count_leaves(node: &crate::mux::Node) -> usize {
+    match node {
+        crate::mux::Node::Leaf(_) => 1,
+        crate::mux::Node::Split { a, b, .. } => count_leaves(a) + count_leaves(b),
+    }
+}
+
 fn confirm_dialog_keypress(
     current_focus: usize,
     num_buttons: usize,
@@ -846,7 +856,6 @@ pub struct TitleEditState {
 /// add `KillProcess`, `DiscardLayout`, `ResetConfig` etc. — the
 /// enum is intentionally extensible.
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
-#[allow(dead_code)] // CloseTab/ClosePane consumed by upcoming sub-cycle 6 wiring
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     /// Close the entire window (every tab + every pane).
@@ -3654,11 +3663,63 @@ impl App {
                     .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker);
             }
             Action::ClosePane => {
+                // Cycle 662 (confirm-dialog sub-cycle 6): per-pane
+                // close prompts when ask_before_closing = Always.
+                // MultipleTerminals doesn't prompt (single pane); see
+                // cycle-638's should_prompt for the matrix.
+                if self.cfg.ask_before_closing.should_prompt(1) {
+                    self.close_all_modals();
+                    self.confirm_dialog = Some(ConfirmDialogState {
+                        prompt: "Close this pane?".to_string(),
+                        buttons: vec![
+                            ConfirmButton::Cancel,
+                            ConfirmButton::Confirm {
+                                label: "Close".to_string(),
+                                destructive: true,
+                            },
+                        ],
+                        focus_idx: 0,
+                        on_confirm: ConfirmAction::ClosePane,
+                    });
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.mux.close_focused() {
                     event_loop.exit();
                 }
             }
             Action::CloseTab => {
+                // Cycle 662 (confirm-dialog sub-cycle 6): close the
+                // active tab via the modal when ask_before_closing
+                // says so. scope_count = leaves in the active tab
+                // (panes_in_tab below).
+                let panes_in_tab = self
+                    .mux
+                    .tabs
+                    .get(self.mux.active)
+                    .map(|t| count_leaves(&t.root))
+                    .unwrap_or(1);
+                if self.cfg.ask_before_closing.should_prompt(panes_in_tab) {
+                    self.close_all_modals();
+                    self.confirm_dialog = Some(ConfirmDialogState {
+                        prompt: format!("Close tab with {panes_in_tab} pane(s)?"),
+                        buttons: vec![
+                            ConfirmButton::Cancel,
+                            ConfirmButton::Confirm {
+                                label: "Close".to_string(),
+                                destructive: true,
+                            },
+                        ],
+                        focus_idx: 0,
+                        on_confirm: ConfirmAction::CloseTab,
+                    });
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Cycle 368: capture the active index BEFORE close
                 // so the LuaEvent::TabClose payload is meaningful
                 // (after close, self.mux.active points at a
@@ -7106,6 +7167,57 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 662 drift guard. `count_leaves` is the pure helper
+    /// behind `Action::CloseTab`'s scope_count for the confirm-
+    /// dialog. Walks a tiny synthetic tree to verify the recursion.
+    #[test]
+    fn count_leaves_for_nested_splits() {
+        use super::count_leaves;
+        use crate::mux::{Dir, Node};
+        // Single leaf.
+        let leaf = Node::Leaf(1);
+        assert_eq!(count_leaves(&leaf), 1);
+        // Two-way split.
+        let split = Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(1)),
+            b: Box::new(Node::Leaf(2)),
+        };
+        assert_eq!(count_leaves(&split), 2);
+        // Three-way nested split (a is a split, b is a leaf).
+        let nested = Node::Split {
+            dir: Dir::Vertical,
+            ratio: 0.5,
+            a: Box::new(Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            }),
+            b: Box::new(Node::Leaf(3)),
+        };
+        assert_eq!(count_leaves(&nested), 3);
+        // Four-way (both a and b are splits).
+        let four = Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            }),
+            b: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(3)),
+                b: Box::new(Node::Leaf(4)),
+            }),
+        };
+        assert_eq!(count_leaves(&four), 4);
     }
 
     /// Cycle 652 drift guard. `confirm_dialog_keypress` is the pure

@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 662 — **confirm-dialog sub-cycle 6: `CloseTab` +
+              `ClosePane` interception**: completes the close-
+              family dispatch wrapping.
+                - `Action::CloseTab` checks
+                  `should_prompt(panes_in_active_tab)` → opens
+                  modal with `on_confirm = ConfirmAction::CloseTab`
+                  if pane count meets the configured threshold
+                - `Action::ClosePane` checks `should_prompt(1)`
+                  → only fires the modal when
+                  `ask_before_closing = always` (the
+                  multiple_terminals default doesn't prompt for
+                  single-pane close)
+                - new pure helper `count_leaves(node)` walks the
+                  split tree to compute the panes-in-tab scope
+                - drift guard `count_leaves_for_nested_splits`
+                  covers Leaf / 2-way / 3-way / 4-way trees
+              `ConfirmAction::CloseTab` and `ClosePane` arms in
+              `dispatch_confirm_action` now have real callers,
+              so the `#[allow(dead_code)]` gate on the enum is
+              dropped. Workspace tests 384 → 385. Confirm-dialog
+              port: 6/8 sub-cycles complete (mouse hit-test +
+              audit-doc remain).
+
   cycle 661 — **Deploy: redeployed local kettle with the
               live confirm-dialog**. Binary at
               `~/.local/bin/kettle` reports `1.45.1 (54b49e6)`.
