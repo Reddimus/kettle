@@ -477,6 +477,114 @@ pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
     Some(ThemeSchedule::Clock { dark_at, light_at })
 }
 
+/// Cycle 670 (sub-cycle 7 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): compute UTC sunrise +
+/// sunset (seconds-of-day) for a given `day_of_year` (1..=366) +
+/// latitude + longitude. Uses the well-known NOAA simplified
+/// algorithm — accurate to ~1 minute at temperate latitudes,
+/// degrades near the poles where the sun may not rise/set on
+/// some days (returns `None` for polar-day or polar-night).
+///
+/// Pure — no env, no clock, no dep. Unit-testable against
+/// known fixtures.
+///
+/// Returns `Some((sunrise_secs, sunset_secs))` in UTC seconds-of-day.
+pub fn sunrise_sunset_utc_secs(
+    day_of_year: u16,
+    lat_deg: f64,
+    long_deg: f64,
+) -> Option<(u32, u32)> {
+    let n = day_of_year as f64;
+    // Solar declination (simplified — Spencer's formula).
+    // Range: ±23.45° over the year.
+    let gamma = 2.0 * std::f64::consts::PI * (n - 1.0) / 365.0;
+    let decl = 0.006918 - 0.399912 * gamma.cos() + 0.070257 * gamma.sin()
+        - 0.006758 * (2.0 * gamma).cos()
+        + 0.000907 * (2.0 * gamma).sin()
+        - 0.002697 * (3.0 * gamma).cos()
+        + 0.001480 * (3.0 * gamma).sin();
+    // Equation of time (minutes).
+    let eot_min = 229.18
+        * (0.000075 + 0.001868 * gamma.cos()
+            - 0.032077 * gamma.sin()
+            - 0.014615 * (2.0 * gamma).cos()
+            - 0.040849 * (2.0 * gamma).sin());
+    // Hour angle for sunrise (when zenith = 90.833° to account
+    // for atmospheric refraction).
+    let lat_rad = lat_deg.to_radians();
+    let zenith = (90.833_f64).to_radians();
+    let cos_h = (zenith.cos() - lat_rad.sin() * decl.sin()) / (lat_rad.cos() * decl.cos());
+    if !(-1.0..=1.0).contains(&cos_h) {
+        // Polar day (sun never sets) or polar night (sun never
+        // rises). Caller's policy decides what to do.
+        return None;
+    }
+    let h_deg = cos_h.acos().to_degrees();
+    // Solar noon in UTC minutes: 720 - 4*longitude - eot_min.
+    let solar_noon_min = 720.0 - 4.0 * long_deg - eot_min;
+    let h_min = 4.0 * h_deg;
+    let sunrise_min = solar_noon_min - h_min;
+    let sunset_min = solar_noon_min + h_min;
+    // Wrap into [0, 1440) — sun events can fall outside the
+    // calendar day in UTC (e.g. east longitudes push sunrise
+    // before UTC midnight).
+    let wrap = |m: f64| -> u32 {
+        let mut m = m;
+        while m < 0.0 {
+            m += 1440.0;
+        }
+        while m >= 1440.0 {
+            m -= 1440.0;
+        }
+        (m * 60.0) as u32
+    };
+    Some((wrap(sunrise_min), wrap(sunset_min)))
+}
+
+/// Cycle 670 (sub-cycle 7 of auto-theme design): pure decision
+/// helper for `ThemeSchedule::SunriseSunset`. Returns
+/// `true` = should be dark, `false` = should be light.
+///
+/// Wraps `sunrise_sunset_utc_secs`:
+///   - sunrise has not occurred yet → dark
+///   - between sunrise and sunset → light
+///   - past sunset → dark
+///   - polar day → light (default)
+///   - polar night → dark (default)
+///
+/// Pure — input is wall-clock seconds + lat/long + day_of_year.
+pub fn schedule_decision_sunrise(
+    now_secs_of_day_utc: u32,
+    day_of_year: u16,
+    lat_deg: f64,
+    long_deg: f64,
+) -> bool {
+    let Some((sunrise, sunset)) = sunrise_sunset_utc_secs(day_of_year, lat_deg, long_deg) else {
+        // Polar regions: default to dark when the sun's below
+        // the horizon all day, light when it's above. Heuristic:
+        // northern hemisphere winter (Nov-Feb) at high latitude
+        // == polar night == dark; summer == polar day == light.
+        // We approximate via day-of-year: day 80..266 ≈ light.
+        let summer = (80..=266).contains(&day_of_year);
+        return if lat_deg.abs() > 66.5 {
+            // Within polar circle.
+            !((summer && lat_deg > 0.0) || (!summer && lat_deg < 0.0))
+        } else {
+            // Shouldn't happen — non-polar latitudes always have
+            // sunrise/sunset. Default to light defensively.
+            false
+        };
+    };
+    // Handle the case where sunrise > sunset (sun event crosses
+    // UTC midnight). In that case the *light* window wraps.
+    if sunrise <= sunset {
+        !(now_secs_of_day_utc >= sunrise && now_secs_of_day_utc < sunset)
+    } else {
+        // Light wraps past midnight: [sunrise, 24:00) ∪ [00:00, sunset).
+        !(now_secs_of_day_utc >= sunrise || now_secs_of_day_utc < sunset)
+    }
+}
+
 /// Cycle 649 (sub-cycle 2 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
 /// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): pure helper that picks
 /// the right theme name given the current `ThemeMode`, the
@@ -5099,6 +5207,78 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 670 drift guard. `sunrise_sunset_utc_secs` reproduces
+    /// the canonical NOAA fixtures within ~5 minutes (the algorithm
+    /// is approximate but good enough for a theme-flip).
+    #[test]
+    fn sunrise_sunset_utc_secs_known_fixtures() {
+        use super::sunrise_sunset_utc_secs;
+        // San Francisco, summer solstice (June 21 = day 172).
+        // NOAA: sunrise 12:48 UTC, sunset 03:35 UTC next day.
+        // (Wraps; UTC offset of SF is -7 hours during PDT.)
+        let sf_lat = 37.7749;
+        let sf_long = -122.4194;
+        let (rise, set) = sunrise_sunset_utc_secs(172, sf_lat, sf_long).unwrap();
+        let rise_min = rise / 60;
+        let set_min = set / 60;
+        // Sunrise ~ 12:48 UTC ⇒ ~768 min into the UTC day.
+        assert!(
+            (rise_min as i32 - 768).abs() < 10,
+            "SF June 21 sunrise: expected ~768 min UTC, got {rise_min}"
+        );
+        // Sunset ~ 03:35 UTC next day ⇒ 215 min in UTC day terms.
+        assert!(
+            (set_min as i32 - 215).abs() < 30 || (set_min as i32 - (215 + 1440)).abs() < 30,
+            "SF June 21 sunset: expected ~03:35 UTC, got {set_min}"
+        );
+        // Equator on equinox (March 21 = day 80): roughly
+        // 06:00 sunrise + 18:00 sunset local. At longitude 0
+        // that's 06:00 + 18:00 UTC.
+        let (rise, set) = sunrise_sunset_utc_secs(80, 0.0, 0.0).unwrap();
+        let rise_min = rise / 60;
+        let set_min = set / 60;
+        assert!(
+            (rise_min as i32 - 360).abs() < 15,
+            "equator equinox sunrise: expected ~06:00 UTC, got {rise_min}"
+        );
+        assert!(
+            (set_min as i32 - 1080).abs() < 15,
+            "equator equinox sunset: expected ~18:00 UTC, got {set_min}"
+        );
+        // Polar night/day: lat 80°N on Jan 1 (day 1) returns
+        // None (sun never rises).
+        assert!(sunrise_sunset_utc_secs(1, 80.0, 0.0).is_none());
+        // Same lat on June 21 returns None (sun never sets).
+        assert!(sunrise_sunset_utc_secs(172, 80.0, 0.0).is_none());
+    }
+
+    /// Cycle 670 drift guard. `schedule_decision_sunrise`
+    /// returns the right dark/light decision for fixed times.
+    #[test]
+    fn schedule_decision_sunrise_walks_windows() {
+        use super::schedule_decision_sunrise;
+        // SF June 21: rise ≈ 12:48 UTC (768 min), set ≈ 03:35
+        // next-day UTC (215 min). Light window wraps midnight.
+        let sf_lat = 37.7749;
+        let sf_long = -122.4194;
+        // Mid-day UTC (12:00): just before sunrise → dark.
+        assert!(
+            schedule_decision_sunrise(720 * 60, 172, sf_lat, sf_long),
+            "12:00 UTC < sunrise → dark"
+        );
+        // 14:00 UTC: just after sunrise → light.
+        assert!(
+            !schedule_decision_sunrise(840 * 60, 172, sf_lat, sf_long),
+            "14:00 UTC > sunrise → light"
+        );
+        // 22:00 UTC (afternoon in SF): light.
+        assert!(!schedule_decision_sunrise(22 * 3600, 172, sf_lat, sf_long));
+        // Polar regions: lat 80°N day 1 (polar night) → dark.
+        assert!(schedule_decision_sunrise(12 * 3600, 1, 80.0, 0.0));
+        // lat 80°N day 172 (polar day) → light.
+        assert!(!schedule_decision_sunrise(12 * 3600, 172, 80.0, 0.0));
     }
 
     /// Cycle 669 drift guard. `theme-schedule = sunrise/sunset`

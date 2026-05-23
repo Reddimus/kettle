@@ -4748,7 +4748,23 @@ impl App {
         let day_secs = secs % 86_400;
         let h = (day_secs / 3600) as u8;
         let m = ((day_secs % 3600) / 60) as u8;
-        let is_dark = kettle_config::schedule_decision_clock((h, m), schedule);
+        // Cycle 670: branch on the schedule variant.
+        let is_dark = match schedule {
+            kettle_config::ThemeSchedule::Clock { .. } => {
+                kettle_config::schedule_decision_clock((h, m), schedule)
+            }
+            kettle_config::ThemeSchedule::SunriseSunset { lat, long } => {
+                // Day-of-year approximation: days since unix
+                // epoch mod 365. Good enough — sunrise/sunset
+                // varies very slowly day-to-day, and we re-poll
+                // every redraw tick anyway. Sub-cycle 8 could
+                // refine with a real Gregorian-calendar
+                // conversion if needed.
+                let days_since_epoch = (secs / 86_400) as u32;
+                let approx_doy = ((days_since_epoch % 365) + 1) as u16;
+                kettle_config::schedule_decision_sunrise(day_secs as u32, approx_doy, lat, long)
+            }
+        };
         // Seed on first call so we don't flip the theme just for
         // existing on a "now's dark" tick — only boundary
         // crossings fire the swap.

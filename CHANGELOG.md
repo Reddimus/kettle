@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 670 — **auto-theme sub-cycle 7: solar-position math —
+              completes the 7/7 auto-theme port**.
+              New surface in kettle-config (pure, no dep):
+                - `pub fn sunrise_sunset_utc_secs(day_of_year,
+                  lat, long) -> Option<(u32, u32)>` — NOAA
+                  simplified algorithm. Returns sunrise + sunset
+                  as seconds-of-day in UTC. Accurate to ~1 min
+                  at temperate latitudes; `None` for polar
+                  day / polar night.
+                - `pub fn schedule_decision_sunrise(now, doy,
+                  lat, long) -> bool` — returns dark/light
+                  decision. Polar regions fall back to a
+                  day-of-year heuristic (winter at high
+                  latitude = polar night = dark; summer = polar
+                  day = light).
+              App's `poll_theme_schedule` now branches on the
+              `ThemeSchedule` variant:
+                - `Clock` → cycle-664 helper (unchanged)
+                - `SunriseSunset` → cycle-670 sunrise helper
+                  using `(unix_days % 365) + 1` as the day-of-
+                  year approximation (sub-cycle 8 could refine
+                  with full Gregorian calendar arithmetic)
+              Drift guards covering 11 input shapes:
+                - SF June solstice (~12:48 UTC sunrise checked
+                  within 10 min)
+                - equator equinox (~06:00 / 18:00 UTC)
+                - polar day / polar night → None
+                - 5 decision-helper window-crossing shapes
+              **`auto_theme.py` port now 7/7 sub-cycles complete**.
+              Workspace tests 388 → 390. Privacy posture
+              upheld (no network).
+
   cycle 669 — **auto-theme sub-cycle 6: sunrise/sunset variant
               + lat/long config keys**:
                 - new `ThemeSchedule::SunriseSunset { lat,
