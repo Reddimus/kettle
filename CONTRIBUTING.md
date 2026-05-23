@@ -110,6 +110,9 @@ Each cycle has the same shape:
    Cycle 493 added this after a doc-list overindentation
    regression landed across cycles 484-492 without anyone
    running clippy — the hook catches that class at commit time.
+   The hook header comment in `.githooks/pre-commit` enumerates
+   exactly which path categories trigger the gauntlet vs which
+   skip it; bypass per-commit with `git commit --no-verify`.
 6. **Update docs.** `CHANGELOG.md` gets a paragraph under
    `[Unreleased]` describing the bug shape and the fix.
    `docs/ROADMAP.md`'s `Done` list gets a one-paragraph entry of the
