@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.41.0] — 2026-05-22
+
 Post-v1.40.0 polish — pre-commit hook UX tightens, real-bug
 catches from running shellcheck on scripts/, and crates.io
 metadata polish.
