@@ -42,7 +42,7 @@
       detachable-tabs serialize/insert, GPU offscreen) + CI fmt-check,
       headless GPU smoke, CLI smoke on all three OSes — see
       docs/TESTING.md. The "automated test harness" entry was first
-      logged at 19 tests circa v0.2 and now reflects v1.35.0; the
+      logged at 19 tests circa v0.2 and now reflects v1.40.0; the
       same per-cycle drift-guard discipline grew it.
 
 - [x] Offscreen GPU self-test (compiles WGSL + renders a pass with no

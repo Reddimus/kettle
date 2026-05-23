@@ -14,7 +14,7 @@ cargo test --workspace
 
 ## What's covered (automated)
 
-**~321 tests across the workspace** (post-v1.37.0 — the cycle-288 →
+**~321 tests across the workspace** (post-v1.40.0 — the cycle-288 →
 303 feature sweep, the cycles 330-410 Terminator-parity sweep, and
 the cycles 411-438 production-polish run added drift guards for
 smart selection, triggers, status-bar, vi-mode entry, remote-control,
