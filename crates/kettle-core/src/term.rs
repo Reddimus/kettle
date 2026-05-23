@@ -75,6 +75,18 @@ pub(crate) fn home_dir_fallback(
         .map(std::path::PathBuf::from)
 }
 
+/// Cycle 612 (Terminator parity, `command_notify.py` plugin): a single
+/// completed-command event for the App's notification dispatcher. Built
+/// from the OSC 133 `OutputStart` → `CommandEnd` transition; the App
+/// uses `duration` + window focus to decide whether to fire a desktop
+/// notification. `exit_code` is the OSC 133 D payload (`None` when the
+/// shell didn't ship one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandFinished {
+    pub duration: std::time::Duration,
+    pub exit_code: Option<i32>,
+}
+
 pub struct Terminal {
     pub term: SharedTerm,
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -92,6 +104,21 @@ pub struct Terminal {
     pub relatives: Relatives,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
     pub prompts: Arc<Mutex<Vec<i64>>>,
+    /// Cycle 612 (Terminator parity, `command_notify.py` plugin):
+    /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
+    /// cleared when the matching `CommandEnd` fires. The reader
+    /// thread updates this; the App reads `command_finished` (below)
+    /// to learn that a command completed + how long it took.
+    pub output_started_at: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Cycle 612: per-pane queue of completed-command events.
+    /// Populated by the reader thread on OSC 133 D (CommandEnd) when
+    /// `output_started_at` is `Some`; drained by the App each tick
+    /// to fire desktop notifications (if the window isn't focused
+    /// and the command ran longer than `cfg.command_notify_threshold_ms`).
+    /// Bounded at 32 entries — a hostile / runaway script that
+    /// emitted thousands of fake OSC 133 D sequences would otherwise
+    /// grow this Vec indefinitely.
+    pub command_finished: Arc<Mutex<Vec<CommandFinished>>>,
     /// Latest working directory reported via OSC 7.
     pub cwd: Arc<Mutex<Option<String>>>,
     /// The argv this pane was launched with (empty = default shell);
@@ -348,6 +375,11 @@ impl Terminal {
         let anims: Animations = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let relatives: Relatives = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+        // Cycle 612 (Terminator parity, `command_notify.py`):
+        // per-pane OSC 133 OutputStart timestamp + completed-command
+        // event queue. Reader thread writes; App polls each tick.
+        let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
 
@@ -358,6 +390,8 @@ impl Terminal {
             let anims = anims.clone();
             let relatives = relatives.clone();
             let prompts = prompts.clone();
+            let output_started_at = output_started_at.clone();
+            let command_finished = command_finished.clone();
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
             std::thread::Builder::new()
@@ -531,6 +565,41 @@ impl Terminal {
                                                 }
                                             }
                                         }
+                                        // Cycle 612 (Terminator parity, command_notify.py):
+                                        // OSC 133 OutputStart (C) marks the moment the
+                                        // shell handed control to a user command. Record
+                                        // the timestamp so the matching CommandEnd (D)
+                                        // can compute the elapsed duration.
+                                        Chunk::Prompt(PromptKind::OutputStart) => {
+                                            if let Ok(mut t) = output_started_at.lock() {
+                                                *t = Some(std::time::Instant::now());
+                                            }
+                                        }
+                                        // Cycle 612: OSC 133 CommandEnd (D). Pop the
+                                        // most-recent OutputStart timestamp, compute
+                                        // the elapsed duration, push a CommandFinished
+                                        // event for the App to drain. Bounded queue at
+                                        // 32 entries — a runaway / hostile shell that
+                                        // spams CommandEnd would otherwise grow the
+                                        // Vec without bound.
+                                        Chunk::Prompt(PromptKind::CommandEnd(code)) => {
+                                            let started = output_started_at
+                                                .lock()
+                                                .ok()
+                                                .and_then(|mut t| t.take());
+                                            if let Some(started) = started
+                                                && let Ok(mut q) = command_finished.lock()
+                                            {
+                                                if q.len() >= 32 {
+                                                    let d = q.len() - 31;
+                                                    q.drain(0..d);
+                                                }
+                                                q.push(CommandFinished {
+                                                    duration: started.elapsed(),
+                                                    exit_code: code,
+                                                });
+                                            }
+                                        }
                                         Chunk::Prompt(_) => {}
                                         Chunk::Cwd(path) => {
                                             if let Ok(mut c) = cwd_cell.lock() {
@@ -559,6 +628,8 @@ impl Terminal {
             anims,
             relatives,
             prompts,
+            output_started_at,
+            command_finished,
             cwd: cwd_cell,
             argv: argv.to_vec(),
             cell_px,
@@ -568,6 +639,20 @@ impl Terminal {
     /// Last working directory reported via OSC 7, if any.
     pub fn current_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Cycle 612 (Terminator parity, `command_notify.py`): pop every
+    /// `CommandFinished` event the reader thread queued since the
+    /// previous call. The App drains this each tick to fire desktop
+    /// notifications for long commands that completed while the
+    /// window was unfocused. Empty Vec when the shell hasn't shipped
+    /// OSC 133 D events (no shell integration) or no command has
+    /// completed since the last drain.
+    pub fn drain_command_finished_events(&self) -> Vec<CommandFinished> {
+        self.command_finished
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
     }
 
     /// Live cursor-blink state. Defaults to whatever the config seeded at

@@ -2017,6 +2017,36 @@ impl App {
                     _ => {}
                 }
             }
+            // Cycle 612 (Terminator parity, command_notify.py): drain
+            // OSC 133 D (CommandEnd) events from the reader thread.
+            // For each event, fire a desktop notification if:
+            //   - the kettle window isn't focused at this moment,
+            //   - the elapsed duration crosses the configured
+            //     threshold (0 disables; default 5 s).
+            // Active-pane filtering is intentionally NOT applied — a
+            // background pane finishing a long task is the most
+            // useful notification case (the user IS in another pane
+            // but won't see the result without switching). Window
+            // focus is enough.
+            if self.cfg.command_notify_threshold_ms > 0 {
+                for ev in pane.term.drain_command_finished_events() {
+                    let elapsed_ms = ev.duration.as_millis() as u64;
+                    if !self.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
+                        let secs = ev.duration.as_secs();
+                        let exit_text = match ev.exit_code {
+                            Some(0) => "✓ ok".to_string(),
+                            Some(code) => format!("✗ exit {code}"),
+                            None => String::new(),
+                        };
+                        let body = if exit_text.is_empty() {
+                            format!("pane {pane_id} command ran for {secs}s")
+                        } else {
+                            format!("pane {pane_id} • {secs}s • {exit_text}")
+                        };
+                        fire_notify("kettle: command finished", &body);
+                    }
+                }
+            }
         }
         if bell {
             if self.cfg.bell.visual() {

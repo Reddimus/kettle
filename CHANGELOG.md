@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 612 — **Long-command desktop notification on OSC 133 D
+              (CommandEnd)** — Terminator parity for
+              `terminatorlib/plugins/command_notify.py`. When a
+              command completes in a pane:
+                - kettle window doesn't have focus, AND
+                - elapsed duration crossed
+                  `cfg.command_notify_threshold_ms` (default 5 s,
+                  `0` disables)
+              kettle fires a desktop notification "kettle:
+              command finished" with the pane id, duration, and
+              exit code. Requires shell integration (`kettle
+              --shell-integration bash`) — without OSC 133 the
+              shell never emits the CommandEnd event. New
+              kettle-core types: `term::CommandFinished {
+              duration, exit_code }`, per-Terminal
+              `output_started_at: Arc<Mutex<Option<Instant>>>`
+              and `command_finished: Arc<Mutex<Vec<...>>>`
+              (bounded at 32 entries against runaway shells),
+              `Terminal::drain_command_finished_events()`. The
+              PTY reader thread tracks the OutputStart →
+              CommandEnd transition; the App drains the queue
+              each tick. Drift guard
+              `command_notify_threshold_parses_and_clamps` walks
+              the 4 aliases + default + 0-disables + 1-day clamp.
+              CONFIG.md row + commented example in
+              kettle.example.config. Workspace tests 351 → 352.
+
   cycle 611 — **`menu-item = LABEL = CMD` config grammar**
               (Terminator parity, `terminatorlib/plugins/
               custom_commands.py` → "Custom Commands" menu).

@@ -693,6 +693,17 @@ pub struct Config {
     /// going quiet is noticed before the user switches tabs. Clamped
     /// `[1000, 600_000]` (1 s..10 min) at parse time.
     pub tab_silence_threshold_ms: u64,
+    /// Cycle 612 (Terminator parity, `command_notify.py` plugin):
+    /// minimum command duration in ms before kettle fires a desktop
+    /// notification on OSC 133 D (CommandEnd). The notification fires
+    /// only when the kettle window doesn't have focus at the moment
+    /// the command finishes — so a foreground command you're
+    /// watching doesn't pop a noise. `0` disables command-end
+    /// notifications entirely. Default 5_000 (5 s) — long enough
+    /// that quick `ls` / `cd` don't fire, short enough that a `make`
+    /// you switched away from notifies promptly. Clamped at parse
+    /// time to `[0, 86_400_000]` (0..1 day).
+    pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
     /// When the user types while scrolled back in scrollback, jump back to
@@ -899,6 +910,7 @@ impl Default for Config {
             accent_color: None,
             cursor_blink_interval: 530,
             tab_silence_threshold_ms: 10_000,
+            command_notify_threshold_ms: 5_000,
             copy_on_select: true,
             scroll_on_keystroke: true,
             scroll_on_output: false,
@@ -1977,6 +1989,15 @@ impl Config {
                 "tab-silence-threshold-ms" | "tab-silence-threshold" => {
                     if let Ok(v) = e.value.parse::<u64>() {
                         cfg.tab_silence_threshold_ms = v.clamp(1_000, 600_000);
+                    }
+                }
+                "command-notify-threshold-ms"
+                | "command-notify-threshold"
+                | "command_notify_threshold_ms"
+                | "command_notify_threshold" => {
+                    if let Ok(v) = e.value.parse::<u64>() {
+                        // 0 = disable; positive clamps to 1 day.
+                        cfg.command_notify_threshold_ms = v.min(86_400_000);
                     }
                 }
                 "copy-on-select" => {
@@ -4334,6 +4355,38 @@ mod config_tests {
     /// empty label / command) should show up in the malformed list
     /// so the user sees the issue at `kettle --check-config` time
     /// rather than silently getting no menu row.
+    ///
+    /// Cycle 612: doc continues after a paragraph break to satisfy
+    /// clippy's `doc_list_item_without_indent` lint that fires
+    /// when consecutive `///` lines after a single `#[test]` look
+    /// like a list continuation.
+    #[test]
+    fn command_notify_threshold_parses_and_clamps() {
+        // Default is 5 seconds.
+        assert_eq!(Config::default().command_notify_threshold_ms, 5_000);
+        // Various aliases all parse.
+        for alias in [
+            "command-notify-threshold-ms",
+            "command-notify-threshold",
+            "command_notify_threshold_ms",
+            "command_notify_threshold",
+        ] {
+            let cfg = Config::parse_text(&format!("{alias} = 12000\n"));
+            assert_eq!(cfg.command_notify_threshold_ms, 12_000, "alias {alias}");
+        }
+        // 0 disables (no clamp upward).
+        let cfg = Config::parse_text("command-notify-threshold-ms = 0\n");
+        assert_eq!(cfg.command_notify_threshold_ms, 0);
+        // Past the 1-day ceiling clamps.
+        let cfg = Config::parse_text("command-notify-threshold-ms = 999999999\n");
+        assert_eq!(cfg.command_notify_threshold_ms, 86_400_000);
+    }
+
+    /// Cycle 611 drift guard for the --check-config malformed-value
+    /// surface. Missing label-side `=`, empty label, or empty
+    /// command should each show up in the diagnostic list so the
+    /// user sees the issue at `kettle --check-config` time rather
+    /// than silently getting no menu row.
     #[test]
     fn detect_malformed_values_flags_invalid_menu_item() {
         let cases = [
