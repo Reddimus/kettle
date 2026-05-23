@@ -125,7 +125,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | Super+0 | insert_padded | — | C (zero-padded pane index) |
 | (unbound) | next_profile / previous_profile | — | C (runtime profile cycling; kettle has `--profile NAME` launch-time only) |
 | (unbound) | preferences / preferences_keybindings | — | E (preferences GUI; paradigm choice) |
-| F1 | help | — | E (opens man page in browser; kettle ships `man kettle` + `--help`) |
+| F1 | help | A | cycle-695 — `Action::ShowHelp` opens the kettle README on GitHub via `open::that_detached` (the same cross-platform dispatch path cycle-X URL clicks already use). Reachable from cycle-104 palette + 5 name aliases (`help`, `show_help`, `show-help`, `open_help`, `open-help`). Drift guard `from_name_accepts_show_help_aliases` covers all five. |
 | (unbound) | page_up/down/_half | — | A (kettle has `ScrollPageUp/Down`; half-page is B) |
 | (unbound) | line_up/down | `ScrollLineUp/Down` | A |
 

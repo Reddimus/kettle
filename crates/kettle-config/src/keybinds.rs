@@ -166,6 +166,13 @@ pub enum Action {
     ResizeLeft,
     ResizeRight,
     ToggleZoom,
+    /// Cycle 695 Terminator parity (`key_help`).
+    /// Terminator's F1 opens its HTML manual via `open_url`
+    /// (xdg-open). kettle opens its README at the canonical
+    /// GitHub URL via the `open` crate — the same dispatch path
+    /// cycle-X URL clicks already use, so it works on
+    /// Linux/macOS/Windows without spawning a per-platform helper.
+    ShowHelp,
     /// Cycle 693 Terminator parity (`key_scaled_zoom`).
     /// Terminator's "scaled zoom" maximizes the active pane AND
     /// scales the font proportionally so text fills the larger
@@ -440,6 +447,8 @@ pub fn action_names() -> Vec<&'static str> {
         "toggle_split_zoom",
         "toggle_zoom",
         "scaled_zoom",
+        "help",
+        "show_help",
         "increase_font_size",
         "zoom_in",
         "decrease_font_size",
@@ -627,6 +636,7 @@ impl Action {
             "resize_right" => ResizeRight,
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
+            "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
             "increase_font_size" | "zoom_in" => IncreaseFontSize,
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
@@ -1529,6 +1539,18 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::InsertPaneName)),
                 "alias {s:?} should parse to InsertPaneName"
+            );
+        }
+    }
+
+    /// Cycle 695 drift guard. Terminator's F1 `key_help`
+    /// resolves to `Action::ShowHelp` via the documented aliases.
+    #[test]
+    fn from_name_accepts_show_help_aliases() {
+        for s in ["help", "show_help", "show-help", "open_help", "open-help"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::ShowHelp)),
+                "alias {s:?} should parse to ShowHelp"
             );
         }
     }

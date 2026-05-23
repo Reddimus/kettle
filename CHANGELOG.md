@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 695 — **`Action::ShowHelp` (Terminator key_help / F1)**:
+              Terminator's F1 opens its HTML manual via
+              `terminal.key_help` → `open_url(manual_lookup())`.
+              kettle opens its README at the canonical GitHub URL
+              (https://github.com/Reddimus/kettle#readme) via
+              `open::that_detached` — the same cross-platform
+              dispatch path that cycle-X URL clicks already use,
+              so it works on Linux/macOS/Windows without spawning
+              a per-platform helper.
+              Reachable from cycle-104 command palette + 5 keybind
+              name aliases: `help`, `show_help`, `show-help`,
+              `open_help`, `open-help`. cycle-117 palette
+              completeness drift guard enforces registry coverage.
+              Drift guard `from_name_accepts_show_help_aliases`
+              walks all five aliases.
+              Audit row promoted from E → A.
+              Workspace tests 394 → 395.
+
   cycle 694 — **`sticky` wired on macOS**:
               Terminator's `sticky = true` shows a window on
               every workspace. macOS exposes this as a

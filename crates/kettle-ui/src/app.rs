@@ -4311,6 +4311,19 @@ impl App {
                 self.mux.toggle_zoom();
                 self.resize_all();
             }
+            // Cycle 695 Terminator parity (`key_help`).
+            // Terminator's F1 opens its HTML manual via xdg-open;
+            // kettle opens its README at the canonical GitHub URL
+            // via the cycle-X `open::that_detached` dispatch path
+            // (same one URL clicks already use, so it works on
+            // Linux/macOS/Windows without spawning a per-platform
+            // helper).
+            Action::ShowHelp => {
+                let url = "https://github.com/Reddimus/kettle#readme";
+                if let Err(e) = open::that_detached(url) {
+                    log::warn!("Action::ShowHelp: failed to open {url}: {e}");
+                }
+            }
             // Cycle 693 Terminator parity (`key_scaled_zoom`).
             // Toggle pane zoom + scale the font 1.5× so glyphs
             // grow with the enlarged pane area, then restore the
