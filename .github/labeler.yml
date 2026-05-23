@@ -110,3 +110,4 @@ tooling:
           - "Justfile"
           - "scripts/bench.sh"
           - "rust-toolchain.toml"
+          - ".githooks/**"
