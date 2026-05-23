@@ -6,6 +6,67 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.39.0 polish. The session caught two of its own bugs:
+cycle 484's doc-list overindentation (cycle 493) and the
+cycle-494 hook's missing deletion filter (cycle 496) — both
+caught the bug class they exist to prevent.
+
+  cycle 489 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries
+              extended to v1.39.0 (cycles 411-486, 8 releases,
+              76 cycles).
+
+  cycle 490 — ROADMAP "Drift guards" bullet credited cycles
+              471-472 (3 new drift guards on
+              `extra_check_config_lines`) + bumped final count
+              319 → 321 to match HEAD.
+
+  cycle 491 — Saved a session-summary memory entry for the
+              v1.34.0 → v1.39.0 arc so future sessions can
+              resume with the load-bearing invariants visible.
+
+  cycle 492 — Helper rustdoc lede reordered (purpose first,
+              cycle citation in parens) to match the rest of
+              the codebase's rustdoc conventions.
+
+  cycle 493 — **Fix-my-own-bug.** Cycle 484's `lua_engine`
+              doc-list used column-aligned hanging-indent
+              continuations; clippy 1.93 flagged them as
+              `doc_list_item_without_indentation` errors. Re-
+              flowed to standard 2-space markdown hanging
+              indent + blank-line block separator.
+
+  cycle 494 — **Durable infrastructure.** Added opt-in
+              `.githooks/pre-commit` that runs `cargo fmt
+              --check && clippy && test` on every commit
+              touching code. Skips doc-only commits to stay
+              fast (CHANGELOG / README / docs/ / packaging/ /
+              .github/ / .githooks/ / NOTICE / LICENSE /
+              SECURITY / CODE_OF_CONDUCT / CONTRIBUTING /
+              deny.toml / .gitignore). Documented in
+              CONTRIBUTING.md step 5 with the cycle-493
+              incident citation. Opt in via
+              `git config core.hooksPath .githooks`.
+
+  cycle 495 — Hook header expanded to enumerate "NOT excluded"
+              path categories that DO trigger the gauntlet
+              (crates / Cargo.toml-lock / assets / scripts /
+              shell-integration / tests). Self-verified — hook
+              fired correctly on its own commit (touched only
+              `.githooks/`, fast-path triggered).
+
+  cycle 496 — **Fix-my-own-bug.** Cycle 494's diff-filter
+              `ACMR` excluded `D` (deletions). A commit that
+              ONLY deleted `.rs` files would have shown an
+              empty non-doc set, falsely matched the doc-only
+              fast-path, and skipped gauntlet despite breaking
+              the build. Switched to `ACMRD`.
+
+  cycle 497 — CONTRIBUTING.md hook section points readers at
+              the `.githooks/pre-commit` header comment for
+              the trigger/skip enumeration + notes the
+              `--no-verify` per-commit bypass.
+
 ## [1.39.0] — 2026-05-22
 
 Doc-accuracy release. Justfile + CONTRIBUTING got a `gauntlet-strict`
