@@ -578,16 +578,17 @@ same UX, or an explicit Bucket-E rationale for paradigm-divergent features
 adoption variant of detachable tabs — a kettle-internal optimization,
 not a missing Terminator feature.
 
-## Post-sweep polish (cycles 411-486, v1.32.0 → v1.39.0, 8 releases)
+## Post-sweep polish (cycles 411-497, v1.32.0 → v1.40.0, 9 releases)
 
-After the Terminator-parity sweep landed at v1.31.0, cycles 411-486 ran
-a production-grade hardening pass on the new surfaces. Seventy-six
-cycles, eight tagged releases, +13 tests, plus a UX-observability
+After the Terminator-parity sweep landed at v1.31.0, cycles 411-497 ran
+a production-grade hardening pass on the new surfaces. Eighty-seven
+cycles, nine tagged releases, +13 tests, plus a UX-observability
 sweep that surfaced all 7 Terminator-parity opt-in keys in
 `--check-config`, plus a doc-durability sweep that scrubbed internal
 cycle refs from every user-facing surface and extended the drift
 guard to enforce it, plus a doc-accuracy sweep that corrected 3 stale
-field doc-comments in `app.rs`:
+field doc-comments in `app.rs`, plus an opt-in pre-commit hook that
+catches the clippy / fmt / test regression class at commit time:
 
   Workspace tests             308 → 321 (+13 drift guards)
   Tagged releases             v1.32.0 (cycles 411-415) ·
@@ -597,7 +598,8 @@ field doc-comments in `app.rs`:
                               v1.36.0 (cycles 438-448) ·
                               v1.37.0 (cycles 450-463) ·
                               v1.38.0 (cycles 466-475) ·
-                              v1.39.0 (cycles 478-486)
+                              v1.39.0 (cycles 478-486) ·
+                              v1.40.0 (cycles 489-497)
   Plugin-contract bug fixes   6 silent event-bypass sites covered:
                               remote-control new-tab → TabAdd
                               (cycle 423); 3 close_tab paths →
