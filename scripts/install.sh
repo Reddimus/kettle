@@ -79,10 +79,12 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${ICON_BASE}/64x64/apps/kettle.png" \
     "${ICON_BASE}/128x128/apps/kettle.png" \
     "${ICON_BASE}/256x256/apps/kettle.png"
-  command -v update-desktop-database >/dev/null 2>&1 \
-    && update-desktop-database "${APP_DIR}" 2>/dev/null || true
-  command -v gtk-update-icon-cache >/dev/null 2>&1 \
-    && gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "${APP_DIR}" 2>/dev/null || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+  fi
   echo "  removed."
   exit 0
 fi
@@ -130,10 +132,12 @@ fi
 
 # 4) Refresh caches so GNOME/KDE pick the new entry up immediately.
 # Both tools no-op silently if absent.
-command -v update-desktop-database >/dev/null 2>&1 \
-  && update-desktop-database "${APP_DIR}" 2>/dev/null || true
-command -v gtk-update-icon-cache >/dev/null 2>&1 \
-  && gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "${APP_DIR}" 2>/dev/null || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+fi
 
 cat <<MSG
 
