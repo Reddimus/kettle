@@ -82,6 +82,16 @@ gauntlet:
     @echo ""
     @echo "GAUNTLET PASSED — same gate CI runs on every PR. Safe to push."
 
+# Strict gate: gauntlet + supply-chain hygiene (cycle 444 added the
+# `cargo-deny` stale-ignore catch + cycle 274 added `cargo-machete`
+# unused-deps catch as separate CI workflows triggered on Cargo.lock
+# changes). Run `just gauntlet-strict` before a release-cut so all
+# CI gates pass locally first. Requires `cargo install cargo-deny
+# cargo-machete` (one-time).
+gauntlet-strict: gauntlet deny machete
+    @echo ""
+    @echo "STRICT GAUNTLET PASSED — every CI workflow green locally."
+
 # === End-to-end smoke ==============================================
 
 # Render the canonical "kettle in a terminal" screenshot — exercises
