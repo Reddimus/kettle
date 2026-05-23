@@ -6,6 +6,49 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.42.0 packaging-drift cleanup. Three template files
+(flake.nix, PKGBUILD, kettle.rb) had identical 39-release
+version-string drift discovered + closed in one sweep, with
+release.yml CI gate extended to prevent recurrence.
+
+  cycle 547 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+              `docs/ARCHITECTURE.md` post-sweep summaries
+              extended to v1.42.0 (cycles 411-543, 11 releases,
+              121 cycles).
+
+  cycle 549 — **Drift catch #1.** `flake.nix` hardcoded
+              `version = "1.3.5"` despite a "Keep in lockstep
+              with Cargo.toml" comment. The lockstep was
+              advisory-only for 39 releases. Bumped to v1.42.0.
+
+  cycle 550 — **Durable enforcement.** `scripts/release.sh` now
+              auto-bumps `flake.nix` version in lockstep with
+              `Cargo.toml`; release.yml CI gate asserts the two
+              match the tag. Forward (auto-bump) + backward (CI
+              guard) per user directive ("durable over
+              patches").
+
+  cycle 551 — **Drift catch #2.** `packaging/arch/PKGBUILD`
+              had the same `pkgver=1.3.5` + matching v1.3.5
+              sha256. Bumped to v1.42.0 with the v1.42.0
+              tarball sha256 fetched deterministically from the
+              release sidecar.
+
+  cycle 552 — **Drift catch #3.** `packaging/homebrew/kettle.rb`
+              had `version "1.3.5"` + matching v1.3.5 sha256s
+              for both macOS-universal + Linux-x86_64. Bumped
+              to v1.42.0 with both sha256s from the release
+              sidecars.
+
+  cycle 553 — release.yml gate extended to assert PKGBUILD
+              pkgver + kettle.rb version match the tag.
+              PKGBUILD + kettle.rb can't be auto-bumped from
+              release.sh because their sha256 lines depend on
+              post-CI artifacts; the gate catches forgotten
+              manual bumps. End message now lists all 5
+              version-bearing files (tag ↔ Cargo.toml ↔
+              flake.nix ↔ PKGBUILD ↔ kettle.rb ↔ CHANGELOG.md).
+
 ## [1.42.0] — 2026-05-22
 
 Post-v1.41.0 polish + a real user-reported bug fix.
