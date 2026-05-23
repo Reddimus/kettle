@@ -377,8 +377,8 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 |---|---|---|---|
 | ~~`rotate_cw` / `rotate_ccw`~~ (rotate panes) | paned.py + keybinds | ✅ cycle 347 — `Action::RotateCw` / `RotateCcw` (split-tree rotation; flip dir + swap-children for CW) | cycle-347 |
 | ~~`hide_window`~~ (Ctrl+Shift+Alt+A; toggle window visibility) | keybinds | ✅ cycle 342 — `Action::ToggleWindowVisibility` (wires the cycle-303 IPC path directly) | cycle-342 |
-| `group_tab` / `ungroup_tab` / `group_win` / `ungroup_win` | keybinds | 🟡 kettle has per-tab broadcast only | new actions + per-tab broadcast scoping |
-| `create_group` | keybinds | ❌ | named group creation + group-name field on Pane |
+| `group_tab` / `ungroup_tab` / `group_win` / `ungroup_win` | keybinds | D | cycle-631 — multi-cycle design in [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](TERMINATOR-NAMED-GROUPS-DESIGN.md). Extends `BroadcastScope` with `Group(String)`; promotes cycle-407 `pane.group_name` from display-only to broadcast-scoping. 8 sub-cycles. |
+| `create_group` | keybinds | D | cycle-631 — same design doc. Reuses cycle-369 title-edit overlay (`TitleEditScope::Group`). |
 | ~~`zoom_in/out/normal_all`~~ (broadcast zoom) | keybinds | ✅ cycle 345 — `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (kettle's font-size is window-wide so they compose into the single-pane zoom) | cycle-345 |
 | ~~`toggle_scrollbar`~~ (runtime show/hide) | keybinds | ✅ cycle 342 — `Action::ToggleScrollbar` cycles Never → Always → Auto → Never | cycle-342 |
 | ~~`edit_window_title` / `edit_tab_title` / `edit_terminal_title`~~ | keybinds | ✅ cycle 369 — `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` with inline title-edit overlay (`TitleEditState`); cycle 407 added `EditPaneGroup` for the broadcast-group name | cycle-369 |

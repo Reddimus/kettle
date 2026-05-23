@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 631 — **`docs/TERMINATOR-NAMED-GROUPS-DESIGN.md` —
+              Bucket D design doc for Terminator's named broadcast
+              groups (`create_group` / `group_tab` / `group_win`
+              + ungroup_*)**:
+              fills the kettle gap between per-tab broadcast
+              (cycle 178) and broadcast-all — the finer-grained
+              "broadcast to every pane I tagged with X." Design:
+                - new `BroadcastScope::Group(String)` variant on
+                  the existing scope enum
+                - cycle-407 `pane.group_name` field gets promoted
+                  from display-only to scoping-load-bearing
+                - cycle-369 title-edit overlay reused with the
+                  existing `TitleEditScope::Group` variant
+                - renderer titlebar shows a `[name]` pill with
+                  hash-derived color so all "fleet" panes look
+                  visually linked
+                - new actions: `CreateGroup`, `GroupTab`,
+                  `GroupWindow`, `UngroupTab`, `UngroupWindow`
+              8 sub-cycle roadmap, +8-10 estimated tests.
+              Explicit Bucket E carveouts: cross-window groups
+              (cycle-302 IPC follow-up), session-persistence of
+              group assignments. Audit-doc rows promoted from
+              C/❌ to D. No code change.
+
   cycle 630 — **`docs/TERMINATOR-TERMINALSHOT-DESIGN.md` —
               Bucket D design doc for `plugins/terminalshot.py`
               live-window capture**:
