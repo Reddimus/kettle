@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 660 — **confirm-dialog sub-cycles 3 + 5: renderer
+              + dispatch interception (modal goes live)**.
+              When `ask-before-closing` fires for
+              `Action::CloseWindow`, the dialog now opens
+              visibly and the user can interact:
+                - Sub-cycle 3 (renderer): bottom-bar projection
+                  paints a red-accent strip with `⚠ Close N
+                  pane(s)?      [Cancel]   ▶ Close      (Tab/
+                  ←→ focus · Enter confirm · Esc cancel)`.
+                  Focused button shows a `▶` prefix. Full
+                  centered-panel painting deferred to a polish
+                  sub-cycle (3.5).
+                - Sub-cycle 5 (dispatch interception):
+                  `Action::CloseWindow` checks
+                  `cfg.ask_before_closing.should_prompt(pane_count)`
+                  (cycle 638). If true, opens the modal with
+                  `on_confirm = ConfirmAction::CloseWindow`
+                  and the safe default (Cancel) focused.
+                  Modal's Confirm → `dispatch_confirm_action`
+                  runs the real close path
+                  (`mux.close_window` + `save_session` +
+                  `event_loop.exit()`).
+              Modal-aware key handler: while open, intercepts
+              Tab/Shift+Tab/←/→/Enter/Esc via cycle-652's
+              `confirm_dialog_keypress` pure helper. Non-nav
+              keys are swallowed (modal is exclusive).
+              `Pane::CloseTab` and `ClosePane` wired to
+              `dispatch_confirm_action` arms for the cycle-661
+              sub-cycle 6 wiring. New renderer types:
+              `ConfirmDialogOverlay` + `ConfirmDialogButton`.
+              Workspace tests stay 384.
+
   cycle 659 — **Deploy: redeployed local kettle with the full
               remote.py port (sub-cycles 1-7 of 7
               complete)**. Binary at `~/.local/bin/kettle`

@@ -158,7 +158,6 @@ fn spawn_trigger_command(argv: &[String]) {
 /// of winit's `NamedKey` so the pure helper isn't coupled to a UI
 /// framework type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // sub-cycle 5 wires the consumer.
 pub enum ConfirmKey {
     Escape,
     Enter,
@@ -170,7 +169,6 @@ pub enum ConfirmKey {
 
 /// Cycle 652: outcome of a key press in the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // sub-cycle 5 consumes this.
 pub enum ConfirmKeyResult {
     /// Update `focus_idx` to the new value + redraw.
     Move(usize),
@@ -186,7 +184,6 @@ pub enum ConfirmKeyResult {
 /// Cycle 652: pure helper that maps a (current_focus, num_buttons,
 /// key) tuple to the next action for the confirm-dialog state
 /// machine. Sub-cycle 5 wires this to the App's winit key handler.
-#[allow(dead_code)] // sub-cycle 5 wires the consumer.
 fn confirm_dialog_keypress(
     current_focus: usize,
     num_buttons: usize,
@@ -848,8 +845,8 @@ pub struct TitleEditState {
 /// (`Action::CloseWindow` / `CloseTab` / `ClosePane`). Future cycles
 /// add `KillProcess`, `DiscardLayout`, `ResetConfig` etc. — the
 /// enum is intentionally extensible.
-#[allow(dead_code)] // sub-cycle 5 wires the dispatch usage.
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
+#[allow(dead_code)] // CloseTab/ClosePane consumed by upcoming sub-cycle 6 wiring
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     /// Close the entire window (every tab + every pane).
@@ -863,7 +860,6 @@ pub enum ConfirmAction {
 /// Cycle 648: which buttons a confirm modal shows. v1 is just
 /// the two-button [Cancel] / [Confirm] shape; future cycles can
 /// add a third "Apply to all" or similar without rippling.
-#[allow(dead_code)] // sub-cycle 3/4 wire renderer + keyboard nav.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
     /// Dismiss the modal without action. Always the safe default.
@@ -876,7 +872,6 @@ pub enum ConfirmButton {
 
 /// Cycle 648: live state for an open confirm dialog. `focus_idx`
 /// points into `buttons` and the renderer / keyboard nav follow it.
-#[allow(dead_code)] // sub-cycle 3-5 wire the consumers.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogState {
     pub prompt: String,
@@ -999,7 +994,6 @@ pub struct App {
     /// over a dimming backdrop. State landed now; sub-cycle 3 wires
     /// the renderer, sub-cycle 4 wires keyboard nav, sub-cycle 5
     /// wires the dispatch interception for `Action::CloseWindow`.
-    #[allow(dead_code)] // wiring lands in sub-cycle 3-5.
     confirm_dialog: Option<ConfirmDialogState>,
     window_focused: bool,
     /// True while the OS mouse cursor is hidden because the user is typing
@@ -2829,6 +2823,32 @@ impl App {
                 };
                 (label.to_string(), s.input.clone(), anchor_y)
             });
+        // Cycle 660: project the App's confirm_dialog into the
+        // renderer's projection (so it shows even when no
+        // search is open — confirm modals are independent).
+        let confirm_dialog_early =
+            self.confirm_dialog
+                .as_ref()
+                .map(|d| kettle_render::ConfirmDialogOverlay {
+                    prompt: d.prompt.clone(),
+                    buttons: d
+                        .buttons
+                        .iter()
+                        .map(|b| match b {
+                            ConfirmButton::Cancel => kettle_render::ConfirmDialogButton {
+                                label: "Cancel".to_string(),
+                                destructive: false,
+                            },
+                            ConfirmButton::Confirm { label, destructive } => {
+                                kettle_render::ConfirmDialogButton {
+                                    label: label.clone(),
+                                    destructive: *destructive,
+                                }
+                            }
+                        })
+                        .collect(),
+                    focus_idx: d.focus_idx,
+                });
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
@@ -2843,6 +2863,7 @@ impl App {
                 cursor_visible,
                 bell,
                 context_menu,
+                confirm_dialog: confirm_dialog_early,
                 ..Overlay::default()
             };
         }
@@ -2862,6 +2883,7 @@ impl App {
                 })
             })
             .collect();
+        let confirm_dialog = confirm_dialog_early;
         Overlay {
             search_query: Some(s.query.clone()),
             search_count: s.matches.len(),
@@ -2880,6 +2902,7 @@ impl App {
             context_menu,
             vi_cursor: self.vi_mode.map(|v| (v.row, v.col)),
             vi_visual_anchor: self.vi_mode.and_then(|v| v.visual_anchor),
+            confirm_dialog,
         }
     }
 
@@ -3650,6 +3673,32 @@ impl App {
                 self.fire_tab_close_event(closing_idx);
             }
             Action::CloseWindow => {
+                // Cycle 660 (sub-cycle 5 of confirm-dialog design):
+                // intercept via the cycle-638 should_prompt helper.
+                // When ask-before-closing fires, open the modal
+                // with on_confirm=CloseWindow; the modal's Confirm
+                // dispatch (in the key handler) re-runs the close
+                // path below.
+                let scope = self.mux.panes.len();
+                if self.cfg.ask_before_closing.should_prompt(scope) {
+                    self.close_all_modals();
+                    self.confirm_dialog = Some(ConfirmDialogState {
+                        prompt: format!("Close {scope} pane(s)?"),
+                        buttons: vec![
+                            ConfirmButton::Cancel,
+                            ConfirmButton::Confirm {
+                                label: "Close".to_string(),
+                                destructive: true,
+                            },
+                        ],
+                        focus_idx: 0, // Cancel — safe default.
+                        on_confirm: ConfirmAction::CloseWindow,
+                    });
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Distinct from `CloseTab`: drop *every* tab + pane in
                 // this window, not just the focused tab. Previously
                 // both actions did `close_tab()` so binding `close_window`
@@ -4496,6 +4545,36 @@ impl App {
         match &self.startup.layout {
             Some(name) => s.save_layout(name),
             None => s.save(),
+        }
+    }
+
+    /// Cycle 660 (sub-cycle 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): dispatch
+    /// the `ConfirmAction` after the user accepts the modal. Skips
+    /// the `should_prompt` check (we wouldn't be here otherwise) so
+    /// the close-family actions run their real bodies.
+    fn dispatch_confirm_action(
+        &mut self,
+        action: ConfirmAction,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) {
+        match action {
+            ConfirmAction::CloseWindow => {
+                self.mux.close_window();
+                self.save_session();
+                event_loop.exit();
+            }
+            ConfirmAction::CloseTab => {
+                // CloseTab dispatch (cycle X). Sub-cycle 6 wires
+                // ask-before-closing for CloseTab too; this arm is
+                // the dispatch target for that future wiring.
+                self.mux.close_tab();
+                self.save_session();
+            }
+            ConfirmAction::ClosePane => {
+                self.mux.close_focused();
+                self.save_session();
+            }
         }
     }
 
@@ -6147,6 +6226,57 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // Cycle 660 (sub-cycle 5 of confirm-dialog design):
+                // confirm-modal key handler. Tab/Shift+Tab/←→
+                // cycle focus, Enter dispatches on_confirm, Esc
+                // closes the modal without dispatching. Modal is
+                // exclusive — non-nav keys are swallowed.
+                if self.confirm_dialog.is_some() {
+                    let key = match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
+                        Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
+                        Key::Named(NamedKey::Tab) => {
+                            if self.mods.shift_key() {
+                                Some(ConfirmKey::ShiftTab)
+                            } else {
+                                Some(ConfirmKey::Tab)
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
+                        Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+                        _ => None,
+                    };
+                    if let Some(k) = key
+                        && let Some(state) = self.confirm_dialog.as_ref()
+                    {
+                        let n = state.buttons.len();
+                        let focus = state.focus_idx;
+                        let action = &state.on_confirm;
+                        let result = confirm_dialog_keypress(focus, n, k);
+                        match result {
+                            ConfirmKeyResult::Move(idx) => {
+                                if let Some(s) = self.confirm_dialog.as_mut() {
+                                    s.focus_idx = idx;
+                                }
+                            }
+                            ConfirmKeyResult::Confirm => {
+                                // Inspect on_confirm BEFORE clearing
+                                // so the dispatch sees the right action.
+                                let to_run = action.clone();
+                                self.confirm_dialog = None;
+                                self.dispatch_confirm_action(to_run, event_loop);
+                            }
+                            ConfirmKeyResult::Cancel => {
+                                self.confirm_dialog = None;
+                            }
+                            ConfirmKeyResult::Ignore => {}
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // Cycle 369: Edit-title overlay key handler. Esc
                 // cancels; Enter applies via apply_title_edit;
                 // Backspace removes one char; printable text appends.

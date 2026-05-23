@@ -172,6 +172,32 @@ pub struct Overlay {
     /// highlights cells from `vi_visual_anchor` to `vi_cursor`
     /// (inclusive both ends) using theme.selection_background.
     pub vi_visual_anchor: Option<(usize, usize)>,
+    /// Cycle 660 (sub-cycle 3 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): when
+    /// `Some`, render a centered modal dialog over a dimming
+    /// backdrop. The renderer paints the prompt + button row;
+    /// the button at `focus_idx` gets the accent-border treatment.
+    pub confirm_dialog: Option<ConfirmDialogOverlay>,
+}
+
+/// Cycle 660: renderer-side projection of `App::confirm_dialog`.
+/// Stripped of dispatch state — just the bits needed to paint.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialogOverlay {
+    /// Prompt text shown at the top of the modal.
+    pub prompt: String,
+    /// Button labels in display order (Cancel typically first).
+    pub buttons: Vec<ConfirmDialogButton>,
+    /// Which button has focus (idx into `buttons`).
+    pub focus_idx: usize,
+}
+
+/// Cycle 660: paint-side button shape. `destructive: true` gets
+/// the red-accent treatment (Close / Delete buttons).
+#[derive(Debug, Clone)]
+pub struct ConfirmDialogButton {
+    pub label: String,
+    pub destructive: bool,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -1416,6 +1442,49 @@ impl Renderer {
             let bar_y = anchor_y.unwrap_or(sh - bar_h);
             quads.push(rect(0.0, bar_y, sw, bar_h, theme.palette[3], 0.96));
             let label = format!("  ✎ {label_prefix} {q}_   (Enter apply · Esc cancel)");
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some(dlg) = &overlay.confirm_dialog {
+            // Cycle 660 (sub-cycle 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
+            // a bottom-bar projection of the modal. v1 of the
+            // renderer skips the fancy centered-panel + backdrop
+            // dimming + per-button accent border — the bottom bar
+            // gives the user immediate "a modal is open" feedback
+            // with prompt + button labels + focus indicator
+            // (the focused button gets a ▶ prefix). The full
+            // centered-modal painting is sub-cycle 3.5 (renderer
+            // polish); for now this lands the wiring so cycle 661
+            // can hook up the dispatch.
+            have_search = true;
+            let bar_h = ch + 10.0;
+            // Red-ish accent (palette[1]) to signal "destructive
+            // confirmation pending" vs the cycle-X palette/ssh/
+            // edit-title yellows/blues/cyans.
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
+            let mut buttons_label = String::new();
+            for (i, btn) in dlg.buttons.iter().enumerate() {
+                if !buttons_label.is_empty() {
+                    buttons_label.push_str("   ");
+                }
+                let marker = if i == dlg.focus_idx { "▶ " } else { "  " };
+                buttons_label.push_str(marker);
+                buttons_label.push_str(&btn.label);
+            }
+            let label = format!(
+                "  ⚠ {}      {}      (Tab/←→ focus · Enter confirm · Esc cancel)",
+                dlg.prompt, buttons_label
+            );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
             self.search_buffer
