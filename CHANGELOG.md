@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 651 — **vertical-tabs sub-cycle 2: `content_rect_for`
+              pure helper**: extracts `App::area`'s layout math
+              into a pure function that takes the inputs
+              explicitly:
+                `content_rect_for(surface, tab_bar_h,
+                  status_bar_h, tab_bar_pos, status_bar_mode)
+                  -> Rect`
+              `App::area` now wraps the helper; cycle-651 v1
+              treats `TabBarPos::Left` / `Right` the same as
+              `Top` (the cycle-647 fallback). Sub-cycle 4 of
+              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)
+              branches on orientation + carves a per-strip
+              width instead of a per-edge height. Drift guard
+              `content_rect_for_carves_out_tab_and_status_bands`
+              walks 8 (tab_pos × status_pos) cases including
+              the tiny-window content-h floor. Workspace tests
+              380 → 381.
+
   cycle 650 — **terminalshot sub-cycle 2:
               `session_screenshot_path` pure helper**: mirrors
               cycle-621's `session_log_path` shape. Lives under

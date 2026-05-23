@@ -152,6 +152,50 @@ fn spawn_trigger_command(argv: &[String]) {
     }
 }
 
+/// Cycle 651 (sub-cycle 2 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): pure helper
+/// that computes the pane-content rect from the inputs that govern
+/// it — surface size, tab-bar height, status-bar height, and the
+/// edge each occupies.
+///
+/// Returns `(x, y, width, height)` in pixel coordinates.
+///
+/// Cycle-651 v1 of this helper treats vertical-strip positions
+/// (`Left` / `Right`) the same as `Top` (the strip claims the
+/// same per-edge slice). Sub-cycle 4 of the vertical-tabs design
+/// will branch on the orientation + carve out a per-strip width
+/// instead of a per-edge height.
+///
+/// Pure — no `&self`, no renderer, no winit. Drives the `App::area`
+/// method (which now wraps this helper) so cycle-651 + future
+/// vertical-strip wiring can test the layout math without
+/// constructing a full App.
+fn content_rect_for(
+    surface: (u32, u32),
+    tab_bar_h: f32,
+    status_bar_h: f32,
+    tab_bar_pos: kettle_config::TabBarPos,
+    status_bar_mode: kettle_config::StatusBarMode,
+) -> Rect {
+    let (sw, sh) = (surface.0 as f32, surface.1 as f32);
+    let tb_on_top = matches!(
+        tab_bar_pos,
+        kettle_config::TabBarPos::Top
+            | kettle_config::TabBarPos::Left
+            | kettle_config::TabBarPos::Right
+    );
+    let tb_on_bottom = matches!(tab_bar_pos, kettle_config::TabBarPos::Bottom);
+    let sb_on_top = matches!(status_bar_mode, kettle_config::StatusBarMode::Top);
+    let sb_on_bottom = matches!(status_bar_mode, kettle_config::StatusBarMode::Bottom);
+
+    let top_offset =
+        (if tb_on_top { tab_bar_h } else { 0.0 }) + (if sb_on_top { status_bar_h } else { 0.0 });
+    let bot_offset = (if tb_on_bottom { tab_bar_h } else { 0.0 })
+        + (if sb_on_bottom { status_bar_h } else { 0.0 });
+    let content_h = (sh - top_offset - bot_offset).max(1.0);
+    (0.0, top_offset, sw, content_h)
+}
+
 /// Cycle 650 (sub-cycle 2 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
 /// ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): build the
 /// per-pane screenshot path. Lives under `<cache>/kettle/shots/`
@@ -1627,39 +1671,20 @@ impl App {
     }
 
     fn area(&self) -> Rect {
-        let (w, h) = self
+        let surface = self
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        let tb = self.tab_bar_h();
-        let sb = self.status_bar_h();
-        // Vertical layout (top to bottom). Tab bar + status bar each
-        // claim space at their configured edge; pane content gets
-        // what's left. Both can sit at top or bottom independently;
-        // four total combinations are handled here.
-        let surface_h = h as f32;
-        let top_offset = (if self.cfg.tab_bar_pos == TabBarPos::Top {
-            tb
-        } else {
-            0.0
-        }) + (if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Top) {
-            sb
-        } else {
-            0.0
-        });
-        let bot_offset =
-            (if self.cfg.tab_bar_pos == TabBarPos::Bottom {
-                tb
-            } else {
-                0.0
-            }) + (if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
-                sb
-            } else {
-                0.0
-            });
-        let content_h = (surface_h - top_offset - bot_offset).max(1.0);
-        (0.0, top_offset, w as f32, content_h)
+        // Cycle 651: delegate to the pure helper so layout math is
+        // unit-testable without constructing a full App.
+        content_rect_for(
+            surface,
+            self.tab_bar_h(),
+            self.status_bar_h(),
+            self.cfg.tab_bar_pos,
+            self.cfg.status_bar,
+        )
     }
 
     /// Tab-bar geometry — the single source of truth shared by the renderer
@@ -6793,6 +6818,60 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 651 drift guard. `content_rect_for` is the pure helper
+    /// behind `App::area`. Sub-cycle 2 of vertical-tabs design.
+    /// Walks the 4 (tab_pos)×3 (status_pos) cases.
+    #[test]
+    fn content_rect_for_carves_out_tab_and_status_bands() {
+        use super::content_rect_for;
+        use kettle_config::{StatusBarMode, TabBarPos};
+        // Top + status-off: content starts at y=tab_h, full width.
+        let r = content_rect_for((800, 600), 24.0, 16.0, TabBarPos::Top, StatusBarMode::Off);
+        assert_eq!(r, (0.0, 24.0, 800.0, 576.0));
+        // Bottom + status-off: content at y=0, height shrinks by tab_h.
+        let r = content_rect_for(
+            (800, 600),
+            24.0,
+            16.0,
+            TabBarPos::Bottom,
+            StatusBarMode::Off,
+        );
+        assert_eq!(r, (0.0, 0.0, 800.0, 576.0));
+        // Top + status-top: both claim from top.
+        let r = content_rect_for((800, 600), 24.0, 16.0, TabBarPos::Top, StatusBarMode::Top);
+        assert_eq!(r, (0.0, 40.0, 800.0, 560.0));
+        // Top + status-bottom: status claims from bottom.
+        let r = content_rect_for(
+            (800, 600),
+            24.0,
+            16.0,
+            TabBarPos::Top,
+            StatusBarMode::Bottom,
+        );
+        assert_eq!(r, (0.0, 24.0, 800.0, 560.0));
+        // Bottom + status-bottom: both claim from bottom.
+        let r = content_rect_for(
+            (800, 600),
+            24.0,
+            16.0,
+            TabBarPos::Bottom,
+            StatusBarMode::Bottom,
+        );
+        assert_eq!(r, (0.0, 0.0, 800.0, 560.0));
+        // Left (cycle 647 vertical, sub-cycle 1 only): treated as
+        // Top by the v1 helper. Sub-cycle 4 will branch on
+        // orientation + carve a width slice instead of a height.
+        let r = content_rect_for((800, 600), 24.0, 0.0, TabBarPos::Left, StatusBarMode::Off);
+        assert_eq!(r, (0.0, 24.0, 800.0, 576.0));
+        // Right: same fallback as Left for now.
+        let r = content_rect_for((800, 600), 24.0, 0.0, TabBarPos::Right, StatusBarMode::Off);
+        assert_eq!(r, (0.0, 24.0, 800.0, 576.0));
+        // Defensive: content_h clamped to >= 1.0 so a tiny window
+        // doesn't degenerate to a zero/negative rect.
+        let r = content_rect_for((100, 30), 24.0, 16.0, TabBarPos::Top, StatusBarMode::Bottom);
+        assert!(r.3 >= 1.0);
     }
 
     /// Cycle 650 drift guard. `session_screenshot_path` is the
