@@ -643,3 +643,26 @@ After cycle 430 the kettle plugin contract is consistent across every
 new_tab / close_tab / event-hook call site, with one canonical drain
 path shared by all 5 LuaEvent variants (Startup / TabAdd / TabClose /
 Bell / Output). Adding a sixth event is one new `fire_event` call.
+
+## Bucket D close-out summary (cycles 614-677)
+
+The cycles-614+ arc revisited the 7 Bucket D design docs created in
+cycles 629-637 (REMOTE, TERMINALSHOT, NAMED-GROUPS, AUTO-THEME,
+VERTICAL-TABS, THEME-SUBMENU, CONFIRM-DIALOG) and progressed each
+through sub-cycles. Status snapshot at cycle 677:
+
+| Bucket D feature             | Status | Sub-cycles | Notes |
+|------------------------------|--------|------------|-------|
+| `plugins/remote.py`          | ✅ A   | 7/7        | SSH/Docker/Podman/kubectl detect + right-click reconnect. Deployed cycle 659. |
+| `plugins/auto_theme.py`      | ✅ A   | 7/7        | Manual + clock schedule + sunrise/sunset (NOAA solar). Deployed cycle 671. |
+| `ask_before_closing`         | ✅ A   | 7/8 + 1 polish-deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer is keyboard-driven. Mouse hit-test deferred to a follow-up centered-panel renderer upgrade. Deployed cycle 661+663. |
+| `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed cycle 674. |
+| `plugins/terminalshot.py`    | 🟡    | 3/7        | Action surface + path helper + dispatch queues real `ScreenshotRequest`. wgpu surface readback (sub-cycle 4) is the heavy renderer work; pending. |
+| Named broadcast groups       | 🟡    | 1/8        | 5 Action variants + 12 aliases + EditPaneGroup overlay reuse. `BroadcastScope::Group(String)` refactor of `mux.broadcast: bool` → enum is the heavy core; pending. |
+| Right-click theme submenu    | D     | 0/9        | Cycle-634 design doc only; no implementation cycles yet. cycle-329 command palette covers the same UX via `/theme NAME`. |
+
+**Four Bucket D features now ship end-to-end on the deployed
+binary** (`~/.local/bin/kettle 1.45.1` at the cycle-674 commit).
+The two `🟡` (terminalshot, named-groups) and one un-started
+(theme submenu) are the remaining gaps tracked here for the
+next pass.

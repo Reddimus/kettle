@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 677 — **Audit doc: Bucket D close-out summary
+              (cycles 614-677)**: new section in
+              `docs/TERMINATOR-AUDIT.md` summarizing the
+              7-feature Bucket D arc:
+                - `plugins/remote.py` ✅ A 7/7 (cycle-659 deploy)
+                - `plugins/auto_theme.py` ✅ A 7/7 (cycle-671)
+                - `ask_before_closing` ✅ A 7/8+polish (cycle-661/663)
+                - `tab_position = left/right` ✅ A 7/8+polish (cycle-674)
+                - `plugins/terminalshot.py` 🟡 3/7 (wgpu readback pending)
+                - Named broadcast groups 🟡 1/8 (BroadcastScope refactor pending)
+                - Right-click theme submenu D 0/9 (design only; cycle-329 palette covers same UX)
+              **Four Bucket D features now ship end-to-end on
+              the deployed binary**. No code change.
+
   cycle 676 — **confirm-dialog sub-cycles 7 + 8: audit
               finalization**: audit row promoted from D
               (design only) to A (shipped) with sub-cycle 7
