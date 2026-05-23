@@ -120,6 +120,24 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
     }
 }
 
+/// Cycle 618 (Terminator parity, key_next_profile / key_previous_profile):
+/// pick the next profile name after `current`, wrapping at the end.
+/// If `current` isn't in the list (e.g. user launched without `--profile`,
+/// or with an explicit `--config FILE`), the cycle starts at index 0.
+/// Pure — unit-testable without touching disk.
+fn pick_next_profile(current: Option<&str>, names: &[String], forward: bool) -> String {
+    let n = names.len();
+    let cur_idx = current
+        .and_then(|c| names.iter().position(|x| x == c))
+        .unwrap_or(0);
+    let next_idx = if forward {
+        (cur_idx + 1) % n
+    } else {
+        (cur_idx + n - 1) % n
+    };
+    names[next_idx].clone()
+}
+
 fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<String> {
     let cur = current.trim().to_ascii_lowercase();
     let l = light.trim();
@@ -3695,40 +3713,31 @@ impl App {
             // config-path, and loads the next/prev. Falls back to
             // log::info when no profiles directory or no entries.
             Action::NextProfile | Action::PrevProfile => {
-                let cycle_dir = kettle_config::Config::default_path()
-                    .and_then(|p| p.parent().map(|d| d.join("profiles")));
-                let entries: Vec<std::path::PathBuf> = cycle_dir
-                    .as_deref()
-                    .and_then(|d| std::fs::read_dir(d).ok())
-                    .map(|rd| {
-                        let mut v: Vec<_> = rd
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.path())
-                            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("config"))
-                            .collect();
-                        v.sort();
-                        v
-                    })
-                    .unwrap_or_default();
-                if entries.is_empty() {
+                // Cycle 618: delegate listing + name extraction to
+                // kettle-config so the same path math has a single
+                // home (and drift guards on it). Empty list → no-op
+                // with a one-line info nudge.
+                let names = kettle_config::Config::list_profiles();
+                if names.is_empty() {
                     log::info!(
                         "{action:?}: no profiles in <config-dir>/profiles/ — \
                          create one with `kettle --print-default-config > \
                          ~/.config/kettle/profiles/dev.config`"
                     );
                 } else {
-                    let cur_idx = self
+                    let current = self
                         .config_path
-                        .as_ref()
-                        .and_then(|p| entries.iter().position(|e| e == p))
-                        .unwrap_or(0);
-                    let next_idx = if matches!(action, Action::NextProfile) {
-                        (cur_idx + 1) % entries.len()
-                    } else {
-                        (cur_idx + entries.len() - 1) % entries.len()
-                    };
-                    self.config_path = Some(entries[next_idx].clone());
-                    self.reload_config();
+                        .as_deref()
+                        .and_then(kettle_config::Config::profile_name_from_path);
+                    let next = pick_next_profile(
+                        current.as_deref(),
+                        &names,
+                        matches!(action, Action::NextProfile),
+                    );
+                    if let Some(p) = kettle_config::Config::path_for_profile(&next) {
+                        self.config_path = Some(p);
+                        self.reload_config();
+                    }
                 }
             }
             // Cycle 347: split-tree rotation. RotateCw flips dir +
@@ -6440,6 +6449,34 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 618 drift guard. `pick_next_profile` is the pure
+    /// helper behind `Action::NextProfile`/`PrevProfile`. Cycles
+    /// the sorted profile list with wrap-around; starts at index 0
+    /// when current isn't a known profile (e.g. --config FILE or
+    /// default config).
+    #[test]
+    fn pick_next_profile_wraps_and_starts_at_index_0() {
+        use super::pick_next_profile;
+        let names: Vec<String> = vec!["dark".into(), "dev".into(), "light".into()];
+        // Forward through the list, wrapping at the end.
+        assert_eq!(pick_next_profile(Some("dark"), &names, true), "dev");
+        assert_eq!(pick_next_profile(Some("dev"), &names, true), "light");
+        assert_eq!(pick_next_profile(Some("light"), &names, true), "dark");
+        // Backward, wrapping at the start.
+        assert_eq!(pick_next_profile(Some("dark"), &names, false), "light");
+        assert_eq!(pick_next_profile(Some("dev"), &names, false), "dark");
+        assert_eq!(pick_next_profile(Some("light"), &names, false), "dev");
+        // Current is None or an unknown name: start the cycle at idx 0.
+        // Forward → idx 1 (the second name); backward → last name.
+        assert_eq!(pick_next_profile(None, &names, true), "dev");
+        assert_eq!(pick_next_profile(None, &names, false), "light");
+        assert_eq!(pick_next_profile(Some("missing"), &names, true), "dev");
+        // Single profile: always returns itself (n=1, both arms ⇒ idx 0).
+        let single = vec!["only".to_string()];
+        assert_eq!(pick_next_profile(Some("only"), &single, true), "only");
+        assert_eq!(pick_next_profile(Some("only"), &single, false), "only");
     }
 
     /// Cycle 616 drift guard. `pick_light_dark_target` is the

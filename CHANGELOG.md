@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 618 — **Profile-cycling refactor (Terminator
+              `key_next_profile` / `key_previous_profile`)**:
+                - new pub fn `Config::list_profiles()` enumerates
+                  `<config-dir>/profiles/*.config` (deterministic
+                  sort: case-insensitive primary + bytewise tiebreak)
+                - new pub fn `Config::profile_name_from_path()`
+                  inverts `path_for_profile`
+                - app.rs NextProfile/PrevProfile dispatch refactored
+                  to use both helpers + new pure `pick_next_profile`
+                  helper (forward/back cycling with wrap)
+                - inline disk-walk in app.rs was duplicating the
+                  same path math kettle-config now exposes; one
+                  source of truth + drift guards on it
+              Drift guards (3):
+                - `profile_name_from_path_inverts_path_for_profile`
+                  covers round-trip, default-config rejection, wrong-
+                  parent rejection, missing-suffix rejection
+                - `pick_next_profile_wraps_and_starts_at_index_0`
+                  covers fwd/back cycling, unknown-current → idx 0,
+                  single-profile self-return
+              Workspace tests 358 → 360.
+
   cycle 617 — **`case_sensitive` parity (Terminator
               config.py:117)**:
                 - new enum `SearchCaseSensitivity { Smart,

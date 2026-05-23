@@ -1016,6 +1016,66 @@ impl Config {
         })
     }
 
+    /// Cycle 618 (Terminator parity, terminatorlib/terminator.py:
+    /// `key_next_profile` / `key_previous_profile`): enumerate the
+    /// available profile files in `<config-dir>/profiles/`, sorted
+    /// ascii-then-bytewise so the cycle order is deterministic
+    /// across runs. Returned names are the *bare* profile names
+    /// (no `.config` extension and no parent dirs), so callers
+    /// can round-trip via `path_for_profile`.
+    ///
+    /// Returns an empty Vec when:
+    ///   - the config dir can't be located (CI / no $HOME)
+    ///   - the `profiles/` subdir doesn't exist
+    ///   - the directory exists but has no `*.config` files
+    ///
+    /// In all three cases, `Action::NextProfile` / `PrevProfile`
+    /// will no-op rather than panic.
+    pub fn list_profiles() -> Vec<String> {
+        let Some(default_p) = Self::default_path() else {
+            return Vec::new();
+        };
+        let Some(parent) = default_p.parent() else {
+            return Vec::new();
+        };
+        let profiles_dir = parent.join("profiles");
+        let Ok(rd) = std::fs::read_dir(&profiles_dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_file() {
+                    return None;
+                }
+                let name = p.file_name()?.to_str()?;
+                name.strip_suffix(".config").map(|s| s.to_string())
+            })
+            .collect();
+        names.sort_by(|a, b| {
+            a.to_lowercase()
+                .cmp(&b.to_lowercase())
+                .then_with(|| a.cmp(b))
+        });
+        names
+    }
+
+    /// Cycle 618. Companion to `path_for_profile`: extract the profile
+    /// name from a config file path, if that path is shaped like one
+    /// returned by `path_for_profile` (`<config-dir>/profiles/<name>.config`).
+    /// Returns `None` for paths outside `profiles/` (e.g. the default
+    /// `<config-dir>/config`, or a user-supplied --config FILE).
+    pub fn profile_name_from_path(p: &std::path::Path) -> Option<String> {
+        let parent_is_profiles =
+            p.parent().and_then(|d| d.file_name()) == Some(std::ffi::OsStr::new("profiles"));
+        if !parent_is_profiles {
+            return None;
+        }
+        let stem = p.file_name()?.to_str()?.strip_suffix(".config")?;
+        Some(stem.to_string())
+    }
+
     /// Inner of `default_path` parameterized on the env-var lookup so
     /// the probe order + empty-value filter are unit-testable without
     /// mutating the real process env (which would race against the
@@ -4532,6 +4592,37 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 618 drift guard. `profile_name_from_path` is the inverse of
+    /// `path_for_profile`: it should recover the bare profile name from
+    /// a `<config-dir>/profiles/<name>.config` path, and return `None`
+    /// for paths shaped any other way (default config, --config FILE
+    /// outside `profiles/`, missing `.config` suffix, etc.). Used by
+    /// `Action::NextProfile` to compute the current profile from
+    /// `App::config_path` so the cycle starts at the right index.
+    #[test]
+    fn profile_name_from_path_inverts_path_for_profile() {
+        use std::path::PathBuf;
+        // Round-trip through path_for_profile.
+        if let Some(p) = Config::path_for_profile("dev") {
+            assert_eq!(Config::profile_name_from_path(&p).as_deref(), Some("dev"));
+        }
+        // Plain "kettle/config" (the default path) is NOT inside profiles/.
+        let p = PathBuf::from("/home/u/.config/kettle/config");
+        assert!(Config::profile_name_from_path(&p).is_none());
+        // A path with a different parent dir is rejected.
+        let p = PathBuf::from("/etc/kettle.d/dev.config");
+        assert!(Config::profile_name_from_path(&p).is_none());
+        // Inside profiles/ but missing the .config suffix is rejected.
+        let p = PathBuf::from("/home/u/.config/kettle/profiles/dev");
+        assert!(Config::profile_name_from_path(&p).is_none());
+        // Verbatim shape: parent=profiles, filename ending in .config.
+        let p = PathBuf::from("/anywhere/profiles/something.config");
+        assert_eq!(
+            Config::profile_name_from_path(&p).as_deref(),
+            Some("something")
+        );
     }
 
     #[test]
