@@ -6,6 +6,46 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+Post-v1.44.0 polish — doc-truth pass + sandbox drift guards.
+No release planned for this batch (per maintainer directive
+"ship/release only on major updates"); entries land here for
+the next major event's release notes.
+
+  cycle 561 — README + INSTALL.md + scripts/install-online.sh
+              version pins bumped to v1.44.0.
+
+  cycle 562 — `app.rs` cycle-560 comment corrected — the claim
+              that broadcast_default "still governs scope
+              elsewhere" was wrong. The field has no consumer
+              after cycle 560 removed the only one; comment
+              now states the actual state + forward-compat
+              intent.
+
+  cycle 563 — `kettle-config/lib.rs` doc-comments for
+              ask_before_closing + focus annotated as currently
+              no-op (parses but no consumer).
+
+  cycle 564 — **Doc-truth sweep.** `docs/CONFIG.md` gained a
+              "Parsed-but-currently-no-op keys" subsection
+              listing all 22 rows / 26 field names that parse
+              cleanly but have no runtime consumer in kettle.
+              Discovery: grep for `cfg\.<field>` in
+              kettle-ui/ / kettle-render/ / kettle-core/
+              returned 0 reads for these fields. Users
+              configuring them now see at a glance that the
+              key is a no-op (rather than guessing).
+
+  cycle 571 — **Security drift guards.** Two new tests cover
+              the cycle-376 Lua sandbox: safe-mode nils 16
+              dangerous stdlib APIs (os.execute/exit/remove/
+              rename/tmpname/setlocale + io.open/popen/lines/
+              input/output/stdin/stdout/stderr + loadfile/
+              dofile + package.loadlib); trusted-mode keeps
+              them callable. The SECURITY.md cycle-447 "Lua
+              plugin sandbox escape" scope is now build-time-
+              enforced rather than manual-review-only.
+              Workspace tests 323 → 325.
+
 ## [1.44.0] — 2026-05-22
 
 Recovery release. The cycle-553 release.yml gate added in v1.43.0
