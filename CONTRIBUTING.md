@@ -85,7 +85,7 @@ Each cycle has the same shape:
    green `just gauntlet` locally is the same gate every PR
    runs on every OS. `just --list` shows every recipe
    (`fmt` / `clippy` / `test` / `doc` / `deny` / `machete` /
-   `gauntlet` / `gauntlet-strict` / `build` / `release` /
+   `build` / `release` / `gauntlet` / `gauntlet-strict` /
    `screenshot` / `menu` / `bench` / `install` / `uninstall` /
    `run` / `clean`). `just deny` (`cargo deny check`) and
    `just machete` (`cargo machete`) mirror the supply-chain CI
