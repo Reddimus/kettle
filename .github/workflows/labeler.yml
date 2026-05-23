@@ -37,6 +37,9 @@ jobs:
   label:
     name: Apply labels by changed paths
     runs-on: ubuntu-latest
+    # Cycle 600 budget cap. Vendored JS action, ~10 s real time;
+    # 5 min handles a GitHub API rate-limit retry.
+    timeout-minutes: 5
     steps:
       # The `actions/labeler` action vendors all the logic itself —
       # no setup-node / etc. needed. Pinned to v5 (current latest as

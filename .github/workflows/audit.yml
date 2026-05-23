@@ -45,6 +45,9 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # Cycle 600 budget cap. cargo-audit completes in <2 min; 10 min
+    # is 5× headroom for a slow advisory-DB fetch.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       # Official RustSec action. Vendors `cargo-audit`, runs against the

@@ -45,6 +45,9 @@ jobs:
   actionlint:
     name: lint workflows
     runs-on: ubuntu-latest
+    # Cycle 600 budget cap. actionlint binary + scan runs in <30 s;
+    # 5 min is generous and still well below the 360-min default.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       # Download the actionlint binary via the upstream-maintained

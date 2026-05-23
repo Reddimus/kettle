@@ -24,6 +24,16 @@ jobs:
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Cycle 600: per-job timeout. GitHub Actions defaults each job
+    # to 360 min (6 hours); a hung test or runaway loop would burn
+    # the full default before failing. Real ci.yml job time is
+    # ~15-25 min (cold-cache Rust build × 3 OSes); 45 min is ~2×
+    # headroom for a slow runner without giving a hang the full
+    # 6-hour budget. Pairs with cycle 597's cancel-in-progress
+    # concurrency block — both budget-protection measures per the
+    # maintainer's cycle-444 GitHub Actions budget exhaustion
+    # directive.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -370,6 +380,11 @@ jobs:
   msrv:
     name: msrv (rust 1.89)
     runs-on: ubuntu-latest
+    # Cycle 600: per-cycle-600 timeout rationale. MSRV job runs the
+    # same gauntlet as the matrix `build` job on a pinned toolchain.
+    # 30 min is ~2× the observed time; tighter than `build` because
+    # this job is Linux-only (no Windows runner overhead).
+    timeout-minutes: 30
     # Cycle 287: the cycle-251 `menu_visual.rs` integration test
     # initializes wgpu (it renders a PNG via the same `capture_png_with`
     # path the `--screenshot-menu` CLI flag uses). The MSRV job needs

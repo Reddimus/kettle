@@ -44,6 +44,9 @@ jobs:
   machete:
     name: unused deps
     runs-on: ubuntu-latest
+    # Cycle 600 budget cap. cargo-machete runs in <1 min real time;
+    # 10 min handles a cold rust-cache restore.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -42,6 +42,10 @@ jobs:
   cargo-deny:
     name: cargo deny check
     runs-on: ubuntu-latest
+    # Cycle 600 budget cap. cargo-deny scans Cargo.lock for license/
+    # source/banned-crate violations; ~3 min real time. 10 min is 3×
+    # headroom for the action's vendored binary download.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       # The official EmbarkStudios action vendors `cargo-deny`

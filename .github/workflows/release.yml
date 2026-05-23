@@ -12,6 +12,14 @@ jobs:
   package:
     name: package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Cycle 600 budget cap. Release builds compile in --release mode
+    # (slow), bundle assets, hash, and upload — real time runs
+    # ~25-40 min per OS. 75 min is ~2× headroom for a slow runner
+    # without giving a hang the full 6-hour default. NOTE: unlike
+    # ci.yml (cycle 597), release.yml is NOT covered by cancel-in-
+    # progress concurrency — a release must always complete, never
+    # be canceled mid-upload (cycle-558 incident recovery).
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
