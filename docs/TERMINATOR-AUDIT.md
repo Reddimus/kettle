@@ -275,7 +275,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `run_cmd_on_match.py` | Run command on regex match | C | extend cycle-289 triggers with a `RunCommand` action variant |
 | `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | `remote.py` | SSH/Docker/Podman session detection | C | OSC 7 cwd + an env-var probe + title update |
-| `logger.py` | Log terminal output to file | C | new action `ToggleSessionLog` + a `log-output-to-file` config knob |
+| `logger.py` | Log terminal output to file | A | cycle-621 `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
 | `terminalshot.py` | Screenshot focused terminal | A | cycle-294 `--annotate` + the existing `--screenshot` |
 | `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
@@ -390,7 +390,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `run_cmd_on_match` (run cmd on regex match) | plugins | 🟡 cycle-289 fires urgency only | extend trigger action enum with `RunCommand(argv)` |
 | ~~`custom_commands`~~ (user-defined context menu items) | plugins | ✅ cycle-611 — `menu-item = LABEL = CMD` config key splits on first `=`, writes CMD\n to focused pane PTY on click | cycle-611 |
 | `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
-| `logger.py` (log session to file) | plugins | ❌ | new action `ToggleSessionLog` + a per-pane `log-to-file = PATH` |
+| ~~`logger.py`~~ (log session to file) | plugins | ✅ cycle-621 — `Action::ToggleSessionLog` opens `<cache>/kettle/logs/...` and writes raw PTY bytes from reader thread via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot | cycle-621 |
 | ~~`dir_open.py`~~ (open cwd in file manager) | plugins | ✅ cycle-607 — `Action::OpenCwdInFileManager` builds `file://{cwd}` via `open_url()` (which uses the `open` crate) | cycle-607 |
 | ~~`auto_theme.py`~~ (light/dark switching) | plugins | ✅ cycle-616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` runtime swap (manual; sunrise/sunset auto-detect is a follow-up) | cycle-616 |
 | `cell_width` / `cell_height` (per-character cell scaling) | config.py | ❌ | new config keys; font-metric override |

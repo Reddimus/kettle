@@ -124,6 +124,13 @@ pub struct Terminal {
     /// The argv this pane was launched with (empty = default shell);
     /// persisted so SSH/remote panes can be restored.
     pub argv: Vec<String>,
+    /// Cycle 621 (Terminator parity, `plugins/logger.py`): optional
+    /// per-pane session log. When `Some(file)`, the reader thread
+    /// writes a copy of every raw PTY byte to the file (best-effort:
+    /// I/O errors are swallowed so a full disk doesn't take down
+    /// the reader). When `None`, no-op cost on the hot path —
+    /// just a Mutex lock + Option check per buf read.
+    pub log_file: Arc<Mutex<Option<std::fs::File>>>,
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
@@ -382,6 +389,12 @@ impl Terminal {
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
+        // Cycle 621 (Terminator parity, `plugins/logger.py`): per-pane
+        // session log. Default None; `Action::ToggleSessionLog`
+        // opens/closes it at runtime. The reader thread holds a
+        // clone and writes raw PTY bytes when Some.
+        let log_file: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(None));
+        let log_file_for_struct = log_file.clone();
 
         let reader_thread = {
             let term = term.clone();
@@ -394,6 +407,7 @@ impl Terminal {
             let command_finished = command_finished.clone();
             let cwd_cell = cwd_cell.clone();
             let cell_px = cell_px.clone();
+            let log_file = log_file.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
@@ -407,6 +421,17 @@ impl Terminal {
                                 break;
                             }
                             Ok(n) => {
+                                // Cycle 621 (Terminator parity, logger.py):
+                                // per-pane session log tap. Best-effort —
+                                // I/O errors are swallowed so a full disk
+                                // doesn't crash the reader. Held lock is
+                                // brief (just the write call).
+                                if let Ok(mut guard) = log_file.lock()
+                                    && let Some(f) = guard.as_mut()
+                                {
+                                    use std::io::Write as _;
+                                    let _ = f.write_all(&buf[..n]);
+                                }
                                 // Cycle 378: ship raw PTY bytes to the
                                 // App via the output_tx sidechannel
                                 // (if any plugin subscriber is listening).
@@ -632,6 +657,7 @@ impl Terminal {
             command_finished,
             cwd: cwd_cell,
             argv: argv.to_vec(),
+            log_file: log_file_for_struct,
             cell_px,
         })
     }

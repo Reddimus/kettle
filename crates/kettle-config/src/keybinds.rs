@@ -259,6 +259,14 @@ pub enum Action {
     /// `warn`). Distinct from `NextTheme` / `PrevTheme` which walk
     /// the full bundled list.
     ToggleLightDark,
+    /// Cycle 621 Terminator parity (`plugins/logger.py`):
+    /// toggle the focused pane's per-pane session log. When off,
+    /// opens a new file at `<cache>/kettle/logs/kettle-<secs>-<pid>.log`
+    /// and starts tee-ing raw PTY bytes to it (no ANSI stripping —
+    /// the log preserves exact terminal output for later replay).
+    /// When on, closes the file. Per-pane state (per-tab and
+    /// per-window). No-op + warn when the cache dir can't be created.
+    ToggleSessionLog,
     /// Cycle 342 Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -439,6 +447,13 @@ pub fn action_names() -> Vec<&'static str> {
         "toggle-light-dark",
         "toggle_theme_variant",
         "toggle-theme-variant",
+        // Cycle 621 — logger.py runtime tap.
+        "toggle_session_log",
+        "toggle-session-log",
+        "start_logger",
+        "start-logger",
+        "stop_logger",
+        "stop-logger",
         "page_up_half",
         "page_down_half",
         "scroll_page_up_half",
@@ -578,6 +593,8 @@ impl Action {
             | "toggle-light-dark"
             | "toggle_theme_variant"
             | "toggle-theme-variant" => ToggleLightDark,
+            "toggle_session_log" | "toggle-session-log" | "start_logger" | "start-logger"
+            | "stop_logger" | "stop-logger" => ToggleSessionLog,
             "page_up_half" | "page-up-half" | "scroll_page_up_half" => ScrollPageUpHalf,
             "page_down_half" | "page-down-half" | "scroll_page_down_half" => ScrollPageDownHalf,
             "paste_selection" | "paste-selection" | "paste_primary" => PastePrimary,

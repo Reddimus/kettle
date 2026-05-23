@@ -120,6 +120,46 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
     }
 }
 
+/// Cycle 621 (Terminator parity, `plugins/logger.py`): build the
+/// per-pane session-log path. Lives under `<cache>/kettle/logs/`
+/// (XDG-respecting via env probe; falls back to `./kettle-logs/`
+/// when no cache dir is available).
+///
+/// File name shape: `kettle-<unix-secs>-<pid>.log`. unix-secs is
+/// sortable; pid disambiguates simultaneous starts across windows.
+///
+/// Pure modulo the explicit `unix_secs` + `cache_dir` inputs —
+/// caller pins both so the helper is fully unit-testable.
+fn session_log_path(
+    unix_secs: u64,
+    pid: u32,
+    cache_dir: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let dir = cache_dir
+        .map(|p| p.to_path_buf().join("kettle").join("logs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("kettle-logs"));
+    dir.join(format!("kettle-{unix_secs}-{pid}.log"))
+}
+
+/// Cycle 621: locate the XDG cache dir for the current user without
+/// pulling in the `dirs` crate. Probes `$XDG_CACHE_HOME` first
+/// (the spec-canonical var) then `$HOME/.cache` on Linux/macOS,
+/// then `$LOCALAPPDATA` on Windows-ish, returning `None` if none
+/// are set (CI / container envs). Pure modulo the env-var reader
+/// fn so tests can pin the env.
+fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path::PathBuf> {
+    if let Some(p) = get("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(p));
+    }
+    if let Some(home) = get("HOME").filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(home).join(".cache"));
+    }
+    if let Some(p) = get("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(p));
+    }
+    None
+}
+
 /// Cycle 620 (Terminator parity, terminatorlib/config.py:88
 /// `homogeneous_tabbar`): per-tab widths for the tab-bar strip.
 ///
@@ -3689,6 +3729,48 @@ impl App {
                     );
                 }
             }
+            Action::ToggleSessionLog => {
+                // Cycle 621 (Terminator parity, `plugins/logger.py`):
+                // toggle the focused pane's session log. Pure helper
+                // computes the file path; this arm does the I/O.
+                if let Some(pane) = self.mux.focused() {
+                    let mut guard = match pane.term.log_file.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    if guard.is_some() {
+                        // Drop the file handle to stop logging.
+                        // The reader thread will check is_some() on
+                        // its next read + skip the write.
+                        *guard = None;
+                        log::info!("toggle-session-log: stopped");
+                    } else {
+                        let secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let cache = cache_dir_from_env(|k| std::env::var(k).ok());
+                        let path = session_log_path(secs, std::process::id(), cache.as_deref());
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                        {
+                            Ok(f) => {
+                                log::info!("toggle-session-log: writing to {}", path.display());
+                                *guard = Some(f);
+                            }
+                            Err(e) => log::warn!(
+                                "toggle-session-log: open {} failed: {e}",
+                                path.display()
+                            ),
+                        }
+                    }
+                }
+            }
             Action::ReloadConfig => self.reload_config(),
             Action::MoveTabLeft => {
                 self.mux.move_active_tab(-1);
@@ -6525,6 +6607,70 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 621 drift guard. `session_log_path` is the pure helper
+    /// behind `Action::ToggleSessionLog`. Verify:
+    ///   - lives under `<cache>/kettle/logs/`
+    ///   - filename includes both the unix-secs (for sort) and pid
+    ///     (for collision-resistance across kettle windows)
+    ///   - falls back to a relative dir when no cache dir resolves
+    #[test]
+    fn session_log_path_under_cache_kettle_logs() {
+        use super::session_log_path;
+        let cache = std::path::Path::new("/home/u/.cache");
+        let p = session_log_path(1_716_422_400, 9876, Some(cache));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/home/u/.cache/kettle/logs/kettle-1716422400-9876.log")
+        );
+        // No cache dir resolved → relative fallback (still gets the
+        // log written somewhere instead of erroring out).
+        let p = session_log_path(1_716_422_400, 9876, None);
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("kettle-logs/kettle-1716422400-9876.log")
+        );
+    }
+
+    /// Cycle 621 drift guard. `cache_dir_from_env` probes the XDG /
+    /// HOME / Windows-ish envs in order. Empty values are treated as
+    /// unset so a stripped CI container with `XDG_CACHE_HOME=""`
+    /// falls through to the next probe instead of returning `""`.
+    #[test]
+    fn cache_dir_from_env_probes_in_order() {
+        use super::cache_dir_from_env;
+        // XDG wins when set.
+        let f = |k: &str| match k {
+            "XDG_CACHE_HOME" => Some("/x/cache".to_string()),
+            "HOME" => Some("/h".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            cache_dir_from_env(f).as_deref(),
+            Some(std::path::Path::new("/x/cache"))
+        );
+        // Empty XDG falls through to HOME/.cache.
+        let f = |k: &str| match k {
+            "XDG_CACHE_HOME" => Some(String::new()),
+            "HOME" => Some("/h".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            cache_dir_from_env(f).as_deref(),
+            Some(std::path::Path::new("/h/.cache"))
+        );
+        // Windows-ish fallback when XDG + HOME both unset.
+        let f = |k: &str| match k {
+            "LOCALAPPDATA" => Some(r"C:\Users\u\AppData\Local".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            cache_dir_from_env(f).as_deref(),
+            Some(std::path::Path::new(r"C:\Users\u\AppData\Local"))
+        );
+        // None of the env vars set → None.
+        assert!(cache_dir_from_env(|_| None).is_none());
     }
 
     /// Cycle 620 drift guard. `compute_tab_segment_widths` is the

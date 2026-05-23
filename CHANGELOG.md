@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 621 — **`plugins/logger.py` parity — per-pane session
+              log**:
+                - new `Action::ToggleSessionLog` (aliases:
+                  `start_logger` / `stop_logger` /
+                  `toggle_session_log` plus kebab variants;
+                  Terminator's two-button start/stop UX maps
+                  to one toggle here)
+                - new `pub log_file: Arc<Mutex<Option<File>>>`
+                  on `kettle_core::Terminal`. Reader thread
+                  holds a clone + writes raw PTY bytes (no ANSI
+                  stripping — preserves replayable output)
+                  when the file is Some. Best-effort I/O:
+                  errors are swallowed so a full disk doesn't
+                  crash the reader.
+                - dispatch arm computes path via two new pure
+                  helpers: `session_log_path(unix_secs, pid,
+                  cache_dir)` and `cache_dir_from_env(get)`.
+                  Helpers take primitives + Path/env-fn so
+                  they're fully unit-testable without disk I/O.
+                - file path shape:
+                  `<XDG-cache>/kettle/logs/kettle-<secs>-<pid>.log`
+                  (relative `./kettle-logs/...` fallback when
+                  no cache dir resolves).
+              Drift guards (2 new, both pure):
+                - `session_log_path_under_cache_kettle_logs`:
+                  XDG path shape + relative-fallback shape.
+                - `cache_dir_from_env_probes_in_order`: XDG →
+                  HOME/.cache → LOCALAPPDATA → None; empty-XDG
+                  falls through (CI safety).
+              Workspace tests 363 → 365.
+
   cycle 620 — **Non-homogeneous tab widths (Terminator
               config.py:88 `homogeneous_tabbar = false`)**:
                 - new pure helper `compute_tab_segment_widths`

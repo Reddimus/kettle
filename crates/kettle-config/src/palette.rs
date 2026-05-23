@@ -69,6 +69,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Next theme", NextTheme),
         ("Previous theme", PrevTheme),
         ("Toggle light/dark theme", ToggleLightDark),
+        ("Toggle session log (pane → file)", ToggleSessionLog),
         ("Reset terminal", Reset),
         ("Clear scrollback", ClearHistory),
         ("Reload config", ReloadConfig),
@@ -200,6 +201,7 @@ mod tests {
             NextTheme,
             PrevTheme,
             ToggleLightDark,
+            ToggleSessionLog,
             OpenContextMenu,
             UndoCloseTab,
             DuplicateTab,
@@ -283,6 +285,7 @@ mod tests {
                 | NextTheme
                 | PrevTheme
                 | ToggleLightDark
+                | ToggleSessionLog
                 | OpenContextMenu
                 | UndoCloseTab
                 | DuplicateTab
