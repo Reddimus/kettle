@@ -447,11 +447,6 @@ do not re-litigate without explicit user request.
 - **`maven.py`** domain-specific URL handler. User can ship their own via
   the Bucket-D Lua plugin system once it lands.
 
-- **`cell_width` / `cell_height`** float-multiplier per-character cell
-  scaling. VTE-specific; kettle derives metrics from glyph rendering.
-  Could be added as Bucket C but probably E since the user-facing cell-
-  spacing concern is already covered by `font-size` + `font-feature`.
-
 - **Multi-display X11 awareness** (Bus name hashing in `ipc.py`). Linux-
   specific; kettle is single-display per process by design.
 
