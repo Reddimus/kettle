@@ -46,6 +46,25 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 582 — **Kitty per-id derivative-map saturation sweep.**
+              Final link in the cycle-576..581 kitty
+              resource-cap chain. The store cap from cycle 581
+              didn't propagate to the four other per-id HashMaps
+              in `KittyState` — `anim` (animation control),
+              `virtual_placements` (`U=1` placements), `rel`
+              (parent/child placements), `frames` (per-id
+              animation frame Vec). The `anim` map was the most
+              acute: an attacker can grow it with `a=a,i=N` for
+              arbitrary N **without ever transmitting a real
+              image**. All four insert sites now check
+              `contains_key(...) || len() < MAX_STORED_IMAGES`
+              and bail to `KittyOut::None` past the cap; updates
+              to already-tracked ids still work. Drift guard
+              `kitty_anim_slot_cap_holds_against_distinct_id_flood`
+              fills 64 ids via `a=a`, fires a 65th distinct id
+              (refused), then updates an existing id (accepted,
+              no growth). Workspace tests 331 → 332 (+ 1 ignored).
+
   cycle 581 — **Kitty stored-image cap.** Sixth link in the
               cycle-576..580 kitty resource-cap chain. The
               `store: HashMap<u32, ImageData>` of completed

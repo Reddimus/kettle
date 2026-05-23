@@ -312,6 +312,14 @@ impl KittyState {
         }
         if action == "a" {
             // Animation control. Record state for the renderer playback loop.
+            // Cycle 582: gate the entry on the saturation cap. Updates to an
+            // already-tracked id are always allowed (no growth); a brand-new
+            // id past saturation is a no-op for animation control so an
+            // attacker can't grow `anim` indefinitely by sending `a=a,i=N`
+            // for distinct N without ever transmitting an image.
+            if !self.anim.contains_key(&id) && self.anim.len() >= MAX_STORED_IMAGES {
+                return KittyOut::None;
+            }
             let st = self.anim.entry(id).or_default();
             if let Some(c) = dim("c") {
                 st.current = c.max(1);
@@ -343,6 +351,9 @@ impl KittyState {
                 && let Some(r) = dim("r")
             {
                 if r <= 1 {
+                    // Cycle 582: already inside the `action == "a"` arm so the
+                    // saturation gate above protects this `entry` from growth
+                    // (we only get here if id was admitted). Safe to keep.
                     self.anim.entry(id).or_default().root_gap = z;
                 } else if let Some(fr) = self
                     .frames
@@ -477,12 +488,19 @@ impl KittyState {
                     // MAX_FRAMES_PER_IMAGE, drop the push silently —
                     // the animation already has plenty to play, and
                     // refusing growth bounds the per-id memory ceiling.
-                    let frames = self.frames.entry(fid).or_default();
-                    if frames.len() < MAX_FRAMES_PER_IMAGE {
-                        frames.push(Frame {
-                            img: frame_img,
-                            gap_ms: gap,
-                        });
+                    // Cycle 582: also cap the frames-map slot count so a
+                    // hostile emitter can't grow the map keyset itself
+                    // by firing `a=f,i=N` for many distinct N. Same shape
+                    // as the `anim` / `store` / `virtual_placements`
+                    // saturation gates.
+                    if self.frames.contains_key(&fid) || self.frames.len() < MAX_STORED_IMAGES {
+                        let frames = self.frames.entry(fid).or_default();
+                        if frames.len() < MAX_FRAMES_PER_IMAGE {
+                            frames.push(Frame {
+                                img: frame_img,
+                                gap_ms: gap,
+                            });
+                        }
                     }
                 }
             }
@@ -495,6 +513,15 @@ impl KittyState {
             // `a=p,U=1` registers a virtual placement (shown later via
             // placeholder text); plain `a=p` puts the image at the cursor.
             if virt {
+                // Cycle 582: saturation gate. Updates to an already-tracked
+                // id are always allowed (no growth); brand-new ids past the
+                // cap are dropped so an attacker can't grow the placement
+                // map by firing `a=p,U=1,i=N` for many distinct N.
+                if !self.virtual_placements.contains_key(&id)
+                    && self.virtual_placements.len() >= MAX_STORED_IMAGES
+                {
+                    return KittyOut::None;
+                }
                 self.virtual_placements.insert(
                     id,
                     VirtualPlacement {
@@ -510,8 +537,16 @@ impl KittyState {
             if let Some(parent_img) = dim("P") {
                 let geti = |k: &str| kv.get(k).and_then(|v| v.parse::<i32>().ok());
                 let placement = dim("p").unwrap_or(0);
+                let key = (id, placement);
+                // Cycle 582: saturation gate on the (id, placement) key
+                // space. `rel` keys are pairs; cap at MAX_STORED_IMAGES²
+                // would be huge — use the same flat MAX_STORED_IMAGES so
+                // total entries stay bounded with `store`.
+                if !self.rel.contains_key(&key) && self.rel.len() >= MAX_STORED_IMAGES {
+                    return KittyOut::None;
+                }
                 self.rel.insert(
-                    (id, placement),
+                    key,
                     RelativePlacement {
                         parent_img,
                         parent_placement: dim("Q").unwrap_or(0),
@@ -575,6 +610,16 @@ impl KittyState {
         // placement, but draw nothing at the cursor.
         if first.get("U").map(|v| v == "1").unwrap_or(false) {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
+            // Cycle 582: saturation gate (same shape as the standalone
+            // `a=p,U=1` path above). The store-side gate above doesn't
+            // imply this one — store and virtual_placements are independent
+            // maps, and `U=1` on an existing-id update would silently grow
+            // virtual_placements without it.
+            if !self.virtual_placements.contains_key(&id)
+                && self.virtual_placements.len() >= MAX_STORED_IMAGES
+            {
+                return KittyOut::None;
+            }
             self.virtual_placements.insert(
                 id,
                 VirtualPlacement {
@@ -634,6 +679,15 @@ impl KittyState {
     #[cfg(test)]
     fn store_len_for_test(&self) -> usize {
         self.store.len()
+    }
+
+    /// Test-only accessor for the cycle-582 anim slot cap drift guard.
+    /// `anim` is the most acute remaining per-id HashMap because an
+    /// attacker can grow it with `a=a,i=N` for arbitrary N without ever
+    /// transmitting a real image.
+    #[cfg(test)]
+    fn anim_len_for_test(&self) -> usize {
+        self.anim.len()
     }
 
     /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
@@ -975,6 +1029,36 @@ mod tests {
         // — these are compile-time invariants of the constant itself.
         const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
         const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+    }
+
+    /// Cycle 582 drift guard: `a=a,i=N` for many distinct N must not
+    /// grow the `anim` HashMap past `MAX_STORED_IMAGES`. This is the
+    /// most acute remaining per-id surface because animation control
+    /// doesn't require a prior transmission — every `a=a` admits a
+    /// new id by default. Updates to already-tracked ids still work.
+    #[test]
+    fn kitty_anim_slot_cap_holds_against_distinct_id_flood() {
+        let mut k = KittyState::default();
+        // Fill anim with MAX_STORED_IMAGES distinct ids via `a=a`.
+        for id in 1..=super::MAX_STORED_IMAGES as u32 {
+            k.feed(&format!("a=a,i={id},s=2"));
+        }
+        assert_eq!(k.anim_len_for_test(), super::MAX_STORED_IMAGES);
+        // Distinct id past the cap is refused (no growth).
+        let overflow = super::MAX_STORED_IMAGES as u32 + 1;
+        k.feed(&format!("a=a,i={overflow},s=2"));
+        assert_eq!(
+            k.anim_len_for_test(),
+            super::MAX_STORED_IMAGES,
+            "anim id {overflow} past saturation must be refused"
+        );
+        // Update to an existing tracked id is still accepted.
+        k.feed("a=a,i=1,s=1");
+        assert_eq!(
+            k.anim_len_for_test(),
+            super::MAX_STORED_IMAGES,
+            "update to existing id must not grow the map"
+        );
     }
 
     /// Cycle 581 drift guard: completing more than `MAX_STORED_IMAGES`
