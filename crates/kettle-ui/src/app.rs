@@ -3896,10 +3896,12 @@ impl App {
                     w.request_redraw();
                 }
             }
-            Action::EditPaneGroup => {
-                // Cycle 407: edit the focused pane's broadcast-group
-                // name. Empty input → clear the group. Same overlay
-                // mechanism as cycle-369 EditPaneTitle.
+            Action::EditPaneGroup | Action::CreateGroup => {
+                // Cycle 407 + cycle 642: edit the focused pane's
+                // broadcast-group name. Empty input → clear the
+                // group. Same overlay mechanism as cycle-369
+                // EditPaneTitle. `CreateGroup` (Terminator name)
+                // and `EditPaneGroup` (kettle name) share dispatch.
                 self.close_all_modals();
                 let current = self
                     .mux
@@ -3913,6 +3915,27 @@ impl App {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+            Action::GroupTab | Action::GroupWindow => {
+                // Cycle 642 (named-groups sub-cycle 1, action
+                // surface only). Bulk-assign every pane in scope
+                // to a named group — same overlay as CreateGroup,
+                // but on Apply the input writes to every pane in
+                // scope instead of just the focused one. Wired
+                // in sub-cycle 4 of
+                // [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+                // ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md).
+                log::info!(
+                    "{action:?}: action surface only — bulk-assign wiring lands in named-groups sub-cycle 4"
+                );
+            }
+            Action::UngroupTab | Action::UngroupWindow => {
+                // Cycle 642 (named-groups sub-cycle 1, action
+                // surface only). Bulk-clear the group on every
+                // pane in scope. Wired in sub-cycle 5.
+                log::info!(
+                    "{action:?}: action surface only — bulk-clear wiring lands in named-groups sub-cycle 5"
+                );
             }
             // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
             // key_next_profile + key_previous_profile): runtime cycle

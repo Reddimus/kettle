@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 642 — **named-groups sub-cycle 1: action surface for
+              `CreateGroup` + `GroupTab` + `GroupWindow` +
+              `UngroupTab` + `UngroupWindow`**: 5 new Action
+              variants from [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)
+              plus the 12 aliases that Terminator users would
+              type. Dispatch:
+                - `CreateGroup` and existing cycle-407
+                  `EditPaneGroup` share dispatch (same
+                  title-edit overlay)
+                - `GroupTab` / `GroupWindow` log a TODO pointing
+                  at named-groups sub-cycle 4 (bulk-apply path)
+                - `UngroupTab` / `UngroupWindow` log a TODO
+                  pointing at sub-cycle 5 (bulk-clear path)
+              Palette includes all 5 so the actions are
+              discoverable via the cycle-329 command palette.
+              Workspace tests stay 373 (action enum is covered
+              by the cycle-117 palette drift guard
+              transitively).
+
   cycle 641 — **auto-theme sub-cycle 1: `ThemeMode` enum +
               `theme-mode` config key**: new `ThemeMode {
               Explicit, Light, Dark, Auto }` enum on Config

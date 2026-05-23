@@ -71,6 +71,11 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Toggle light/dark theme", ToggleLightDark),
         ("Toggle session log (pane → file)", ToggleSessionLog),
         ("Take screenshot (focused pane)", TakeScreenshot),
+        ("Create / edit broadcast group", CreateGroup),
+        ("Group every pane in this tab", GroupTab),
+        ("Group every pane in this window", GroupWindow),
+        ("Ungroup every pane in this tab", UngroupTab),
+        ("Ungroup every pane in this window", UngroupWindow),
         ("Reset terminal", Reset),
         ("Clear scrollback", ClearHistory),
         ("Reload config", ReloadConfig),
@@ -204,6 +209,11 @@ mod tests {
             ToggleLightDark,
             ToggleSessionLog,
             TakeScreenshot,
+            CreateGroup,
+            GroupTab,
+            GroupWindow,
+            UngroupTab,
+            UngroupWindow,
             OpenContextMenu,
             UndoCloseTab,
             DuplicateTab,
@@ -289,6 +299,11 @@ mod tests {
                 | ToggleLightDark
                 | ToggleSessionLog
                 | TakeScreenshot
+                | CreateGroup
+                | GroupTab
+                | GroupWindow
+                | UngroupTab
+                | UngroupWindow
                 | OpenContextMenu
                 | UndoCloseTab
                 | DuplicateTab

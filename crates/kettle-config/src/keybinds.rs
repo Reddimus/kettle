@@ -276,6 +276,29 @@ pub enum Action {
     /// lands now so a user can bind a chord ahead of the renderer
     /// work.
     TakeScreenshot,
+    /// Cycle 642 Terminator parity (sub-cycle 1 of
+    /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)).
+    /// `create_group` is Terminator's name for "prompt for a
+    /// group name + assign it to the focused pane." Already wired
+    /// since cycle 407 as `Action::EditPaneGroup`; `CreateGroup`
+    /// is the Terminator-spelled alias.
+    CreateGroup,
+    /// Cycle 642 Terminator parity. Assign every pane in the
+    /// focused tab to a named broadcast group (prompts via the
+    /// title-edit overlay). v1 dispatch logs a TODO; sub-cycle 4
+    /// of the named-groups design wires the bulk-apply path.
+    GroupTab,
+    /// Cycle 642 Terminator parity. Assign every pane in the
+    /// focused window to a named broadcast group. Same stub
+    /// status as `GroupTab`.
+    GroupWindow,
+    /// Cycle 642 Terminator parity. Bulk-clear the group on every
+    /// pane in the focused tab. Sub-cycle 5 wires the implementation.
+    UngroupTab,
+    /// Cycle 642 Terminator parity. Bulk-clear the group on every
+    /// pane in the focused window.
+    UngroupWindow,
     /// Cycle 342 Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -468,6 +491,21 @@ pub fn action_names() -> Vec<&'static str> {
         "take-screenshot",
         "terminalshot",
         "screenshot",
+        // Cycle 642 — named broadcast groups (action surface).
+        "create_group",
+        "create-group",
+        "group_tab",
+        "group-tab",
+        "group_win",
+        "group-win",
+        "group_window",
+        "group-window",
+        "ungroup_tab",
+        "ungroup-tab",
+        "ungroup_win",
+        "ungroup-win",
+        "ungroup_window",
+        "ungroup-window",
         "page_up_half",
         "page_down_half",
         "scroll_page_up_half",
@@ -610,6 +648,11 @@ impl Action {
             "toggle_session_log" | "toggle-session-log" | "start_logger" | "start-logger"
             | "stop_logger" | "stop-logger" => ToggleSessionLog,
             "take_screenshot" | "take-screenshot" | "terminalshot" | "screenshot" => TakeScreenshot,
+            "create_group" | "create-group" => CreateGroup,
+            "group_tab" | "group-tab" => GroupTab,
+            "group_win" | "group-win" | "group_window" | "group-window" => GroupWindow,
+            "ungroup_tab" | "ungroup-tab" => UngroupTab,
+            "ungroup_win" | "ungroup-win" | "ungroup_window" | "ungroup-window" => UngroupWindow,
             "page_up_half" | "page-up-half" | "scroll_page_up_half" => ScrollPageUpHalf,
             "page_down_half" | "page-down-half" | "scroll_page_down_half" => ScrollPageDownHalf,
             "paste_selection" | "paste-selection" | "paste_primary" => PastePrimary,
