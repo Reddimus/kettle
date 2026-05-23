@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 633 — **`docs/TERMINATOR-VERTICAL-TABS-DESIGN.md` —
+              Bucket D design doc for `tab-position = left/right`
+              (vertical tab strip)**: cycle 331/628 wired the
+              parser for the values; this design lays out the
+              render-layer change needed for the actual layout.
+              Architecture:
+                - new `TabBarPos::Left` / `::Right` variants
+                - new `App::content_rect()` pure helper that
+                  branches the pane-content rect on
+                  (tab_bar_pos, tab_bar_visible, window_size)
+                - new `kettle_render::TabBarOrientation` enum
+                  (`Horizontal` / `VerticalLeft` / `VerticalRight`)
+                  parameter on `paint_tab_bar`
+                - hit-testing flip on cursor_in_tab_bar /
+                  tab_seg_at_cursor / tab_close_at_cursor
+                - drag-reorder generalized to either axis
+                - new `tab-bar-width = 180` config knob for
+                  vertical strip width
+              8 sub-cycles, +10-12 estimated tests. Audit row
+              promoted from B-partial to A+D with cross-link.
+              No code change.
+
   cycle 632 — **`docs/TERMINATOR-AUTO-THEME-DESIGN.md` — Bucket D
               design doc for auto-detect + sunrise/sunset (the
               other half of `plugins/auto_theme.py` not shipped

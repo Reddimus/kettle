@@ -307,7 +307,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `audible_bell` / `visible_bell` / `urgent_bell` | config.py | ✅ `bell = off/visual/attention/both` | cycle-X |
 | `background_color` opacity (via `background_darkness`) | config.py | ✅ `background-opacity` | cycle-X |
 | `word_chars` (double-click word boundaries) | config.py | ✅ `word-delimiters` | cycle-X |
-| `tab_position` (top/bottom) | config.py | 🟡 partial — only top/bottom; `left/right/hidden` missing | (see Bucket B) |
+| `tab_position` (top/bottom) | config.py | A+D | A: top/bottom/hidden shipped (cycle 331 + cycle 628 alias). D: left/right designed in [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](TERMINATOR-VERTICAL-TABS-DESIGN.md) — `TabBarOrientation` enum + content_rect helper + hit-test flip + drag-axis generalization. 8 sub-cycles. |
 | `broadcast_default = group` (per-tab broadcast) | config.py | ✅ per-tab broadcast via `Super+G` | cycle-X |
 | `scrollbar_position = right/hidden` | config.py | ✅ `scrollbar = always/auto/never` | cycle-X |
 | split_horiz / split_vert / split_auto | keybinds | ✅ same actions | cycle-X |
