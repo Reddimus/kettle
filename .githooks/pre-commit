@@ -51,7 +51,8 @@ fi
 
 # Code paths touched — run the quality gate. Cycle 502: log
 # elapsed time so a contributor running a slow-clippy commit
-# knows it's the linter taking ~30s, not a hung hook.
+# knows it's the linter taking 30-90s on a cold cache, not a
+# hung hook. Warm-cache incremental rebuilds finish in <5s.
 start_sec=$(date +%s)
 echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test ..." >&2
 cargo fmt --all --check
