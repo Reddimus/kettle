@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 628 — **`tab-position` Terminator alias (config.py:144)**:
+              cycle-331 wired the canonical kettle key
+              `tab-bar-position` with all 4 Terminator values
+              (top/bottom/hidden/left/right). Cycle 628 accepts
+              the Terminator-spelled `tab-position` / `tab_position`
+              as additional aliases so a Terminator config file
+              binds without rename. Both the parser arm and the
+              `detect_malformed_values` diagnostic arm updated;
+              drift guard `tab_position_alias_parses` covers 5
+              input shapes including the parse-time-accepted
+              left/right runtime-fallback. Workspace tests 369 → 370.
+
   cycle 627 — **Doc-truth refresh (round 4)**: 7 more stale
               audit-doc rows flipped, citing the cycles that
               closed them:

@@ -1410,16 +1410,19 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "false" | "auto" | "always"
                 ),
-                "tab-bar-position" => {
-                    // Cycle 331 (Terminator parity, terminatorlib/config.py:144
-                    // `tab_position` accepts top/left/right/bottom/hidden).
-                    // kettle accepts top + bottom natively, treats `hidden`
-                    // as the well-known alias for `tab-bar = off` (the
-                    // separate visibility key). `left`/`right` would require
-                    // a vertical-tab-bar render-layer change (Bucket C in
-                    // docs/TERMINATOR-AUDIT.md); accepted here so a config
-                    // copied from Terminator doesn't fail --check-config, but
-                    // the runtime falls through to top with a log::warn.
+                "tab-bar-position" | "tab-position" | "tab_position" => {
+                    // Cycle 331 + cycle 628 (Terminator parity,
+                    // terminatorlib/config.py:144 `tab_position` accepts
+                    // top/left/right/bottom/hidden). kettle accepts top +
+                    // bottom natively, treats `hidden` as the well-known
+                    // alias for `tab-bar = off` (the separate visibility
+                    // key). `left`/`right` would require a vertical-tab-bar
+                    // render-layer change (Bucket C in docs/TERMINATOR-AUDIT.md);
+                    // accepted here so a config copied from Terminator doesn't
+                    // fail --check-config, but the runtime falls through to
+                    // top with a log::warn. Cycle 628 added the Terminator-
+                    // spelled `tab-position` / `tab_position` aliases (kettle
+                    // canonical is `tab-bar-position`).
                     matches!(
                         v.to_ascii_lowercase().as_str(),
                         "top" | "bottom" | "hidden" | "left" | "right"
@@ -1733,10 +1736,10 @@ impl Config {
                         _ => TabBarMode::Always,
                     }
                 }
-                "tab-bar-position" => {
-                    // Cycle 331 (Terminator parity, terminatorlib/config.py:144
-                    // `tab_position`). Terminator accepts top/left/right/
-                    // bottom/hidden. kettle:
+                "tab-bar-position" | "tab-position" | "tab_position" => {
+                    // Cycle 331 + cycle 628 (Terminator parity,
+                    // terminatorlib/config.py:144 `tab_position`). Terminator
+                    // accepts top/left/right/bottom/hidden. kettle:
                     //   - `top` / `bottom`: native (cycle-X).
                     //   - `hidden`: alias to `tab-bar = off` (the kettle
                     //     visibility-vs-position split — different keys).
@@ -4754,6 +4757,38 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 628 drift guard. Terminator's `tab_position` is kettle's
+    /// `tab-bar-position`. A Terminator config that says
+    /// `tab_position = bottom` (or `= hidden`) should now bind cleanly.
+    #[test]
+    fn tab_position_alias_parses() {
+        // Terminator-spelled value applies the expected mode.
+        let cfg = Config::parse_text("tab-position = bottom\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+        // Underscore spelling.
+        let cfg = Config::parse_text("tab_position = bottom\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+        // `hidden` value flips the visibility (not the position).
+        let cfg = Config::parse_text("tab-position = hidden\n");
+        assert_eq!(cfg.tab_bar, TabBarMode::Off);
+        // Top default preserved when not set.
+        let cfg = Config::parse_text("\n");
+        assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
+        // left/right accepted (parser-side) but log::warn'd at runtime.
+        // detect_malformed_values should NOT flag these (they're known
+        // values even if unimplemented at render time).
+        let bad = Config::detect_malformed_values("tab-position = left\n");
+        assert!(
+            !bad.iter().any(|m| m.contains("tab-position")),
+            "tab-position = left should be accepted at parse time (got: {bad:?})"
+        );
+        let bad = Config::detect_malformed_values("tab_position = right\n");
+        assert!(
+            !bad.iter().any(|m| m.contains("tab_position")),
+            "tab_position = right should be accepted at parse time (got: {bad:?})"
+        );
     }
 
     /// Cycle 626 drift guard. Terminator's `audible_bell` doesn't
