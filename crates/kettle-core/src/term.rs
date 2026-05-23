@@ -687,6 +687,21 @@ impl Terminal {
         self.cwd.lock().ok().and_then(|c| c.clone())
     }
 
+    /// Cycle 639 (Terminator parity, sub-cycle 1 of
+    /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)):
+    /// PTY child PID accessor. Returns the OS pid of the shell that
+    /// kettle spawned at pane creation. None means either:
+    ///   - lock contention (extremely rare; the reader thread holds
+    ///     the child mutex briefly when reaping after exit)
+    ///   - the platform doesn't expose pids for this Child type
+    ///     (Windows fallback path)
+    ///
+    /// Used by the upcoming remote-session detector to root the
+    /// process-tree walk. Read-only — does not consume the Child.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|c| c.process_id())
+    }
+
     /// Cycle 612 (Terminator parity, `command_notify.py`): pop every
     /// `CommandFinished` event the reader thread queued since the
     /// previous call. The App drains this each tick to fire desktop

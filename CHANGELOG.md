@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 639 — **remote.py sub-cycle 1: `Terminal::child_pid()`
+              accessor**: new public method on `kettle_core::
+              Terminal` returns the PTY child's OS pid via
+              `portable_pty::Child::process_id()`. Read-only,
+              doesn't consume the Child. The upcoming remote-
+              session detector (sub-cycles 2-6 from
+              [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md))
+              roots its process-tree walk here. Returns None on
+              lock contention or platforms without pid access.
+              No new drift guard — the method is one line over
+              the existing child Arc<Mutex<>>; the upcoming
+              `kettle_remote::detect_remote` tests will cover it
+              transitively. Workspace tests stay 371.
+
   cycle 638 — **confirm-dialog sub-cycle 1: `should_prompt`
               pure helper**: new `AskBeforeClosing::should_prompt(
               scope_count) -> bool` method on the existing enum
