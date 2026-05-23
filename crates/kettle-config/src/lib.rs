@@ -735,6 +735,32 @@ pub struct Config {
     /// one trigger doesn't sink the whole config load — invalid
     /// patterns are logged via `log::warn!` and dropped.
     pub triggers: Vec<OutputTrigger>,
+    /// Cycle 611 (Terminator parity, `terminatorlib/plugins/
+    /// custom_commands.py` → "Custom Commands" menu). User-defined
+    /// right-click menu entries: each `menu-item = LABEL = CMD`
+    /// config line appends one row. Clicking the row writes
+    /// `CMD\n` to the focused pane's PTY (same shape as
+    /// `kettle.send_text` from cycle 325). Strictly additive on
+    /// top of the built-in context menu items.
+    ///
+    /// Distinct from the cycle-375 `kettle.add_menu_item(label,
+    /// callback)` Lua API: that one takes a callback for
+    /// arbitrary Lua-side behavior; this one is config-file-only
+    /// and sends literal text. Use this entry for plain
+    /// "type this command" rows; use Lua for anything richer.
+    pub menu_items: Vec<MenuItem>,
+}
+
+/// Cycle 611: a user-defined right-click menu entry from
+/// `menu-item = LABEL = CMD`. The label is shown in the menu;
+/// the command is sent as PTY input + `\n` when the row is
+/// clicked. Plain text, no shell expansion or env substitution
+/// at parse time — the user's shell does that when the
+/// command arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem {
+    pub label: String,
+    pub command: String,
 }
 
 /// Cycle 289: one configured output-trigger rule. Plain-string
@@ -886,6 +912,7 @@ impl Default for Config {
             shell: None,
             ssh_hosts: Vec::new(),
             triggers: Vec::new(),
+            menu_items: Vec::new(),
         }
     }
 }
@@ -1275,6 +1302,9 @@ impl Config {
                 // check-config time so users see the issue before
                 // an event they expected to fire never does.
                 "trigger" => regex::Regex::new(v.trim()).is_ok(),
+                "menu-item" | "menu_item" => v
+                    .split_once('=')
+                    .is_some_and(|(l, c)| !l.trim().is_empty() && !c.trim().is_empty()),
                 _ => true,
             };
             if !ok {
@@ -2026,6 +2056,27 @@ impl Config {
                             pattern,
                             action: TriggerAction::Urgency,
                         });
+                    }
+                }
+                "menu-item" | "menu_item" => {
+                    // Cycle 611 (Terminator parity, custom_commands.py):
+                    // `menu-item = LABEL = CMD` appends a right-click
+                    // menu entry that writes `CMD\n` to the focused
+                    // PTY on click. The cycle-X line-parser already
+                    // consumed the first `=` to split key/value, so
+                    // here we split `e.value` on the FIRST `=` again
+                    // to get label vs command. A label with no `=`
+                    // is rejected (parser arm logs nothing — the
+                    // line just doesn't materialize a row).
+                    if let Some((label, cmd)) = e.value.split_once('=') {
+                        let label = label.trim();
+                        let cmd = cmd.trim();
+                        if !label.is_empty() && !cmd.is_empty() {
+                            cfg.menu_items.push(MenuItem {
+                                label: label.to_string(),
+                                command: cmd.to_string(),
+                            });
+                        }
                     }
                 }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
@@ -4222,6 +4273,83 @@ mod config_tests {
         // typo'd line doesn't fire on every byte.
         assert!(Config::parse_text("trigger =\n").triggers.is_empty());
         assert!(Config::parse_text("trigger =   \n").triggers.is_empty());
+    }
+
+    /// Cycle 611 drift guard. `menu-item = LABEL = CMD` accumulates
+    /// `MenuItem` rows used by the chrome to extend the right-click
+    /// context menu (Terminator parity, `custom_commands.py`). The
+    /// FIRST `=` in the line splits key/value (consumed by the
+    /// cycle-X line parser); the FIRST `=` of the value splits
+    /// label/command. Subsequent `=` in the command are preserved
+    /// (so `cmd = foo=bar` is a label "cmd" + command "foo=bar").
+    /// Malformed lines (missing the value-side `=`, empty label,
+    /// empty command) are silently dropped at parse time.
+    #[test]
+    fn menu_item_parses_label_and_command() {
+        let cfg = Config::parse_text(
+            "menu-item = Clear screen = clear\n\
+             menu-item = Open editor = $EDITOR ~/.bashrc\n\
+             # subsequent `=` in the command survive the split:\n\
+             menu-item = Set FOO = export FOO=bar\n",
+        );
+        assert_eq!(cfg.menu_items.len(), 3);
+        assert_eq!(cfg.menu_items[0].label, "Clear screen");
+        assert_eq!(cfg.menu_items[0].command, "clear");
+        assert_eq!(cfg.menu_items[1].label, "Open editor");
+        assert_eq!(cfg.menu_items[1].command, "$EDITOR ~/.bashrc");
+        assert_eq!(cfg.menu_items[2].label, "Set FOO");
+        assert_eq!(cfg.menu_items[2].command, "export FOO=bar");
+        // Default config has no entries.
+        assert!(Config::default().menu_items.is_empty());
+        // Malformed forms: silently dropped (the check-config malformed
+        // diagnostic surfaces them; the parser doesn't materialize a row).
+        assert!(
+            Config::parse_text("menu-item = onlylabel\n")
+                .menu_items
+                .is_empty(),
+            "missing the value-side `=` separator"
+        );
+        assert!(
+            Config::parse_text("menu-item =  = cmd\n")
+                .menu_items
+                .is_empty(),
+            "empty label"
+        );
+        assert!(
+            Config::parse_text("menu-item = label = \n")
+                .menu_items
+                .is_empty(),
+            "empty command"
+        );
+        // `menu_item` (underscore) is accepted as an alias of
+        // `menu-item` (kebab) — same convention as the rest of the
+        // grammar (cycle 175 underscore-vs-kebab cleanup).
+        let alias_cfg = Config::parse_text("menu_item = test = ls\n");
+        assert_eq!(alias_cfg.menu_items.len(), 1);
+        assert_eq!(alias_cfg.menu_items[0].label, "test");
+    }
+
+    /// Cycle 611 drift guard for the check-config malformed-value
+    /// surfacing. A `menu-item` line without a second `=` (or with
+    /// empty label / command) should show up in the malformed list
+    /// so the user sees the issue at `kettle --check-config` time
+    /// rather than silently getting no menu row.
+    #[test]
+    fn detect_malformed_values_flags_invalid_menu_item() {
+        let cases = [
+            "menu-item = no-separator",
+            "menu-item =  = cmd",
+            "menu-item = label = ",
+        ];
+        for case in cases {
+            let bad = Config::detect_malformed_values(&format!("{case}\n"));
+            assert!(
+                bad.iter().any(|m| m.contains("menu-item")),
+                "expected malformed-value diagnostic for {case:?}, got {bad:?}"
+            );
+        }
+        // Well-formed line: no diagnostic.
+        assert!(Config::detect_malformed_values("menu-item = ok = ls\n").is_empty());
     }
 
     #[test]

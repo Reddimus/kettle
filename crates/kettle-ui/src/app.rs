@@ -445,6 +445,10 @@ struct HintTarget {
 enum ContextMenuClick {
     Action(Action),
     LuaMenuItem(usize),
+    /// Cycle 611 (Terminator parity, `custom_commands.py`): a
+    /// `menu-item = LABEL = CMD` config entry. Dispatch writes
+    /// `CMD\n` to the focused pane's PTY.
+    ConfigCommand(String),
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -464,6 +468,16 @@ enum ContextMenuItem {
     LuaItem {
         label: String,
         lua_idx: usize,
+    },
+    /// Cycle 611 (Terminator parity, `custom_commands.py`): user-
+    /// defined menu entry from a config-file `menu-item = LABEL =
+    /// CMD` line. Dispatch writes `command + "\n"` to the focused
+    /// PTY. Simpler than `LuaItem` — no callback, just literal
+    /// text. Use this for "Run `clear`" / "Open `~/.bashrc` in
+    /// `$EDITOR`" / etc.
+    ConfigItem {
+        label: String,
+        command: String,
     },
 }
 
@@ -528,7 +542,9 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
     matches!(
         item,
-        ContextMenuItem::Item { enabled: true, .. } | ContextMenuItem::LuaItem { .. }
+        ContextMenuItem::Item { enabled: true, .. }
+            | ContextMenuItem::LuaItem { .. }
+            | ContextMenuItem::ConfigItem { .. }
     )
 }
 
@@ -2812,6 +2828,28 @@ impl App {
         ]
     }
 
+    /// Cycle 611 (Terminator parity, `custom_commands.py`): append
+    /// every `menu-item = LABEL = CMD` config entry to the context-
+    /// menu item list. Called by `open_context_menu` AFTER the
+    /// built-in items + BEFORE the Lua-supplied items so the visual
+    /// order from top to bottom is:
+    ///     built-in actions → separator → config-file commands →
+    ///     separator → Lua-registered items
+    /// (matching the layered priority: kettle's own → user's config-
+    /// file customization → user's Lua plugin customization).
+    fn append_config_menu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        if self.cfg.menu_items.is_empty() {
+            return;
+        }
+        items.push(ContextMenuItem::Separator);
+        for mi in &self.cfg.menu_items {
+            items.push(ContextMenuItem::ConfigItem {
+                label: mi.label.clone(),
+                command: mi.command.clone(),
+            });
+        }
+    }
+
     /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
     /// append every Lua-registered menu item to the context-menu
     /// item list. Called by `open_context_menu` after the built-in
@@ -2842,6 +2880,8 @@ impl App {
     fn open_context_menu(&mut self, px: f32, py: f32) {
         self.close_all_modals();
         let mut items = self.context_menu_items();
+        // Cycle 611: append config-file menu items (if any).
+        self.append_config_menu_items(&mut items);
         // Cycle 375: append Lua-supplied items (if any).
         self.append_lua_menu_items(&mut items);
         // Highlight the first enabled non-separator item.
@@ -2854,7 +2894,9 @@ impl App {
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
+                ContextMenuItem::Item { .. }
+                | ContextMenuItem::LuaItem { .. }
+                | ContextMenuItem::ConfigItem { .. } => row_h,
             })
             .sum();
         let max_chars = items
@@ -2862,6 +2904,7 @@ impl App {
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -2928,7 +2971,9 @@ impl App {
         for item in &menu.items {
             let h = match item {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
+                ContextMenuItem::Item { .. }
+                | ContextMenuItem::LuaItem { .. }
+                | ContextMenuItem::ConfigItem { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 match item {
@@ -2939,6 +2984,9 @@ impl App {
                     } => return Some(ContextMenuClick::Action(action.clone())),
                     ContextMenuItem::LuaItem { lua_idx, .. } => {
                         return Some(ContextMenuClick::LuaMenuItem(*lua_idx));
+                    }
+                    ContextMenuItem::ConfigItem { command, .. } => {
+                        return Some(ContextMenuClick::ConfigCommand(command.clone()));
                     }
                     _ => return None,
                 }
@@ -2962,7 +3010,9 @@ impl App {
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. } | ContextMenuItem::LuaItem { .. } => row_h,
+                ContextMenuItem::Item { .. }
+                | ContextMenuItem::LuaItem { .. }
+                | ContextMenuItem::ConfigItem { .. } => row_h,
             })
             .sum();
         let max_chars = menu
@@ -2971,6 +3021,7 @@ impl App {
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -2999,6 +3050,11 @@ impl App {
                     enabled: false,
                 },
                 ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: true,
+                },
+                ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
@@ -4940,6 +4996,21 @@ impl ApplicationHandler<UserEvent> for App {
                                 eng.invoke_menu_item(idx);
                             }
                             self.drain_lua_hook_commands("lua menu-item");
+                        }
+                        // Cycle 611 (Terminator parity, custom_commands.py):
+                        // dispatch a config-file `menu-item = LABEL =
+                        // CMD` click by writing the command + newline to
+                        // the focused PTY. Simpler than the LuaItem path
+                        // because there's no callback to invoke + no
+                        // command queue to drain — just bytes to the
+                        // PTY, identical to typing the command
+                        // letter-by-letter.
+                        ContextMenuClick::ConfigCommand(command) => {
+                            if let Some(p) = self.mux.focused() {
+                                let mut bytes = command.into_bytes();
+                                bytes.push(b'\n');
+                                p.term.write(&bytes);
+                            }
                         }
                     }
                     return;

@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 611 — **`menu-item = LABEL = CMD` config grammar**
+              (Terminator parity, `terminatorlib/plugins/
+              custom_commands.py` → "Custom Commands" menu).
+              Repeatable config-file syntax that appends a
+              right-click menu row writing `CMD\n` to the
+              focused pane's PTY on click. Simpler than the
+              cycle-375 `kettle.add_menu_item(label, callback)`
+              Lua API: no callback to author, just literal
+              text. The two paths layer cleanly — visual order
+              top-to-bottom in the menu is: built-in actions →
+              separator → config-file commands (cycle 611) →
+              separator → Lua-registered items (cycle 375).
+              New `Config::menu_items: Vec<MenuItem>` field,
+              new `ContextMenuItem::ConfigItem` + `ContextMenu
+              Click::ConfigCommand` variants, parser arm with
+              both kebab + underscore aliases. Drift guards:
+              `menu_item_parses_label_and_command` walks 6 cases
+              (well-formed, multi-`=`-in-command, default empty,
+              missing separator, empty label, empty command,
+              underscore alias);
+              `detect_malformed_values_flags_invalid_menu_item`
+              ensures `--check-config` surfaces the malformed
+              forms. CONFIG.md row + commented example in
+              kettle.example.config. Workspace tests 349 → 351.
+
   cycle 610 — **CONFIG.md "no-op keys" reclassification.** The
               cycle-564 "Parsed-but-currently-no-op keys" table
               had grown stale as cycles 353 / 359 / 360 / 604 /
