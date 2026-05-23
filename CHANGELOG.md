@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 661 — **Deploy: redeployed local kettle with the
+              live confirm-dialog**. Binary at
+              `~/.local/bin/kettle` reports `1.45.1 (54b49e6)`.
+              User-visible behavior now testable end-to-end:
+              with `ask-before-closing = multiple_terminals`
+              (the default) + 2+ panes open, pressing the
+              CloseWindow chord opens a bottom bar
+              `⚠ Close N pane(s)?      [Cancel]   ▶ Close
+              (Tab/←→ focus · Enter confirm · Esc cancel)`.
+              Tab cycles focus, Enter confirms, Esc cancels.
+
   cycle 660 — **confirm-dialog sub-cycles 3 + 5: renderer
               + dispatch interception (modal goes live)**.
               When `ask-before-closing` fires for
