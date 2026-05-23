@@ -52,10 +52,10 @@ fi
 # Code paths touched — run the quality gate. Cycle 502: log
 # elapsed time so a contributor running a slow-clippy commit
 # knows it's the linter taking ~30s, not a hung hook.
-start_ns=$(date +%s)
+start_sec=$(date +%s)
 echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test ..." >&2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-elapsed=$(($(date +%s) - start_ns))
+elapsed=$(($(date +%s) - start_sec))
 echo "pre-commit: PASSED (${elapsed}s)" >&2
