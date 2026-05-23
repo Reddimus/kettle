@@ -44,6 +44,31 @@ fn wheel_lines(delta: &winit::event::MouseScrollDelta, multiplier: f32) -> i32 {
     (raw * m).round() as i32
 }
 
+/// Cycle 604 (Terminator parity, `key_zoom_in` / `key_zoom_out` via
+/// Ctrl+wheel): pure decision for whether the wheel notch should resize
+/// the font.
+///
+///   * `ctrl` — Ctrl modifier held (the canonical zoom modifier across
+///     gnome-terminal, Terminator, xterm-via-ctrl-shift-plus, etc.).
+///   * `lines` — already-scaled `wheel_lines` result; sign drives the
+///     zoom direction, zero short-circuits.
+///   * `disabled` — `cfg.disable_mousewheel_zoom`. Opt-out for users
+///     who scroll-zoom by accident (laptop touchpads + a Ctrl-meta
+///     remap is a common collision).
+///
+/// Returns `Some(+1)` to grow, `Some(-1)` to shrink, `None` for no-op.
+/// Extracted as a pure helper so the policy is unit-testable without
+/// constructing a full App + winit event loop.
+fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
+    if !ctrl || disabled || lines == 0 {
+        None
+    } else if lines > 0 {
+        Some(1)
+    } else {
+        Some(-1)
+    }
+}
+
 /// Cap an OSC 52 clipboard payload so a hostile program can't make the
 /// terminal allocate/set an unbounded clipboard. Truncates on a UTF-8
 /// char boundary at or below `max` bytes (xterm/kitty also bound this).
@@ -5127,6 +5152,34 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Cycle 604 (Terminator parity): Ctrl+wheel resizes the
+                // font. Fires BEFORE the mouse-tracking pass-through so
+                // it works even when a TUI like tmux/htop has mouse
+                // tracking on — matches gnome-terminal / Terminator /
+                // xterm UX. `cfg.disable_mousewheel_zoom = true`
+                // (recognized since cycle 334; previously a no-op
+                // because the feature it disables didn't exist) opts
+                // out for users who scroll-zoom by accident on a
+                // touchpad. Step size matches the existing keyboard
+                // IncreaseFontSize / DecreaseFontSize actions for a
+                // single source of truth.
+                if let Some(sign) = should_zoom_font(
+                    self.mods.control_key(),
+                    lines,
+                    self.cfg.disable_mousewheel_zoom,
+                ) && let Some(r) = self.renderer.as_mut()
+                {
+                    let new = if sign > 0 {
+                        r.cell_h / 1.25 + 1.0
+                    } else {
+                        (r.cell_h / 1.25 - 1.0).max(6.0)
+                    };
+                    r.set_font_size(new);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Shift+wheel always scrolls the kettle scrollback even
                 // when a TUI has mouse-tracking on (xterm convention).
                 // Without this bypass, you can't scroll back through
@@ -5563,6 +5616,31 @@ mod tests {
         assert_eq!(wheel_lines(&pix, 1.0), 3);
         // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
         assert_eq!(wheel_lines(&one, -5.0), 0);
+    }
+
+    /// Cycle 604 drift guard: pin the `should_zoom_font` policy. The
+    /// in-wheel-handler call relies on this returning Some only when
+    /// Ctrl is held AND the user hasn't opted out via
+    /// `disable-mousewheel-zoom`. If a future refactor accidentally
+    /// inverts the disable check or drops the Ctrl gate, the test
+    /// fires before the regression ships.
+    #[test]
+    fn should_zoom_font_gates_on_ctrl_and_disable_flag() {
+        use super::should_zoom_font;
+        // Ctrl + scroll up + not disabled → +1 (grow font).
+        assert_eq!(should_zoom_font(true, 3, false), Some(1));
+        // Ctrl + scroll down + not disabled → -1 (shrink font).
+        assert_eq!(should_zoom_font(true, -3, false), Some(-1));
+        // Ctrl + scroll up + DISABLED → None (opt-out honored).
+        assert_eq!(should_zoom_font(true, 3, true), None);
+        // No Ctrl → None even when not disabled (regular scrollback
+        // scroll path takes over).
+        assert_eq!(should_zoom_font(false, 3, false), None);
+        // No Ctrl AND disabled → still None.
+        assert_eq!(should_zoom_font(false, 3, true), None);
+        // Zero lines → None (a stale wheel event with no actual
+        // motion shouldn't trigger a font change).
+        assert_eq!(should_zoom_font(true, 0, false), None);
     }
 
     #[test]

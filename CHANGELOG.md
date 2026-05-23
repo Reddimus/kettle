@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 604 — **Ctrl+wheel font zoom + `disable-mousewheel-zoom`
+              opt-out** (Terminator parity, key_zoom_in /
+              key_zoom_out). The `disable-mousewheel-zoom` config
+              key had been recognized by the parser since cycle
+              334 but was a no-op because kettle didn't implement
+              the Ctrl+wheel zoom it disables. This cycle adds
+              both: the feature (Ctrl+wheel grows / shrinks the
+              font, step matches the keyboard
+              `IncreaseFontSize` / `DecreaseFontSize` actions for
+              a single source of truth) AND the disable gate
+              (config bool, default `false`). Fires BEFORE the
+              mouse-tracking pass-through so it works even when
+              a TUI (tmux / htop / nvim with `mouse=a`) has mouse
+              tracking on — matches gnome-terminal / Terminator /
+              xterm UX. New pure helper `should_zoom_font(ctrl,
+              lines, disabled)` exposes the policy for unit-
+              testing without an App fixture. Drift guard
+              `should_zoom_font_gates_on_ctrl_and_disable_flag`
+              walks the six relevant input combinations. CONFIG.md
+              key moved out of "Parsed-but-currently-no-op keys"
+              into the main table; example config gains a
+              commented-out entry. Workspace tests 345 → 346.
+
 ## [1.45.1] — 2026-05-22
 
 Patch release for two critical pane-lifecycle bugs surfaced in

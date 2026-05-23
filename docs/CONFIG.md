@@ -43,6 +43,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
+| `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS window title template — placeholders `{title}` (active pane title), `{cwd}` (active pane cwd), `{tab}` (1-based tab index); `{{`/`}}` escape literal braces |
 | `tab-format` (`tab-title-format`) | string | `{n}: {title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). The trailing `✕` close button is appended by the renderer |
@@ -119,7 +120,6 @@ has no runtime effect today.
 | `cell-width` / `cell-height` | Font cell-grid pixel size overrides |
 | `cursor-color-default` | Use the system / terminal cursor color rather than a config override |
 | `detachable-tabs` | Allow tabs to be dragged out into separate windows. kettle implements this end-to-end via `Action::MoveTabToNewWindow`; the config toggle isn't wired (the feature is always available) |
-| `disable-mousewheel-zoom` | Disable Ctrl+wheel font-size change |
 | `extra-styling` | Render bold/italic with the styled-font features even when palette lacks the variants |
 | `geometry-hinting` | GTK-specific window-size step constraints |
 | `handle-size` | Split-divider grab-width in px |
