@@ -908,6 +908,12 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// the user should see. Empty `Vec` for a default config — terse
 /// default-summary output is the contract.
 ///
+/// Adding a new branch: bump the doc list below, append the `if`,
+/// and add the in-isolation assertion to
+/// `extra_check_config_lines_surface_each_opt_in_key` (cycle 471).
+/// The `extra_check_config_lines_empty_for_default_config` guard
+/// will catch a branch that fires on default config.
+///
 /// Each variant gates on a single field's non-default-ness:
 ///   - `accent` (cycle 309) — `accent_color` is `Some`
 ///   - `bell: force-no-bell` (cycle 349) — `force_no_bell` is `true`
