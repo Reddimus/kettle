@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 711 — **Tooling: `just menu-shot` repro harness for the
+              right-click context menu**:
+              Context-menu UX overhaul (C3-C9 in the plan) needs
+              a reproducible way to capture the menu's visual
+              state across sub-cycles. cycle 711 lands the
+              harness — no behavior change.
+              Adds:
+                - `scripts/menu-screenshot.sh` — launches the
+                  built kettle binary, focuses + resizes the
+                  window to 1280×720 via xdotool, right-clicks
+                  near the center, sleeps 350ms for the menu
+                  paint, captures the screen with scrot. Output
+                  PNG lands in `target/menu-shots/`.
+                - `--name <slug>` flag for labeled outputs.
+                - `--hold` flag to leave kettle running for
+                  manual driving.
+                - Auto-skip when `$DISPLAY` and
+                  `$WAYLAND_DISPLAY` are both unset (headless
+                  CI).
+                - `just menu-shot` recipe that forwards args.
+              Drift guard `scripts_menu_shot_exists_and_executable`
+              pins: file exists, executable bit set, opens with
+              bash shebang, references both scrot + xdotool.
+              Workspace tests 406 → 407.
+
   cycle 710 — **Fix: focused pane titlebar respects theme accent
               cascade (kill the red bar)**:
               User-reported regression: on dark themes (Tokyo

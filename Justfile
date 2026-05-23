@@ -137,6 +137,13 @@ uninstall:
 run:
     cargo run --release -p kettle
 
+# Cycle 711: capture a screenshot of the right-click context menu via
+# scrot + xdotool. Useful for visual regression of the C3-C9 context-
+# menu sub-cycles. Output lands in `target/menu-shots/`. Pass
+# `--name <slug>` to label the file; `--hold` to leave kettle running.
+menu-shot *ARGS:
+    ./scripts/menu-screenshot.sh {{ARGS}}
+
 # Clean every build artifact — `cargo clean` plus the bench /
 # screenshot output PNGs that may have leaked into /tmp.
 clean:

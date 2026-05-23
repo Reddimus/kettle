@@ -1547,4 +1547,42 @@ mod tests {
             }
         }
     }
+
+    /// Cycle 711 drift guard. `scripts/menu-screenshot.sh` is the
+    /// repro harness for the C3-C9 context-menu sub-cycles —
+    /// `just menu-shot` and the CONTRIBUTING workflow both depend on
+    /// it being checked in, executable, and pointing at the right
+    /// kettle binary. Pin the contract:
+    ///   1. file exists at the expected path.
+    ///   2. executable bit set (chmod +x in source control).
+    ///   3. opens with the conventional bash shebang.
+    ///   4. references both `scrot` and `xdotool` (so a refactor that
+    ///      accidentally drops one of the load-bearing tools fails
+    ///      here instead of at runtime on a contributor's machine).
+    #[test]
+    fn scripts_menu_shot_exists_and_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/menu-screenshot.sh");
+        let md = std::fs::metadata(&p).unwrap_or_else(|e| {
+            panic!("missing repro harness at {}: {e}", p.display());
+        });
+        assert!(md.is_file(), "expected file at {}", p.display());
+        let mode = md.permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{} not executable (mode={:o}); run `chmod +x` and re-commit",
+            p.display(),
+            mode
+        );
+        let text = std::fs::read_to_string(&p).expect("read harness");
+        assert!(
+            text.starts_with("#!/usr/bin/env bash") || text.starts_with("#!/bin/bash"),
+            "harness must open with a bash shebang"
+        );
+        assert!(
+            text.contains("scrot") && text.contains("xdotool"),
+            "harness must reference both scrot + xdotool"
+        );
+    }
 }
