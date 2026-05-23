@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.42.0] — 2026-05-22
+
 Post-v1.41.0 polish + a real user-reported bug fix.
 
   cycle 524 — README + INSTALL.md + scripts/install-online.sh
