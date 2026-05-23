@@ -90,8 +90,18 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APP_DIR}" 2>/dev/null || true
   fi
-  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -f -t "${ICON_BASE}" 2>/dev/null || true
+  # Cycle 543: symmetric to cycle 540's install-side cleanup —
+  # if ${ICON_BASE} has no index.theme (the user-local hicolor
+  # case), only rebuild the cache when there IS a theme to cache.
+  # Otherwise the cache reference goes stale referencing now-
+  # removed icons. Remove the broken cache instead so GNOME falls
+  # back to file-system scanning.
+  if command -v gtk-update-icon-cache >/dev/null 2>&1 \
+      && [ -f "${ICON_BASE}/index.theme" ]; then
+    gtk-update-icon-cache -f "${ICON_BASE}" 2>/dev/null || true
+  fi
+  if [ ! -f "${ICON_BASE}/index.theme" ] && [ -f "${ICON_BASE}/icon-theme.cache" ]; then
+    rm -f "${ICON_BASE}/icon-theme.cache"
   fi
   echo "  removed."
   exit 0
