@@ -108,7 +108,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | (unbound) | broadcast_off/group/all | `ToggleBroadcastOff/All` (group mode = per-tab) | A (partial; group-mode is Bucket C) |
 | Ctrl+Shift+C | copy | `Copy` | A |
 | Ctrl+Shift+V | paste | `Paste` | A |
-| (unbound) | paste_selection | — | B (X11 primary selection; Linux-only) |
+| (unbound) | paste_selection | `PastePrimary` (cycle 345) | A (clipboard alias on non-X11; cycle 574 routed through `paste_clipboard` for clamp/bracketed/broadcast) |
 | Shift+Return | send_newline | — | E (most shells already handle this; not a kettle action) |
 | Ctrl+Plus | zoom_in | `IncreaseFontSize` | A |
 | Ctrl+Minus | zoom_out | `DecreaseFontSize` | A |
@@ -365,7 +365,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `login_shell` | config.py | ❌ | new config key (`-l` flag to shell argv) |
 | `geometry_hinting` (font-step resize) | config.py | ❌ | winit GTK-equivalent uncertain — defer to design |
 | `use_login_shell` | config.py | duplicate of `login_shell` | doc |
-| `paste_selection` (X11 primary) | keybinds | 🟡 Linux X11 only; mouse middle-click does it | new keybind `Action::PastePrimary` |
+| ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 — `Action::PastePrimary`; cycle-574 hardened it to go through `paste_clipboard` for `LOCAL_PASTE_MAX` clamp + bracketed-paste wrap + broadcast scope (arboard has no separate primary-selection API; on Linux+X11 the regular clipboard ≈ primary for keyboard paste, and middle-click already covers true X11 primary at a lower level) | cycle-345 |
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
 | `reset_clear` (Reset + Clear) | keybinds | ❌ | new action `Action::ResetAndClear` (composes existing two) |
 | half-page scroll variants | keybinds | ❌ | new actions `Action::ScrollPageUpHalf/Down`|
@@ -499,7 +499,7 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 8. `term` + `colorterm` env override (B). One cycle.
 9. `invert-search = true/false` (B). One cycle.
 10. `close-button-on-tab = true/false` (B; render tab chrome). One cycle.
-11. `Action::PastePrimary` (B; X11 primary selection). One cycle.
+11. `Action::PastePrimary` (B; X11 primary selection). ✅ Cycle 345 added the action; cycle 574 routed it through `paste_clipboard` so it picks up the same `LOCAL_PASTE_MAX` clamp, bracketed-paste wrap, and broadcast scoping as `Action::Paste`.
 12. `Action::ResetAndClear` (B; composed). One cycle.
 13. `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (B). One cycle.
 14. `exit-action = close/restart/hold` (C). One cycle.
