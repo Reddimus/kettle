@@ -46,6 +46,23 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 587 — **Lua script read cap.** Closes the fourth and final
+              user-file read in the cycle-584..587 resource-cap
+              sweep (bg-image, session.json, config, lua script).
+              `LuaEngine::exec_file` previously called
+              `std::fs::read_to_string(path)` unbounded. Threat
+              model is the same — a swap-attack on
+              `~/.config/kettle/init.lua` could OOM kettle on
+              launch. New `MAX_LUA_SCRIPT_BYTES = 4 MiB` (~40×
+              over typical init.lua, ~10× over a moderately
+              complex plugin suite). Past the cap, the function
+              `anyhow::bail!`s rather than reading into RAM —
+              surfaces a clear diagnostic to the user instead of
+              an OOM. Drift guard `exec_file_rejects_oversize_script`
+              writes a 5 MiB syntactically valid Lua file and
+              asserts the load errors with a "refusing to load"
+              message. Workspace tests 335 → 336.
+
   cycle 586 — **Config-file read cap.** Companion to cycles 584
               (bg-image) and 585 (session.json). `Config::
               load_from_with_diagnostics` previously called

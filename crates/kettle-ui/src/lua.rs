@@ -486,7 +486,26 @@ impl LuaEngine {
     /// Run the contents of a Lua file. Errors bubble up via anyhow
     /// with the script path attached so the user sees which file
     /// failed.
+    ///
+    /// Cycle 587: bound the read at 4 MiB. Real init.lua files run
+    /// a few KB to ~100 KB; pulling in a moderately complex plugin
+    /// suite might reach a few hundred KB. 4 MiB is a generous
+    /// margin while still catching a swap-attack blob (same
+    /// defense-in-depth pattern as cycle 585 session.json + cycle
+    /// 586 config). Past the cap the script is refused with an
+    /// `anyhow` error so the user gets a clear diagnostic rather
+    /// than an OOM mid-load.
     pub fn exec_file(&self, path: &Path) -> Result<()> {
+        const MAX_LUA_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+        let size = std::fs::metadata(path)
+            .with_context(|| format!("stat lua script {}", path.display()))?
+            .len();
+        if size > MAX_LUA_SCRIPT_BYTES {
+            anyhow::bail!(
+                "lua script {} is {size} bytes (cap {MAX_LUA_SCRIPT_BYTES}); refusing to load",
+                path.display()
+            );
+        }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read lua script {}", path.display()))?;
         self.lua
@@ -788,6 +807,37 @@ mod tests {
         eng.exec_file(&path).expect("exec");
         let v = eng.eval_str("return answer").expect("eval");
         assert_eq!(v, env!("CARGO_PKG_VERSION"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Cycle 587 drift guard: an oversized Lua script must be refused
+    /// via the metadata pre-check rather than read into RAM. Real
+    /// init.lua files top out around 100 KB; a multi-MB blob is either
+    /// a runaway autogen script or a swap-attack — either way the
+    /// load should fail loud rather than OOM mid-load.
+    #[test]
+    fn exec_file_rejects_oversize_script() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "kettle-lua-cycle587-oversize-{}.lua",
+            std::process::id()
+        ));
+        // 5 MiB of LEGITIMATE Lua (`x = x + 1\n` repeated). Verifies
+        // the size gate fires BEFORE loading — even a syntactically
+        // valid payload past the cap is refused, so a future refactor
+        // that drops the size check fails the gauntlet.
+        let line = "x = x + 1\n";
+        let copies = (5 * 1024 * 1024) / line.len() + 1;
+        let oversize: String = line.repeat(copies);
+        std::fs::write(&path, &oversize).expect("write oversize lua");
+        let eng = LuaEngine::new("Default").expect("init");
+        let err = eng
+            .exec_file(&path)
+            .expect_err("oversize script must be refused");
+        assert!(
+            err.to_string().contains("refusing to load"),
+            "expected refusal message, got: {err}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
