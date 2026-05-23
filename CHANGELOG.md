@@ -75,6 +75,34 @@ the next major event's release notes.
               case; eliminates the flake under parallel
               execution.
 
+  cycle 601 — **Lua side-effect API resource caps.** Audit
+              extension to the cycle-376 / cycle-591 sandbox
+              defense: the `kettle.*` side-effect callbacks
+              (`send_text`, `exec_action`, `notify`, `set_theme`)
+              had no per-call or queue-length bounds. A hostile
+              `init.lua` running under default safe-mode could
+              still queue gigabytes via `for i=1,10000 do
+              kettle.send_text(string.rep("X", 1<<20)) end` and
+              OOM kettle at the App's drain step
+              (`app.rs:900` unconditionally
+              `extend_from_slice`s every SendText into a single
+              Vec). New caps:
+                - `MAX_LUA_SEND_TEXT_BYTES = 1 MiB` per call;
+                - `MAX_LUA_NOTIFY_BYTES = 8 KiB` per title /
+                  body field;
+                - `MAX_PENDING_COMMANDS = 1024` queue length.
+              Routed all four callbacks through a new
+              `bounded_push` helper so the queue cap is enforced
+              exactly once. Per-call oversize drops silently
+              with `log::warn`; queue saturation drops with
+              `log::warn` + discriminant. Drift guards:
+              `send_text_drops_oversized_payload_silently`,
+              `notify_drops_oversized_field_silently`,
+              `pending_queue_caps_at_max_pending_commands`.
+              SECURITY.md cycle-447 "Lua plugin sandbox escape"
+              scope updated to enumerate the caps. Workspace
+              tests 337 → 340.
+
   cycle 591 — **Pin mlua-default debug-library exclusion as a drift
               guard.** Audit revealed that mlua's `Lua::new()`
               defaults already exclude the entire `debug` library

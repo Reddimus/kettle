@@ -63,8 +63,12 @@ Reports that fit any of these are welcome:
   user-supplied `init.lua` (or a `kettle.add_url_handler` /
   `kettle.add_menu_item` callback) reach an external process, the
   filesystem, or a native library despite the sandbox flag is in
-  scope. `lua-sandbox = trusted` is opt-in and explicitly carries
-  the same surface as native Lua — out of scope.
+  scope. Cycle-601 also caps the `kettle.*` side-effect APIs against
+  resource-exhaustion (1 MiB per `send_text`, 8 KiB per `notify`
+  field, 1024-command queue length) — bypassing those caps to OOM
+  kettle from a sandboxed script is in scope too. `lua-sandbox =
+  trusted` is opt-in and explicitly carries the same surface as
+  native Lua — out of scope.
 - **Detachable-tabs handoff** — `--tab-handoff PATH` (cycle-403) and
   `--tab-handoff-fd FD` (cycle-408) restore a JSON payload from
   another kettle process. A handoff payload that bypasses path

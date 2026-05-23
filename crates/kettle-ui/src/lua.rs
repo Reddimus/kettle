@@ -24,6 +24,60 @@ use mlua::Lua;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Cycle 601: per-call cap on `kettle.send_text(s)`. A hostile
+/// `init.lua` running under the default `lua-sandbox = safe` mode
+/// (where `os.execute`/`io.popen` are nil'd, cycle 376) could still
+/// queue gigabytes of PTY-bound text via `for i=1,10000 do
+/// kettle.send_text(string.rep("X", 1<<20)) end` and OOM kettle at
+/// the App's drain step (app.rs:900 unconditionally
+/// `extend_from_slice`s every queued SendText into a single Vec).
+/// 1 MiB per call covers any realistic multi-line snippet paste
+/// with massive headroom and stops the bomb shape early.
+const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
+
+/// Cycle 601: per-call cap on `kettle.notify(title, body)`. Real
+/// desktop notifications are tiny (titles ~30 chars, bodies a
+/// sentence or two). 8 KiB per field is ~100× over realistic
+/// use, ample for a multi-line code-snippet body, and matches
+/// the notify-rust crate's typical practical limits without
+/// burning unbounded heap on a hostile script that builds a
+/// huge title in a loop.
+const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
+
+/// Cycle 601: cap on the in-process LuaCommand queue length. A
+/// hostile script that fires `for i=1,10^9 do
+/// kettle.exec_action("noop") end` (or any other API) would grow
+/// `pending` without bound — even short commands at 32 bytes each
+/// × 10^9 = 32 GB. 1024 entries is well above any realistic
+/// init.lua's batch (most fire 1-10 commands; a power user wiring
+/// up a couple dozen hooks tops out around 50). Past the cap, new
+/// pushes drop silently with a `log::warn`.
+const MAX_PENDING_COMMANDS: usize = 1024;
+
+/// Cycle 601: locked push with queue-length cap. All four
+/// `kettle.*` side-effect callbacks route through this so the
+/// `MAX_PENDING_COMMANDS` invariant is enforced exactly once,
+/// not duplicated four times. Returns `Ok(())` whether or not
+/// the push succeeded — from Lua's perspective the call is
+/// best-effort and dropping past the cap is preferable to
+/// raising an error that user scripts don't expect to handle.
+/// A poisoned mutex is the only hard error (it means kettle is
+/// already in an unrecoverable state — surface it).
+fn bounded_push(pending: &Mutex<Vec<LuaCommand>>, cmd: LuaCommand) -> mlua::Result<()> {
+    let mut v = pending
+        .lock()
+        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
+    if v.len() >= MAX_PENDING_COMMANDS {
+        log::warn!(
+            "lua command queue saturated at {MAX_PENDING_COMMANDS}; dropping {:?}",
+            std::mem::discriminant(&cmd)
+        );
+        return Ok(());
+    }
+    v.push(cmd);
+    Ok(())
+}
+
 /// Cycle 325: side-effect commands buffered from Lua. The Lua VM
 /// can't directly mutate App state (lifetime + threading), so
 /// side-effect APIs (send_text, set_tab_title, notify, ...) push
@@ -209,16 +263,22 @@ impl LuaEngine {
         // focused pane's PTY. Lua-side it looks synchronous, but
         // the actual PTY write happens once the script returns —
         // a kettle script can't observe its own typing.
+        // Cycle 601: per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES)
+        // and global cap on the queue length (MAX_PENDING_COMMANDS)
+        // — see the constants above for the threat-model rationale.
         let pending_for_send = Arc::clone(&pending);
         kettle_tbl
             .set(
                 "send_text",
                 lua.create_function(move |_, s: String| {
-                    pending_for_send
-                        .lock()
-                        .map(|mut v| v.push(LuaCommand::SendText(s)))
-                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
-                    Ok(())
+                    if s.len() > MAX_LUA_SEND_TEXT_BYTES {
+                        log::warn!(
+                            "kettle.send_text: dropping {} bytes (cap {MAX_LUA_SEND_TEXT_BYTES})",
+                            s.len()
+                        );
+                        return Ok(());
+                    }
+                    bounded_push(&pending_for_send, LuaCommand::SendText(s))
                 })?,
             )
             .context("set kettle.send_text")?;
@@ -231,17 +291,16 @@ impl LuaEngine {
             .set(
                 "exec_action",
                 lua.create_function(move |_, name: String| {
-                    pending_for_action
-                        .lock()
-                        .map(|mut v| v.push(LuaCommand::ExecAction(name)))
-                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
-                    Ok(())
+                    bounded_push(&pending_for_action, LuaCommand::ExecAction(name))
                 })?,
             )
             .context("set kettle.exec_action")?;
         // Cycle 371 (plugin sub-cycle 7): kettle.notify(title, body?)
         // queues a desktop notification. Body is optional;
         // `kettle.notify('Build done')` works too.
+        // Cycle 601: per-field cap (MAX_LUA_NOTIFY_BYTES) on title +
+        // body so a hostile script can't smuggle gigabytes through
+        // the notify API. Real desktop notifications are tiny.
         let pending_for_notify = Arc::clone(&pending);
         kettle_tbl
             .set(
@@ -250,11 +309,16 @@ impl LuaEngine {
                     let mut iter = args.into_iter();
                     let title = iter.next().unwrap_or_default();
                     let body = iter.next().unwrap_or_default();
-                    pending_for_notify
-                        .lock()
-                        .map(|mut v| v.push(LuaCommand::Notify { title, body }))
-                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
-                    Ok(())
+                    if title.len() > MAX_LUA_NOTIFY_BYTES || body.len() > MAX_LUA_NOTIFY_BYTES {
+                        log::warn!(
+                            "kettle.notify: dropping (title {} bytes, body {} bytes; \
+                             cap {MAX_LUA_NOTIFY_BYTES} each)",
+                            title.len(),
+                            body.len()
+                        );
+                        return Ok(());
+                    }
+                    bounded_push(&pending_for_notify, LuaCommand::Notify { title, body })
                 })?,
             )
             .context("set kettle.notify")?;
@@ -266,11 +330,7 @@ impl LuaEngine {
             .set(
                 "set_theme",
                 lua.create_function(move |_, name: String| {
-                    pending_for_theme
-                        .lock()
-                        .map(|mut v| v.push(LuaCommand::SetTheme(name)))
-                        .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
-                    Ok(())
+                    bounded_push(&pending_for_theme, LuaCommand::SetTheme(name))
                 })?,
             )
             .context("set kettle.set_theme")?;
@@ -987,5 +1047,88 @@ mod tests {
                  update SECURITY.md cycle-447 + cycle-591 notes accordingly"
             );
         }
+    }
+
+    /// Cycle 601 drift guard: `kettle.send_text(s)` must drop
+    /// strings larger than `MAX_LUA_SEND_TEXT_BYTES`. Pre-cap, a
+    /// hostile script (or even a buggy legitimate one that runs
+    /// away on a loop) could queue gigabytes of PTY-bound text and
+    /// OOM kettle at the App's drain step. Verifies the silent-drop
+    /// behavior: the call succeeds (no Lua-side error to handle)
+    /// but the queue stays empty.
+    #[test]
+    fn send_text_drops_oversized_payload_silently() {
+        let eng = LuaEngine::new("Default").expect("init");
+        // 1 MiB + 1 byte — one byte over the cap.
+        let oversize = (super::MAX_LUA_SEND_TEXT_BYTES + 1).to_string();
+        let script = format!(
+            "kettle.send_text(string.rep('X', {oversize}))\n\
+             kettle.send_text('legit')\n"
+        );
+        eng.eval_str(&format!("return (function() {script} return true end)()"))
+            .expect("script runs without error (silent drop is the contract)");
+        let cmds = eng.drain_commands();
+        // Exactly one command queued — the second (legit) call. The
+        // oversize first call must drop without queueing.
+        assert_eq!(cmds.len(), 1, "queue: {cmds:?}");
+        assert!(
+            matches!(&cmds[0], LuaCommand::SendText(s) if s == "legit"),
+            "expected only the 'legit' send_text to queue, got {cmds:?}"
+        );
+    }
+
+    /// Cycle 601 drift guard: `kettle.notify(title, body)` rejects
+    /// each field over `MAX_LUA_NOTIFY_BYTES`. Real desktop
+    /// notifications are tiny; oversized title/body almost certainly
+    /// indicates a runaway script.
+    #[test]
+    fn notify_drops_oversized_field_silently() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let oversize = (super::MAX_LUA_NOTIFY_BYTES + 1).to_string();
+        // Oversize title → drop.
+        eng.eval_str(&format!(
+            "kettle.notify(string.rep('T', {oversize}), 'body'); return true"
+        ))
+        .expect("script runs");
+        // Oversize body → drop.
+        eng.eval_str(&format!(
+            "kettle.notify('title', string.rep('B', {oversize})); return true"
+        ))
+        .expect("script runs");
+        // Sane call → admitted.
+        eng.eval_str("kettle.notify('ok', 'sane'); return true")
+            .expect("script runs");
+        let cmds = eng.drain_commands();
+        assert_eq!(cmds.len(), 1, "queue: {cmds:?}");
+        assert!(
+            matches!(&cmds[0], LuaCommand::Notify { title, body }
+                if title == "ok" && body == "sane"),
+            "expected only the sane notify to queue, got {cmds:?}"
+        );
+    }
+
+    /// Cycle 601 drift guard: the queue length caps at
+    /// `MAX_PENDING_COMMANDS`. A hostile script firing
+    /// `for i=1,10^9 do kettle.exec_action('noop') end` would
+    /// otherwise grow the Vec without bound — even at 32 bytes per
+    /// entry that's 32 GB.
+    #[test]
+    fn pending_queue_caps_at_max_pending_commands() {
+        let eng = LuaEngine::new("Default").expect("init");
+        // Fire 1.5× the cap. Use exec_action with a short name so
+        // each entry is small (the test is about queue *length*,
+        // not per-entry size).
+        let n = super::MAX_PENDING_COMMANDS + super::MAX_PENDING_COMMANDS / 2;
+        eng.eval_str(&format!(
+            "for _ = 1, {n} do kettle.exec_action('no_op') end; return true"
+        ))
+        .expect("script runs");
+        let cmds = eng.drain_commands();
+        assert_eq!(
+            cmds.len(),
+            super::MAX_PENDING_COMMANDS,
+            "queue must cap at MAX_PENDING_COMMANDS, not {}",
+            cmds.len()
+        );
     }
 }
