@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 664 — **auto-theme sub-cycle 4: clock-schedule parser
+              + decision helper**: privacy-conscious no-
+              geolocation half of the auto-theme schedule.
+              New surface:
+                - `pub enum ThemeSchedule { Clock { dark_at,
+                  light_at } }` (sunrise/sunset is sub-cycle 5)
+                - `pub theme_schedule: Option<ThemeSchedule>`
+                  field on Config
+                - `theme-schedule = HH:MM dark, HH:MM light`
+                  parser arm (either tag-order; whitespace
+                  flexible; strict on bad input)
+                - `pub fn parse_theme_schedule(value)` helper
+                - `pub fn schedule_decision_clock(now_hm,
+                  schedule) -> bool` (true=dark, false=light)
+                  handles wrap-past-midnight + same-day window
+                  + degenerate dark==light
+              Drift guards:
+                - `parse_theme_schedule_walks_input_shapes`
+                  walks 8 input shapes incl. 6 rejection cases
+                - `schedule_decision_clock_walks_boundaries`
+                  walks 13 (now, schedule) pairs incl. wrap-
+                  past-midnight, same-day window, degenerate
+                  dark==light → light default
+              Workspace tests 385 → 387.
+              Auto-theme port: 4/7 sub-cycles complete.
+
+  cycle 663 — **docs(audit): flip `ask_before_closing` row
+              from D → A** (cycle 662 completed sub-cycles
+              1-6 of 8 confirm-dialog work) + redeploy local
+              kettle to commit 3f0a7c3.
+
   cycle 662 — **confirm-dialog sub-cycle 6: `CloseTab` +
               `ClosePane` interception**: completes the close-
               family dispatch wrapping.

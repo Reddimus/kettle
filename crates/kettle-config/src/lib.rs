@@ -355,6 +355,101 @@ pub enum AskBeforeClosing {
     Never,
 }
 
+/// Cycle 664 (sub-cycle 4 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): theme-schedule policy
+/// for the no-geolocation case.
+///
+/// `Clock { dark_at, light_at }` flips between dark and light at
+/// the wall-clock times (local). E.g.
+/// `theme-schedule = 18:00 dark, 06:00 light` reads as: dark from
+/// 18:00 to 06:00 the next day, light from 06:00 to 18:00.
+///
+/// The sunrise/sunset variant (lat/long-driven) is a sub-cycle 5
+/// follow-up — needs a small solar-position computation that the
+/// `sunrise` crate handles, plus explicit-lat/long config keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeSchedule {
+    Clock {
+        dark_at: (u8, u8),
+        light_at: (u8, u8),
+    },
+}
+
+/// Cycle 664: pure decision for `ThemeSchedule::Clock`.
+///
+/// Given the current wall-clock time (hour, minute), returns:
+///   - `Some(true)` — should be dark right now
+///   - `Some(false)` — should be light right now
+///
+/// The schedule "dark at H1:M1, light at H2:M2" means: dark when
+/// current time is in `[H1:M1, H2:M2)` (where the range can wrap
+/// past midnight; e.g. `18:00 → 06:00` wraps).
+///
+/// Pure — entirely a function of `now_hm` + the schedule. Drift
+/// guard `schedule_decision_clock_walks_boundaries` covers the
+/// 4 representative shapes (normal day, wrap past midnight,
+/// exactly-on-boundary, dawn = dusk degenerate).
+pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> bool {
+    let ThemeSchedule::Clock { dark_at, light_at } = schedule;
+    let now = (now_hm.0 as u32) * 60 + (now_hm.1 as u32);
+    let dark = (dark_at.0 as u32) * 60 + (dark_at.1 as u32);
+    let light = (light_at.0 as u32) * 60 + (light_at.1 as u32);
+    if dark == light {
+        // Degenerate: dawn equals dusk. Default to light (the
+        // less-disruptive choice for a presumably-misconfigured
+        // schedule).
+        return false;
+    }
+    if dark < light {
+        // Same-day window: dark in [dark, light).
+        now >= dark && now < light
+    } else {
+        // Wraps past midnight: dark in [dark, 24:00) ∪ [00:00, light).
+        now >= dark || now < light
+    }
+}
+
+/// Cycle 664: parse a `theme-schedule = HH:MM dark, HH:MM light`
+/// value into `Option<ThemeSchedule>`. Either tag-order is OK
+/// (`HH:MM light, HH:MM dark` works too); whitespace is flexible.
+///
+/// Returns `None` on any malformed input — invalid HH:MM, missing
+/// comma, missing role tag, hour > 23, minute > 59. Strict parse
+/// keeps `--check-config` flagging real misconfigurations.
+///
+/// Pure — string-in, optional-schedule-out. Unit-testable.
+pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
+    let value = value.trim();
+    let (a, b) = value.split_once(',')?;
+    let parse_entry = |s: &str| -> Option<((u8, u8), &'static str)> {
+        let s = s.trim();
+        let (time_part, role) = s.rsplit_once(' ')?;
+        let role = match role.trim().to_ascii_lowercase().as_str() {
+            "dark" => "dark",
+            "light" => "light",
+            _ => return None,
+        };
+        let (h, m) = time_part.trim().split_once(':')?;
+        let h: u8 = h.trim().parse().ok()?;
+        let m: u8 = m.trim().parse().ok()?;
+        if h > 23 || m > 59 {
+            return None;
+        }
+        Some(((h, m), role))
+    };
+    let (entry_a_time, entry_a_role) = parse_entry(a)?;
+    let (entry_b_time, entry_b_role) = parse_entry(b)?;
+    if entry_a_role == entry_b_role {
+        return None;
+    }
+    let (dark_at, light_at) = if entry_a_role == "dark" {
+        (entry_a_time, entry_b_time)
+    } else {
+        (entry_b_time, entry_a_time)
+    };
+    Some(ThemeSchedule::Clock { dark_at, light_at })
+}
+
 /// Cycle 649 (sub-cycle 2 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
 /// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): pure helper that picks
 /// the right theme name given the current `ThemeMode`, the
@@ -730,6 +825,13 @@ pub struct Config {
     /// the auto-theme design will wire `Auto` to the OS dark-mode
     /// subscribe.
     pub theme_mode: ThemeMode,
+    /// Cycle 664 (sub-cycle 4 of auto-theme design): wall-clock
+    /// schedule for switching between `light_theme` and `dark_theme`.
+    /// `None` means no schedule (the default; user's `theme_mode`
+    /// alone governs the choice). When `Some(Clock { dark_at,
+    /// light_at })`, the App's poll loop (sub-cycle 5 follow-up)
+    /// will flip the theme on minute boundaries.
+    pub theme_schedule: Option<ThemeSchedule>,
     /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
@@ -1086,6 +1188,7 @@ impl Default for Config {
             force_no_bell: false,
             log_strip_ansi: false,
             theme_mode: ThemeMode::Explicit,
+            theme_schedule: None,
             light_theme: String::new(),
             dark_theme: String::new(),
             icon_bell: true,
@@ -2183,6 +2286,14 @@ impl Config {
                         "auto" | "system" | "follow-system" | "follow_system" => ThemeMode::Auto,
                         _ => ThemeMode::Explicit,
                     };
+                }
+                "theme-schedule" | "theme_schedule" => {
+                    // Cycle 664 (sub-cycle 4 of auto-theme design):
+                    // `theme-schedule = HH:MM dark, HH:MM light`
+                    // (whitespace flexible). The dark + light are
+                    // role tags; either can come first. Garbage
+                    // values leave theme_schedule as None.
+                    cfg.theme_schedule = parse_theme_schedule(&e.value);
                 }
                 "light-theme" | "light_theme" => {
                     if let Some(canonical) = Theme::find_name(&e.value) {
@@ -4909,6 +5020,137 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 664 drift guard. `parse_theme_schedule` accepts
+    /// the `HH:MM dark, HH:MM light` config-value shape with
+    /// either tag-order. Sub-cycle 4 of auto-theme design.
+    #[test]
+    fn parse_theme_schedule_walks_input_shapes() {
+        use super::parse_theme_schedule;
+        // Canonical: dark first, then light.
+        let s = parse_theme_schedule("18:00 dark, 06:00 light").unwrap();
+        assert_eq!(
+            s,
+            ThemeSchedule::Clock {
+                dark_at: (18, 0),
+                light_at: (6, 0),
+            }
+        );
+        // Swapped order — same result.
+        let s = parse_theme_schedule("06:00 light, 18:00 dark").unwrap();
+        assert_eq!(
+            s,
+            ThemeSchedule::Clock {
+                dark_at: (18, 0),
+                light_at: (6, 0),
+            }
+        );
+        // Whitespace flexible.
+        let s = parse_theme_schedule("  18:00  dark  ,  06:00 light  ").unwrap();
+        assert_eq!(
+            s,
+            ThemeSchedule::Clock {
+                dark_at: (18, 0),
+                light_at: (6, 0),
+            }
+        );
+        // Failures → None.
+        assert!(
+            parse_theme_schedule("18:00 dark 06:00 light").is_none(),
+            "missing comma"
+        );
+        assert!(
+            parse_theme_schedule("18:00 dark").is_none(),
+            "only one entry"
+        );
+        assert!(
+            parse_theme_schedule("18:00 dark, 06:00 dark").is_none(),
+            "duplicate tag"
+        );
+        assert!(
+            parse_theme_schedule("24:00 dark, 06:00 light").is_none(),
+            "hour > 23"
+        );
+        assert!(
+            parse_theme_schedule("18:60 dark, 06:00 light").is_none(),
+            "minute > 59"
+        );
+        assert!(
+            parse_theme_schedule("18 dark, 06:00 light").is_none(),
+            "missing :"
+        );
+        assert!(
+            parse_theme_schedule("18:00 weird, 06:00 light").is_none(),
+            "bad tag"
+        );
+        assert!(parse_theme_schedule("").is_none(), "empty");
+    }
+
+    /// Cycle 664 drift guard. `schedule_decision_clock` returns
+    /// the right dark/light boolean given a `(now, schedule)` pair.
+    #[test]
+    fn schedule_decision_clock_walks_boundaries() {
+        use super::schedule_decision_clock;
+        let normal = ThemeSchedule::Clock {
+            dark_at: (18, 0),
+            light_at: (6, 0),
+        };
+        // Wraps past midnight: dark in [18:00, 24:00) ∪ [00:00, 06:00).
+        assert!(
+            schedule_decision_clock((18, 0), normal),
+            "18:00 → dark (start)"
+        );
+        assert!(schedule_decision_clock((23, 59), normal), "23:59 → dark");
+        assert!(
+            schedule_decision_clock((0, 0), normal),
+            "00:00 → dark (across midnight)"
+        );
+        assert!(
+            schedule_decision_clock((5, 59), normal),
+            "05:59 → dark (just before light)"
+        );
+        assert!(
+            !schedule_decision_clock((6, 0), normal),
+            "06:00 → light (boundary)"
+        );
+        assert!(
+            !schedule_decision_clock((12, 0), normal),
+            "12:00 → light (middle of day)"
+        );
+        assert!(
+            !schedule_decision_clock((17, 59), normal),
+            "17:59 → light (just before dark)"
+        );
+        // Same-day window: dark in [dark, light) when dark < light.
+        let day = ThemeSchedule::Clock {
+            dark_at: (10, 0),
+            light_at: (14, 0),
+        };
+        assert!(
+            !schedule_decision_clock((9, 0), day),
+            "09:00 → light (before dark window)"
+        );
+        assert!(
+            schedule_decision_clock((10, 0), day),
+            "10:00 → dark (window start)"
+        );
+        assert!(schedule_decision_clock((13, 59), day), "13:59 → dark");
+        assert!(
+            !schedule_decision_clock((14, 0), day),
+            "14:00 → light (window end)"
+        );
+        assert!(
+            !schedule_decision_clock((20, 0), day),
+            "20:00 → light (after window)"
+        );
+        // Degenerate: dark == light → defaults to light.
+        let degen = ThemeSchedule::Clock {
+            dark_at: (12, 0),
+            light_at: (12, 0),
+        };
+        assert!(!schedule_decision_clock((12, 0), degen));
+        assert!(!schedule_decision_clock((0, 0), degen));
     }
 
     /// Cycle 649 drift guard. `resolve_theme_for_mode` is the
