@@ -141,6 +141,12 @@ pub struct Overlay {
     pub palette_query: Option<String>,
     /// The ranked command labels (selected one marked) for the palette.
     pub palette_hint: String,
+    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
+    /// `Some(typed)` while the layout picker is open. Same UX
+    /// surface as the command palette but the hint string lists
+    /// layout names from `Session::list_layouts`.
+    pub layout_picker_query: Option<String>,
+    pub layout_picker_hint: String,
     /// Cycle 372 (Terminator parity, edit-title overlay UX): the
     /// in-progress title-edit text + a scope label for the prompt
     /// (e.g. "Edit window title:" / "Edit tab title:" /
@@ -1435,6 +1441,30 @@ impl Renderer {
             let label = format!(
                 "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
                 overlay.palette_hint
+            );
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some(q) = &overlay.layout_picker_query {
+            // Cycle 708 (Terminator parity, layoutlauncher.py):
+            // layout picker overlay. Same bar shape as the
+            // palette but the hint string lists layouts.
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[6], 0.96));
+            let label = format!(
+                "  ▤ layout: {q}_   ▸ {}   (Enter spawn · Tab/↑↓ select · Esc cancel)",
+                overlay.layout_picker_hint
             );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);

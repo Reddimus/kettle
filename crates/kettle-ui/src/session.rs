@@ -113,6 +113,40 @@ impl Session {
         }
     }
 
+    /// Cycle 708 (Terminator parity, `terminatorlib/layoutlauncher.py`):
+    /// list saved layouts by name (alphabetical). Walks
+    /// `<config-dir>/layouts/*.json`, strips the extension. Returns
+    /// an empty `Vec` when the layouts dir doesn't exist (a fresh
+    /// install has none) — that's not an error, just "nothing to
+    /// pick from yet". Closes the layout-launcher Bucket-D gap by
+    /// giving `Action::OpenLayoutPicker` (cycle 708) a source of
+    /// names to filter against.
+    pub fn list_layouts() -> Vec<String> {
+        let Some(default) = kettle_config::Config::default_path() else {
+            return Vec::new();
+        };
+        let Some(dir) = default.parent().map(|d| d.join("layouts")) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                    return None;
+                }
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Cycle 291: save to the named-layout path. Creates the parent
     /// directory if it doesn't exist (a first-time
     /// `kettle --layout dev` from a fresh install needs to create

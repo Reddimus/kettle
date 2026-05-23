@@ -1029,6 +1029,32 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
     raw.clamp(0, n as isize - 1) as usize
 }
 
+/// Cycle 708 (Terminator parity, `layoutlauncher.py`): rank saved
+/// layouts against the user-typed query. Empty query returns
+/// every layout in original (alphabetical) order; non-empty query
+/// keeps only entries whose lower-cased name contains every
+/// lower-cased query token. Same shape as
+/// `kettle_config::palette::rank` but layouts have only a name
+/// field (no description), so the inner predicate is simpler.
+/// Pure — separated from `layout_picker_key` so a drift guard
+/// can exercise it without touching App state.
+pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
+    let q = q.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return (0..layouts.len()).collect();
+    }
+    let tokens: Vec<&str> = q.split_whitespace().collect();
+    layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            let lower = name.to_ascii_lowercase();
+            tokens.iter().all(|t| lower.contains(t))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Pure: walk the menu item list to find the next enabled, non-
 /// separator row index, given a `delta` (±1) and a wrap-around at the
 /// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
@@ -1104,6 +1130,13 @@ pub struct App {
     ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
     palette_input: Option<(String, usize)>,
+    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
+    /// `Action::OpenLayoutPicker` modal state. Same shape as
+    /// `palette_input` — (typed query, selected index) — but
+    /// ranks against the cycle-708 `Session::list_layouts`
+    /// instead of the cycle-104 command palette. Enter spawns
+    /// `kettle --layout NAME` as a new window.
+    layout_picker_input: Option<(String, usize)>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     hint_state: Option<(Vec<HintTarget>, String)>,
     /// Right-click context menu state (`Some` while open). Lives next
@@ -1601,6 +1634,7 @@ impl App {
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
+            layout_picker_input: None,
             hint_state: None,
             context_menu: None,
             editing_title: None,
@@ -3003,6 +3037,43 @@ impl App {
             None => (None, String::new()),
         };
 
+        // Cycle 708 (Terminator parity, layoutlauncher.py):
+        // compute the layout-picker overlay's query + hint
+        // string the same way as the command palette. Empty
+        // layouts dir is fine — the hint reads `(no saved
+        // layouts; run kettle --save-layout NAME)`.
+        let (layout_picker_query, layout_picker_hint) = match &self.layout_picker_input {
+            Some((q, sel)) => {
+                let layouts = crate::session::Session::list_layouts();
+                let ranked = rank_layouts(q, &layouts);
+                let hint = if layouts.is_empty() {
+                    "(no saved layouts; run `kettle --save-layout NAME`)".to_string()
+                } else if ranked.is_empty() {
+                    "(no matching layout)".to_string()
+                } else {
+                    let sel = (*sel).min(ranked.len() - 1);
+                    let start = if sel < 8 { 0 } else { sel - 7 };
+                    ranked
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(8)
+                        .map(|(i, &li)| {
+                            let l = &layouts[li];
+                            if i == sel {
+                                format!("«{l}»")
+                            } else {
+                                l.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ·  ")
+                };
+                (Some(q.clone()), hint)
+            }
+            None => (None, String::new()),
+        };
+
         let hint_labels: Vec<HintLabel> = match &self.hint_state {
             Some((targets, typed)) => targets
                 .iter()
@@ -3036,6 +3107,7 @@ impl App {
             || !window_focused
             || self.ssh_input.is_some()
             || self.palette_input.is_some()
+            || self.layout_picker_input.is_some()
             || self.hint_state.is_some()
             || self.mux.search.open
         {
@@ -3125,6 +3197,8 @@ impl App {
                 ssh_hint,
                 palette_query,
                 palette_hint,
+                layout_picker_query,
+                layout_picker_hint,
                 edit_title,
                 hint_labels,
                 window_focused,
@@ -3162,6 +3236,8 @@ impl App {
             ssh_hint,
             palette_query,
             palette_hint,
+            layout_picker_query,
+            layout_picker_hint,
             edit_title,
             hint_labels,
             window_focused,
@@ -3472,6 +3548,7 @@ impl App {
     fn close_all_modals(&mut self) {
         self.mux.search.open = false;
         self.palette_input = None;
+        self.layout_picker_input = None;
         self.hint_state = None;
         self.ssh_input = None;
         self.context_menu = None;
@@ -3550,6 +3627,7 @@ impl App {
     fn any_modal_open(&self) -> bool {
         self.mux.search.open
             || self.palette_input.is_some()
+            || self.layout_picker_input.is_some()
             || self.hint_state.is_some()
             || self.ssh_input.is_some()
             || self.context_menu.is_some()
@@ -4531,6 +4609,16 @@ impl App {
             Action::CommandPalette => {
                 self.close_all_modals();
                 self.palette_input = Some((String::new(), 0));
+            }
+            // Cycle 708 (Terminator parity, layoutlauncher.py):
+            // open the runtime layout picker. Empty layouts dir
+            // is fine — the modal still opens with a "no
+            // matching layout" hint, so the user gets a clear
+            // "I have no saved layouts yet; save one with
+            // `kettle --save-layout NAME`" affordance.
+            Action::OpenLayoutPicker => {
+                self.close_all_modals();
+                self.layout_picker_input = Some((String::new(), 0));
             }
             Action::HintMode => {
                 let targets = self.collect_hints();
@@ -5869,6 +5957,68 @@ impl App {
         }
     }
 
+    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
+    /// keyboard routing while the layout picker overlay is open.
+    /// Same shape as `palette_key` but ranks against
+    /// `Session::list_layouts()` and dispatches by spawning
+    /// `kettle --layout NAME` as a new window.
+    fn layout_picker_key(&mut self, key: &Key, text: Option<&str>) {
+        let layouts = crate::session::Session::list_layouts();
+        let Some((q, sel)) = self.layout_picker_input.as_mut() else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.layout_picker_input = None;
+                self.reset_blink_phase();
+            }
+            Key::Named(NamedKey::Backspace) => {
+                q.pop();
+                *sel = 0;
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                let n = rank_layouts(q, &layouts).len();
+                if n > 0 {
+                    *sel = (*sel + 1) % n;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let n = rank_layouts(q, &layouts).len();
+                if n > 0 {
+                    *sel = (*sel + n - 1) % n;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let ranked = rank_layouts(q, &layouts);
+                let name = ranked.get(*sel).map(|&i| layouts[i].clone());
+                self.layout_picker_input = None;
+                if let Some(name) = name {
+                    let exe = std::env::current_exe()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("kettle"));
+                    if let Err(e) = std::process::Command::new(&exe)
+                        .arg("--layout")
+                        .arg(&name)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        log::warn!("layout picker: spawn `kettle --layout {name}`: {e}");
+                    }
+                }
+            }
+            _ => {
+                if let Some(t) = text
+                    && !t.is_empty()
+                    && !t.chars().any(|c| c.is_control())
+                {
+                    q.push_str(t);
+                    *sel = 0;
+                }
+            }
+        }
+    }
+
     /// Keyboard routing while the right-click context menu is open.
     /// `Esc` closes, `↑/↓` step the highlight (skipping separators +
     /// disabled rows via `next_context_menu_highlight`), `Enter` fires
@@ -7108,6 +7258,14 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                if self.layout_picker_input.is_some() {
+                    self.layout_picker_key(&event.logical_key, text);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 if self.ssh_input.is_some() {
                     self.ssh_key(&event.logical_key, text);
                     if let Some(w) = &self.window {
@@ -7356,8 +7514,34 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::selection_kind;
+    use super::{rank_layouts, selection_kind};
     use kettle_core::SelectionType;
+
+    /// Cycle 708 drift guard. `rank_layouts` filters layout names by
+    /// every lower-cased query token; empty query returns identity.
+    #[test]
+    fn rank_layouts_filters_by_tokens_case_insensitive() {
+        let layouts: Vec<String> = ["dev", "work", "dev-rust", "Notes", "ssh prod"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Empty query — identity, every layout shows.
+        assert_eq!(rank_layouts("", &layouts), vec![0, 1, 2, 3, 4]);
+        // Whitespace-only query — still identity (trim).
+        assert_eq!(rank_layouts("   ", &layouts), vec![0, 1, 2, 3, 4]);
+        // Single token, case-insensitive.
+        assert_eq!(rank_layouts("dev", &layouts), vec![0, 2]);
+        assert_eq!(rank_layouts("DEV", &layouts), vec![0, 2]);
+        // Multi-token AND (every token must match).
+        assert_eq!(rank_layouts("dev rust", &layouts), vec![2]);
+        assert_eq!(rank_layouts("ssh prod", &layouts), vec![4]);
+        // Lower-cased target matches mixed-case layouts.
+        assert_eq!(rank_layouts("notes", &layouts), vec![3]);
+        // No matches → empty (not a panic).
+        assert_eq!(rank_layouts("xyz", &layouts), Vec::<usize>::new());
+        // Empty layouts → empty (defensive).
+        assert_eq!(rank_layouts("dev", &[]), Vec::<usize>::new());
+    }
 
     #[test]
     fn cap_title_for_status_bar_truncates_at_char_budget_with_ellipsis() {

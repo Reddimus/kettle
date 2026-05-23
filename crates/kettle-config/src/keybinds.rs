@@ -173,6 +173,17 @@ pub enum Action {
     /// cycle-X URL clicks already use, so it works on
     /// Linux/macOS/Windows without spawning a per-platform helper.
     ShowHelp,
+    /// Cycle 708 Terminator parity
+    /// (`terminatorlib/layoutlauncher.py`). Open the runtime
+    /// layout picker — an overlay modal that lists saved
+    /// layouts from `<config-dir>/layouts/*.json` (via
+    /// `Session::list_layouts`). Type-to-filter; Enter spawns
+    /// `kettle --layout NAME` as a new window. Same shape as
+    /// the cycle-329 command palette; uses
+    /// `App::layout_picker_input: Option<(String, usize)>`.
+    /// Closes the last Bucket-D plugin gap
+    /// (`launcher.py` → layout overlay).
+    OpenLayoutPicker,
     /// Cycle 702 Terminator parity (`key_send_newline` /
     /// Shift+Return). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
@@ -470,6 +481,8 @@ pub fn action_names() -> Vec<&'static str> {
         "help",
         "show_help",
         "send_newline",
+        "layout_launcher",
+        "open_layout_picker",
         "preferences",
         "edit_config",
         "increase_font_size",
@@ -664,6 +677,8 @@ impl Action {
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
             "send_newline" | "send-newline" => SendNewline,
+            "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
+            | "layout_picker" | "layout-picker" => OpenLayoutPicker,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

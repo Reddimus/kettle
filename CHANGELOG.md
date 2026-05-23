@@ -6,6 +6,53 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 708 — **`Action::OpenLayoutPicker` (Terminator
+              `layoutlauncher.py` — Plugin system COMPLETE)**:
+              Closes the last remaining Terminator plugin gap.
+              The Stop hook cited `launcher.py (port to layout
+              overlay)` as the final plugin item.
+              Adds:
+                - `Session::list_layouts() -> Vec<String>` —
+                  walks `<config-dir>/layouts/*.json`, strips
+                  the `.json` extension, returns names sorted
+                  alphabetically. Empty when the dir doesn't
+                  exist (fresh install).
+                - `Action::OpenLayoutPicker` variant + 6
+                  keybind name aliases: `layout_launcher`,
+                  `layout-launcher`, `open_layout_picker`,
+                  `open-layout-picker`, `layout_picker`,
+                  `layout-picker`. cycle-117 palette
+                  completeness drift guard enforces registry
+                  coverage.
+                - `App::layout_picker_input: Option<(String,
+                  usize)>` modal state. Same shape as
+                  `palette_input` (query + selected index).
+                - `App::layout_picker_key` keyboard handler.
+                  Esc closes, Backspace pops, Up/Down/Tab steps
+                  selection, Enter spawns
+                  `std::env::current_exe()` with `--layout
+                  NAME` (detached stdio). Type-to-filter.
+                - Pure `rank_layouts(query, layouts) ->
+                  Vec<usize>` helper. Empty query → identity;
+                  non-empty → AND across lower-cased tokens.
+                - Renderer overlay extensions:
+                  `Overlay::layout_picker_query` +
+                  `layout_picker_hint` + a paint arm in the
+                  search/palette bar block (theme palette[6]
+                  color so it's visually distinct from the
+                  cycle-329 palette bar).
+                - Empty-layouts-dir hint reads `(no saved
+                  layouts; run kettle --save-layout NAME)`
+                  so first-time users get a clear affordance.
+              Drift guard `rank_layouts_filters_by_tokens
+              _case_insensitive` walks 8 cases:
+              empty/whitespace queries → identity; single
+              token; multi-token AND; case folding; no-match;
+              empty list. Audit row promoted from 🟡 to A;
+              Plugin system Bucket-D row promoted from
+              substantially-complete → COMPLETE (6/6 Terminator
+              plugins ported). Workspace tests 402 → 403.
+
   cycle 707 — **Audit doc Bucket D cleanup — all 4 items now A**:
               Doc-only cycle. The audit doc's Bucket D section
               listed 4 multi-cycle gaps (Plugin system,
