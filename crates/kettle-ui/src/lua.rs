@@ -790,4 +790,105 @@ mod tests {
         assert_eq!(v, env!("CARGO_PKG_VERSION"));
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn safe_sandbox_nils_dangerous_stdlib_apis() {
+        // Cycle 571 drift guard. The cycle-376 sandbox (default
+        // `lua-sandbox = safe`) nils the Lua stdlib APIs that can
+        // execute external processes, open arbitrary files, or load
+        // native shared libraries. A future refactor removing one of
+        // these nils silently degrades the security posture documented
+        // in SECURITY.md (cycle 447 "Lua plugin sandbox escape" in
+        // scope).
+        //
+        // Assert every member of the nil-list is `nil` after sandbox
+        // construction. The list mirrors the in-code nil sweep.
+        let eng = LuaEngine::new("Default").expect("init (safe sandbox)");
+        // os.* — process control + filesystem mutation.
+        for api in [
+            "os.execute",
+            "os.exit",
+            "os.remove",
+            "os.rename",
+            "os.tmpname",
+            "os.setlocale",
+        ] {
+            let kind = eng
+                .eval_str(&format!("return type({api})"))
+                .unwrap_or_else(|_| panic!("eval type({api})"));
+            assert_eq!(
+                kind, "nil",
+                "sandbox should nil {api} but got type {kind:?}"
+            );
+        }
+        // io.* — arbitrary file open/read/write.
+        for api in [
+            "io.open",
+            "io.popen",
+            "io.lines",
+            "io.input",
+            "io.output",
+            "io.stdin",
+            "io.stdout",
+            "io.stderr",
+        ] {
+            let kind = eng
+                .eval_str(&format!("return type({api})"))
+                .unwrap_or_else(|_| panic!("eval type({api})"));
+            assert_eq!(
+                kind, "nil",
+                "sandbox should nil {api} but got type {kind:?}"
+            );
+        }
+        // Global file-load functions.
+        for api in ["loadfile", "dofile"] {
+            let kind = eng
+                .eval_str(&format!("return type({api})"))
+                .unwrap_or_else(|_| panic!("eval type({api})"));
+            assert_eq!(
+                kind, "nil",
+                "sandbox should nil {api} but got type {kind:?}"
+            );
+        }
+        // package.loadlib — native code execution.
+        let kind = eng
+            .eval_str("return type(package.loadlib)")
+            .expect("eval type(package.loadlib)");
+        assert_eq!(
+            kind, "nil",
+            "sandbox should nil package.loadlib but got type {kind:?}"
+        );
+
+        // Sanity: SAFE stdlib functions stay callable. If a future
+        // refactor over-nils, this catches it from the other side.
+        assert_eq!(
+            eng.eval_str("return type(string.upper)").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            eng.eval_str("return type(table.insert)").unwrap(),
+            "function"
+        );
+        assert_eq!(eng.eval_str("return type(math.floor)").unwrap(), "function");
+    }
+
+    #[test]
+    fn trusted_sandbox_leaves_stdlib_intact() {
+        // Cycle 571 companion test. The opt-in `lua-sandbox =
+        // trusted` mode leaves the dangerous APIs callable. Users
+        // explicitly setting `trusted` accept the full Lua stdlib
+        // surface (cycle-447 SECURITY.md: opt-in trust, out-of-scope
+        // for sandbox-escape reports). A future refactor that nils
+        // these even in trusted mode silently breaks user scripts.
+        let eng = LuaEngine::new_with_sandbox("Default", false).expect("init (trusted sandbox)");
+        // os.execute exists in trusted mode (still a function).
+        assert_eq!(eng.eval_str("return type(os.execute)").unwrap(), "function");
+        // io.open exists in trusted mode.
+        assert_eq!(eng.eval_str("return type(io.open)").unwrap(), "function");
+        // package.loadlib exists in trusted mode.
+        assert_eq!(
+            eng.eval_str("return type(package.loadlib)").unwrap(),
+            "function"
+        );
+    }
 }
