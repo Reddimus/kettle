@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 622 — **`plugins/run_cmd_on_match.py` parity**:
+                - `trigger = REGEX :: cmd arg1 arg2` extends
+                  cycle-289 trigger syntax with a `::` separator.
+                  RHS is whitespace-split into argv (no shell
+                  expansion at kettle's layer; the configured
+                  command is treated as data, not as a shell
+                  string).
+                - `TriggerAction::RunCommand(Vec<String>)` new
+                  variant carrying the argv. `TriggerAction` loses
+                  its `Copy` derive (Vec<String> can't be Copy);
+                  callers (`compile_triggers`, `match_triggers`)
+                  switch to `.clone()`.
+                - new pure helper `parse_trigger_with_command`
+                  takes the raw value, returns `Option<(pattern,
+                  argv)>` — `None` falls through to the cycle-289
+                  Urgency action.
+                - dispatch: `match_triggers` returns the action;
+                  the loop now branches on Urgency vs RunCommand
+                  and spawns via `spawn_trigger_command` (fire-
+                  and-forget). Spawn errors are logged + ignored.
+                - documented limitation: `::` separator means
+                  patterns containing a literal `::` (rare IPv6
+                  alternations) get split early. Workaround:
+                  write `:[:]` or `\x3a\x3a`.
+              Drift guard:
+                - `parse_trigger_with_command_splits_on_double_colon`
+                  covers happy path, multi-arg argv, whitespace
+                  collapsing, all 4 sentinel-None cases, +
+                  documents the IPv6 footgun.
+              Workspace tests 365 → 366.
+
   cycle 621 — **`plugins/logger.py` parity — per-pane session
               log**:
                 - new `Action::ToggleSessionLog` (aliases:

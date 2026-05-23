@@ -855,10 +855,46 @@ pub struct OutputTrigger {
 ///   handles the rest (Wayland: foot animation, GNOME notification
 ///   counter; X11: WM_HINTS urgency; macOS: dock bounce; Windows:
 ///   taskbar flash).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TriggerAction {
     #[default]
     Urgency,
+    /// Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+    /// spawn an external program when the trigger pattern matches.
+    /// Argv form (no shell expansion at kettle's layer) — security
+    /// posture is "treat the configured command as data, not a
+    /// shell string." Capture groups are NOT substituted in v1
+    /// (a `$1`-substitution path is the natural next sub-cycle).
+    ///
+    /// The spawn is fire-and-forget: kettle does not wait for the
+    /// child to exit, doesn't capture its stdout/stderr, and
+    /// doesn't track its lifetime. Same shape as a shell `&`
+    /// background launch. If the command can't be spawned (binary
+    /// missing, perm denied) a warn is logged + the trigger is
+    /// otherwise ignored.
+    RunCommand(Vec<String>),
+}
+
+/// Cycle 622 helper: split a `trigger = REGEX :: cmd arg1 arg2`
+/// value into `(pattern, argv)`. Returns `None` when there's no
+/// `::` separator (caller treats the whole value as a plain
+/// Urgency trigger, preserving cycle-289 behavior).
+///
+/// Argv is whitespace-split with no quote-escaping in v1 — kettle
+/// doesn't try to mimic the shell's quoting rules. A user who
+/// needs spaces in an arg should symlink the binary to a path
+/// without spaces, or wait for the v2 quoted-arg syntax.
+///
+/// Pure: no env, no disk, no clock.
+pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> {
+    let (pat, cmd) = value.split_once("::")?;
+    let pattern = pat.trim().to_string();
+    let argv: Vec<String> = cmd.split_whitespace().map(|s| s.to_string()).collect();
+    if pattern.is_empty() || argv.is_empty() {
+        return None;
+    }
+    Some((pattern, argv))
 }
 
 impl Default for Config {
@@ -2238,21 +2274,29 @@ impl Config {
                     }
                 }
                 "trigger" => {
-                    // Cycle 289: `trigger = REGEX` adds a regex pattern
-                    // that fires `Urgency` on a PTY-output match. v1
-                    // only ships the one action so the value is the
-                    // whole pattern — no separator parsing. A future
-                    // multi-action syntax must NOT use `|` as the
-                    // separator: pipe is a regex metacharacter, and
-                    // patterns like `(BUILD SUCCESSFUL|FAILED)` would
-                    // split mid-alternation. A `→` or two-step
-                    // `trigger-action = …` would be safer.
-                    let pattern = e.value.trim().to_string();
-                    if !pattern.is_empty() {
-                        cfg.triggers.push(OutputTrigger {
-                            pattern,
-                            action: TriggerAction::Urgency,
-                        });
+                    // Cycle 289 base: `trigger = REGEX` fires Urgency.
+                    // Cycle 622 (Terminator parity, run_cmd_on_match.py):
+                    // `trigger = REGEX :: cmd arg1 arg2` extends the
+                    // syntax with a `::` separator (two colons —
+                    // chosen over `|` because pipe is a regex
+                    // metacharacter, and over `:` because IPv6
+                    // patterns would split mid-address). The RHS
+                    // is whitespace-split into an argv (no shell
+                    // expansion at kettle's layer); spawned
+                    // fire-and-forget when the pattern matches.
+                    let raw = e.value.trim();
+                    if !raw.is_empty() {
+                        if let Some((pat, cmd)) = parse_trigger_with_command(raw) {
+                            cfg.triggers.push(OutputTrigger {
+                                pattern: pat,
+                                action: TriggerAction::RunCommand(cmd),
+                            });
+                        } else {
+                            cfg.triggers.push(OutputTrigger {
+                                pattern: raw.to_string(),
+                                action: TriggerAction::Urgency,
+                            });
+                        }
                     }
                 }
                 "menu-item" | "menu_item" => {
@@ -4660,6 +4704,52 @@ mod config_tests {
         // Garbage value leaves the field at the default.
         let cfg = Config::parse_text("search-case-sensitive = banana\n");
         assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
+    /// Cycle 622 drift guard. `parse_trigger_with_command` is the
+    /// pure helper that splits a `trigger = REGEX :: CMD ARGS`
+    /// value. Verify:
+    ///   - `::` separator parsed (pattern + argv both non-empty)
+    ///   - whitespace-split argv preserves order + collapses runs
+    ///   - missing separator → None (caller falls back to Urgency)
+    ///   - empty pattern after split → None (sentinel for malformed)
+    ///   - empty argv after split → None
+    #[test]
+    fn parse_trigger_with_command_splits_on_double_colon() {
+        use super::parse_trigger_with_command;
+        // Happy path.
+        let (pat, cmd) = parse_trigger_with_command("error.*panic :: notify-send oops").unwrap();
+        assert_eq!(pat, "error.*panic");
+        assert_eq!(cmd, vec!["notify-send", "oops"]);
+        // Multiple-argument argv, tabs + multispace collapsed.
+        let (pat, cmd) =
+            parse_trigger_with_command("warn\\b ::   /usr/bin/say  -v Alex  warning").unwrap();
+        assert_eq!(pat, "warn\\b");
+        assert_eq!(cmd, vec!["/usr/bin/say", "-v", "Alex", "warning"]);
+        // No separator → None (caller falls back to Urgency).
+        assert!(parse_trigger_with_command("just a regex").is_none());
+        // Empty pattern side → None.
+        assert!(parse_trigger_with_command(" :: notify-send oops").is_none());
+        // Empty argv side → None.
+        assert!(parse_trigger_with_command("pattern ::").is_none());
+        // Both empty → None.
+        assert!(parse_trigger_with_command("::").is_none());
+        // IPv6-like pattern with a single `:` does NOT split (sep
+        // is `::` specifically). This guards against a footgun
+        // where a user-typed IPv4-vs-IPv6 alternation pattern
+        // would accidentally activate the cmd path.
+        let (pat, cmd) =
+            parse_trigger_with_command("from 2001:db8::1 :: logger ipv6-seen").unwrap();
+        assert_eq!(pat, "from 2001:db8");
+        // `::` is the split's stop sigil — `split_once` consumes only
+        // the first occurrence; remaining `::` after the first match
+        // survive as plain whitespace-separated argv tokens.
+        assert_eq!(cmd, vec!["1", "::", "logger", "ipv6-seen"]);
+        // ^ Note: the user-typed pattern DOES contain `::` so it
+        // does split. This is the documented limitation of the
+        // syntax; a v2 escape like `\::` could be added but in
+        // practice users who need bare `::` in a regex can write
+        // `:[:]` or `\x3a\x3a` to dodge the parser.
     }
 
     /// Cycle 619 drift guard. Terminator splits the bell into two

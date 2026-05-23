@@ -120,6 +120,38 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
     }
 }
 
+/// Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+/// fire the configured argv as a fire-and-forget subprocess.
+///
+/// Security posture:
+///   - argv form (no shell). The configured command is treated as
+///     data, not as a shell string — kettle never invokes `sh -c`
+///     on it. A configured `trigger = .* :: rm -rf $HOME` would
+///     spawn `rm -rf $HOME` *literally*, with `$HOME` as a literal
+///     argv element, not as the user's home dir.
+///   - empty argv ⇒ no-op (parser already rejects, but be safe).
+///   - spawn errors logged but otherwise ignored so a missing
+///     binary doesn't loop-fail.
+///
+/// Stripped into a free fn so the dispatch arm stays small.
+fn spawn_trigger_command(argv: &[String]) {
+    if argv.is_empty() {
+        return;
+    }
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    // Don't capture stdout/stderr; the child inherits kettle's
+    // file descriptors (where applicable). On Unix this means
+    // stdout goes to wherever kettle was launched from — which
+    // is acceptable for a user-configured fire-and-forget hook.
+    if let Err(e) = cmd.spawn() {
+        log::warn!(
+            "trigger run-command failed to spawn {:?}: {e}",
+            argv.first().map(String::as_str).unwrap_or("<empty>")
+        );
+    }
+}
+
 /// Cycle 621 (Terminator parity, `plugins/logger.py`): build the
 /// per-pane session-log path. Lives under `<cache>/kettle/logs/`
 /// (XDG-respecting via env probe; falls back to `./kettle-logs/`
@@ -540,7 +572,7 @@ fn compile_triggers(
     let mut out = Vec::with_capacity(triggers.len());
     for t in triggers {
         match regex::Regex::new(&t.pattern) {
-            Ok(re) => out.push((re, t.action)),
+            Ok(re) => out.push((re, t.action.clone())),
             Err(e) => {
                 log::warn!("trigger pattern {:?} failed to compile: {e}", t.pattern);
             }
@@ -560,7 +592,7 @@ fn match_triggers(
     triggers
         .iter()
         .find(|(re, _)| re.is_match(text))
-        .map(|(_, action)| *action)
+        .map(|(_, action)| action.clone())
 }
 
 /// Cycle 288 smart selection (iTerm2 parity). When a double-click
@@ -4365,10 +4397,24 @@ impl App {
             out
         };
         for snap in &snapshots {
-            if match_triggers(snap, &self.compiled_triggers).is_some() {
-                if let Some(w) = &self.window {
-                    use winit::window::UserAttentionType;
-                    w.request_user_attention(Some(UserAttentionType::Critical));
+            if let Some(action) = match_triggers(snap, &self.compiled_triggers) {
+                match action {
+                    kettle_config::TriggerAction::Urgency => {
+                        if let Some(w) = &self.window {
+                            use winit::window::UserAttentionType;
+                            w.request_user_attention(Some(UserAttentionType::Critical));
+                        }
+                    }
+                    kettle_config::TriggerAction::RunCommand(argv) => {
+                        // Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+                        // fire-and-forget spawn. Argv form means no
+                        // shell expansion at kettle's layer; the
+                        // configured command is treated as data, not
+                        // a shell string. Spawn errors are logged
+                        // but otherwise ignored so a missing binary
+                        // doesn't loop spawn-fail every trigger tick.
+                        spawn_trigger_command(&argv);
+                    }
                 }
                 self.last_trigger_fire = std::time::Instant::now();
                 break;

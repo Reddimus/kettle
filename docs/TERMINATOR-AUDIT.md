@@ -272,7 +272,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `save_user_session_layout.py` | Manual save/load named layouts | A | cycle-291 `--layout NAME` |
 | `url_handlers.py` (Launchpad bug + code + APT) | Open URLs in browser | A | kettle Ctrl/Cmd+click opens URLs via `open` crate (cross-platform); cycle-608 `docs/examples/init.lua` ports the three Launchpad/APT handlers as Lua `kettle.add_url_handler` recipes |
 | `mousefree_url_handler.py` | Keyboard URL selection | A | cycle-218 hint mode (Ctrl+Shift+H) — `kettle.on('url_match')` could extend |
-| `run_cmd_on_match.py` | Run command on regex match | C | extend cycle-289 triggers with a `RunCommand` action variant |
+| `run_cmd_on_match.py` | Run command on regex match | A | cycle-622 — `trigger = REGEX :: cmd arg1 arg2` extends cycle-289 trigger syntax. `TriggerAction::RunCommand(Vec<String>)` carries the argv; fire-and-forget spawn via `std::process::Command`. No shell expansion at kettle's layer (argv form, security posture: "config command is data, not shell"). Capture-group substitution deferred to a follow-up. |
 | `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | `remote.py` | SSH/Docker/Podman session detection | C | OSC 7 cwd + an env-var probe + title update |
 | `logger.py` | Log terminal output to file | A | cycle-621 `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
@@ -387,7 +387,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | Theme presets in right-click menu | terminal_popup_menu.py | ❌ | extend cycle-245 menu with theme submenu |
 | Layout launcher overlay (Alt+L) | layoutlauncher.py | ❌ | new modal overlay (like cycle-218 hint mode) listing saved layouts |
 | ~~`command_notify`~~ (long-running command done) | plugins | ✅ cycle-612 — OSC 133 CommandEnd duration → `notify-rust` when window unfocused, gated by `command-notify-threshold-ms` | cycle-612 |
-| `run_cmd_on_match` (run cmd on regex match) | plugins | 🟡 cycle-289 fires urgency only | extend trigger action enum with `RunCommand(argv)` |
+| ~~`run_cmd_on_match`~~ (run cmd on regex match) | plugins | ✅ cycle-622 — `trigger = REGEX :: argv` + `TriggerAction::RunCommand(Vec<String>)` + fire-and-forget spawn | cycle-622 |
 | ~~`custom_commands`~~ (user-defined context menu items) | plugins | ✅ cycle-611 — `menu-item = LABEL = CMD` config key splits on first `=`, writes CMD\n to focused pane PTY on click | cycle-611 |
 | `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
 | ~~`logger.py`~~ (log session to file) | plugins | ✅ cycle-621 — `Action::ToggleSessionLog` opens `<cache>/kettle/logs/...` and writes raw PTY bytes from reader thread via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot | cycle-621 |
