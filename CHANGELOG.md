@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 627 — **Doc-truth refresh (round 4)**: 7 more stale
+              audit-doc rows flipped, citing the cycles that
+              closed them:
+                - `edit_*_title` → cycle 369-407 (full title-edit
+                  overlay shipped, including the cycle-407
+                  `EditPaneGroup` for broadcast-group name)
+                - `close_button_on_tab` → wired earlier
+                - `login_shell` → cycle 343 (mux.rs threads
+                  the bool to Terminal::new_with_env)
+                - `next_profile` / `prev_profile` → cycles 342
+                  + 618 (refactor)
+                - `geometry_hinting` → cycle 359 (winit
+                  resize_increments)
+              Reclassified `sticky` + `hide_from_taskbar` to
+              Bucket E with rationale (winit 0.30 only exposes
+              skip_taskbar on Windows; X11/Wayland/macOS would
+              need platform-specific extensions kettle hasn't
+              taken on). No code change. Tests stay 369/369.
+
   cycle 626 — **`audible_bell` accepted as documented no-op
               (Terminator config.py:214)**: kettle ships no audio
               bell surface yet (visual flash + window urgency only),

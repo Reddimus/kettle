@@ -355,15 +355,15 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `title_at_bottom` | config.py | ❌ | new config key (for the per-pane titlebar; needs Bucket D first) |
 | `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses cycle-620 homogeneous/non-homogeneous layout with overflow fallback — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ cycle-620 — `true` (kettle default) divides strip evenly; `false` sizes per title length with `close_w * 1.5` min-affordance + overflow falls back to homogeneous so a many-tab window never truncates | cycle-620 |
-| `close_button_on_tab` (toggle ✕ on tabs) | config.py | 🟡 always shown | new config key |
+| ~~`close_button_on_tab`~~ (toggle ✕ on tabs) | config.py | ✅ `close-button-on-tab` config key wired to tab-bar render | (covered) |
 | ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |
 | ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |
-| `sticky` (on all workspaces) | config.py | ❌ | new config key (Linux-only; winit hint) |
-| `hide_from_taskbar` | config.py | ❌ | new config key (winit hint) |
+| `sticky` (on all workspaces) | config.py | E | parsed but Bucket E: winit 0.30 doesn't expose `_NET_WM_STATE_STICKY` (X11) or `set_visible_on_all_workspaces` (macOS) on the cross-platform Window/WindowAttributes API. Would need raw-window-handle direct X11 atom writes or a winit upgrade. |
+| `hide_from_taskbar` | config.py | E | parsed but Bucket E: winit 0.30 has `with_skip_taskbar` only on Windows (`WindowAttributesExtWindows`). X11/Wayland/macOS need platform-specific extensions kettle would have to add manually. |
 | `ask_before_closing = always/multiple_terminals/never` | config.py | ❌ | new config key + close-confirm dialog |
 | ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart | (covered) |
-| `login_shell` | config.py | ❌ | new config key (`-l` flag to shell argv) |
-| `geometry_hinting` (font-step resize) | config.py | ❌ | winit GTK-equivalent uncertain — defer to design |
+| ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (kettle-ui/mux.rs cycle 343) so the spawn argv gets `-l` when true | (covered) |
+| ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ cycle 359 — `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) | cycle-359 |
 | `use_login_shell` | config.py | duplicate of `login_shell` | doc |
 | ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 — `Action::PastePrimary`; cycle-574 hardened it to go through `paste_clipboard` for `LOCAL_PASTE_MAX` clamp + bracketed-paste wrap + broadcast scope (arboard has no separate primary-selection API; on Linux+X11 the regular clipboard ≈ primary for keyboard paste, and middle-click already covers true X11 primary at a lower level) | cycle-345 |
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
@@ -381,9 +381,9 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `create_group` | keybinds | ❌ | named group creation + group-name field on Pane |
 | ~~`zoom_in/out/normal_all`~~ (broadcast zoom) | keybinds | ✅ cycle 345 — `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (kettle's font-size is window-wide so they compose into the single-pane zoom) | cycle-345 |
 | ~~`toggle_scrollbar`~~ (runtime show/hide) | keybinds | ✅ cycle 342 — `Action::ToggleScrollbar` cycles Never → Always → Auto → Never | cycle-342 |
-| `edit_window_title` / `edit_tab_title` / `edit_terminal_title` | keybinds | ❌ | new actions + title-edit overlay |
+| ~~`edit_window_title` / `edit_tab_title` / `edit_terminal_title`~~ | keybinds | ✅ cycle 369 — `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` with inline title-edit overlay (`TitleEditState`); cycle 407 added `EditPaneGroup` for the broadcast-group name | cycle-369 |
 | `insert_number` / `insert_padded` | keybinds | 🟡 cycle-606 ships `insert_term_name` (sends pane title); kettle uses titles not numbers (kettle doesn't enumerate panes 1..N for users) | E for `insert_number`; `insert_term_name` covered |
-| `next_profile` / `previous_profile` | keybinds | 🟡 launch-time only via `--profile NAME` | new actions + runtime profile cycle |
+| ~~`next_profile` / `previous_profile`~~ | keybinds | ✅ cycles 342 + 618 — `Action::NextProfile` / `PrevProfile` cycle `<config>/profiles/*.config` at runtime; cycle 618 refactored to use `Config::list_profiles` + `profile_name_from_path` + pure `pick_next_profile` helper | cycle-618 |
 | Theme presets in right-click menu | terminal_popup_menu.py | ❌ | extend cycle-245 menu with theme submenu |
 | Layout launcher overlay (Alt+L) | layoutlauncher.py | ❌ | new modal overlay (like cycle-218 hint mode) listing saved layouts |
 | ~~`command_notify`~~ (long-running command done) | plugins | ✅ cycle-612 — OSC 133 CommandEnd duration → `notify-rust` when window unfocused, gated by `command-notify-threshold-ms` | cycle-612 |
