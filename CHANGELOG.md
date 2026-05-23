@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 665 — **vertical-tabs sub-cycle 3: `content_rect_for`
+              honors Left/Right strip width**: cycle-651 v1
+              treated `TabBarPos::Left/Right` the same as `Top`
+              (the cycle-647 fallback). Now the pane content
+              actually carves out a 180 px strip on the
+              configured side instead of consuming a height
+              band like `Top`/`Bottom`.
+              New `VERTICAL_TAB_STRIP_W: f32 = 180.0` constant
+              (Firefox-style sidebar default; configurable via
+              the upcoming `tab-bar-width` config key in
+              sub-cycle 7).
+              Drift guard `content_rect_for_carves_out_tab_and_status_bands`
+              extended with 4 new shapes:
+                - Left + status-off
+                - Right + status-off
+                - Left + status-top (vertical strip claims x;
+                  status claims y; both compose)
+                - Right + status-bottom (same)
+              Plus a "narrow window with vertical strip clamps
+              content_w" defensive assertion.
+              Workspace tests stay 387 (existing drift guard
+              expanded; no new fn).
+              Vertical-tabs port: 3/8 sub-cycles complete.
+
   cycle 664 — **auto-theme sub-cycle 4: clock-schedule parser
               + decision helper**: privacy-conscious no-
               geolocation half of the auto-theme schedule.

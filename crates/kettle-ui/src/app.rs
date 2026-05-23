@@ -226,24 +226,28 @@ fn confirm_dialog_keypress(
     }
 }
 
-/// Cycle 651 (sub-cycle 2 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): pure helper
-/// that computes the pane-content rect from the inputs that govern
-/// it — surface size, tab-bar height, status-bar height, and the
-/// edge each occupies.
+/// Cycle 665 (sub-cycle 3 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): default
+/// strip width for vertical (Left / Right) tab bars. The design
+/// doc proposes 180 px as the "sidebar default" (Firefox-style
+/// sidebar feel). A future cycle adds a `tab-bar-width` config
+/// override (sub-cycle 7 of the design).
+pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
+
+/// Cycle 651 + 665 (sub-cycles 2 + 3 of vertical-tabs design):
+/// pure helper that computes the pane-content rect from the
+/// surface size + bar metrics + edge each occupies.
 ///
 /// Returns `(x, y, width, height)` in pixel coordinates.
 ///
-/// Cycle-651 v1 of this helper treats vertical-strip positions
-/// (`Left` / `Right`) the same as `Top` (the strip claims the
-/// same per-edge slice). Sub-cycle 4 of the vertical-tabs design
-/// will branch on the orientation + carve out a per-strip width
-/// instead of a per-edge height.
+/// Sub-cycle 3 now honors `TabBarPos::Left` and `Right` — the
+/// strip claims a per-side width slice (`VERTICAL_TAB_STRIP_W`,
+/// 180 px) instead of falling through to a per-edge height like
+/// in cycle-651 v1.
 ///
 /// Pure — no `&self`, no renderer, no winit. Drives the `App::area`
-/// method (which now wraps this helper) so cycle-651 + future
-/// vertical-strip wiring can test the layout math without
-/// constructing a full App.
+/// method (which now wraps this helper) so vertical-strip wiring
+/// can be unit-tested without constructing a full App.
 fn content_rect_for(
     surface: (u32, u32),
     tab_bar_h: f32,
@@ -252,22 +256,32 @@ fn content_rect_for(
     status_bar_mode: kettle_config::StatusBarMode,
 ) -> Rect {
     let (sw, sh) = (surface.0 as f32, surface.1 as f32);
-    let tb_on_top = matches!(
-        tab_bar_pos,
-        kettle_config::TabBarPos::Top
-            | kettle_config::TabBarPos::Left
-            | kettle_config::TabBarPos::Right
-    );
+    let tb_on_top = matches!(tab_bar_pos, kettle_config::TabBarPos::Top);
     let tb_on_bottom = matches!(tab_bar_pos, kettle_config::TabBarPos::Bottom);
+    let tb_on_left = matches!(tab_bar_pos, kettle_config::TabBarPos::Left);
+    let tb_on_right = matches!(tab_bar_pos, kettle_config::TabBarPos::Right);
     let sb_on_top = matches!(status_bar_mode, kettle_config::StatusBarMode::Top);
     let sb_on_bottom = matches!(status_bar_mode, kettle_config::StatusBarMode::Bottom);
 
+    // Vertical: status bar still claims y-band (status is
+    // always horizontal in v1); the strip claims an x-band.
     let top_offset =
         (if tb_on_top { tab_bar_h } else { 0.0 }) + (if sb_on_top { status_bar_h } else { 0.0 });
     let bot_offset = (if tb_on_bottom { tab_bar_h } else { 0.0 })
         + (if sb_on_bottom { status_bar_h } else { 0.0 });
+    let left_offset = if tb_on_left {
+        VERTICAL_TAB_STRIP_W
+    } else {
+        0.0
+    };
+    let right_offset = if tb_on_right {
+        VERTICAL_TAB_STRIP_W
+    } else {
+        0.0
+    };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
-    (0.0, top_offset, sw, content_h)
+    let content_w = (sw - left_offset - right_offset).max(1.0);
+    (left_offset, top_offset, content_w, content_h)
 }
 
 /// Cycle 650 (sub-cycle 2 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
@@ -7332,18 +7346,34 @@ mod tests {
             StatusBarMode::Bottom,
         );
         assert_eq!(r, (0.0, 0.0, 800.0, 560.0));
-        // Left (cycle 647 vertical, sub-cycle 1 only): treated as
-        // Top by the v1 helper. Sub-cycle 4 will branch on
-        // orientation + carve a width slice instead of a height.
+        // Cycle 665: Left vertical strip — content carves out
+        // `VERTICAL_TAB_STRIP_W` (180 px) from the LEFT side.
         let r = content_rect_for((800, 600), 24.0, 0.0, TabBarPos::Left, StatusBarMode::Off);
-        assert_eq!(r, (0.0, 24.0, 800.0, 576.0));
-        // Right: same fallback as Left for now.
+        assert_eq!(r, (180.0, 0.0, 620.0, 600.0));
+        // Right: 180 px carved from the RIGHT side.
         let r = content_rect_for((800, 600), 24.0, 0.0, TabBarPos::Right, StatusBarMode::Off);
-        assert_eq!(r, (0.0, 24.0, 800.0, 576.0));
-        // Defensive: content_h clamped to >= 1.0 so a tiny window
-        // doesn't degenerate to a zero/negative rect.
+        assert_eq!(r, (0.0, 0.0, 620.0, 600.0));
+        // Vertical + status-bar: status still claims y-band
+        // (status is always horizontal in v1); strip claims x-band.
+        let r = content_rect_for((800, 600), 24.0, 16.0, TabBarPos::Left, StatusBarMode::Top);
+        assert_eq!(r, (180.0, 16.0, 620.0, 584.0));
+        let r = content_rect_for(
+            (800, 600),
+            24.0,
+            16.0,
+            TabBarPos::Right,
+            StatusBarMode::Bottom,
+        );
+        assert_eq!(r, (0.0, 0.0, 620.0, 584.0));
+        // Defensive: content_h + content_w clamped to >= 1.0 so a
+        // tiny window doesn't degenerate to a zero/negative rect.
         let r = content_rect_for((100, 30), 24.0, 16.0, TabBarPos::Top, StatusBarMode::Bottom);
         assert!(r.3 >= 1.0);
+        let r = content_rect_for((100, 600), 0.0, 0.0, TabBarPos::Left, StatusBarMode::Off);
+        assert!(
+            r.2 >= 1.0,
+            "narrow window with vertical strip clamps content_w"
+        );
     }
 
     /// Cycle 650 drift guard. `session_screenshot_path` is the
