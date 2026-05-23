@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 716 — **Preferences submenu infrastructure: atomic
+              config write-back (C7)**:
+              Lays the plumbing for the Preferences ▸ submenu
+              landing in cycle 717 (C8). No user-visible UX
+              yet — this is the safety net.
+              New `kettle_config::persist_config_toggle(path,
+              key, value) -> io::Result<PathBuf>`:
+                - In-place edit: if a line matching `key` exists
+                  (allowing `-` ↔ `_` equivalence), only that
+                  line is replaced. Comments + blanks + ordering
+                  survive byte-for-byte.
+                - Append on miss: new `key = value` line goes at
+                  the bottom with a leading blank line for
+                  readability.
+                - Atomic temp+rename (POSIX rename(2) /
+                  MoveFileEx — both atomic on supported FSes).
+                - First-write backup: `<config>.bak` snapshot of
+                  the pre-edit content; subsequent writes don't
+                  re-overwrite the backup so the user has a
+                  forensic "what did my config look like before
+                  I started clicking toggles?" artifact.
+                - Path-traversal refused: any path with a `..`
+                  component returns `PermissionDenied`.
+              Drift guards (in `tests` mod):
+                - `persist_config_toggle_appends_on_missing_key`
+                - `persist_config_toggle_preserves_user_comments
+                  _and_blank_lines` (byte-for-byte assert)
+                - `persist_config_toggle_backup_only_on_first_write`
+                - `persist_config_toggle_treats_dash_and_underscore
+                  _as_equivalent`
+                - `persist_config_toggle_refuses_traversal_paths`
+              Workspace tests 418 → 423.
+
   cycle 715 — **Right-click menu: mnemonics + typeahead**:
               Context-menu UX sub-cycle C6. Single A-Z keys
               now dispatch rows by mnemonic; multi-char

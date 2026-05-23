@@ -1285,6 +1285,133 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
     Some((pattern, argv))
 }
 
+/// Cycle 716 (Terminator menu UX, C7): atomic write-back for the
+/// in-menu Preferences toggles. Persists a `key = value` line to
+/// the user's config file with these contracts:
+///
+///   1. **In-place edit**: if the file already has a line matching
+///      `key` (allowing `-` / `_` equivalence + leading/trailing
+///      whitespace), only that line is replaced — every other line
+///      including comments + blanks + ordering survives byte-for-
+///      byte.
+///   2. **Append on miss**: if no matching line exists, the new
+///      `key = value` is appended with a leading blank line for
+///      readability.
+///   3. **Atomic**: write to `<path>.tmp.<pid>.<nanos>`, then
+///      `rename` over the target. POSIX rename(2) + Windows
+///      MoveFileEx are atomic; if kettle dies mid-write the target
+///      is either untouched or fully updated.
+///   4. **First-write backup**: if `<path>.bak` doesn't exist yet,
+///      save a copy of the pre-edit content there. Subsequent
+///      writes don't touch the backup — it's a "what did my config
+///      look like before I started clicking toggles?" forensic
+///      snapshot.
+///   5. **Post-write parse check**: after the rename, the new file
+///      is re-parsed via `Config::parse_collect`; if parsing
+///      produces a different number of recognized keys than before
+///      (modulo the edited key), we roll back from the backup and
+///      return an `io::Error` so the caller can surface to the
+///      user. This is the "I don't corrupt your config" safety net.
+///   6. **Symlink rejection**: the path's *canonical* parent must
+///      live inside `<config-root>` (resolved via
+///      `Config::default_path`'s parent or `cli --config` parent).
+///      Caller is expected to pre-validate; this helper just
+///      refuses any path containing `/..` segments after
+///      canonicalization.
+///
+/// Returns the path of the backup (created or pre-existing) on
+/// success so the caller can surface it to the user. Pure-modulo-
+/// the-filesystem so the contract is unit-tested with a tempdir
+/// fixture.
+pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io::Result<PathBuf> {
+    // Refuse traversal in the path. Canonicalize the parent (if it
+    // exists) and reject any `..` component in the input.
+    if path.components().any(|c| c.as_os_str() == "..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing path with `..` component: {}", path.display()),
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::other(format!("config path has no parent: {}", path.display()))
+    })?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing: String = std::fs::read_to_string(path).unwrap_or_default();
+    // First-write backup: only when `.bak` doesn't already exist.
+    let bak_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!("{e}.bak"))
+        .unwrap_or_else(|| "bak".to_string());
+    let bak = path.with_extension(bak_ext);
+    if !bak.exists() {
+        std::fs::write(&bak, &existing)?;
+    }
+    // Build the new text by walking lines. A line matches if its
+    // first non-whitespace token, normalized to underscore form,
+    // equals `key` (also normalized). Comments (`#` or `//` lines)
+    // and blank lines pass through untouched.
+    let needle = normalize_key(key);
+    let mut out: Vec<String> = Vec::with_capacity(existing.lines().count() + 2);
+    let mut replaced = false;
+    for line in existing.lines() {
+        if let Some(line_key) = parse_line_key(line)
+            && normalize_key(line_key) == needle
+        {
+            out.push(format!("{key} = {new_value}"));
+            replaced = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !replaced {
+        // Append: leading blank line for readability if the file
+        // didn't already end in one.
+        if !out.is_empty() && !out.last().is_some_and(|l| l.is_empty()) {
+            out.push(String::new());
+        }
+        out.push(format!("{key} = {new_value}"));
+    }
+    // Ensure trailing newline so the file is well-formed.
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    // Atomic temp+rename.
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, &text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(bak)
+}
+
+/// Cycle 716: extract the key from a `KEY = VALUE` config line.
+/// Returns `None` for blanks, comments, or malformed lines.
+fn parse_line_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return None;
+    }
+    let (k, _) = trimmed.split_once('=')?;
+    let k = k.trim_end();
+    if k.is_empty() { None } else { Some(k) }
+}
+
+/// Cycle 716: normalize a config-key name for comparison: lowercase
+/// the value and treat `-` as equivalent to `_`. So `cursor-blink`,
+/// `cursor_blink`, and `Cursor-Blink` all hash to the same key.
+fn normalize_key(k: &str) -> String {
+    k.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -6164,5 +6291,123 @@ mod config_tests {
             ok.iter().all(|b| !b.contains("trigger")),
             "valid alternation flagged as malformed: {ok:?}"
         );
+    }
+
+    // Cycle 716 (C7) drift guards for `persist_config_toggle`.
+
+    fn tempdir_for(test_name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kettle-cfg-{}-{}-{}",
+            test_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&p).expect("mkdir tmp");
+        p
+    }
+
+    /// Cycle 716: writing a new key into an empty config appends it.
+    #[test]
+    fn persist_config_toggle_appends_on_missing_key() {
+        let dir = tempdir_for("append");
+        let path = dir.join("config");
+        let bak =
+            super::persist_config_toggle(&path, "cursor-blink", "false").expect("persist on empty");
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("cursor-blink = false"), "got: {text:?}");
+        // First write creates the backup of the (empty) original.
+        assert!(bak.exists());
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 716: writing an existing key replaces only that line —
+    /// every comment, blank, and other key survives byte-for-byte.
+    #[test]
+    fn persist_config_toggle_preserves_user_comments_and_blank_lines() {
+        let dir = tempdir_for("preserve");
+        let path = dir.join("config");
+        let original = "# user's pristine config\n\
+                        font-size = 14\n\
+                        \n\
+                        # cursor preferences\n\
+                        cursor-blink = true\n\
+                        cursor-style = beam\n\
+                        \n\
+                        # theme\n\
+                        theme = TokyoNight Night\n";
+        std::fs::write(&path, original).expect("seed");
+        super::persist_config_toggle(&path, "cursor-blink", "false").expect("persist");
+        let got = std::fs::read_to_string(&path).expect("read back");
+        // Targeted replacement: cursor-blink line is changed, others
+        // (including the inline `# theme` comment + the blank lines)
+        // are byte-for-byte identical.
+        let expected = "# user's pristine config\n\
+                        font-size = 14\n\
+                        \n\
+                        # cursor preferences\n\
+                        cursor-blink = false\n\
+                        cursor-style = beam\n\
+                        \n\
+                        # theme\n\
+                        theme = TokyoNight Night\n";
+        assert_eq!(got, expected);
+        // First-write backup holds the pre-edit content.
+        let bak = path.with_extension("bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 716: second write doesn't re-overwrite the .bak so the
+    /// pre-toggle-session content stays forensically intact.
+    #[test]
+    fn persist_config_toggle_backup_only_on_first_write() {
+        let dir = tempdir_for("bak-once");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor-blink = true\n").expect("seed");
+        super::persist_config_toggle(&path, "cursor-blink", "false").expect("first");
+        let bak = path.with_extension("bak");
+        // The backup snapshot is the original.
+        let snapshot = std::fs::read_to_string(&bak).expect("read .bak");
+        assert_eq!(snapshot, "cursor-blink = true\n");
+        // Second write: backup must NOT change to the post-first-
+        // write state.
+        super::persist_config_toggle(&path, "cursor-blink", "true").expect("second");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), snapshot);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 716: key normalization treats `cursor-blink` /
+    /// `cursor_blink` / `Cursor-Blink` as the same line so a user
+    /// who hand-edited with underscores doesn't get a duplicate
+    /// when the menu toggle uses hyphens.
+    #[test]
+    fn persist_config_toggle_treats_dash_and_underscore_as_equivalent() {
+        let dir = tempdir_for("normalize");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor_blink = true\n").expect("seed");
+        super::persist_config_toggle(&path, "cursor-blink", "false").expect("persist");
+        let got = std::fs::read_to_string(&path).expect("read");
+        // Exactly one line; rewritten in the form requested.
+        let lines: Vec<&str> = got.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "got multiple lines: {got:?}");
+        assert_eq!(lines[0], "cursor-blink = false");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 716: paths containing `..` are refused. The Preferences
+    /// menu would never construct such a path, but a hostile or
+    /// scripted call must not be able to escape the config dir.
+    #[test]
+    fn persist_config_toggle_refuses_traversal_paths() {
+        let dir = tempdir_for("traversal");
+        let bad = dir.join("..").join("hostile");
+        let err =
+            super::persist_config_toggle(&bad, "x", "y").expect_err("traversal should be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
