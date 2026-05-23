@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 620 — **Non-homogeneous tab widths (Terminator
+              config.py:88 `homogeneous_tabbar = false`)**:
+                - new pure helper `compute_tab_segment_widths`
+                  drives per-tab strip widths:
+                    - `true` (kettle default) → equal width
+                      `strip / n` (current behavior, unchanged)
+                    - `false` → per-tab natural width =
+                      `chars * cell_w + 2 * chrome + close_w`
+                      with a `close_w * 1.5` min-affordance floor
+                    - sum > strip → silent fallback to homogeneous
+                      (no truncation; every tab stays visible)
+                - tab_bar() now consumes the helper instead of
+                  computing seg_w inline; x_offsets are
+                  pre-computed from cumulative widths
+                - empty title list yields `vec![strip]` (panic-safe;
+                  never seen at runtime but the helper still has
+                  to handle it for symmetry)
+              Drift guard
+              `compute_tab_segment_widths_homogeneous_and_natural`
+              walks 4 scenarios (homogeneous, natural with room,
+              overflow fallback, empty list).
+              Workspace tests 362 → 363.
+
   cycle 619 — **`visible_bell` + `urgent_bell` compat parsing
               (Terminator config.py:215-216)**:
                 - new parser arms map Terminator's two-bool bell

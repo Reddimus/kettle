@@ -120,6 +120,54 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
     }
 }
 
+/// Cycle 620 (Terminator parity, terminatorlib/config.py:88
+/// `homogeneous_tabbar`): per-tab widths for the tab-bar strip.
+///
+/// `homogeneous = true` (kettle + Terminator default) divides the
+/// strip evenly across all tabs — `strip / n` per tab.
+///
+/// `homogeneous = false` sizes each tab by its title length: a
+/// natural width of `title_chars * cell_w + chrome_w * 2 + close_btn_w`
+/// where `chrome_w` is half the tab height (matching kettle's
+/// existing inner padding) and `close_btn_w` is one tab-height
+/// (matching the existing ✕ hit-zone in cycle-46). If the sum of
+/// natural widths exceeds the strip, we silently fall back to
+/// homogeneous so a many-tab window doesn't overflow.
+///
+/// Pure — no `&self`, no renderer, no winit. Tests can hand it
+/// any title slice + strip width + cell metric.
+fn compute_tab_segment_widths<'a>(
+    titles: impl ExactSizeIterator<Item = &'a str>,
+    strip: f32,
+    cell_w: f32,
+    tab_h: f32,
+    homogeneous: bool,
+) -> Vec<f32> {
+    let titles: Vec<&str> = titles.collect();
+    let n = titles.len().max(1);
+    let strip = strip.max(1.0);
+    if homogeneous {
+        return vec![strip / n as f32; titles.len().max(1)];
+    }
+    let chrome = (tab_h * 0.5).max(4.0);
+    let close_w = tab_h;
+    let natural: Vec<f32> = titles
+        .iter()
+        .map(|t| {
+            let chars = t.chars().count().max(1) as f32;
+            (chars * cell_w + chrome * 2.0 + close_w).max(close_w * 1.5)
+        })
+        .collect();
+    let sum: f32 = natural.iter().sum();
+    if sum > strip {
+        // Doesn't fit naturally — fall back to homogeneous so
+        // every tab stays visible (no truncation of the strip).
+        vec![strip / n as f32; titles.len().max(1)]
+    } else {
+        natural
+    }
+}
+
 /// Cycle 618 (Terminator parity, key_next_profile / key_previous_profile):
 /// pick the next profile name after `current`, wrapping at the end.
 /// If `current` isn't in the list (e.g. user launched without `--profile`,
@@ -1477,13 +1525,41 @@ impl App {
         // Trailing square "+" button.
         let plus_w = height;
         let strip = (sw - plus_w).max(plus_w);
-        let seg_w = strip / n as f32;
+        let cell_w = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_w)
+            .unwrap_or(8.0)
+            .max(1.0);
+        // Cycle 620 (Terminator parity, terminatorlib/config.py:88
+        // `homogeneous_tabbar`): per-tab widths from a pure helper.
+        // `homogeneous = true` (kettle default) keeps the equal-width
+        // strip; `false` sizes each tab to its title length so a
+        // short tab like "fish" isn't padded out as wide as a long
+        // tab like "vim ~/Projects/some-long-path".
+        let widths = compute_tab_segment_widths(
+            titles.iter().map(|s| s.as_str()),
+            strip,
+            cell_w,
+            height,
+            self.cfg.homogeneous_tabbar,
+        );
         let active = self.mux.active;
+        // Pre-compute x offsets from the cumulative widths so the
+        // closure stays a stateless map. (Slight allocation, but
+        // n is small — tab counts cap in the dozens.)
+        let mut x_offsets: Vec<f32> = Vec::with_capacity(n + 1);
+        x_offsets.push(0.0);
+        for w in &widths {
+            let last = *x_offsets.last().unwrap();
+            x_offsets.push(last + w);
+        }
         let segments = titles
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                let x = i as f32 * seg_w;
+                let x = x_offsets[i];
+                let seg_w = widths[i];
                 // Cycle 246: pull per-tab activity into the segment so
                 // the renderer can draw the indicator dot. Active tabs
                 // short-circuit to Normal (the focused-tab accent
@@ -6449,6 +6525,57 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 620 drift guard. `compute_tab_segment_widths` is the
+    /// pure layout helper behind the tab bar. Verify:
+    ///   - homogeneous = true divides the strip evenly (kettle default)
+    ///   - homogeneous = false sizes per title length when there's room
+    ///   - sum > strip falls back to homogeneous (no truncation)
+    ///   - empty title list yields one safe-width segment (no div/0)
+    ///   - one-char titles still satisfy a minimum (close-btn-affordance)
+    #[test]
+    fn compute_tab_segment_widths_homogeneous_and_natural() {
+        use super::compute_tab_segment_widths;
+        let cell_w = 10.0;
+        let tab_h = 24.0;
+        // Homogeneous: every width is strip/n.
+        let widths =
+            compute_tab_segment_widths(["a", "bb", "ccc"].into_iter(), 300.0, cell_w, tab_h, true);
+        assert_eq!(widths, vec![100.0, 100.0, 100.0]);
+        // Non-homogeneous with plenty of room: each width is
+        // chars*cell_w + 2*chrome + close_w (= 1*10 + 24 + 24 = 58
+        // for "a", but min clamp = close_w * 1.5 = 36, so 58 wins).
+        let widths = compute_tab_segment_widths(
+            ["a", "bb", "ccc"].into_iter(),
+            1_000.0,
+            cell_w,
+            tab_h,
+            false,
+        );
+        assert_eq!(widths.len(), 3);
+        // Wider title ⇒ wider segment.
+        assert!(widths[2] > widths[1]);
+        assert!(widths[1] > widths[0]);
+        // Min affordance: a single-char title is at least 1.5*tab_h.
+        assert!(widths[0] >= tab_h * 1.5);
+        // Overflow falls back to homogeneous: sum > strip.
+        let titles: Vec<String> = (0..20).map(|i| format!("tab-{i}-with-padding")).collect();
+        let widths = compute_tab_segment_widths(
+            titles.iter().map(|s| s.as_str()),
+            200.0,
+            cell_w,
+            tab_h,
+            false,
+        );
+        // All equal because we fell back to homogeneous.
+        assert!(widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01));
+        // Empty list ⇒ one safe segment (no div/0). The bar code
+        // never actually sees this (renders nothing when there are
+        // no tabs), but the helper still has to be panic-safe.
+        let widths: Vec<f32> =
+            compute_tab_segment_widths(std::iter::empty::<&str>(), 100.0, cell_w, tab_h, true);
+        assert_eq!(widths, vec![100.0]);
     }
 
     /// Cycle 618 drift guard. `pick_next_profile` is the pure

@@ -354,7 +354,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`colorterm`~~ | config.py | ✅ cycle-335 — string config key (default `truecolor`; wiring is a follow-up sub-cycle) | cycle-335 |
 | `title_at_bottom` | config.py | ❌ | new config key (for the per-pane titlebar; needs Bucket D first) |
 | `scroll_tabbar` (scrollable tab bar) | config.py | ❌ | new config key for many-tab handling |
-| `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ kettle already does fixed-width | document |
+| `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ cycle-620 — `true` (kettle default) divides strip evenly; `false` sizes per title length with `close_w * 1.5` min-affordance + overflow falls back to homogeneous so a many-tab window never truncates | cycle-620 |
 | `close_button_on_tab` (toggle ✕ on tabs) | config.py | 🟡 always shown | new config key |
 | ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |
 | ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |
