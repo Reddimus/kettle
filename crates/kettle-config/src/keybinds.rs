@@ -173,6 +173,15 @@ pub enum Action {
     /// cycle-X URL clicks already use, so it works on
     /// Linux/macOS/Windows without spawning a per-platform helper.
     ShowHelp,
+    /// Cycle 702 Terminator parity (`key_send_newline` /
+    /// Shift+Return). Writes a literal `\n` to the focused
+    /// pane's PTY. Mostly useful for inserting a newline into a
+    /// shell line-editor that's otherwise consuming Enter
+    /// (e.g. multi-line readline prompts that submit on Enter
+    /// but expect explicit `\n` for line continuation). Bucket E
+    /// rationale removed since shipping this 4-line dispatch
+    /// arm closes the row outright.
+    SendNewline,
     /// Cycle 696 Terminator parity (`key_preferences` /
     /// `key_preferences_keybindings`). Terminator's GUI
     /// Preferences dialog is config-file-driven for kettle, so
@@ -460,6 +469,7 @@ pub fn action_names() -> Vec<&'static str> {
         "scaled_zoom",
         "help",
         "show_help",
+        "send_newline",
         "preferences",
         "edit_config",
         "increase_font_size",
@@ -653,6 +663,7 @@ impl Action {
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
+            "send_newline" | "send-newline" => SendNewline,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"
@@ -1614,6 +1625,18 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::EditConfig)),
                 "alias {s:?} should parse to EditConfig"
+            );
+        }
+    }
+
+    /// Cycle 702 drift guard. Terminator's `send_newline`
+    /// keybind name resolves to `Action::SendNewline`.
+    #[test]
+    fn from_name_accepts_send_newline_aliases() {
+        for s in ["send_newline", "send-newline"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::SendNewline)),
+                "alias {s:?} should parse to SendNewline"
             );
         }
     }

@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 702 — **`Action::SendNewline` (Terminator key_send_newline)**:
+              Writes a literal `\n` to the focused pane's PTY.
+              Useful for shell line-editors that consume Enter
+              normally but expect explicit `\n` for line
+              continuation (multi-line readline prompts).
+              Reachable from cycle-104 command palette + 2
+              keybind name aliases: `send_newline`,
+              `send-newline`. cycle-117 palette completeness
+              drift guard enforces registry coverage.
+              Drift guard `from_name_accepts_send_newline_aliases`
+              walks both aliases. Audit row promoted from E → A.
+              Workspace tests 398 → 399.
+
   cycle 700 — **Terminator broadcast `*_toggle` keybind aliases**:
               Terminator names its broadcast keybinds with the
               `_toggle` suffix: `group_all_toggle`,

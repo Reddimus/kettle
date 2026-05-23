@@ -4311,6 +4311,16 @@ impl App {
                 self.mux.toggle_zoom();
                 self.resize_all();
             }
+            // Cycle 702 Terminator parity (`key_send_newline`).
+            // Write a literal `\n` to the focused pane's PTY.
+            // Useful for shell line-editors that consume Enter
+            // normally but expect explicit `\n` for line
+            // continuation (multi-line readline prompts).
+            Action::SendNewline => {
+                if let Some(p) = self.mux.focused() {
+                    p.term.write(b"\n");
+                }
+            }
             // Cycle 696 Terminator parity (`key_preferences` /
             // `key_preferences_keybindings`). Terminator's GUI
             // Preferences dialog is config-file-driven for

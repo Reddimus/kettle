@@ -109,7 +109,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | Ctrl+Shift+C | copy | `Copy` | A |
 | Ctrl+Shift+V | paste | `Paste` | A |
 | (unbound) | paste_selection | `PastePrimary` (cycle 345) | A (clipboard alias on non-X11; cycle 574 routed through `paste_clipboard` for clamp/bracketed/broadcast) |
-| Shift+Return | send_newline | — | E (most shells already handle this; not a kettle action) |
+| Shift+Return | send_newline | A | cycle-702 — `Action::SendNewline` writes a literal `\n` to the focused pane's PTY. Useful for shell line-editors that consume Enter normally but expect explicit `\n` for line continuation. Palette + 2 name aliases (`send_newline`, `send-newline`). Drift guard `from_name_accepts_send_newline_aliases` covers both. |
 | Ctrl+Plus | zoom_in | `IncreaseFontSize` | A |
 | Ctrl+Minus | zoom_out | `DecreaseFontSize` | A |
 | Ctrl+0 | zoom_normal | `ResetFontSize` | A |
