@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 700 — **Terminator broadcast `*_toggle` keybind aliases**:
+              Terminator names its broadcast keybinds with the
+              `_toggle` suffix: `group_all_toggle`,
+              `group_tab_toggle`, `group_win_toggle`. Kettle's
+              existing actions are `ToggleBroadcastAll/Group/
+              Window`; cycle 700 adds the Terminator spellings
+              as direct aliases so an unmodified Terminator
+              keybind block resolves cleanly.
+                - `group_all_toggle` → `ToggleBroadcastAll`
+                - `group_tab_toggle` → `ToggleBroadcastGroup`
+                  (per-tab broadcast)
+                - `group_win_toggle` → `ToggleBroadcastWindow`
+                  (per-window broadcast)
+              Drift guard
+              `from_name_accepts_terminator_group_toggle_aliases`
+              walks all 6 (underscore + hyphen) aliases.
+              Workspace tests 397 → 398.
+
   cycle 699 — **Terminator config-key aliases: `custom_command` +
               `use_custom_command` + `copy_on_selection` +
               `enabled_plugins`**:

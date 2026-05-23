@@ -472,6 +472,9 @@ pub fn action_names() -> Vec<&'static str> {
         "search",
         "broadcast_all",
         "group_all",
+        "group_all_toggle",
+        "group_tab_toggle",
+        "group_win_toggle",
         "broadcast_off",
         "ungroup_all",
         // Cycle 681 — named-groups runtime broadcast scope.
@@ -666,11 +669,21 @@ impl Action {
             "broadcast_group"
             | "broadcast-group"
             | "toggle_broadcast_group"
-            | "toggle-broadcast-group" => ToggleBroadcastGroup,
+            | "toggle-broadcast-group"
+            | "group_tab_toggle"
+            | "group-tab-toggle" => ToggleBroadcastGroup,
             "broadcast_window"
             | "broadcast-window"
             | "toggle_broadcast_window"
-            | "toggle-broadcast-window" => ToggleBroadcastWindow,
+            | "toggle-broadcast-window"
+            | "group_win_toggle"
+            | "group-win-toggle" => ToggleBroadcastWindow,
+            // Cycle 700 Terminator parity
+            // (terminatorlib/keybindings DEFAULTS):
+            // `group_all_toggle` is Terminator's spelling for
+            // "toggle group-all". Reuses the existing
+            // ToggleBroadcastAll dispatch.
+            "group_all_toggle" | "group-all-toggle" => ToggleBroadcastAll,
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
@@ -1559,6 +1572,27 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::InsertPaneName)),
                 "alias {s:?} should parse to InsertPaneName"
+            );
+        }
+    }
+
+    /// Cycle 700 drift guard. Terminator's `*_toggle` broadcast
+    /// keybind names map onto kettle's existing broadcast-scope
+    /// actions.
+    #[test]
+    fn from_name_accepts_terminator_group_toggle_aliases() {
+        for (s, want) in [
+            ("group_all_toggle", Action::ToggleBroadcastAll),
+            ("group-all-toggle", Action::ToggleBroadcastAll),
+            ("group_tab_toggle", Action::ToggleBroadcastGroup),
+            ("group-tab-toggle", Action::ToggleBroadcastGroup),
+            ("group_win_toggle", Action::ToggleBroadcastWindow),
+            ("group-win-toggle", Action::ToggleBroadcastWindow),
+        ] {
+            assert_eq!(
+                Action::from_name(s).as_ref(),
+                Some(&want),
+                "alias {s:?} should parse to {want:?}"
             );
         }
     }
