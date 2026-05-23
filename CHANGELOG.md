@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 630 — **`docs/TERMINATOR-TERMINALSHOT-DESIGN.md` —
+              Bucket D design doc for `plugins/terminalshot.py`
+              live-window capture**:
+              live-window readback fills the gap between the
+              existing headless `--screenshot` (synthetic scene)
+              and what users actually want when they press a
+              "screenshot now" chord. Architecture:
+                - `Action::TakeScreenshot` + aliases queues
+                  a `ScreenshotRequest` on the renderer
+                - Renderer paints into an intermediate texture
+                  on screenshot-pending frames + copy_texture_
+                  to_buffer + map_async + PNG encode
+                - Per-pane crop (focused-pane rect from mux)
+                - Toast notification on success
+                - Path scheme mirrors cycle-621 logger:
+                  `<cache>/kettle/shots/kettle-<secs>-<pid>.png`
+              7 sub-cycle roadmap, +5 estimated tests. Audit-
+              doc row updated to A+D (`--screenshot` covers
+              the synthetic path; D for live capture). Risk
+              register covers GPU readback latency, render-
+              thread blocking, image-crate version skew. No
+              code change.
+
   cycle 629 — **`docs/TERMINATOR-REMOTE-DESIGN.md` — Bucket D
               design doc for `plugins/remote.py` port**:
               SSH / Docker / Podman / kubectl session detection

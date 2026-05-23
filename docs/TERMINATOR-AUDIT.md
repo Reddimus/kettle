@@ -276,7 +276,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | `remote.py` | SSH/Docker/Podman session detection | D | cycle-629 — multi-cycle design in [`TERMINATOR-REMOTE-DESIGN.md`](TERMINATOR-REMOTE-DESIGN.md). Adds a `kettle_remote` crate (sysinfo-backed process-tree walk), `Terminal::child_pid()` accessor, SSH + Container detectors, ~10 Hz poll tied to cycle-290 trigger cadence, and right-click "Clone session" menu integration. 7 sub-cycles. |
 | `logger.py` | Log terminal output to file | A | cycle-621 `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
-| `terminalshot.py` | Screenshot focused terminal | A | cycle-294 `--annotate` + the existing `--screenshot` |
+| `terminalshot.py` | Screenshot focused terminal | A+D | A: `--screenshot` + cycle-294 `--annotate` (headless synthetic scene). D: live-window readback designed in [`TERMINATOR-TERMINALSHOT-DESIGN.md`](TERMINATOR-TERMINALSHOT-DESIGN.md) — `Action::TakeScreenshot` + wgpu intermediate-texture + per-pane crop. 7 sub-cycles. |
 | `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |

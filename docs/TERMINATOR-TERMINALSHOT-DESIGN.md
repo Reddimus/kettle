@@ -1,0 +1,170 @@
+# Terminator `terminalshot.py` port — design
+
+> Status: design only (cycle 630). The runtime live-window surface
+> readback machinery exceeds a single cycle, so this doc lays out the
+> architecture + sub-cycle roadmap. Same shape as
+> [`TERMINATOR-REMOTE-DESIGN.md`](TERMINATOR-REMOTE-DESIGN.md),
+> [`TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md),
+> [`TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md),
+> [`TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+
+## What it is
+
+Terminator's `plugins/terminalshot.py` adds a right-click "Terminal
+screenshot" menu item. Clicking opens a file-save dialog; on save it
+calls `widget_pixbuf(terminal)` which grabs the GTK widget's current
+pixel buffer (already on the host's GPU/CPU memory; cheap on GTK +
+X11), scales to half-res, and writes PNG via GdkPixbuf.
+
+End-state UX in kettle:
+
+- A user binds `take_screenshot` to a chord (e.g. `Ctrl+Shift+P`) or
+  picks "Take screenshot" from the right-click menu.
+- kettle captures the focused pane's current rendered content + saves
+  it as a PNG to `<cache>/kettle/shots/kettle-<unix-secs>-<pid>.png`
+  (same path scheme as cycle-621's logger).
+- A transient toast (using the existing notification surface) flashes
+  the file path so the user can find it.
+
+The `--screenshot=PATH` / `--screenshot-menu=PATH` CLI flags already
+exist (cycle X). Those render a *synthetic content-free debug scene*
+headlessly — useful for visual regression testing but not for
+"snapshot what I'm looking at right now." This design fills the live-
+window readback gap.
+
+## Why multi-cycle
+
+Three cross-cutting changes:
+
+1. **wgpu surface readback**. kettle's renderer paints into the wgpu
+   swap-chain texture and presents. To read it back we have to either:
+   - Render into an intermediate texture + copy to a readable buffer
+     + map-async + write PNG (most general, but adds a full extra
+     render pass each screenshot).
+   - Or hook into the existing `render_frame` path with an optional
+     readback flag that fires once per screenshot trigger (lower
+     overhead, but requires a new state machine: queue screenshot
+     request → next render takes the slow path → after present,
+     copy texture to staging buffer → map-async → PNG write).
+   - Decision: the second approach. One frame's worth of latency is
+     fine for a user-triggered screenshot. The hot path stays unchanged.
+
+2. **Per-pane vs full-window capture**. Terminator captures *the focused
+   terminal widget*. kettle's renderer paints the whole window in one
+   pass (no per-pane texture). Two sub-options:
+   - **Per-pane crop**: capture the whole frame + crop to the focused
+     pane's rect (which the renderer already computes for pane
+     borders). Cheap; lossy at sub-pixel borders.
+   - **Per-pane re-render**: render just the focused pane into an
+     offscreen texture sized to its pixel rect. Pixel-perfect; more
+     work.
+   - Decision: per-pane crop. The user's expectation matches whatever
+     they see on-screen; sub-pixel border slop is fine.
+
+3. **Toast / notification path**. We already have notify-rust + the
+   cycle-612 desktop notification surface. After PNG write succeeds,
+   fire a notification with body "Saved to <path>" so the user knows
+   where it landed.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ kettle_ui::app::App (Action::TakeScreenshot dispatch)                │
+│                                                                      │
+│  on action:                                                          │
+│    self.pending_screenshot = Some(ScreenshotRequest {                │
+│        path: session_screenshot_path(unix_secs, pid, cache),         │
+│        crop: self.mux.focused_pane_rect(),                           │
+│    });                                                               │
+│    self.window.request_redraw();  ← forces next paint                │
+└──────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ kettle_render::Renderer::render_frame (extended)                     │
+│                                                                      │
+│  if let Some(req) = take_pending_screenshot():                       │
+│    render to intermediate texture (instead of swapchain only)        │
+│    issue copy_texture_to_buffer(crop_rect)                           │
+│    after queue.submit:                                               │
+│      staging_buf.map_async(MapMode::Read, cb)                        │
+│      when cb fires (next frame typically):                           │
+│        encode PNG from mapped bytes                                  │
+│        write to req.path                                             │
+│        send Toast(req.path) event back to App                        │
+└──────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ App handles ToastEvent → fire_notify("Screenshot saved", req.path)   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+`Renderer::take_pending_screenshot()` is a tiny getter; the queue lives
+in a `Mutex<Option<ScreenshotRequest>>` on the renderer.
+
+The PNG encoder is the same crate used by the existing `capture_png`
+function (cycle X) — `image` is already a transitive dep via
+kettle-render. No new deps.
+
+## Sub-cycle roadmap
+
+| Sub-cycle | What ships | Test coverage |
+|-----------|-----------|---------------|
+| 1 | `Action::TakeScreenshot` enum variant + aliases (`take_screenshot` / `terminalshot` / `take-screenshot`) + dispatch arm queues request (no render-side wiring yet) | Unit test on from_name + palette inclusion |
+| 2 | `session_screenshot_path(unix_secs, pid, cache_dir)` pure helper (mirrors cycle-621 `session_log_path`) | Drift guard on path shape + relative-fallback |
+| 3 | `Renderer::pending_screenshot` slot + getter/setter; render_frame branches to intermediate-texture path when set | Compiles + existing snapshot tests pass |
+| 4 | wgpu copy_texture_to_buffer + map_async + PNG encode path | Mock wgpu via existing test infra? (may need manual e2e) |
+| 5 | Toast notification on save success/fail | Manual e2e |
+| 6 | Right-click context menu entry "Take screenshot" + per-pane crop | Manual e2e |
+| 7 | Audit doc + CONFIG.md + CHANGELOG | doc-only |
+
+Estimated test growth: +5 (helpers + dispatch); the wgpu pipeline is
+hard to unit-test cleanly — relies on manual screenshot verification.
+
+## What WON'T ship in v1
+
+- **In-place annotation**. The cycle-294 `--annotate` flag adds an
+  annotation overlay to the headless screenshot path. Wiring the
+  annotation surface into the live-capture path is a follow-up
+  (mostly composing existing pieces).
+- **Per-tab vs per-window screenshot**. v1 ships the focused-pane
+  capture. The whole-window capture is the existing `--screenshot`
+  path; if the user wants live-window-whole-frame, they can
+  alt-screen + use the OS screenshot tool. (kettle's window is just
+  one wgpu surface; the OS tool sees it like any other window.)
+- **Mouse-cursor inclusion**. Terminator's pixbuf grab doesn't include
+  the OS cursor; kettle's matches. Document this explicitly.
+
+## Acceptance test
+
+```
+$ kettle
+# bind take_screenshot in config:
+# keybind = ctrl+shift+p = take_screenshot
+
+# run some commands in pane 1; split to pane 2; run a different command
+# focus pane 1, press Ctrl+Shift+P
+# verify: notification "Screenshot saved to ~/.cache/kettle/shots/..."
+# open the file:
+$ xdg-open ~/.cache/kettle/shots/kettle-*.png
+# verify: PNG shows pane 1's content (not pane 2, not the tab bar)
+```
+
+## Risks + mitigations
+
+- **Risk:** wgpu readback can be slow on integrated GPUs (~10 ms).
+  **Mitigation:** screenshot is user-triggered, not on the hot path.
+  One frame of latency is acceptable.
+- **Risk:** PNG encode blocks the render thread.
+  **Mitigation:** spawn a tokio task / std::thread to do the encode
+  + write off the render thread. The mapped buffer is owned by the
+  task; renderer unblocks immediately.
+- **Risk:** mapped-buffer leak if the user closes kettle mid-encode.
+  **Mitigation:** put the task in a JoinSet tracked by the renderer;
+  on shutdown, abort the joinset (the kernel reaps the leaked staging
+  buffer when the wgpu device drops).
+- **Risk:** image crate version skew with the headless `capture_png`
+  path. **Mitigation:** share the encoder helper between the two
+  paths — single image-crate import location.
