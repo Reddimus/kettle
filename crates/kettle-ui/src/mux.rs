@@ -160,6 +160,38 @@ impl Node {
         }
     }
 
+    /// Cycle 602: find the leaf id that should receive focus when
+    /// `id` is removed from this tree. Returns the first leaf of
+    /// `id`'s sibling subtree at the deepest Split containing
+    /// `id`. Returns `None` if `id` isn't a leaf in this tree, or
+    /// if the tree is a single Leaf (no sibling to promote).
+    ///
+    /// User-reported bug pre-cycle-602: `close_focused` was setting
+    /// `tab.focus = tab.root.first_leaf()` after the close, which
+    /// always jumps to the LEFTMOST leaf of the whole tab — i.e.,
+    /// the first pane the user split from. Closing a deeply-nested
+    /// pane felt teleporting. `neighbor_of` walks to the closed
+    /// pane's split-mate instead, matching what every other
+    /// terminal multiplexer does (tmux, wezterm, kitty).
+    fn neighbor_of(&self, id: u64) -> Option<u64> {
+        match self {
+            Node::Leaf(_) => None,
+            Node::Split { a, b, .. } => {
+                // If `id` is a direct Leaf child of this Split, the
+                // sibling subtree's first leaf is the right neighbor.
+                // Otherwise recurse — the deeper recursion finds the
+                // sibling at the actual Split that contains `id`.
+                if matches!(a.as_ref(), Node::Leaf(x) if *x == id) {
+                    return Some(b.first_leaf());
+                }
+                if matches!(b.as_ref(), Node::Leaf(x) if *x == id) {
+                    return Some(a.first_leaf());
+                }
+                a.neighbor_of(id).or_else(|| b.neighbor_of(id))
+            }
+        }
+    }
+
     fn contains(&self, id: u64) -> bool {
         match self {
             Node::Leaf(x) => *x == id,
@@ -1083,11 +1115,26 @@ impl Mux {
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
+            // Cycle 602: pick the post-close focus BEFORE removing the leaf
+            // so we know which sibling subtree to promote. Pre-cycle-602
+            // this was `tab.root.first_leaf()` POST-remove, which always
+            // jumped to the leftmost leaf of the whole tab — a regression
+            // the user described as "closing a pane sets my cursor back
+            // to my first focused terminal" (the leftmost = first split).
+            // `neighbor_of` walks the tree and returns the first leaf of
+            // the closed pane's sibling subtree, matching tmux/wezterm/
+            // kitty's neighbor-promotion semantics.
+            let neighbor = tab.root.neighbor_of(focus);
             let root = std::mem::replace(&mut tab.root, Node::Leaf(0));
             match root.remove_leaf(focus) {
                 Ok(n) | Err(Some(n)) => {
                     tab.root = n;
-                    tab.focus = tab.root.first_leaf();
+                    // `neighbor` is None only if the focus pane wasn't
+                    // in the tree (logic error) or the tree was a single
+                    // Leaf (handled by Err(None) below). Fall back to
+                    // first_leaf so a stale focus pointer doesn't crash
+                    // — same defensive shape as pre-cycle-602.
+                    tab.focus = neighbor.unwrap_or_else(|| tab.root.first_leaf());
                     self.panes.remove(&focus);
                 }
                 Err(None) => {
@@ -1795,6 +1842,107 @@ mod node_tests {
         // Closing the now-last pane drains the tab.
         assert!(m.close_focused(), "last-pane close should report empty");
         assert!(m.tabs.is_empty());
+    }
+
+    /// Cycle 602: user-reported bug. When the user splits many times
+    /// and then closes a pane deep in the tree, focus jumps back to
+    /// the leftmost (first focused) pane instead of the deeper
+    /// neighbor of the closed pane.
+    ///
+    /// Repro: build tree
+    ///
+    ///     Split{Horiz,
+    ///         a: Leaf(10),
+    ///         b: Split{Vert,
+    ///             a: Leaf(20),
+    ///             b: Split{Horiz,
+    ///                 a: Leaf(30),
+    ///                 b: Leaf(40)}}}
+    ///
+    /// User focuses Leaf(40) and closes it. Pre-cycle-602:
+    /// `tab.root.first_leaf()` returns 10 (the leftmost of the WHOLE
+    /// tree). Expected: focus moves to Leaf(30) — the immediate
+    /// neighbor that took 40's slot in the deepest split.
+    #[test]
+    fn close_focused_picks_nearest_neighbor_not_leftmost_root() {
+        let mut m = Mux::new();
+        // Build the 4-leaf nested tree by hand (testing the Node logic
+        // directly; bypasses the Pane/PTY infra which split_leaf would
+        // touch in the full Mux::split flow).
+        let root = Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(10)),
+            b: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(20)),
+                b: Box::new(Node::Split {
+                    dir: Dir::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(30)),
+                    b: Box::new(Node::Leaf(40)),
+                }),
+            }),
+        };
+        m.tabs.push(Tab {
+            root,
+            focus: 40,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        });
+        m.active = 0;
+        assert!(!m.close_focused(), "tab still has 3 panes after closing 40");
+        assert_eq!(
+            m.tabs[0].focus, 30,
+            "focus must move to the *nearest neighbor* (30), not jump back \
+             to the leftmost-leaf-of-the-tab (10) — that's the cycle-602 bug"
+        );
+    }
+
+    /// Cycle 602: companion to the test above. The `neighbor_of`
+    /// helper drives the focus-restoration. Asserts the contract
+    /// directly so a future refactor of `close_focused` that
+    /// stops calling `neighbor_of` (or breaks the helper) fails
+    /// the gauntlet rather than re-introducing the user-reported
+    /// bug.
+    #[test]
+    fn node_neighbor_of_finds_sibling_subtree_first_leaf() {
+        // Same shape as the close-focused repro above.
+        let root = Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(10)),
+            b: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(20)),
+                b: Box::new(Node::Split {
+                    dir: Dir::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(30)),
+                    b: Box::new(Node::Leaf(40)),
+                }),
+            }),
+        };
+        // Neighbor of the deepest right leaf is its split-mate (30).
+        assert_eq!(root.neighbor_of(40), Some(30));
+        // Neighbor of 30 is 40 (the other side of the deepest split).
+        assert_eq!(root.neighbor_of(30), Some(40));
+        // Neighbor of 20 is the first leaf of its sibling subtree
+        // (Split{30, 40}) → 30.
+        assert_eq!(root.neighbor_of(20), Some(30));
+        // Neighbor of 10 is the first leaf of its sibling subtree
+        // (the deeper Split) → 20.
+        assert_eq!(root.neighbor_of(10), Some(20));
+        // Leaf id not in the tree → None.
+        assert_eq!(root.neighbor_of(999), None);
+        // Single-leaf tree → no neighbor.
+        let lonely = Node::Leaf(1);
+        assert_eq!(lonely.neighbor_of(1), None);
     }
 
     #[test]

@@ -75,6 +75,32 @@ the next major event's release notes.
               case; eliminates the flake under parallel
               execution.
 
+  cycle 602 — **Pane-close focus follows the neighbor, not the
+              leftmost leaf.** User-reported bug: "when I split
+              the window many times then close that specific
+              terminal it sets my cursor/focused window to my
+              first focused terminal." `Mux::close_focused` was
+              setting `tab.focus = tab.root.first_leaf()` after
+              the close — which always points at the LEFTMOST
+              leaf of the whole tab (the first pane the user
+              started from). For deeply-nested closes that
+              feels teleporting. New `Node::neighbor_of(id)`
+              walks the tree and returns the first leaf of the
+              closed pane's sibling subtree; `close_focused`
+              calls it BEFORE the destructive `remove_leaf` so
+              the right neighbor is captured even after the
+              tree is rebuilt. Matches tmux / wezterm / kitty
+              neighbor-promotion semantics. Drift guards:
+              `close_focused_picks_nearest_neighbor_not_leftmost_root`
+              (4-leaf nested tree reproduction of the exact
+              user-described scenario; pre-fix focus jumps to
+              leaf 10, post-fix it lands on neighbor leaf 30)
+              and `node_neighbor_of_finds_sibling_subtree_first_leaf`
+              (pins the helper's contract directly).
+              `reap_tabs` (PTY-died path) keeps its existing
+              fallback policy — only user-initiated close gets
+              neighbor focus. Workspace tests 340 → 342.
+
   cycle 601 — **Lua side-effect API resource caps.** Audit
               extension to the cycle-376 / cycle-591 sandbox
               defense: the `kettle.*` side-effect callbacks
