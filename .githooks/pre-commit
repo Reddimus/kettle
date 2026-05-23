@@ -4,8 +4,21 @@
 # Runs the local-only quality gate kettle's CONTRIBUTING.md
 # recommends ("a green `just gauntlet` locally is the same gate
 # every PR runs on every OS"). Skips the gate for commits that
-# touch ONLY non-code paths (CHANGELOG.md, README.md, docs/*,
-# packaging/*, .github/*) so doc-only edits stay fast.
+# touch ONLY paths Rust code doesn't depend on at compile time
+# (CHANGELOG.md, README.md, docs/*, packaging/*, .github/*,
+# .githooks/*, NOTICE, LICENSE, SECURITY.md, CODE_OF_CONDUCT.md,
+# CONTRIBUTING.md, deny.toml, .gitignore) so doc-only / CI-only /
+# license-only edits stay fast.
+#
+# Paths NOT excluded (and thus trigger the gauntlet):
+#   - crates/**/*.rs
+#   - Cargo.toml + Cargo.lock (a dep bump can break clippy/tests)
+#   - assets/* (build.rs scans assets/themes/ for the embedded set)
+#   - scripts/* (release.sh + install*.sh are exercised by `cargo
+#     test` if a contributor adds shellcheck-tested helpers)
+#   - shell-integration/* (snippet content is include_str!'d at
+#     build time)
+#   - tests/ (anything we want compiled)
 #
 # Install (one-time per checkout):
 #
