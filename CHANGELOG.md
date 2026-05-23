@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 690 — **terminalshot sub-cycle 7: audit close-out**.
+              Audit doc row + Bucket-D summary table both
+              promoted: terminalshot → ✅ A 7/7 deployed.
+              **All 7 Bucket D Terminator features now ship
+              end-to-end on the deployed binary**:
+                - `plugins/remote.py`
+                - `plugins/auto_theme.py`
+                - `ask_before_closing`
+                - `tab_position = left/right`
+                - Named broadcast groups
+                - Theme + Profile submenu
+                - `plugins/terminalshot.py`
+              Plus the summary highlights three durable
+              choices: BroadcastScope migration touched 5
+              call sites without breaking cycle-178; the
+              NOAA solar algo is pure (no deps); the wgpu
+              readback respects row padding + BGRA→RGBA
+              for cross-adapter portability.
+              No code change. **Bucket D pass complete.**
+
   cycle 689 — **terminalshot sub-cycles 5 + 6: desktop
               notification + per-pane crop**.
               Sub-cycle 5: `Action::TakeScreenshot` dispatch

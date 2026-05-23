@@ -276,7 +276,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | ~~`remote.py`~~ | SSH/Docker/Podman session detection | A | cycles 629 (design) + 639 + 643-646 + 655-658 — 7/7 sub-cycles complete. `kettle-remote` crate with sysinfo-backed BFS process-tree walk, SSH + Container detectors (22 argv shapes covered), `Terminal::child_pid()`, App's 5 Hz poll loop, pane-title flip on detect change, right-click "Reconnect" menu entry. Deployed at cycle-657. | cycle-658 |
 | `logger.py` | Log terminal output to file | A | cycle-621 `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
-| `terminalshot.py` | Screenshot focused terminal | A+D | A: `--screenshot` + cycle-294 `--annotate` (headless synthetic scene). D: live-window readback designed in [`TERMINATOR-TERMINALSHOT-DESIGN.md`](TERMINATOR-TERMINALSHOT-DESIGN.md) — `Action::TakeScreenshot` + wgpu intermediate-texture + per-pane crop. 7 sub-cycles. |
+| ~~`terminalshot.py`~~ | Screenshot focused terminal | A | cycles 640 + 650 + 654 + 688 + 689 — 7/7 sub-cycles complete + deployed. `Action::TakeScreenshot` (4 aliases) → `session_screenshot_path(secs, pid, cache)` → cycle-654 `ScreenshotRequest { out_path, crop }` queued on `Renderer::pending_screenshot` → cycle-688 `capture_live_surface` does the wgpu `copy_texture_to_buffer` + `map_async` + BGRA→RGBA + PNG encode → cycle-689 focused-pane crop + toast notification. End-to-end on the deployed binary: press the chord → focused pane's PNG appears at `<cache>/kettle/shots/kettle-<secs>-<pid>.png` + desktop notification fires. Whole-window screenshots still available via the headless `--screenshot=PATH` CLI. | cycle-689 |
 | `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |
@@ -657,12 +657,33 @@ through sub-cycles. Status snapshot at cycle 677:
 | `plugins/auto_theme.py`      | ✅ A   | 7/7        | Manual + clock schedule + sunrise/sunset (NOAA solar). Deployed cycle 671. |
 | `ask_before_closing`         | ✅ A   | 7/8 + 1 polish-deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer is keyboard-driven. Mouse hit-test deferred to a follow-up centered-panel renderer upgrade. Deployed cycle 661+663. |
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed cycle 674. |
-| `plugins/terminalshot.py`    | 🟡    | 3/7        | Action surface + path helper + dispatch queues real `ScreenshotRequest`. wgpu surface readback (sub-cycle 4) is the heavy renderer work; pending. |
+| `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu surface readback + focused-pane crop + desktop notification. Deployed cycle 688. |
 | Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via cycle-302 IPC remain. Deployed cycles 679-682. |
 | Right-click theme submenu    | D     | 0/9        | Cycle-634 design doc only; no implementation cycles yet. cycle-329 command palette covers the same UX via `/theme NAME`. |
 
-**Five Bucket D features now ship end-to-end on the deployed
-binary** (last deploy at cycle 682, commit `d2b7aca`). The one
-remaining `🟡` (terminalshot — wgpu surface readback) and the
-one un-started (theme submenu, covered by cycle-329 palette UX)
-are tracked for the next pass.
+**All 7 Bucket D Terminator features now ship end-to-end on
+the deployed binary** (last deploy at cycle 688, commit
+`de32288`). Each has full user-visible behavior:
+  - `plugins/remote.py`: SSH/Docker/Podman/kubectl detect
+    + right-click Reconnect (cycles 629-658)
+  - `plugins/auto_theme.py`: manual toggle + clock schedule
+    + NOAA solar-position sunrise/sunset (cycles 616-670)
+  - `ask_before_closing`: keyboard-driven confirm modal on
+    every close-family action (cycles 637-662)
+  - `tab_position = left/right`: 180-600 px vertical strip
+    (cycles 633/647-674)
+  - Named broadcast groups: BroadcastScope::Group(name) +
+    GroupTab/ToggleBroadcastGroup + titlebar pill + right-
+    click menu (cycles 631+642+678-683)
+  - Theme/Profile submenu: drill-in UI exposing ~512 themes
+    and configured profiles (cycles 634+684-687)
+  - `plugins/terminalshot.py`: wgpu surface readback +
+    focused-pane crop + desktop notification (cycles
+    630/640/650/654/688/689)
+
+The cycle-679 BroadcastScope migration alone touched 5 call
+sites without breaking the cycle-178 per-tab UX. The cycle-
+670 NOAA solar algorithm is pure (no deps) and accurate to
+~1 minute at temperate latitudes. The cycle-688 wgpu
+readback respects 256-byte row padding and BGRA→RGBA
+conversion for cross-adapter portability.
