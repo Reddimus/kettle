@@ -217,6 +217,13 @@ pub enum Action {
     /// Cycle 342 Terminator parity (key_insert_padded): send the
     /// focused pane's index zero-padded.
     InsertPanePadded,
+    /// Cycle 606 Terminator parity (`insert_term_name.py` plugin):
+    /// send the focused pane's title (Pane::title — what the chrome
+    /// shows in the per-pane titlebar) as text input. Useful for
+    /// scripts that want to label their output by which pane it
+    /// came from, or for keyboard-driven copy-the-current-title
+    /// workflows.
+    InsertPaneName,
     /// Cycle 342 Terminator parity (key_next_profile): cycle to the
     /// next named profile at runtime.
     NextProfile,
@@ -515,6 +522,8 @@ impl Action {
             | "edit-pane-title" => EditPaneTitle,
             "insert_number" | "insert-number" | "insert_pane_number" => InsertPaneNumber,
             "insert_padded" | "insert-padded" | "insert_pane_padded" => InsertPanePadded,
+            "insert_name" | "insert-name" | "insert_pane_name" | "insert-pane-name"
+            | "insert_term_name" | "insert-term-name" => InsertPaneName,
             "next_profile" | "next-profile" => NextProfile,
             "previous_profile" | "previous-profile" | "prev_profile" | "prev-profile" => {
                 PrevProfile
@@ -1269,6 +1278,29 @@ mod tests {
         // will reject — not unbind).
         for tok in ["copy", "no_action", "disabled", "off", "x"] {
             assert!(!is_unbind_token(tok), "{tok:?} should NOT be unbind");
+        }
+    }
+
+    /// Cycle 606 drift guard: every alias the parser accepts for
+    /// `insert_pane_name` round-trips to the same Action variant.
+    /// Terminator emits the `insert-term-name` signal (with hyphens
+    /// AND `term`); kettle's preferred spelling is `insert_pane_name`.
+    /// The aliases here let a Terminator-style config keybind work
+    /// without renaming.
+    #[test]
+    fn from_name_accepts_insert_pane_name_aliases() {
+        for s in [
+            "insert_pane_name",
+            "insert-pane-name",
+            "insert_name",
+            "insert-name",
+            "insert_term_name",
+            "insert-term-name",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::InsertPaneName)),
+                "alias {s:?} should parse to InsertPaneName"
+            );
         }
     }
 

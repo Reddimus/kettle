@@ -3594,6 +3594,19 @@ impl App {
                     p.term.write(format!("{idx:02}").as_bytes());
                 }
             }
+            // Cycle 606 Terminator parity (`insert_term_name.py`
+            // plugin → `InsertTermName` menu item + keybind). Send
+            // the focused pane's title (Pane::title — same string
+            // the chrome shows in the per-pane titlebar) to the
+            // PTY. Useful for scripts that want to label their
+            // output by source pane, or for keyboard workflows
+            // that re-type the current title into the command line.
+            Action::InsertPaneName => {
+                if let Some(p) = self.mux.focused() {
+                    let title = p.title.clone();
+                    p.term.write(title.as_bytes());
+                }
+            }
             // Cycle 345: half-page scroll. Same shape as cycle-X's
             // ScrollPageUp/Down handler but with half the row count.
             // Pull the row count from the focused pane's grid

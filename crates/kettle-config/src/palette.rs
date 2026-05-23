@@ -142,6 +142,7 @@ mod tests {
             EditPaneTitle,
             InsertPaneNumber,
             InsertPanePadded,
+            InsertPaneName,
         ];
         // Enumerate every Action variant explicitly via this exhaustive
         // list; if a future variant is added the match below fails to
@@ -209,6 +210,7 @@ mod tests {
             EditPaneTitle,
             InsertPaneNumber,
             InsertPanePadded,
+            InsertPaneName,
             NextProfile,
             PrevProfile,
             ZoomInAll,
@@ -289,6 +291,7 @@ mod tests {
                 | EditPaneTitle
                 | InsertPaneNumber
                 | InsertPanePadded
+                | InsertPaneName
                 | NextProfile
                 | PrevProfile
                 | ZoomInAll

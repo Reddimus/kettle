@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 606 — **`Action::InsertPaneName`** (Terminator parity,
+              `terminatorlib/plugins/insert_term_name.py`). New
+              action that sends the focused pane's title to the
+              focused PTY — useful for scripts that label their
+              output by source pane or for keyboard-driven
+              copy-current-title workflows. Mirrors the existing
+              cycle-345 `InsertPaneNumber` / `InsertPanePadded`
+              pattern. Accepted name aliases:
+              `insert_pane_name`, `insert-pane-name`,
+              `insert_name`, `insert-name`, plus
+              `insert_term_name` / `insert-term-name` (Terminator
+              spelling — copy-a-Terminator-keybind compatibility).
+              Drift guards: existing
+              `action_names_round_trip_through_from_name` + the
+              cycle-117 `palette_includes_every_user_facing_action`
+              already cover the addition; new
+              `from_name_accepts_insert_pane_name_aliases` pins
+              every alias. Workspace tests 346 → 347.
+
+  cycle 605 — **Doc-truth pass: 3 wired keys promoted out of
+              the no-op table.** `handle-size` (cycle 353),
+              `geometry-hinting` (cycle 359), `focus`
+              (cycle 360) were all wired in production but
+              listed as no-op in CONFIG.md "Parsed-but-currently-
+              no-op keys" — the explanatory copy on `focus` even
+              claimed "kettle uses click-focus exclusively"
+              which contradicts the cycle-360 sloppy
+              implementation. Audit each key's read sites,
+              promote into main table with proper type / default /
+              behavior rows. Doc-only. cycle-179 drift guards
+              all still pass.
+
   cycle 604 — **Ctrl+wheel font zoom + `disable-mousewheel-zoom`
               opt-out** (Terminator parity, key_zoom_in /
               key_zoom_out). The `disable-mousewheel-zoom` config
