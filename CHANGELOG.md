@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 635 — **Audit doc reconciliation (round 5)**: 7 more
+              audit rows reclassified:
+                - `inactive_color_offset` → ✅ shipped (both
+                  fg + bg offsets parse and apply)
+                - `title_at_bottom` → ✅ shipped (per-pane
+                  titlebar honors it in render/lib.rs)
+                - `remote.py` → D (cycle-629 design doc)
+                - `ask_before_closing` → 🟡 parsed not wired
+                  (Bucket D: shared modal-overlay primitive)
+                - `layout_launcher` → Bucket E (cycle-329
+                  palette covers the picker UX)
+                - `cell_width`/`cell_height` → 🟡 Bucket C
+                  (parsed; needs renderer font-metric multiply)
+                - `palette = solarized_dark` → Bucket E
+                  (kettle's ~512 themes are a superset)
+                - `Multiple grouping modes + auto-cleanup` → D
+                  (cycle-631 named-groups design covers it)
+              Audit now reflects ground truth: every row is
+              either ✅ (shipped), Bucket D with a cross-link to
+              the design doc, Bucket E with a divergence
+              rationale, or 🟡 Bucket C with a concrete
+              implementation sketch.
+
   cycle 634 — **`docs/TERMINATOR-THEME-SUBMENU-DESIGN.md` —
               Bucket D design doc for the right-click theme +
               profile submenu (Terminator

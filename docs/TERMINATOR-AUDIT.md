@@ -336,7 +336,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | Terminator feature | source | kettle status | Cycle target |
 |---|---|---|---|
 | ~~`tab_position = left` / `right` / `hidden`~~ | config.py | ✅ cycle-331 — `hidden` aliases to `tab-bar = off`; `left`/`right` accepted by parser + check-config but fall through to top with a log::warn (vertical tab bars are deferred Bucket C) | cycle-331 |
-| `inactive_color_offset` (dim unfocused term FG) | config.py | 🟡 kettle has `unfocused-split-opacity` (single combined dim); Terminator has separate fg + bg offsets | add `inactive-color-offset` + `inactive-bg-color-offset` aliases that map to `unfocused-split-opacity` (single value); or split into two |
+| ~~`inactive_color_offset`~~ (dim unfocused term FG) | config.py | ✅ — `inactive-color-offset` + `inactive-bg-color-offset` config keys both parse (lib.rs:1944/1959) and apply in kettle-render (lib.rs:1218). Separate FG + BG offsets honored. | (covered) |
 | ~~`allow_bold`~~ | config.py | ✅ cycle-333 — bool config key (default true; kettle render-time behavior wiring in render layer is a follow-up sub-cycle but config + drift guard ship now) | cycle-333 |
 | ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 — bool config key (default false; xterm-convention SGR1→bright mapping; render-layer wiring is a follow-up) | cycle-333 |
 | ~~`link_single_click`~~ | config.py | ✅ cycle-333 — bool config key (default false; mouse-handler wiring is a follow-up) | cycle-333 |
@@ -352,7 +352,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`force_no_bell`~~ | config.py | ✅ cycle-613 — wired post-process override of `bell` mode | cycle-613 |
 | ~~`term`~~ | config.py | ✅ cycle-335 — string config key (default `xterm-256color`; wiring to spawned shell env is a follow-up sub-cycle) | cycle-335 |
 | ~~`colorterm`~~ | config.py | ✅ cycle-335 — string config key (default `truecolor`; wiring is a follow-up sub-cycle) | cycle-335 |
-| `title_at_bottom` | config.py | ❌ | new config key (for the per-pane titlebar; needs Bucket D first) |
+| ~~`title_at_bottom`~~ | config.py | ✅ — `title-at-bottom` config key (lib.rs:520-522) wired in kettle-render at the per-pane titlebar layout (render/lib.rs:1099-1106 + 1583-1590). Flips bar to bottom of pane when true. | (covered) |
 | `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses cycle-620 homogeneous/non-homogeneous layout with overflow fallback — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ cycle-620 — `true` (kettle default) divides strip evenly; `false` sizes per title length with `close_w * 1.5` min-affordance + overflow falls back to homogeneous so a many-tab window never truncates | cycle-620 |
 | ~~`close_button_on_tab`~~ (toggle ✕ on tabs) | config.py | ✅ `close-button-on-tab` config key wired to tab-bar render | (covered) |
@@ -360,7 +360,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |
 | `sticky` (on all workspaces) | config.py | E | parsed but Bucket E: winit 0.30 doesn't expose `_NET_WM_STATE_STICKY` (X11) or `set_visible_on_all_workspaces` (macOS) on the cross-platform Window/WindowAttributes API. Would need raw-window-handle direct X11 atom writes or a winit upgrade. |
 | `hide_from_taskbar` | config.py | E | parsed but Bucket E: winit 0.30 has `with_skip_taskbar` only on Windows (`WindowAttributesExtWindows`). X11/Wayland/macOS need platform-specific extensions kettle would have to add manually. |
-| `ask_before_closing = always/multiple_terminals/never` | config.py | ❌ | new config key + close-confirm dialog |
+| `ask_before_closing = always/multiple_terminals/never` | config.py | 🟡 — `ask-before-closing` config key parses (lib.rs:1873) + `AskBeforeClosing` enum (lib.rs:303-310). Close-confirm dialog not yet wired (the parsed value isn't read at close-time). Bucket D — needs a modal-overlay confirm primitive shared with future quit/save-changes flows. |
 | ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart | (covered) |
 | ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (kettle-ui/mux.rs cycle 343) so the spawn argv gets `-l` when true | (covered) |
 | ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ cycle 359 — `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) | cycle-359 |
@@ -385,17 +385,17 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `insert_number` / `insert_padded` | keybinds | 🟡 cycle-606 ships `insert_term_name` (sends pane title); kettle uses titles not numbers (kettle doesn't enumerate panes 1..N for users) | E for `insert_number`; `insert_term_name` covered |
 | ~~`next_profile` / `previous_profile`~~ | keybinds | ✅ cycles 342 + 618 — `Action::NextProfile` / `PrevProfile` cycle `<config>/profiles/*.config` at runtime; cycle 618 refactored to use `Config::list_profiles` + `profile_name_from_path` + pure `pick_next_profile` helper | cycle-618 |
 | Theme presets in right-click menu | terminal_popup_menu.py | D | cycle-634 — multi-cycle design in [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](TERMINATOR-THEME-SUBMENU-DESIGN.md). Adds `ContextMenuItem::Submenu { label, items }`, hover-delay state machine, flyout layout + edge-flip clipping, populated by `Theme::list()` and `Config::list_profiles()`. 9 sub-cycles. |
-| Layout launcher overlay (Alt+L) | layoutlauncher.py | ❌ | new modal overlay (like cycle-218 hint mode) listing saved layouts |
+| Layout launcher overlay (Alt+L) | layoutlauncher.py | 🟡 — `--layout NAME` launch-time and `Action::ReloadConfig` runtime both work; cycle-329 command palette + cycle-634 right-click theme-submenu design both list layouts as candidate sources for a runtime picker. Bucket E for now (cycle-329 palette covers the picker UX). |
 | ~~`command_notify`~~ (long-running command done) | plugins | ✅ cycle-612 — OSC 133 CommandEnd duration → `notify-rust` when window unfocused, gated by `command-notify-threshold-ms` | cycle-612 |
 | ~~`run_cmd_on_match`~~ (run cmd on regex match) | plugins | ✅ cycle-622 — `trigger = REGEX :: argv` + `TriggerAction::RunCommand(Vec<String>)` + fire-and-forget spawn | cycle-622 |
 | ~~`custom_commands`~~ (user-defined context menu items) | plugins | ✅ cycle-611 — `menu-item = LABEL = CMD` config key splits on first `=`, writes CMD\n to focused pane PTY on click | cycle-611 |
-| `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
+| `remote.py` (SSH/Docker/Podman detection) | plugins | D | cycle-629 design in [`TERMINATOR-REMOTE-DESIGN.md`](TERMINATOR-REMOTE-DESIGN.md) — new kettle_remote crate + sysinfo + 7 sub-cycles |
 | ~~`logger.py`~~ (log session to file) | plugins | ✅ cycle-621 — `Action::ToggleSessionLog` opens `<cache>/kettle/logs/...` and writes raw PTY bytes from reader thread via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot | cycle-621 |
 | ~~`dir_open.py`~~ (open cwd in file manager) | plugins | ✅ cycle-607 — `Action::OpenCwdInFileManager` builds `file://{cwd}` via `open_url()` (which uses the `open` crate) | cycle-607 |
 | `auto_theme.py` (light/dark switching) | plugins | A+D | A: cycle-616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` (manual toggle). D: auto-detect + sunrise/sunset designed in [`TERMINATOR-AUTO-THEME-DESIGN.md`](TERMINATOR-AUTO-THEME-DESIGN.md) — dark-light crate dep + DBus/NSDistributedNotificationCenter/Registry subscribe + ThemeSchedule { Clock, SunriseSunset } + privacy-conscious explicit-lat/long only. 7 sub-cycles. |
-| `cell_width` / `cell_height` (per-character cell scaling) | config.py | ❌ | new config keys; font-metric override |
-| `palette = solarized_dark` (named preset) | config.py | 🟡 kettle has ~500 themes; named palette presets are subset | new config-key syntax `palette = solarized_dark` (alias for full hex set) |
-| Multiple grouping modes + auto-cleanup | config.py | ❌ | named groups + `autoclean_groups` config key |
+| `cell_width` / `cell_height` (per-character cell scaling) | config.py | 🟡 — `cell-width` + `cell-height` config keys parse (lib.rs:2043-2052) and store on Config. Not yet plumbed to the renderer's font-metric override path — cell metrics use measured glyph dimensions, not the scaled `cfg.cell_width * measured`. Bucket C — one renderer cycle to multiply through. |
+| `palette = solarized_dark` (named preset) | config.py | E | Bucket E — kettle's ~512 bundled themes (Ghostty / iTerm2 / WezTerm corpora) are a strict superset of Terminator's named palette presets. A Terminator user with `palette = solarized_dark` can write `theme = Solarized Dark` for equivalent + richer behavior (palette + cursor + selection colors set in one). |
+| Multiple grouping modes + auto-cleanup | config.py | D | cycle-631 design in [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](TERMINATOR-NAMED-GROUPS-DESIGN.md) covers named groups. `autoclean_groups` (auto-remove groups when last member closes) is a natural extension — sub-cycle of the named-groups design. |
 | `use_custom_url_handler` + `custom_url_handler` | config.py | ❌ | new config key — external URL-open program |
 | `backspace_binding` / `delete_binding` (escape encoding) | config.py | 🟡 kettle uses `automatic` always | new config keys |
 | `background_image` + mode + align | config.py | ❌ | render-layer feature; multi-cycle if done cleanly — D candidate |
