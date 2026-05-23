@@ -239,8 +239,17 @@ mod tests {
         // non-empty rgba buffer. Doesn't pixel-compare (PNG encoders
         // can vary on the precise byte layout); just confirms the
         // full path works.
-        let dir = std::env::temp_dir();
-        let path = dir.join("kettle-bg-image-cycle392-smoke.png");
+        // Cycle 592: PID + nanos in the filename so parallel `cargo
+        // test` runs and CI-runner concurrency don't race on a shared
+        // /tmp path. Matches the pattern used in session::tests.
+        let path = std::env::temp_dir().join(format!(
+            "kettle-bg-image-cycle392-smoke-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         // Encode a small RGBA PNG using the image crate directly
         // (writer feature is on for kettle-render's image dep).
         let w = 8;
@@ -279,8 +288,15 @@ mod tests {
         // Black RGBA: w * 1 * 4 = ~32 KB at width 8193.
         let buf = vec![0u8; w * h * 4];
         let img = image::RgbaImage::from_raw(w as u32, h as u32, buf).expect("rgba buffer");
-        let dir = std::env::temp_dir();
-        let path = dir.join("kettle-bg-image-cycle584-oversize.png");
+        // Cycle 592: PID + nanos so parallel test runs don't race.
+        let path = std::env::temp_dir().join(format!(
+            "kettle-bg-image-cycle584-oversize-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         img.save(&path).expect("write oversize png");
         assert!(
             decode_bg_image(path.to_str().unwrap()).is_none(),

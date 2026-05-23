@@ -813,8 +813,17 @@ mod tests {
         // The script writes a result into a global so the test can
         // check it ran. Same shape as a user's `~/.config/kettle/
         // init.lua` setting up environment.
-        let dir = std::env::temp_dir();
-        let path = dir.join("kettle-lua-cycle324-smoke.lua");
+        // Cycle 592: PID + nanos so parallel `cargo test` runs don't
+        // race on a shared /tmp path. Same pattern as the cycle-587
+        // oversize-script test below.
+        let path = std::env::temp_dir().join(format!(
+            "kettle-lua-cycle324-smoke-{}-{}.lua",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::write(&path, "answer = kettle.version()\n").expect("write");
         let eng = LuaEngine::new("Default").expect("init");
         eng.exec_file(&path).expect("exec");

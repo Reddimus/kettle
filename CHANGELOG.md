@@ -46,6 +46,24 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 592 — **Test race fix: PID + nanos on `/tmp` paths.** Three
+              unit tests (`bg_image::real_png_roundtrip`,
+              `bg_image::rejects_oversized_dimensions`,
+              `lua::exec_file_runs_a_real_script`) used FIXED
+              filenames like `kettle-bg-image-cycle392-smoke.png`
+              in `std::env::temp_dir()` directly. Two concurrent
+              `cargo test` runs (parallel test threads, CI runner
+              concurrency, two developers on the same shared
+              runner) would race on the same file — one writes,
+              the other reads stale/half-written bytes, sporadic
+              failures. Switched to the
+              `{name}-{pid}-{nanos}.png` pattern already used by
+              `session::tests` and `config_tests::load_from_with_
+              diagnostics_*` (subdir-level isolation). No
+              behavior change for the happy-path single-run
+              case; eliminates the flake under parallel
+              execution.
+
   cycle 591 — **Pin mlua-default debug-library exclusion as a drift
               guard.** Audit revealed that mlua's `Lua::new()`
               defaults already exclude the entire `debug` library
