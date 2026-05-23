@@ -1024,6 +1024,19 @@ struct ContextMenuState {
     /// when popping back to each level. Same length as `drill_stack`
     /// at all times.
     scroll_stack: Vec<usize>,
+    /// Cycle 715 (Terminator menu UX, C6): typeahead buffer. As the
+    /// user types A-Z chars, we accumulate them here and best-match
+    /// against item labels (case-insensitive prefix). A single char
+    /// also resolves to a mnemonic (first matchable char of any
+    /// row), so common items like Copy = 'C' / Theme = 'T' are
+    /// one-keystroke; multi-char "th" → Theme by prefix.
+    ///
+    /// Cleared after 750ms of inactivity (`typeahead_until`) so a
+    /// pause restarts the buffer instead of accumulating forever.
+    typeahead_buf: String,
+    /// Cycle 715. Deadline after which `typeahead_buf` is cleared
+    /// on the next key. `None` when the buffer is empty.
+    typeahead_until: Option<std::time::Instant>,
 }
 
 /// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
@@ -1051,6 +1064,76 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
 /// field (no description), so the inner predicate is simpler.
 /// Pure — separated from `layout_picker_key` so a drift guard
 /// can exercise it without touching App state.
+/// Cycle 715 (Terminator menu UX, C6). Compute mnemonics for the
+/// context-menu rows: for each row, returns `Some((byte_index,
+/// char))` where `char` is the first lowercase A-Z letter in the
+/// label that hasn't already been claimed by an earlier row, or
+/// `None` for rows without any A-Z (separators, choice rows with
+/// no label letters, etc.).
+///
+/// First-letter is the canonical priority (matches GTK / Win32);
+/// fall through to subsequent letters only if the first letter is
+/// already taken by an earlier row. Pure so the collision rules
+/// are unit-tested without spinning up App.
+fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
+    let labels: Vec<&str> = items
+        .iter()
+        .map(|it| match it {
+            ContextMenuItem::Item { label, .. } => *label,
+            ContextMenuItem::LuaItem { label, .. } => label.as_str(),
+            ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
+            ContextMenuItem::Submenu { label, .. } => label.as_str(),
+            ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
+            ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
+            ContextMenuItem::Separator => "",
+        })
+        .collect();
+    let mut claimed: std::collections::HashSet<char> = std::collections::HashSet::new();
+    let mut out: Vec<Option<(usize, char)>> = Vec::with_capacity(labels.len());
+    for label in labels {
+        let mut chosen: Option<(usize, char)> = None;
+        for (bi, c) in label.char_indices() {
+            if !c.is_ascii_alphabetic() {
+                continue;
+            }
+            let low = c.to_ascii_lowercase();
+            if !claimed.contains(&low) {
+                claimed.insert(low);
+                chosen = Some((bi, low));
+                break;
+            }
+        }
+        out.push(chosen);
+    }
+    out
+}
+
+/// Cycle 715. Match the user's typeahead buffer to a row by
+/// case-insensitive prefix on the label. Returns the first
+/// dispatchable row whose label (lowercased) starts with `buf`
+/// (also lowercased). Separators/empty labels are skipped.
+fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
+    if buf.is_empty() {
+        return None;
+    }
+    let needle = buf.to_ascii_lowercase();
+    items.iter().position(|it| match it {
+        ContextMenuItem::Item {
+            label,
+            enabled: true,
+            ..
+        } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::LuaItem { label, .. }
+        | ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::Submenu { label, .. }
+        | ContextMenuItem::ThemeChoice { label, .. }
+        | ContextMenuItem::ProfileChoice { label, .. } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
+        _ => false,
+    })
+}
+
 /// Cycle 714 (Terminator menu UX, C5). How many rows starting at
 /// `start` fit within `panel_h` pixels. Separators take `sep_h`,
 /// every other row takes `row_h`. Used by `step_context_menu_highlight`
@@ -4028,6 +4111,8 @@ impl App {
             drill_stack: Vec::new(),
             scroll_offset: 0,
             scroll_stack: Vec::new(),
+            typeahead_buf: String::new(),
+            typeahead_until: None,
         });
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -6283,7 +6368,7 @@ impl App {
     /// the highlighted action. Any other key is swallowed so a stray
     /// keypress doesn't leak into the focused pane while the menu is
     /// expecting nav input.
-    fn context_menu_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
+    fn context_menu_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
         match key {
             Key::Named(NamedKey::Escape) => {
                 // Cycle 687 (theme-submenu sub-cycle 3): Esc on
@@ -6337,7 +6422,127 @@ impl App {
                 }
             }
             _ => {
-                // Swallow other keys — the user is in menu-nav mode.
+                // Cycle 715 (Terminator menu UX, C6): mnemonics +
+                // typeahead. A single A-Z keystroke dispatches a row
+                // whose mnemonic char matches; multi-char accumulates
+                // into `typeahead_buf` for prefix-match. Buffer
+                // clears after 750ms of inactivity.
+                let Some(t) = text else { return };
+                let mut chars = t.chars();
+                let Some(c) = chars.next() else { return };
+                if chars.next().is_some() || !c.is_ascii_alphabetic() {
+                    // Multi-char text events or non-alpha (digits,
+                    // punctuation, IME composition) are ignored.
+                    return;
+                }
+                let lower = c.to_ascii_lowercase();
+                let now = std::time::Instant::now();
+                // Clear stale typeahead buffer.
+                if let Some(menu) = self.context_menu.as_mut()
+                    && menu
+                        .typeahead_until
+                        .map(|deadline| now > deadline)
+                        .unwrap_or(false)
+                {
+                    menu.typeahead_buf.clear();
+                    menu.typeahead_until = None;
+                }
+                // First key after a long pause: try mnemonic dispatch
+                // (single-char). On a hit, dispatch the row + close
+                // the menu (matches Win32 / GTK convention). On a
+                // miss, accumulate into typeahead.
+                let mnemonic_hit = self.context_menu.as_ref().and_then(|menu| {
+                    if !menu.typeahead_buf.is_empty() {
+                        return None;
+                    }
+                    let mn = assign_mnemonics(&menu.items);
+                    mn.iter().enumerate().find_map(|(idx, slot)| {
+                        slot.and_then(|(_, ch)| (ch == lower).then_some(idx))
+                    })
+                });
+                if let Some(idx) = mnemonic_hit {
+                    // Dispatch the matched row exactly the same way
+                    // Enter would: drill into Submenu, or fire the
+                    // Action, or set theme/profile.
+                    let click =
+                        self.context_menu
+                            .as_ref()
+                            .and_then(|m| match m.items.get(idx)? {
+                                ContextMenuItem::Item {
+                                    action,
+                                    enabled: true,
+                                    ..
+                                } => Some(ContextMenuClick::Action(action.clone())),
+                                ContextMenuItem::Submenu { .. } => {
+                                    Some(ContextMenuClick::DrillIntoSubmenu(idx))
+                                }
+                                ContextMenuItem::ThemeChoice { theme, .. } => {
+                                    Some(ContextMenuClick::SetTheme(theme.clone()))
+                                }
+                                ContextMenuItem::ProfileChoice { profile, .. } => {
+                                    Some(ContextMenuClick::SetProfile(profile.clone()))
+                                }
+                                _ => None,
+                            });
+                    match click {
+                        Some(ContextMenuClick::Action(a)) => {
+                            self.context_menu = None;
+                            self.handle_action(a, event_loop);
+                            return;
+                        }
+                        Some(ContextMenuClick::DrillIntoSubmenu(idx)) => {
+                            if let Some(menu) = self.context_menu.as_mut() {
+                                let nested_items = match menu.items.get(idx) {
+                                    Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
+                                    _ => Vec::new(),
+                                };
+                                if !nested_items.is_empty() {
+                                    let parent = std::mem::replace(&mut menu.items, nested_items);
+                                    menu.drill_stack.push(parent);
+                                    menu.scroll_stack.push(menu.scroll_offset);
+                                    menu.scroll_offset = 0;
+                                    menu.typeahead_buf.clear();
+                                    menu.typeahead_until = None;
+                                    menu.highlight = menu
+                                        .items
+                                        .iter()
+                                        .position(item_is_dispatchable)
+                                        .unwrap_or(0);
+                                }
+                            }
+                            return;
+                        }
+                        Some(ContextMenuClick::SetTheme(name)) => {
+                            self.context_menu = None;
+                            self.cfg.theme_name = name.clone();
+                            self.cfg.theme = kettle_config::Theme::by_name(&name);
+                            self.save_session();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        Some(ContextMenuClick::SetProfile(name)) => {
+                            self.context_menu = None;
+                            if let Some(p) = kettle_config::Config::path_for_profile(&name) {
+                                self.config_path = Some(p);
+                                self.reload_config();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Typeahead path: accumulate into the buffer, find
+                // the first row whose label has this prefix, advance
+                // highlight without dispatching.
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.typeahead_buf.push(lower);
+                    menu.typeahead_until = Some(now + std::time::Duration::from_millis(750));
+                    if let Some(idx) = typeahead_match(&menu.items, &menu.typeahead_buf) {
+                        menu.highlight = idx;
+                    }
+                }
             }
         }
     }
@@ -7514,7 +7719,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let text = event.text.as_ref().map(|s| s.as_str());
 
                 if self.context_menu.is_some() {
-                    self.context_menu_key(&event.logical_key, event_loop);
+                    self.context_menu_key(&event.logical_key, text, event_loop);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -7806,8 +8011,8 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextMenuItem, count_rows_fitting, filter_disabled, find_menu_row_y, rank_layouts,
-        selection_kind,
+        ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled, find_menu_row_y,
+        rank_layouts, selection_kind, typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -7894,6 +8099,71 @@ mod tests {
         ];
         let got = filter_disabled(menu);
         assert!(got.is_empty());
+    }
+
+    /// Cycle 715 drift guard. `assign_mnemonics` returns the first
+    /// A-Z char per row; on collision the second row's first letter
+    /// is taken, so the second row falls through to its next A-Z.
+    /// Pinning the contract: Copy=C, Close Pane=l (C taken),
+    /// Cancel=a (C taken).
+    #[test]
+    fn mnemonics_assign_unique_chars_with_fallback() {
+        let menu = vec![
+            item("Copy", true),       // 'C'
+            item("Close Pane", true), // 'C' taken → 'l'
+            item("Cancel", true),     // 'C' + 'l' taken → 'a'
+            ContextMenuItem::Separator,
+            item("Theme", true), // 'T'
+            item("Tab", true),   // 'T' taken → 'a' taken → 'b'
+            item("12345", true), // no A-Z → None
+        ];
+        let mn = assign_mnemonics(&menu);
+        assert_eq!(mn[0], Some((0, 'c')));
+        // "Close Pane": C taken, so next alphabetic is 'l' at byte 1.
+        assert_eq!(mn[1], Some((1, 'l')));
+        // "Cancel": C + l taken, so next is 'a' at byte 1.
+        assert_eq!(mn[2], Some((1, 'a')));
+        // Separator: no label, no mnemonic.
+        assert_eq!(mn[3], None);
+        // "Theme": T at byte 0.
+        assert_eq!(mn[4], Some((0, 't')));
+        // "Tab": T taken, a taken, so 'b' at byte 2.
+        assert_eq!(mn[5], Some((2, 'b')));
+        // "12345": no A-Z, None.
+        assert_eq!(mn[6], None);
+    }
+
+    /// Cycle 715 drift guard. Typeahead prefix-match is case-
+    /// insensitive and stops at the first dispatchable hit.
+    #[test]
+    fn typeahead_th_highlights_theme_first() {
+        let menu = vec![
+            item("Copy", true),
+            item("Theme", true),
+            item("Toggle Broadcast", true),
+            item("Profile", true),
+        ];
+        // Single-char "t" hits Theme (first label starting with t).
+        assert_eq!(typeahead_match(&menu, "t"), Some(1));
+        // "th" still Theme.
+        assert_eq!(typeahead_match(&menu, "th"), Some(1));
+        // "to" → Toggle Broadcast.
+        assert_eq!(typeahead_match(&menu, "to"), Some(2));
+        // Uppercase = lowercase (case-insensitive).
+        assert_eq!(typeahead_match(&menu, "TH"), Some(1));
+        // No match.
+        assert_eq!(typeahead_match(&menu, "xyz"), None);
+        // Empty buffer.
+        assert_eq!(typeahead_match(&menu, ""), None);
+    }
+
+    /// Cycle 715 drift guard. Disabled rows aren't typeahead targets
+    /// (would be confusing to highlight a row that can't dispatch).
+    #[test]
+    fn typeahead_skips_disabled_rows() {
+        let menu = vec![item("Theme", false), item("Theme Plus", true)];
+        // First Theme is disabled; second matches.
+        assert_eq!(typeahead_match(&menu, "th"), Some(1));
     }
 
     /// Cycle 714 drift guard. `count_rows_fitting` walks rows from

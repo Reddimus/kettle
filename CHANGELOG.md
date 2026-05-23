@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 715 — **Right-click menu: mnemonics + typeahead**:
+              Context-menu UX sub-cycle C6. Single A-Z keys
+              now dispatch rows by mnemonic; multi-char
+              accumulates into a 750ms-windowed typeahead
+              buffer for prefix match.
+                - new pure helper
+                  `assign_mnemonics(items) -> Vec<Option<(usize, char)>>`:
+                  first A-Z char per row, with collision fallback
+                  (Copy=C, Close Pane=l, Cancel=a).
+                - new pure helper
+                  `typeahead_match(items, buf) -> Option<usize>`:
+                  case-insensitive prefix match against
+                  dispatchable rows only (disabled rows
+                  skipped).
+                - `ContextMenuState` gains `typeahead_buf:
+                  String` + `typeahead_until: Option<Instant>`.
+                - `context_menu_key` now takes a `text:
+                  Option<&str>` parameter. A single A-Z char
+                  with an empty buffer dispatches via mnemonic
+                  (drill into Submenu, fire Action, set
+                  Theme/Profile). Otherwise accumulates into
+                  typeahead — buffer clears after 750ms of
+                  inactivity.
+              Drift guards:
+                - `mnemonics_assign_unique_chars_with_fallback`
+                  walks 7 rows including separator + no-alpha
+                  + collision fallback.
+                - `typeahead_th_highlights_theme_first` pins
+                  case-insensitive prefix match + dispatchable-
+                  row filter.
+                - `typeahead_skips_disabled_rows`.
+              Workspace tests 415 → 418.
+
   cycle 714 — **Right-click menu: scrollable long submenus**:
               Context-menu UX sub-cycle C5. The Theme submenu
               (cycle-685) has ~512 entries; pre-cycle-714 the
