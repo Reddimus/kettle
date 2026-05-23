@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 694 — **`sticky` wired on macOS**:
+              Terminator's `sticky = true` shows a window on
+              every workspace. macOS exposes this as a
+              Window-level method via
+              `winit::platform::macos::WindowExtMacOS::set_visible_on_all_workspaces(true)`,
+              so cycle 694 applies it post-construction
+              (unlike cycle-691's `with_skip_taskbar` which
+              is a build-time WindowAttributes attribute).
+              X11/Wayland remain Bucket E — winit 0.30
+              doesn't expose `_NET_WM_STATE_STICKY` on the
+              cross-platform API and would need
+              raw-window-handle direct atom writes (heavy dep
+              for one config key). A Terminator user copying
+              `sticky = true` gets the intended behavior on
+              macOS; on other platforms the value parses
+              without effect (no warning since the key is
+              already recognized via cycle-X parser).
+              Audit row reclassified from full Bucket E to
+              partial 🟡 (macOS only), matching cycle-691's
+              `hide_from_taskbar` pattern.
+
   cycle 693 — **`Action::ScaledZoom` (Terminator key_scaled_zoom)**:
               Terminator's "scaled zoom" maximizes the active
               pane AND scales the font proportionally so text

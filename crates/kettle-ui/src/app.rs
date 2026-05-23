@@ -5997,6 +5997,23 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        // Cycle 694 (Terminator parity, terminatorlib/config.py:81
+        // `sticky`): show window on every workspace. macOS exposes
+        // this as a Window-level method via `WindowExtMacOS`, so
+        // we apply it after construction (unlike Windows
+        // `with_skip_taskbar` which is a build-time attribute).
+        // X11/Wayland remain Bucket E — winit 0.30 doesn't expose
+        // `_NET_WM_STATE_STICKY` on the cross-platform API and
+        // would need raw-window-handle direct atom writes (heavy
+        // dep for one config key). A user copying a Terminator
+        // config that sets `sticky = true` gets the intended
+        // behavior on macOS; on other platforms the value parses
+        // without effect.
+        #[cfg(target_os = "macos")]
+        if self.cfg.sticky {
+            use winit::platform::macos::WindowExtMacOS;
+            window.set_visible_on_all_workspaces(true);
+        }
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let renderer = match pollster::block_on(Renderer::new(
