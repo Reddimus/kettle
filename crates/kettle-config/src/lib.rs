@@ -2150,6 +2150,15 @@ mod config_tests {
             // reasoning — internal cycle refs leak into user-visible
             // documentation.
             "packaging/linux/kettle.1",
+            // Cycle 596: SECURITY.md is user-facing via GitHub's
+            // /security tab + the repo root listing. It already uses
+            // the hyphenated `cycle-NNN` form (per cycles 583 + 588's
+            // resource-cap documentation pass), which passes the
+            // space-digit scan below — adding the doc to the scan
+            // list makes future drift explicit. Past contributors
+            // shouldn't have to remember "SECURITY.md is user-facing,
+            // don't write `cycle 583` there".
+            "SECURITY.md",
         ] {
             let path = repo_root.join(rel);
             let text = std::fs::read_to_string(&path)
