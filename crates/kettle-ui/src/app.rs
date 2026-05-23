@@ -829,6 +829,11 @@ enum ContextMenuClick {
     /// sets `App::config_path` to the cycle-618 profile path
     /// and calls `reload_config`.
     SetProfile(String),
+    /// Cycle 687 (sub-cycle 3 of theme-submenu design): drill
+    /// into a `Submenu` row by index. The click handler pushes
+    /// the current items onto `drill_stack` + replaces them
+    /// with the submenu's items.
+    DrillIntoSubmenu(usize),
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -996,6 +1001,16 @@ struct ContextMenuState {
     /// enabled `Item`, never a `Separator` or disabled row. Updated by
     /// keyboard nav (`↑↓`) and mouse hover.
     highlight: usize,
+    /// Cycle 687 (sub-cycle 3 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// drill-in stack. When the user clicks a `Submenu` row, the
+    /// parent's items are pushed here and replaced by the submenu's
+    /// items. Esc / "Back" pops back to the parent.
+    ///
+    /// v1 is a single-level drill-in (matches the design's
+    /// "no nested-nested submenus in v1" carveout). The Vec
+    /// shape is forward-compatible for arbitrary depth.
+    drill_stack: Vec<Vec<ContextMenuItem>>,
 }
 
 /// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
@@ -3770,6 +3785,7 @@ impl App {
             anchor,
             items,
             highlight,
+            drill_stack: Vec::new(),
         });
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -3815,7 +3831,7 @@ impl App {
         let row_h = ch as f32 + 12.0;
         let sep_h = 8.0_f32;
         let mut row_y = ay;
-        for item in &menu.items {
+        for (idx, item) in menu.items.iter().enumerate() {
             let h = match item {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
@@ -3838,15 +3854,8 @@ impl App {
                     ContextMenuItem::ConfigItem { command, .. } => {
                         return Some(ContextMenuClick::ConfigCommand(command.clone()));
                     }
-                    ContextMenuItem::Submenu { label, .. } => {
-                        // Cycle 684 (sub-cycle 1 of theme-submenu
-                        // design): click on a Submenu row is a
-                        // no-op + log in v1. Sub-cycle 3 wires
-                        // the flyout open/close machinery.
-                        log::info!(
-                            "Submenu '{label}' click: flyout wiring lands in sub-cycle 3 of TERMINATOR-THEME-SUBMENU-DESIGN.md"
-                        );
-                        return None;
+                    ContextMenuItem::Submenu { .. } => {
+                        return Some(ContextMenuClick::DrillIntoSubmenu(idx));
                     }
                     ContextMenuItem::ThemeChoice { theme, .. } => {
                         // Cycle 685: clicked inside a Theme flyout
@@ -3943,20 +3952,24 @@ impl App {
                     separator: false,
                     enabled: true,
                 },
-                // Cycle 685: ThemeChoice rows are flyout-only.
-                // Sub-cycle 3 will surface them in a side panel
-                // when the user opens the Theme submenu. Until
-                // then they're not rendered in the parent menu.
-                ContextMenuItem::ThemeChoice { .. } => ContextMenuRow {
-                    label: String::new(),
-                    separator: true, // skip visually for now
-                    enabled: false,
+                // Cycle 687 (theme-submenu sub-cycle 3 drill-in):
+                // ThemeChoice and ProfileChoice ARE rendered when
+                // they appear in the current items list. Since
+                // the drill-in click replaces menu.items with the
+                // submenu's items, they naturally appear here.
+                // In the parent menu (before drill-in) they never
+                // appear in menu.items, so this arm is unreached
+                // — the parent's items don't contain ThemeChoice/
+                // ProfileChoice directly, only inside Submenu.
+                ContextMenuItem::ThemeChoice { label, .. } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: true,
                 },
-                // Cycle 686: same for ProfileChoice (flyout-only).
-                ContextMenuItem::ProfileChoice { .. } => ContextMenuRow {
-                    label: String::new(),
-                    separator: true,
-                    enabled: false,
+                ContextMenuItem::ProfileChoice { label, .. } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: true,
                 },
             })
             .collect();
@@ -5676,6 +5689,24 @@ impl App {
     fn context_menu_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
         match key {
             Key::Named(NamedKey::Escape) => {
+                // Cycle 687 (theme-submenu sub-cycle 3): Esc on
+                // a drilled-in submenu pops back to the parent
+                // instead of closing the menu entirely. Only
+                // when drill_stack is empty does Esc close.
+                if let Some(menu) = self.context_menu.as_mut()
+                    && let Some(parent) = menu.drill_stack.pop()
+                {
+                    menu.items = parent;
+                    menu.highlight = menu
+                        .items
+                        .iter()
+                        .position(item_is_dispatchable)
+                        .unwrap_or(0);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 self.context_menu = None;
                 self.reset_blink_phase();
             }
@@ -6345,6 +6376,30 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(p) = kettle_config::Config::path_for_profile(&name) {
                                 self.config_path = Some(p);
                                 self.reload_config();
+                            }
+                        }
+                        // Cycle 687 (theme-submenu sub-cycle 3):
+                        // drill into a submenu — push current
+                        // items onto drill_stack, replace with
+                        // the submenu's items, redraw.
+                        ContextMenuClick::DrillIntoSubmenu(idx) => {
+                            if let Some(menu) = self.context_menu.as_mut() {
+                                let nested_items = match menu.items.get(idx) {
+                                    Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
+                                    _ => Vec::new(),
+                                };
+                                if !nested_items.is_empty() {
+                                    let parent = std::mem::replace(&mut menu.items, nested_items);
+                                    menu.drill_stack.push(parent);
+                                    menu.highlight = menu
+                                        .items
+                                        .iter()
+                                        .position(item_is_dispatchable)
+                                        .unwrap_or(0);
+                                }
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
                             }
                         }
                     }

@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 687 — **theme-submenu sub-cycle 3: drill-in submenu
+              UI**. Replaces the cycle-684 "click logs info"
+              no-op with a real, interactive drill-in:
+                - `ContextMenuState.drill_stack: Vec<Vec<...>>`
+                  holds the parent menu while drilled in
+                - new `ContextMenuClick::DrillIntoSubmenu(idx)`
+                  outcome
+                - hit-test enumerate() returns
+                  `DrillIntoSubmenu(idx)` on a Submenu row
+                - click dispatch: push current items to
+                  drill_stack, replace with the submenu's
+                  items, redraw — same anchor/panel
+                  geometry, just different content
+                - Esc: pops drill_stack instead of closing
+                  the menu when drilled in
+                - ThemeChoice / ProfileChoice projection now
+                  renders the label normally (no more
+                  flyout-only hidden treatment) since the
+                  drill-in puts them inline
+              v1 implements drill-in (replace-in-place)
+              instead of the design's "side-panel flyout"
+              — simpler renderer, same UX outcome. The
+              design's flyout is a future polish cycle.
+              End-to-end: right-click → "Theme ▸" → click →
+              menu replaces with 512 theme choices → click
+              one → theme swaps. Same flow for "Profile ▸".
+              Esc on a drilled-in submenu pops back to the
+              parent. Workspace tests stay 392.
+              Theme-submenu port: **4/9** sub-cycles
+              complete (now end-to-end interactive).
+
   cycle 686 — **theme-submenu sub-cycle 8: Profile submenu**:
               same machinery as cycle-685's Theme submenu,
               different source.
