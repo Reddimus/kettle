@@ -58,4 +58,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 elapsed=$(($(date +%s) - start_sec))
-echo "pre-commit: PASSED (${elapsed}s)" >&2
+# Render 0s as "<1s" so an incremental rebuild that completed
+# faster than seconds-resolution doesn't print a misleading "(0s)".
+if [ "$elapsed" -eq 0 ]; then
+    echo "pre-commit: PASSED (<1s)" >&2
+else
+    echo "pre-commit: PASSED (${elapsed}s)" >&2
+fi
