@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 691 — **`hide_from_taskbar` wired on Windows**:
+              winit 0.30 only exposes `with_skip_taskbar`
+              on Windows (`WindowAttributesExtWindows`).
+              X11/Wayland/macOS would need raw-window-handle
+              direct atom writes which is design-doc Bucket E.
+              A user with `hide_from_taskbar = true` in their
+              Terminator config now gets the intended behavior
+              on Windows; on other platforms the value
+              parses without effect (no warning since the
+              key is already recognized).
+              `#[cfg(target_os = "windows")]` gates the new
+              `with_skip_taskbar` call so non-Windows builds
+              don't add the `WindowAttributesExtWindows`
+              import. Audit row promoted from E → 🟡 (with
+              explicit cross-platform-limitation note).
+              Workspace tests stay 392.
+
   cycle 690 — **terminalshot sub-cycle 7: audit close-out**.
               Audit doc row + Bucket-D summary table both
               promoted: terminalshot → ✅ A 7/7 deployed.

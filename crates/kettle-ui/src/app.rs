@@ -5898,6 +5898,21 @@ impl ApplicationHandler<UserEvent> for App {
         if self.cfg.always_on_top {
             attrs = attrs.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
         }
+        // Cycle 691 (Terminator parity, terminatorlib/config.py:79
+        // `hide_from_taskbar`): on Windows, winit 0.30 exposes
+        // `WindowAttributesExtWindows::with_skip_taskbar`. Other
+        // platforms remain Bucket E — X11/Wayland/macOS need
+        // raw-window-handle direct atom writes which the design
+        // doc tagged as a follow-up. A user copying a Terminator
+        // config that sets `hide_from_taskbar = true` gets the
+        // intended behavior on Windows; on other platforms the
+        // value parses without effect (no warning since the key
+        // is recognized).
+        #[cfg(target_os = "windows")]
+        if self.cfg.hide_from_taskbar {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = WindowAttributesExtWindows::with_skip_taskbar(attrs, true);
+        }
         // Cycle 344 (Terminator parity, terminatorlib/config.py:75
         // `window_state`). Apply initial window state at creation.
         match self.cfg.window_state {
