@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 666 — **auto-theme sub-cycle 5: App-side schedule
+              poll**: `App::poll_theme_schedule` now runs on
+              every redraw tick. When `cfg.theme_schedule` is
+              `Some(Clock { … })`:
+                1. compute now in HH:MM (UTC; matches the
+                   cycle-296 status-bar clock semantics)
+                2. ask cycle-664's `schedule_decision_clock`
+                   for the bool (true=dark, false=light)
+                3. compare against `last_schedule_decision`
+                4. on boundary crossing, call cycle-649's
+                   `resolve_theme_for_mode(Light|Dark, …)` to
+                   compute the next theme + swap
+              First call seeds `last_schedule_decision` without
+              swapping — only boundary crossings fire the swap,
+              not "starting up at 18:30 with dark scheduled."
+              End-to-end: a user with `theme-schedule = 18:00
+              dark, 06:00 light` + `light-theme`/`dark-theme`
+              configured now gets automatic theme flips on
+              minute boundaries.
+              Workspace tests stay 387 (logic covered by
+              cycle-664 pure-helper drift guards;
+              `poll_theme_schedule` is the side-effecting
+              wrapper).
+              Auto-theme port: 5/7 sub-cycles complete.
+
   cycle 665 — **vertical-tabs sub-cycle 3: `content_rect_for`
               honors Left/Right strip width**: cycle-651 v1
               treated `TabBarPos::Left/Right` the same as `Top`

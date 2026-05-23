@@ -1078,6 +1078,14 @@ pub struct App {
     /// to walk every tick — SSH/Docker sessions don't fire-up
     /// faster than a couple times per second.
     last_remote_poll: std::time::Instant,
+    /// Cycle 666 (sub-cycle 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)): the
+    /// most-recent "schedule decision" (true=dark, false=light)
+    /// we've applied. A boundary-crossing fires the theme swap
+    /// exactly once (instead of every tick the schedule says
+    /// "now's dark"). `None` = haven't checked yet; first check
+    /// seeds it without swapping the theme.
+    last_schedule_decision: Option<bool>,
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
@@ -1478,6 +1486,7 @@ impl App {
             last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
             remote_sysinfo: kettle_remote::SysinfoSystem::new(),
             last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            last_schedule_decision: None,
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
@@ -2940,6 +2949,7 @@ impl App {
     fn redraw(&mut self) {
         self.drain_events();
         self.poll_remote_contexts();
+        self.poll_theme_schedule();
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into self.mux.panes when spawning a new tab.
@@ -4620,6 +4630,69 @@ impl App {
         match &self.startup.layout {
             Some(name) => s.save_layout(name),
             None => s.save(),
+        }
+    }
+
+    /// Cycle 666 (sub-cycle 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)): poll the
+    /// clock-schedule (when `cfg.theme_schedule` is `Some(Clock { … })`)
+    /// and flip the theme between `light_theme` and `dark_theme` on
+    /// boundary crossings.
+    ///
+    /// Cheap: a few u32 comparisons via cycle-664's
+    /// `schedule_decision_clock`, run from `redraw()` per tick.
+    /// State on `App::last_schedule_decision` means a single
+    /// boundary fires the swap once; sub-cycles can stretch the
+    /// throttling later if needed.
+    fn poll_theme_schedule(&mut self) {
+        let Some(schedule) = self.cfg.theme_schedule else {
+            return;
+        };
+        // Compute now in local-ish HH:MM (UTC for v1 — same as the
+        // cycle-296 status-bar clock; a future cycle could pick up
+        // `$TZ` but no extra dep yet).
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let day_secs = secs % 86_400;
+        let h = (day_secs / 3600) as u8;
+        let m = ((day_secs % 3600) / 60) as u8;
+        let is_dark = kettle_config::schedule_decision_clock((h, m), schedule);
+        // Seed on first call so we don't flip the theme just for
+        // existing on a "now's dark" tick — only boundary
+        // crossings fire the swap.
+        if self.last_schedule_decision == Some(is_dark) {
+            return;
+        }
+        let was_first = self.last_schedule_decision.is_none();
+        self.last_schedule_decision = Some(is_dark);
+        if was_first {
+            return;
+        }
+        // Boundary crossing: ask the cycle-649 resolve_theme_for_mode
+        // what to switch to. We override the ThemeMode to Light/Dark
+        // for the duration of the swap so the helper picks the
+        // configured light/dark theme name.
+        let target_mode = if is_dark {
+            kettle_config::ThemeMode::Dark
+        } else {
+            kettle_config::ThemeMode::Light
+        };
+        if let Some(next) = kettle_config::resolve_theme_for_mode(
+            target_mode,
+            &self.cfg.theme_name,
+            &self.cfg.light_theme,
+            &self.cfg.dark_theme,
+            None,
+        ) {
+            log::info!("theme-schedule: switching to {next}");
+            self.cfg.theme_name = next.clone();
+            self.cfg.theme = kettle_config::Theme::by_name(&next);
+            self.save_session();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
