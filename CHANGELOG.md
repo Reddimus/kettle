@@ -46,6 +46,25 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 589 — **release.sh: gate flake.nix add on existence.**
+              The cycle-550 atomic flake.nix bump correctly
+              guards the `sed` with `if [ -f flake.nix ]`, but
+              the subsequent `git add ... flake.nix` was
+              unconditional. The cycle-550 comment claimed the
+              add was a no-op when the file is absent, but
+              `git add <missing>` exits with 128 — under
+              `set -euo pipefail` the release would abort
+              **after** the Cargo.toml + lockfile bumps had
+              already been applied to the working tree, leaving
+              the user with a half-bumped dirty state to clean
+              up. Switched to a bash array (`ADD_FILES=(…)`)
+              that conditionally appends `flake.nix` to match
+              the existing existence guard. No behavior change
+              on this repo (flake.nix present) — durability
+              fix for forks without it. No drift guard: this is
+              a fork-only code path; running release.sh in CI
+              against this repo doesn't exercise the branch.
+
   cycle 587 — **Lua script read cap.** Closes the fourth and final
               user-file read in the cycle-584..587 resource-cap
               sweep (bg-image, session.json, config, lua script).

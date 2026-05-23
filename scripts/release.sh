@@ -165,11 +165,20 @@ echo "refreshing Cargo.lock"
 
 # Commit.
 # Cycle 550: include flake.nix in the release commit since the
-# Nix-side version is now auto-bumped in lockstep above. The
-# `git add` is safe whether or not flake.nix changed — if it
-# wasn't touched (e.g., the file's absent on a future fork),
-# the add is a no-op.
-git add Cargo.toml Cargo.lock CHANGELOG.md flake.nix
+# Nix-side version is now auto-bumped in lockstep above.
+# Cycle 589: gate the `git add flake.nix` on the file's existence
+# to match the cycle-550 sed-bump guard above. The previous
+# comment claimed the add was a no-op when the file was absent,
+# but `git add <missing>` exits with code 128 — under `set -e`
+# the whole release would abort *after* the Cargo.toml + lock
+# bump had already been applied to the working tree, leaving
+# the user with a dirty state to clean up. Conditional add
+# matches the conditional bump.
+ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
+if [ -f flake.nix ]; then
+    ADD_FILES+=(flake.nix)
+fi
+git add "${ADD_FILES[@]}"
 git commit -m "release: v${VERSION}
 
 See CHANGELOG.md [${VERSION}]."
