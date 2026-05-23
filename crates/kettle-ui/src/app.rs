@@ -869,12 +869,32 @@ pub enum TitleEditScope {
     Group,
 }
 
+/// Cycle 680 (sub-cycle 4 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)):
+/// when a `Group` edit fires, this carries which set of panes the
+/// typed name applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupBulkScope {
+    /// Default: just the focused pane (existing cycle-407
+    /// `EditPaneGroup` / cycle-642 `CreateGroup` behavior).
+    #[default]
+    Single,
+    /// Every pane in the focused tab gets the typed group name.
+    Tab,
+    /// Every pane in every tab.
+    Window,
+}
+
 #[derive(Debug, Clone)]
 pub struct TitleEditState {
     pub scope: TitleEditScope,
     /// Current text the user has typed. Pre-filled with the existing
     /// title so the user can edit in place vs starting blank.
     pub input: String,
+    /// Cycle 680: when `scope == Group`, which panes Apply writes
+    /// to. Single = focused only (existing behavior); Tab/Window
+    /// = bulk-assign via `Action::GroupTab`/`GroupWindow`.
+    pub bulk: GroupBulkScope,
 }
 
 /// Cycle 648 (sub-cycle 2 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
@@ -3375,8 +3395,38 @@ impl App {
                     }
                 }
                 TitleEditScope::Group => {
-                    if let Some(p) = self.mux.focused() {
-                        p.group_name = if value.is_empty() { None } else { Some(value) };
+                    // Cycle 680: bulk-apply branches on
+                    // `state.bulk`. Single = focused pane only
+                    // (preserves cycle-407 behavior); Tab/Window
+                    // = bulk-assign via Action::GroupTab/Window.
+                    let next = if value.is_empty() { None } else { Some(value) };
+                    match state.bulk {
+                        GroupBulkScope::Single => {
+                            if let Some(p) = self.mux.focused() {
+                                p.group_name = next;
+                            }
+                        }
+                        GroupBulkScope::Tab => {
+                            let ids: Vec<u64> = self
+                                .mux
+                                .tabs
+                                .get(self.mux.active)
+                                .map(|t| t.root.leaf_ids())
+                                .unwrap_or_default();
+                            for id in ids {
+                                if let Some(p) = self.mux.panes.get_mut(&id) {
+                                    p.group_name = next.clone();
+                                }
+                            }
+                        }
+                        GroupBulkScope::Window => {
+                            let ids: Vec<u64> = self.mux.panes.keys().copied().collect();
+                            for id in ids {
+                                if let Some(p) = self.mux.panes.get_mut(&id) {
+                                    p.group_name = next.clone();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -4354,6 +4404,7 @@ impl App {
                 self.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Window,
                     input: current,
+                    bulk: GroupBulkScope::Single,
                 });
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -4370,6 +4421,7 @@ impl App {
                 self.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Tab,
                     input: current,
+                    bulk: GroupBulkScope::Single,
                 });
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -4385,6 +4437,7 @@ impl App {
                 self.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Pane,
                     input: current,
+                    bulk: GroupBulkScope::Single,
                 });
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -4405,31 +4458,54 @@ impl App {
                 self.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Group,
                     input: current,
+                    bulk: GroupBulkScope::Single,
                 });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
             Action::GroupTab | Action::GroupWindow => {
-                // Cycle 642 (named-groups sub-cycle 1, action
-                // surface only). Bulk-assign every pane in scope
-                // to a named group — same overlay as CreateGroup,
-                // but on Apply the input writes to every pane in
-                // scope instead of just the focused one. Wired
-                // in sub-cycle 4 of
-                // [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-                // ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md).
-                log::info!(
-                    "{action:?}: action surface only — bulk-assign wiring lands in named-groups sub-cycle 4"
-                );
+                // Cycle 680 (named-groups sub-cycle 4): open the
+                // title-edit overlay with `bulk` set to Tab/Window
+                // so on Apply the typed name writes to every pane
+                // in scope.
+                self.close_all_modals();
+                let bulk = if matches!(action, Action::GroupTab) {
+                    GroupBulkScope::Tab
+                } else {
+                    GroupBulkScope::Window
+                };
+                self.editing_title = Some(TitleEditState {
+                    scope: TitleEditScope::Group,
+                    input: String::new(),
+                    bulk,
+                });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             Action::UngroupTab | Action::UngroupWindow => {
-                // Cycle 642 (named-groups sub-cycle 1, action
-                // surface only). Bulk-clear the group on every
-                // pane in scope. Wired in sub-cycle 5.
-                log::info!(
-                    "{action:?}: action surface only — bulk-clear wiring lands in named-groups sub-cycle 5"
-                );
+                // Cycle 680 (named-groups sub-cycle 4): bulk-
+                // clear the group on every pane in scope. No
+                // overlay needed — empty input is the "clear"
+                // signal, and the action carries the scope.
+                let pane_ids: Vec<u64> = if matches!(action, Action::UngroupTab) {
+                    self.mux
+                        .tabs
+                        .get(self.mux.active)
+                        .map(|t| t.root.leaf_ids())
+                        .unwrap_or_default()
+                } else {
+                    self.mux.panes.keys().copied().collect()
+                };
+                for id in pane_ids {
+                    if let Some(p) = self.mux.panes.get_mut(&id) {
+                        p.group_name = None;
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
             // key_next_profile + key_previous_profile): runtime cycle

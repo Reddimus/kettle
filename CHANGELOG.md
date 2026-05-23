@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 680 — **named-groups sub-cycle 4: `GroupTab` +
+              `GroupWindow` bulk-apply + `Ungroup*` direct
+              clear**: completes the action-dispatch wiring
+              for named-groups.
+                - new `GroupBulkScope { Single, Tab, Window }`
+                  enum + `bulk` field on `TitleEditState`
+                - existing constructions default to `Single`
+                  (preserves cycle-407 EditPaneGroup behavior)
+                - `Action::GroupTab` opens the overlay with
+                  `bulk = Tab`; `GroupWindow` with `Window`
+                - `apply_title_edit` for `TitleEditScope::Group`
+                  branches on `bulk` — Single writes to focused
+                  pane (existing); Tab writes to every leaf in
+                  the active tab; Window writes to every pane
+                  across every tab
+                - `Action::UngroupTab` / `UngroupWindow` skip
+                  the overlay entirely — they directly clear
+                  `pane.group_name = None` on every pane in
+                  scope
+              End-to-end on the deployed binary (next deploy):
+              a user can now run `Action::GroupTab` → type
+              "fleet" → Enter → every pane in the tab gets
+              group_name="fleet". Combined with cycle-679's
+              `BroadcastScope::Group(String)`, typing into
+              one tagged pane (once cycle-681's dispatch sets
+              the scope) will broadcast to all "fleet" panes.
+              Workspace tests stay 392.
+              Named-groups port: **4/8** sub-cycles complete.
+
   cycle 679 — **named-groups sub-cycle 3: `mux.broadcast`
               migrated from `bool` to `BroadcastScope`**:
               the named-groups core refactor. Field type
