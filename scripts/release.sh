@@ -117,6 +117,23 @@ echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
 sed -i.bak "0,/^version = \"${PREV}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
+# Cycle 550 — durable lockstep with flake.nix. The Nix-side
+# version had drifted 39 releases (v1.3.5 → v1.42.0 at cycle 549)
+# because the file's "Keep in lockstep" comment was advisory-
+# only. Now the release script bumps it in the same atomic step
+# as Cargo.toml. The flake-nix-version-line shape:
+#
+#     version = "1.42.0";
+#
+# (4 leading spaces + version + ; + maybe a trailing comment).
+# Use the same 0,/pattern/ form so we only touch the first match
+# (the package version, not any cargo-vendor-deps version etc.).
+if [ -f flake.nix ]; then
+    echo "bumping flake.nix:  ${PREV} → ${VERSION}"
+    sed -i.bak "0,/^          version = \"${PREV}\";\$/s//          version = \"${VERSION}\";/" flake.nix
+    rm -f flake.nix.bak
+fi
+
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
 #
@@ -147,7 +164,12 @@ echo "refreshing Cargo.lock"
 "$CARGO" build --workspace --quiet
 
 # Commit.
-git add Cargo.toml Cargo.lock CHANGELOG.md
+# Cycle 550: include flake.nix in the release commit since the
+# Nix-side version is now auto-bumped in lockstep above. The
+# `git add` is safe whether or not flake.nix changed — if it
+# wasn't touched (e.g., the file's absent on a future fork),
+# the add is a no-op.
+git add Cargo.toml Cargo.lock CHANGELOG.md flake.nix
 git commit -m "release: v${VERSION}
 
 See CHANGELOG.md [${VERSION}]."

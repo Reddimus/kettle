@@ -57,7 +57,21 @@ jobs:
             echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' before tagging"
             exit 1
           fi
-          echo "tag, Cargo.toml, and CHANGELOG.md all agree on version $TAG_VER"
+          # Cycle 550: also assert flake.nix's hardcoded version
+          # matches. The Nix-side string drifted 39 releases (cycle
+          # 549 catch); scripts/release.sh now auto-bumps it, but
+          # a forgotten flake.nix bump should fail the release
+          # workflow, not silently ship a Nix derivation with wrong
+          # metadata.
+          if [ -f flake.nix ]; then
+            FLAKE_VER=$(awk -F\" '/^          version = / { print $2; exit }' flake.nix)
+            if [ -n "$FLAKE_VER" ] && [ "$TAG_VER" != "$FLAKE_VER" ]; then
+              echo "::error::tag $GITHUB_REF_NAME but flake.nix says $FLAKE_VER"
+              echo "::error::scripts/release.sh auto-bumps this — re-run it or edit flake.nix"
+              exit 1
+            fi
+          fi
+          echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
         if: runner.os == 'Linux'
