@@ -334,6 +334,9 @@ pub fn action_names() -> Vec<&'static str> {
         "next_tab",
         "previous_tab",
         "prev_tab",
+        // Cycle 614: Terminator names (config.py:133-134).
+        "cycle_next",
+        "cycle_prev",
         "move_tab_left",
         "move_tab_right",
         "new_split:right",
@@ -348,6 +351,8 @@ pub fn action_names() -> Vec<&'static str> {
         "close_term",
         "close_window",
         "new_window",
+        // Cycle 614: Terminator name (config.py:195).
+        "new_terminator",
         "focus_next",
         "go_next",
         "focus_prev",
@@ -475,8 +480,13 @@ impl Action {
             "paste_from_clipboard" | "paste" => Paste,
             "new_tab" => NewTab,
             "close_tab" => CloseTab,
-            "next_tab" => NextTab,
-            "previous_tab" | "prev_tab" => PrevTab,
+            // Cycle 614: `cycle_next` / `cycle_prev` are
+            // Terminator's names for "cycle to the next / previous
+            // tab" (config.py:133-134, bound to Ctrl+Tab /
+            // Ctrl+Shift+Tab). Equivalent semantics to kettle's
+            // NextTab / PrevTab. Accept both spellings.
+            "next_tab" | "cycle_next" | "cycle-next" => NextTab,
+            "previous_tab" | "prev_tab" | "cycle_prev" | "cycle-prev" => PrevTab,
             "move_tab_left" => MoveTabLeft,
             "move_tab_right" => MoveTabRight,
             // Terminator semantics: split_horiz = horizontal divider
@@ -487,7 +497,14 @@ impl Action {
             "split_auto" => SplitAuto,
             "close_surface" | "close_pane" | "close_term" => ClosePane,
             "close_window" => CloseWindow,
-            "new_window" => NewWindow,
+            // Cycle 614 Terminator parity: `new_terminator` is
+            // Terminator's name for "spawn a new top-level
+            // window/instance" (config.py line 195, bound to
+            // <Super>i by default). Kettle's `NewWindow` action
+            // does the same thing — accept the Terminator spelling
+            // so a `keybind = super+i = new_terminator` copied from
+            // a Terminator config Just Works.
+            "new_window" | "new_terminator" | "new-terminator" => NewWindow,
             "focus_next" | "go_next" => FocusNext,
             "focus_prev" | "go_prev" => FocusPrev,
             "goto_split:up" | "go_up" => FocusUp,
@@ -1290,6 +1307,34 @@ mod tests {
         // will reject — not unbind).
         for tok in ["copy", "no_action", "disabled", "off", "x"] {
             assert!(!is_unbind_token(tok), "{tok:?} should NOT be unbind");
+        }
+    }
+
+    /// Cycle 614 drift guard. Terminator-spelling aliases for
+    /// kettle actions: a config copied verbatim from Terminator
+    /// should bind without unknown-key warnings.
+    ///   - `new_terminator` → `NewWindow`   (config.py:195)
+    ///   - `cycle_next`     → `NextTab`     (config.py:133)
+    ///   - `cycle_prev`     → `PrevTab`     (config.py:134)
+    #[test]
+    fn from_name_accepts_terminator_spelling_aliases() {
+        for s in ["new_window", "new_terminator", "new-terminator"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::NewWindow)),
+                "alias {s:?} should parse to NewWindow"
+            );
+        }
+        for s in ["next_tab", "cycle_next", "cycle-next"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::NextTab)),
+                "alias {s:?} should parse to NextTab"
+            );
+        }
+        for s in ["previous_tab", "prev_tab", "cycle_prev", "cycle-prev"] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::PrevTab)),
+                "alias {s:?} should parse to PrevTab"
+            );
         }
     }
 

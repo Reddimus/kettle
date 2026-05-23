@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 614 — **Terminator-spelling keybind aliases**
+              (`config.py:133-134` / `:195`):
+                - `new_terminator` / `new-terminator` → kettle's
+                  `Action::NewWindow` (Terminator name for
+                  "spawn a new top-level instance")
+                - `cycle_next` / `cycle-next` → `NextTab`
+                - `cycle_prev` / `cycle-prev` → `PrevTab`
+              A Terminator user with `keybind = super+i =
+              new_terminator` in their config now binds
+              correctly without a kettle-side rename. Drift
+              guard `from_name_accepts_terminator_spelling_aliases`
+              walks the 9 alias permutations. Workspace tests
+              353 → 354.
+
   cycle 613 — **`force-no-bell = true` honors override**
               (Terminator parity, `config.py:force_no_bell`).
               Previously the key parsed (since cycle 340) but
