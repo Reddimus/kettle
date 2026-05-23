@@ -46,6 +46,23 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 590 — **install-online.sh: accurate SHA-256 diagnostic.**
+              The hash-verification branch tried `sha256sum -c`,
+              fell back to `shasum -a 256 -c`, and printed "SHA-
+              256 verification FAILED" if both failed. That
+              error message implied tampering even when the
+              real cause was "no hashing tool installed" (e.g.,
+              a minimal container with neither coreutils
+              `sha256sum` nor perl-base `shasum`). Now: detect
+              tool availability first, fail with a clear "install
+              one of them" message if neither is present, and
+              reserve "verification FAILED" for the actual
+              hash-mismatch case. Both branches still refuse to
+              extract, so the security posture is unchanged —
+              just the user-facing diagnostic is honest about
+              what went wrong. `dash -n` syntax-check + shellcheck
+              both clean. No behavior change on the happy path.
+
   cycle 589 — **release.sh: gate flake.nix add on existence.**
               The cycle-550 atomic flake.nix bump correctly
               guards the `sed` with `if [ -f flake.nix ]`, but

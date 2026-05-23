@@ -137,12 +137,26 @@ SHA_FILE="${TMP}/${ASSET}.sha256"
 if curl -fL -o "$SHA_FILE" "$SHA_URL" 2>/dev/null; then
   # sha256sum reads `<hex>  <filename>` and looks for the file relative
   # to the cwd. Run it in $TMP so the bare filename matches.
-  if (cd "$TMP" && sha256sum -c "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
-    echo "kettle: SHA-256 verified."
-  elif command -v shasum >/dev/null 2>&1 \
-       && (cd "$TMP" && shasum -a 256 -c "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
+  # Cycle 590: split tool-availability and verification-result so the
+  # error diagnostic is accurate. Pre-fix, a system without sha256sum
+  # AND without shasum would print "SHA-256 verification FAILED"
+  # implying tampering, when actually the verification couldn't run.
+  # Now: detect "no hashing tool" explicitly and emit the correct
+  # diagnostic.
+  if command -v sha256sum >/dev/null 2>&1; then
+    HASH_CMD="sha256sum -c"
+  elif command -v shasum >/dev/null 2>&1; then
     # Some BusyBox / Alpine environments ship shasum but not sha256sum.
-    echo "kettle: SHA-256 verified (via shasum)."
+    HASH_CMD="shasum -a 256 -c"
+  else
+    echo "kettle install-online.sh: neither sha256sum nor shasum is installed." >&2
+    echo "Install one of them (coreutils / perl-base / busybox-utils) to verify" >&2
+    echo "the release SHA-256, then re-run. Refusing to extract an unverified" >&2
+    echo "archive." >&2
+    exit 1
+  fi
+  if (cd "$TMP" && $HASH_CMD "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
+    echo "kettle: SHA-256 verified."
   else
     echo "kettle install-online.sh: SHA-256 verification FAILED for ${ASSET}." >&2
     echo "The downloaded tarball does not match the hash published on the release." >&2
