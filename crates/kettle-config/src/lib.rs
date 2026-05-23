@@ -355,6 +355,54 @@ pub enum AskBeforeClosing {
     Never,
 }
 
+/// Cycle 649 (sub-cycle 2 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): pure helper that picks
+/// the right theme name given the current `ThemeMode`, the
+/// configured `light_theme` / `dark_theme` / `theme_name` triple,
+/// and the detected OS dark-mode preference (Some(true)=dark,
+/// Some(false)=light, None=can't tell).
+///
+/// Returns the new theme name to apply, or `None` if no change
+/// is needed.
+///
+/// Modes:
+///
+/// - `Explicit`: returns `None` (cfg.theme is the authority).
+/// - `Light`: returns `Some(light_theme)` when non-empty.
+/// - `Dark`: returns `Some(dark_theme)` when non-empty.
+/// - `Auto` with `Some(is_dark)`: returns dark/light based on flag.
+/// - `Auto` with `None`: returns `None` (can't decide).
+///
+/// Pure — no `&self`, no env, no clock; entirely a function of its
+/// 5 inputs. Sub-cycle 6 of the auto-theme design will call this
+/// from the App on `ThemeModeEvent::AutoUpdated`.
+pub fn resolve_theme_for_mode(
+    mode: ThemeMode,
+    current: &str,
+    light: &str,
+    dark: &str,
+    os_dark: Option<bool>,
+) -> Option<String> {
+    let pick = |target: &str| -> Option<String> {
+        let target = target.trim();
+        if target.is_empty() || target.eq_ignore_ascii_case(current) {
+            None
+        } else {
+            Some(target.to_string())
+        }
+    };
+    match mode {
+        ThemeMode::Explicit => None,
+        ThemeMode::Light => pick(light),
+        ThemeMode::Dark => pick(dark),
+        ThemeMode::Auto => match os_dark {
+            Some(true) => pick(dark),
+            Some(false) => pick(light),
+            None => None,
+        },
+    }
+}
+
 impl AskBeforeClosing {
     /// Cycle 638 (Terminator parity, sub-cycle 1 of
     /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
@@ -4861,6 +4909,60 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 649 drift guard. `resolve_theme_for_mode` is the
+    /// pure helper that picks the next theme given the mode +
+    /// configured names + OS preference. Sub-cycle 2 of the
+    /// auto-theme design.
+    #[test]
+    fn resolve_theme_for_mode_matrix() {
+        use ThemeMode::*;
+        // Explicit: always None.
+        assert_eq!(
+            resolve_theme_for_mode(Explicit, "x", "L", "D", Some(true)),
+            None
+        );
+        assert_eq!(resolve_theme_for_mode(Explicit, "x", "L", "D", None), None);
+        // Light: target = L when non-empty + not already current.
+        assert_eq!(
+            resolve_theme_for_mode(Light, "current", "L", "D", None).as_deref(),
+            Some("L")
+        );
+        assert_eq!(
+            resolve_theme_for_mode(Light, "L", "L", "D", None),
+            None,
+            "already on light theme → no change"
+        );
+        assert_eq!(
+            resolve_theme_for_mode(Light, "x", "", "D", None),
+            None,
+            "light unset → no change"
+        );
+        // Dark: target = D when non-empty + not already current.
+        assert_eq!(
+            resolve_theme_for_mode(Dark, "current", "L", "D", None).as_deref(),
+            Some("D")
+        );
+        assert_eq!(resolve_theme_for_mode(Dark, "D", "L", "D", None), None);
+        // Auto with Some(true): dark side.
+        assert_eq!(
+            resolve_theme_for_mode(Auto, "x", "L", "D", Some(true)).as_deref(),
+            Some("D")
+        );
+        // Auto with Some(false): light side.
+        assert_eq!(
+            resolve_theme_for_mode(Auto, "x", "L", "D", Some(false)).as_deref(),
+            Some("L")
+        );
+        // Auto with None: no decision.
+        assert_eq!(resolve_theme_for_mode(Auto, "x", "L", "D", None), None);
+        // Case-insensitive "already current" comparison.
+        assert_eq!(
+            resolve_theme_for_mode(Light, "tokyonight day", "TokyoNight Day", "D", None),
+            None,
+            "current matches light (case-insensitive) → no change"
+        );
     }
 
     /// Cycle 641 drift guard. `theme-mode` config parsing (sub-cycle

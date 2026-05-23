@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 649 — **auto-theme sub-cycle 2: `resolve_theme_for_mode`
+              pure helper**: picks the next theme name given the
+              `ThemeMode` + `light_theme` / `dark_theme` config +
+              current theme name + detected OS dark-mode flag.
+              Pure — entirely a function of its 5 inputs, no env
+              or clock. Sub-cycle 3 of
+              [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md)
+              will add the `dark-light` crate subscribe; this
+              cycle's helper consumes whatever boolean that
+              subscribe returns. Drift guard
+              `resolve_theme_for_mode_matrix` walks 12 input
+              shapes including case-insensitive
+              "already-current" no-op and unset-theme no-ops.
+              Workspace tests 378 → 379.
+
   cycle 648 — **confirm-dialog sub-cycle 2: `ConfirmDialogState`
               + `ConfirmAction` + `ConfirmButton` types**:
               the state shapes that sub-cycles 3-5 will consume.
