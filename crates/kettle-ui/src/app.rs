@@ -634,18 +634,18 @@ pub struct App {
     /// lifetime so `kettle.on(event, callback)` registrations stay
     /// in scope + LuaEngine::fire_event(...) can invoke them from
     /// the 5 emission sites:
-    ///   - Startup    — App::resumed once, guarded by
-    ///                  lua_startup_fired (cycle 366).
-    ///   - TabAdd     — `fire_tab_add_event` helper (cycle 425):
-    ///                  keyboard NewTab, NewWindow fallback,
-    ///                  remote-control IPC new-tab, exit-action
-    ///                  =restart respawn.
-    ///   - TabClose   — `fire_tab_close_event` helper (cycle 424):
-    ///                  keyboard CloseTab, tab-bar ✕-click (2
-    ///                  click-handler branches), SCM_RIGHTS +
-    ///                  file-fallback handoff sources — 5 sites.
-    ///   - Bell       — drain_events Bell handler (cycle 367).
-    ///   - Output     — drain_events output sidechannel (cycle 378).
+    /// - Startup — App::resumed once, guarded by lua_startup_fired
+    ///   (cycle 366).
+    /// - TabAdd — `fire_tab_add_event` helper (cycle 425): keyboard
+    ///   NewTab, NewWindow fallback, remote-control IPC new-tab,
+    ///   exit-action=restart respawn — 4 sites.
+    /// - TabClose — `fire_tab_close_event` helper (cycle 424):
+    ///   keyboard CloseTab, tab-bar ✕-click (2 click-handler
+    ///   branches), SCM_RIGHTS + file-fallback handoff sources —
+    ///   5 sites.
+    /// - Bell — drain_events Bell handler (cycle 367).
+    /// - Output — drain_events output sidechannel (cycle 378).
+    ///
     /// All 5 hooks share `drain_lua_hook_commands` for the
     /// LuaCommand queue dispatch (cycles 426-428, 433).
     lua_engine: Option<crate::LuaEngine>,
