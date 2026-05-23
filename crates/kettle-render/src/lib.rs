@@ -1233,21 +1233,8 @@ impl Renderer {
             // Color picks from the cfg.title_*_bg_color variants
             // based on focus + broadcast group state.
             if pane_titlebar_h > 0.0 {
-                // Cycle 387 (Terminator parity, titlebar sub-cycle 4):
-                // three color variants based on focus + broadcast state.
-                //   focused pane:           transmit colors
-                //   unfocused + broadcast:  receive colors  (group member)
-                //   unfocused + !broadcast: inactive colors
-                let bar_bg = if pv.focused {
-                    cfg.title_transmit_bg_color
-                        .unwrap_or(Rgb::new(0xc8, 0x00, 0x03))
-                } else if tabbar.broadcast {
-                    cfg.title_receive_bg_color
-                        .unwrap_or(Rgb::new(0x00, 0x76, 0xc9))
-                } else {
-                    cfg.title_inactive_bg_color
-                        .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
-                };
+                // Cycle 387 + 710: see `pick_titlebar_bg`.
+                let bar_bg = pick_titlebar_bg(cfg, theme, pv.focused, tabbar.broadcast);
                 // Cycle 385 (Terminator parity, titlebar Bucket-D
                 // sub-cycle 9): title_at_bottom flips the bar from
                 // (top of pane) to (bottom of pane). Cells shift
@@ -2649,6 +2636,43 @@ fn font_features(cfg: &Config) -> FontFeatures {
 /// when something was cut. CJK characters and emoji are wide (2 cells
 /// each), so a char-count truncation overflows the tab segment / title
 /// when these are present; this honors the cell width that the renderer
+/// Cycle 710 (regression fix): pick the per-pane titlebar background
+/// color from the cycle-387 (focus, broadcast) state.
+///
+/// The focused branch used to fall back to a hardcoded
+/// Terminator-bright `Rgb::new(0xc8, 0x00, 0x03)` which screamed
+/// against dark themes like Tokyo Night Storm. The pane border (lib.rs
+/// ~1209) and screenshot accent (lib.rs ~3136) already cascade through
+/// `focused_split_color → accent_color → palette[4]` for theme-aware
+/// focus signaling, so this mirrors that cascade. An explicit
+/// `title_transmit_bg_color = #hex` still wins — anyone who pinned the
+/// Terminator look keeps it.
+///
+/// Receive (broadcast) and inactive fall back to their pre-cycle-710
+/// defaults: the broadcast blue is already accent-derived and the
+/// inactive gray is neutral enough across themes.
+///
+/// Pure so the cascade is drift-guarded without standing up wgpu.
+pub(crate) fn pick_titlebar_bg(
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    focused: bool,
+    broadcast: bool,
+) -> Rgb {
+    if focused {
+        cfg.title_transmit_bg_color
+            .or(cfg.focused_split_color)
+            .or(cfg.accent_color)
+            .unwrap_or(theme.palette[4])
+    } else if broadcast {
+        cfg.title_receive_bg_color
+            .unwrap_or(Rgb::new(0x00, 0x76, 0xc9))
+    } else {
+        cfg.title_inactive_bg_color
+            .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
+    }
+}
+
 /// Cap a cell count so `requested * cell_px + chrome_px <= 8192` —
 /// the wgpu per-side texture limit. Returns at least 1 so a degenerate
 /// clamp (huge font + huge padding) doesn't produce a zero-cell PNG.
@@ -3717,6 +3741,87 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "stepwise field set reads more clearly than a 80-field struct literal here"
+)]
+mod pick_titlebar_bg_tests {
+    use super::pick_titlebar_bg;
+    use kettle_config::{Config, Rgb, Theme};
+
+    /// Cycle 710 drift guard. The focused titlebar must NEVER fall
+    /// through to the historic hardcoded `#c80003` Terminator red.
+    ///
+    /// Cascade order:
+    ///   1. explicit `title_transmit_bg_color = #hex`
+    ///   2. `focused_split_color` (cycle 271 split-border override)
+    ///   3. `accent_color` (cycle 293 peacock)
+    ///   4. `theme.palette[4]` (theme-aware default)
+    ///
+    /// Unfocused panes stay on their pre-cycle-710 neutral fallbacks
+    /// so the gray + blue (broadcast) defaults don't regress.
+    #[test]
+    fn focused_titlebar_uses_accent_cascade_when_unset() {
+        let theme = Theme::by_name("Default");
+        let mut cfg = Config::default();
+        cfg.title_transmit_bg_color = None;
+        cfg.focused_split_color = None;
+        cfg.accent_color = None;
+        // 4. Default fallback is theme.palette[4], not hardcoded
+        //    `#c80003` red.
+        let bg = pick_titlebar_bg(&cfg, &theme, true, false);
+        assert_eq!(bg, theme.palette[4]);
+        assert_ne!(
+            bg,
+            Rgb::new(0xc8, 0x00, 0x03),
+            "the hardcoded Terminator red MUST NOT be the focused-titlebar fallback"
+        );
+        // 3. accent_color wins over palette[4].
+        let accent = Rgb::new(0x00, 0xaa, 0x00);
+        cfg.accent_color = Some(accent);
+        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), accent);
+        // 2. focused_split_color wins over accent_color.
+        let split = Rgb::new(0xff, 0x88, 0x00);
+        cfg.focused_split_color = Some(split);
+        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), split);
+        // 1. explicit title_transmit_bg_color wins over all (preserves
+        //    the Terminator-look pin for any user who set it).
+        let pinned = Rgb::new(0xc8, 0x00, 0x03);
+        cfg.title_transmit_bg_color = Some(pinned);
+        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), pinned);
+    }
+
+    /// Unfocused + non-broadcast = inactive gray. No cascade change
+    /// here — pinning the pre-cycle-710 behavior.
+    #[test]
+    fn unfocused_titlebar_falls_back_to_inactive_gray() {
+        let theme = Theme::by_name("Default");
+        let mut cfg = Config::default();
+        cfg.title_inactive_bg_color = None;
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, false, false),
+            Rgb::new(0xc0, 0xbe, 0xbf)
+        );
+        let pinned = Rgb::new(0x33, 0x33, 0x33);
+        cfg.title_inactive_bg_color = Some(pinned);
+        assert_eq!(pick_titlebar_bg(&cfg, &theme, false, false), pinned);
+    }
+
+    /// Unfocused + broadcast = receive blue. No cascade change here —
+    /// pinning pre-cycle-710 behavior.
+    #[test]
+    fn broadcast_titlebar_falls_back_to_receive_blue() {
+        let theme = Theme::by_name("Default");
+        let mut cfg = Config::default();
+        cfg.title_receive_bg_color = None;
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, false, true),
+            Rgb::new(0x00, 0x76, 0xc9)
+        );
     }
 }
 

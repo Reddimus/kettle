@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 710 — **Fix: focused pane titlebar respects theme accent
+              cascade (kill the red bar)**:
+              User-reported regression: on dark themes (Tokyo
+              Night Storm in the bug report), the focused
+              pane's per-pane titlebar showed a bright
+              `#c80003` red bar that didn't match anything
+              else in the theme. The unfocused pane next to
+              it had a subtle gray bar — exactly the look the
+              user wanted for both states.
+              Root cause: the cycle-387 focused-pane fallback
+              at `crates/kettle-render/src/lib.rs:1241` was a
+              hardcoded Terminator-bright `Rgb::new(0xc8, 0x00,
+              0x03)`. The pane border (lib.rs:1209) and the
+              screenshot accent (lib.rs:3136) both already
+              cascaded through theme-aware
+              `focused_split_color → accent_color → palette[4]`
+              for focus signaling; the titlebar just hadn't
+              been updated.
+              Fix: extracted a pure `pick_titlebar_bg(cfg,
+              theme, focused, broadcast) -> Rgb` helper that
+              mirrors the existing cascade. An explicit
+              `title_transmit_bg_color = #hex` still wins —
+              users who pinned the Terminator look keep it.
+              Unfocused (gray) + broadcast (blue) fallbacks
+              unchanged.
+              Drift guards (in `pick_titlebar_bg_tests`):
+                - `focused_titlebar_uses_accent_cascade_when_unset`
+                  walks all 4 cascade levels + asserts the
+                  historic `#c80003` is NEVER the fallback.
+                - `unfocused_titlebar_falls_back_to_inactive_gray`
+                  pins the no-regression contract.
+                - `broadcast_titlebar_falls_back_to_receive_blue`
+                  pins the no-regression contract.
+              Workspace tests 403 → 406.
+
   cycle 708 — **`Action::OpenLayoutPicker` (Terminator
               `layoutlauncher.py` — Plugin system COMPLETE)**:
               Closes the last remaining Terminator plugin gap.
