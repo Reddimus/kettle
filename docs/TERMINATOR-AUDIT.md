@@ -578,17 +578,22 @@ same UX, or an explicit Bucket-E rationale for paradigm-divergent features
 adoption variant of detachable tabs — a kettle-internal optimization,
 not a missing Terminator feature.
 
-## Post-sweep polish (cycles 411-497, v1.32.0 → v1.40.0, 9 releases)
+## Post-sweep polish (cycles 411-521, v1.32.0 → v1.41.0, 10 releases)
 
-After the Terminator-parity sweep landed at v1.31.0, cycles 411-497 ran
-a production-grade hardening pass on the new surfaces. Eighty-seven
-cycles, nine tagged releases, +13 tests, plus a UX-observability
+After the Terminator-parity sweep landed at v1.31.0, cycles 411-521 ran
+a production-grade hardening pass on the new surfaces. One hundred
+eleven cycles, ten tagged releases, +13 tests, plus a UX-observability
 sweep that surfaced all 7 Terminator-parity opt-in keys in
 `--check-config`, plus a doc-durability sweep that scrubbed internal
 cycle refs from every user-facing surface and extended the drift
 guard to enforce it, plus a doc-accuracy sweep that corrected 3 stale
-field doc-comments in `app.rs`, plus an opt-in pre-commit hook that
-catches the clippy / fmt / test regression class at commit time:
+field doc-comments in `app.rs`, plus an opt-in pre-commit hook (with
+shellcheck gate) that catches the clippy / fmt / test / shell-script
+regression classes at commit time, plus a v1.41.0 real bug fix in
+`scripts/release.sh` (backticks inside double-quoted echo were
+running as command substitution, mutating local state at error
+time — caught by manually running shellcheck before extending the
+hook gate to scripts/):
 
   Workspace tests             308 → 321 (+13 drift guards)
   Tagged releases             v1.32.0 (cycles 411-415) ·
@@ -599,7 +604,8 @@ catches the clippy / fmt / test regression class at commit time:
                               v1.37.0 (cycles 450-463) ·
                               v1.38.0 (cycles 466-475) ·
                               v1.39.0 (cycles 478-486) ·
-                              v1.40.0 (cycles 489-497)
+                              v1.40.0 (cycles 489-497) ·
+                              v1.41.0 (cycles 511-521)
   Plugin-contract bug fixes   6 silent event-bypass sites covered:
                               remote-control new-tab → TabAdd
                               (cycle 423); 3 close_tab paths →

@@ -147,14 +147,15 @@ Comparative analysis behind these choices (with citations) is in
 
 The v1.8.0 → v1.31.0 sweep added four major subsystems. Each has its
 own design doc; the architectural integration is summarized here.
-Cycles 411-497 (v1.32.0 → v1.40.0) hardened the plugin contract,
+Cycles 411-521 (v1.32.0 → v1.41.0) hardened the plugin contract,
 extended drift guards, surfaced opt-in keys via `--check-config`
 echo lines, scrubbed internal cycle refs from every user-facing
 doc surface, corrected 3 stale field doc-comments in
-`crates/kettle-ui/src/app.rs` (pending_pane_restarts,
-lua_engine 5-emission-site enumeration, fire-helper count), and
-added an opt-in pre-commit hook that catches clippy / fmt / test
-regressions at commit time (`.githooks/pre-commit`) — see
+`crates/kettle-ui/src/app.rs`, added an opt-in pre-commit hook
+that catches clippy / fmt / test / shellcheck regressions at
+commit time (`.githooks/pre-commit`), and fixed a real cycle-51-era
+backticks-as-command-substitution bug in `scripts/release.sh` —
+see
 [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md)'s post-sweep section
 for that polish run.
 
