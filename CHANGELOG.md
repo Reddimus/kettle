@@ -6,10 +6,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-Post-v1.44.0 polish — doc-truth pass + sandbox drift guards.
-No release planned for this batch (per maintainer directive
-"ship/release only on major updates"); entries land here for
-the next major event's release notes.
+## [1.45.0] — 2026-05-22
+
+Release trigger: cycle-602 user-reported pane-close focus bug
+("when I split the window many times then close that specific
+terminal it sets my cursor/focused window to my first focused
+terminal") — meets the cycle-562 "critical bug fix that users
+would actively want to re-install for" criterion. Bundling the
+accumulated [Unreleased] polish from cycles 561-602 into this
+release because the user will re-install for cycle-602 anyway.
+
+User-impacting bug fixes in this release:
+
+  - cycle 574 — `Action::PastePrimary` now routes through
+                `paste_clipboard`, picking up the same
+                `LOCAL_PASTE_MAX` clamp, bracketed-paste wrap,
+                and broadcast scoping as `Action::Paste`. Pre-
+                fix, a `paste-primary` keybind under vim could
+                interpret pasted text as commands.
+  - cycle 602 — `Mux::close_focused` now picks the nearest
+                neighbor pane as the new focus, not the
+                leftmost leaf of the whole tab. Matches tmux /
+                wezterm / kitty semantics.
+
+Security hardening (cycles 576-587, 601):
+
+  - Kitty graphics protocol resource caps: PNG/JPEG/GIF
+    decompression-bomb cap (8192² / 256 MiB), `ImageData::new`
+    overflow guard, 384 MiB per-chunk-stream cap, 32-slot
+    in-flight cap, 256 frames-per-image cap, 64-slot caps on
+    `store` / `anim` / `virtual_placements` / `rel` / `frames`.
+  - Background-image decoder uses the same 8192² / 256 MiB
+    envelope.
+  - User-file read-into-memory caps: 16 MiB session.json, 1
+    MiB config, 4 MiB init.lua — all defended against
+    swap-attack OOM via metadata pre-check.
+  - Lua side-effect APIs: 1 MiB per `send_text`, 8 KiB per
+    `notify` field, 1024-command queue length cap.
+
+Production polish:
+
+  - SECURITY.md scope reflects every cap (cycles 583, 588, 596).
+  - GitHub Actions: `cancel-in-progress` on diagnostic
+    workflows (ci.yml, actionlint.yml, machete.yml,
+    labeler.yml) + `timeout-minutes` on all 8 workflows.
+    Budget-protection measures per the cycle-444 exhaustion.
+  - Test-infra: PID + nanos /tmp paths (cycles 592, 593) so
+    parallel `cargo test` runs don't race on shared files.
+  - Doc accuracy: range-stable test counts in TESTING.md
+    (cycle 594); SECURITY.md added to the cycle-179 user-
+    facing-doc drift guard (cycle 596).
+  - `release.sh` correctly skips `git add flake.nix` on
+    forks lacking the file (cycle 589); `install-online.sh`
+    SHA-256 diagnostic distinguishes "tool missing" from
+    "verification failed" (cycle 590).
+
+Workspace tests: 322 (v1.44.0) → 342 (this release).
 
   cycle 561 — README + INSTALL.md + scripts/install-online.sh
               version pins bumped to v1.44.0.
