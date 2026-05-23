@@ -1381,8 +1381,11 @@ section for the full breakdown.
       cycle 430 pinned the `kettle.notify` + `kettle.set_theme`
       queue/drain contract; cycle 435 pinned
       `kettle.add_menu_item` + `kettle.add_url_handler` contracts;
-      cycle 446 pinned `kettle.config_path` return-type contract.
-      Workspace tests 308 → 319.
+      cycle 446 pinned `kettle.config_path` return-type contract;
+      cycles 471-472 added 3 drift guards on the
+      `extra_check_config_lines` helper covering all 7 opt-in
+      echo branches.
+      Workspace tests 308 → 321.
 - [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
       -D warnings` passes on `kettle-render` and `kettle-vt` after
       fixing 3 intra-doc link + bare-URL warnings.
