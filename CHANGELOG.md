@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 632 — **`docs/TERMINATOR-AUTO-THEME-DESIGN.md` — Bucket D
+              design doc for auto-detect + sunrise/sunset (the
+              other half of `plugins/auto_theme.py` not shipped
+              in cycle 616's manual toggle)**:
+              architecture:
+                - new `ThemeMode { Explicit, Light, Dark, Auto }`
+                  enum + `ThemeSchedule { Clock, SunriseSunset }`
+                - `dark-light` crate for cross-platform OS-pref
+                  detection (DBus portal on Linux,
+                  NSDistributedNotificationCenter on macOS,
+                  RegNotifyChangeKeyValue on Windows)
+                - theme_watcher module spawns the subscribe task;
+                  fires events that reuse cycle-616's apply_theme
+                - sunrise/sunset takes explicit lat/long
+                  (privacy: never makes network requests; no
+                  GeoClue2/CoreLocation prompts)
+                - clock schedule: `theme-schedule = 18:00 dark,
+                  06:00 light` for no-geolocation users
+              7 sub-cycles, +10-12 estimated tests. Audit row
+              updated from A (manual-only) to A+D. Risk
+              register covers dark-light compile-failure
+              fallback to cycle-616 manual, subscribe-blocks-
+              launch (100 ms timeout), system-sleep drift,
+              lat/long range validation. No code change.
+
   cycle 631 — **`docs/TERMINATOR-NAMED-GROUPS-DESIGN.md` —
               Bucket D design doc for Terminator's named broadcast
               groups (`create_group` / `group_tab` / `group_win`

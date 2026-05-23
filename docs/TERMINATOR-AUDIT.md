@@ -392,7 +392,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
 | ~~`logger.py`~~ (log session to file) | plugins | ✅ cycle-621 — `Action::ToggleSessionLog` opens `<cache>/kettle/logs/...` and writes raw PTY bytes from reader thread via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot | cycle-621 |
 | ~~`dir_open.py`~~ (open cwd in file manager) | plugins | ✅ cycle-607 — `Action::OpenCwdInFileManager` builds `file://{cwd}` via `open_url()` (which uses the `open` crate) | cycle-607 |
-| ~~`auto_theme.py`~~ (light/dark switching) | plugins | ✅ cycle-616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` runtime swap (manual; sunrise/sunset auto-detect is a follow-up) | cycle-616 |
+| `auto_theme.py` (light/dark switching) | plugins | A+D | A: cycle-616 — `light-theme`/`dark-theme` config + `Action::ToggleLightDark` (manual toggle). D: auto-detect + sunrise/sunset designed in [`TERMINATOR-AUTO-THEME-DESIGN.md`](TERMINATOR-AUTO-THEME-DESIGN.md) — dark-light crate dep + DBus/NSDistributedNotificationCenter/Registry subscribe + ThemeSchedule { Clock, SunriseSunset } + privacy-conscious explicit-lat/long only. 7 sub-cycles. |
 | `cell_width` / `cell_height` (per-character cell scaling) | config.py | ❌ | new config keys; font-metric override |
 | `palette = solarized_dark` (named preset) | config.py | 🟡 kettle has ~500 themes; named palette presets are subset | new config-key syntax `palette = solarized_dark` (alias for full hex set) |
 | Multiple grouping modes + auto-cleanup | config.py | ❌ | named groups + `autoclean_groups` config key |
