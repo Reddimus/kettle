@@ -71,32 +71,25 @@ jobs:
               exit 1
             fi
           fi
-          # Cycle 553: same shape for the Arch PKGBUILD template's
-          # pkgver. Cycle 551 caught the same 39-release drift in
-          # packaging/arch/PKGBUILD that cycle 549 caught in
-          # flake.nix. Unlike flake.nix the PKGBUILD also has a
-          # sha256sums line that depends on post-CI artifacts, so
-          # scripts/release.sh CAN'T auto-bump it. The CI guard
-          # catches a forgotten manual bump.
-          if [ -f packaging/arch/PKGBUILD ]; then
-            PKG_VER=$(awk -F= '/^pkgver=/ { print $2; exit }' packaging/arch/PKGBUILD)
-            if [ -n "$PKG_VER" ] && [ "$TAG_VER" != "$PKG_VER" ]; then
-              echo "::error::tag $GITHUB_REF_NAME but packaging/arch/PKGBUILD says pkgver=$PKG_VER"
-              echo "::error::bump pkgver + sha256sums per packaging/arch/README.md before tagging"
-              exit 1
-            fi
-          fi
-          # Cycle 553: same shape for the Homebrew formula template's
-          # `version "X.Y.Z"` line. Same drift class; same gate.
-          if [ -f packaging/homebrew/kettle.rb ]; then
-            BREW_VER=$(awk -F\" '/^  version "/ { print $2; exit }' packaging/homebrew/kettle.rb)
-            if [ -n "$BREW_VER" ] && [ "$TAG_VER" != "$BREW_VER" ]; then
-              echo "::error::tag $GITHUB_REF_NAME but packaging/homebrew/kettle.rb says version $BREW_VER"
-              echo "::error::bump version + both sha256s per packaging/homebrew/README.md before tagging"
-              exit 1
-            fi
-          fi
-          echo "tag, Cargo.toml, flake.nix, PKGBUILD, kettle.rb, and CHANGELOG.md all agree on version $TAG_VER"
+          # Cycle 558: PKGBUILD + kettle.rb template gates from
+          # cycle 553 were REVERTED. The original intent (catch
+          # forgotten packaging-template bumps) was sound, but
+          # creates a circular dependency:
+          #   - release.sh can't auto-bump them because their
+          #     sha256sums require post-CI artifacts (the
+          #     kettle-{linux,macos}-*.sha256 sidecars).
+          #   - The sidecars only exist AFTER release.yml uploads
+          #     them — which can't happen if a pre-flight gate
+          #     fails on the bump.
+          # The cycle 553 strict-equality gate blocked v1.43.0
+          # release artifacts entirely because PKGBUILD/kettle.rb
+          # carry the previous release's sha256s by design (the
+          # "trail by one" pattern: template at v(N-1) is the
+          # last KNOWN-GOOD AUR/Homebrew target). The cycle 549/
+          # 551/552 reactive bumps remain the right cadence —
+          # update templates when the maintainer re-publishes to
+          # AUR/tap, not on every tag push.
+          echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
         if: runner.os == 'Linux'
