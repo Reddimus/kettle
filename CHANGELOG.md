@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 699 — **Terminator config-key aliases: `custom_command` +
+              `use_custom_command` + `copy_on_selection` +
+              `enabled_plugins`**:
+              Another batch of "kettle already implements this
+              but only under the Alacritty / WezTerm spelling" —
+              cycle 699 adds the Terminator-spelled key as a
+              direct parser alias so an unmodified Terminator
+              profile loads cleanly.
+                - `custom_command` / `custom-command` → `command`
+                  / `shell` (existing per-profile shell override)
+                - `use_custom_command` / `use-custom-command` →
+                  new `pub use_custom_command: bool` field
+                  (default true). When false, `cfg.shell` is
+                  cleared at parse-finalize, falling back to
+                  $SHELL. Order-independent.
+                - `copy_on_selection` / `copy-on-selection` →
+                  `copy_on_select` (existing PRIMARY-clipboard
+                  auto-copy)
+                - `enabled_plugins` / `enabled-plugins` →
+                  recognized-but-ignored (kettle's plugin model
+                  is cycle-324 Lua + cycle-611 menu-item config,
+                  not VTE plugin objects). Prevents
+                  `--check-config` warning on copied configs.
+              Drift guard `terminator_use_custom_command_gate`
+              walks 5 cases: command-then-disable, disable-then-
+              command, default (gate implicit-true), Terminator
+              `custom_command` alias, `copy_on_selection` alias.
+              Workspace tests 396 → 397.
+
   cycle 698 — **Terminator config-key aliases: `mouse_autohide`
               + `word_chars`**:
               Both keys map 1:1 onto pre-existing kettle config

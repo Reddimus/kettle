@@ -897,6 +897,14 @@ pub struct Config {
     /// `custom_url_handler`): path to the custom URL handler.
     /// No-op unless `use_custom_url_handler` is true.
     pub custom_url_handler: String,
+    /// Cycle 699 (Terminator parity, terminatorlib/config.py
+    /// `use_custom_command`): when false, ignore any
+    /// `custom_command` / `command` / `shell` value and fall
+    /// back to the user's $SHELL. Lets a Terminator profile
+    /// keep `custom_command` defined but disabled. Applied at
+    /// parse-finalize so the order of `command =` and
+    /// `use_custom_command =` in the file doesn't matter.
+    pub use_custom_command: bool,
     /// Cycle 338 (Terminator parity, terminatorlib/config.py:84
     /// `inactive_color_offset`): float 0.0-1.0 — unfocused-pane
     /// FG color dimming. kettle's `unfocused-split-opacity`
@@ -1328,6 +1336,7 @@ impl Default for Config {
             broadcast_default: BroadcastDefault::Group,
             use_custom_url_handler: false,
             custom_url_handler: String::new(),
+            use_custom_command: true,
             inactive_color_offset: 1.0,
             inactive_bg_color_offset: 1.0,
             split_to_group: false,
@@ -2350,6 +2359,20 @@ impl Config {
                 "custom-url-handler" | "custom_url_handler" => {
                     cfg.custom_url_handler = e.value.trim().to_string();
                 }
+                "use-custom-command" | "use_custom_command" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.use_custom_command = b;
+                    }
+                }
+                // Cycle 699 Terminator parity
+                // (terminatorlib/config.py `enabled_plugins`):
+                // VTE plugin list. kettle's plugin model is
+                // cycle-324 Lua (loaded from `~/.config/kettle/
+                // kettle.lua` + per-profile `*.lua` siblings) +
+                // cycle-611 menu-item config keys. The Terminator
+                // key is accepted without effect so a copied
+                // config doesn't trigger `--check-config` warnings.
+                "enabled-plugins" | "enabled_plugins" => {}
                 "inactive-color-offset" | "inactive_color_offset" => {
                     if let Ok(v) = e.value.parse::<f32>() {
                         cfg.inactive_color_offset = v.clamp(0.0, 1.0);
@@ -2714,7 +2737,12 @@ impl Config {
                         cfg.command_notify_threshold_ms = v.min(86_400_000);
                     }
                 }
-                "copy-on-select" => {
+                // Cycle 699 Terminator parity
+                // (terminatorlib/config.py `copy_on_selection`):
+                // VTE per-profile "auto-copy selection to PRIMARY
+                // clipboard". Maps 1:1 onto kettle's existing
+                // `copy_on_select`.
+                "copy-on-select" | "copy_on_selection" | "copy-on-selection" | "copy_on_select" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.copy_on_select = b;
                     }
@@ -2763,7 +2791,15 @@ impl Config {
                         }
                     }
                 }
-                "command" | "shell" => {
+                // Cycle 699 Terminator parity (terminatorlib/
+                // config.py `custom_command` + `use_custom_command`):
+                // VTE per-profile "run a specific command instead
+                // of the user's default shell". kettle's existing
+                // `command` / `shell` config keys cover this — the
+                // Terminator `use_custom_command = false` gate is
+                // unnecessary because an empty `command =` falls
+                // back to $SHELL.
+                "command" | "shell" | "custom_command" | "custom-command" => {
                     // Empty `command =` is "reset to default" (same
                     // shape as cycle 121's font-family fix). Without
                     // this, `Some("")` slips through to `shell_argv`
@@ -2882,6 +2918,15 @@ impl Config {
         // never read).
         if cfg.force_no_bell {
             cfg.bell = BellMode::Off;
+        }
+        // Cycle 699 (Terminator parity, terminatorlib/config.py
+        // `use_custom_command`): when false, ignore any
+        // `custom_command` / `command` / `shell` value — Terminator
+        // semantics let you keep `custom_command` defined in the
+        // profile but disabled. Order-independent because applied
+        // here at parse-finalize.
+        if !cfg.use_custom_command {
+            cfg.shell = None;
         }
         // Cycle 669: patch the SunriseSunset variant with the
         // parsed lat/long now that both halves of the config
@@ -5278,6 +5323,34 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 699 drift guard. Terminator `use_custom_command =
+    /// false` clears `cfg.shell` at parse-finalize so the
+    /// otherwise-defined `command =` / `custom_command =` /
+    /// `shell =` value falls back to $SHELL. Order-independent.
+    #[test]
+    fn terminator_use_custom_command_gate() {
+        // command-then-disable.
+        let cfg = Config::parse_text("command = /bin/zsh\nuse_custom_command = false\n");
+        assert!(cfg.shell.is_none());
+        // disable-then-command (reverse order works too).
+        let cfg = Config::parse_text("use_custom_command = false\ncommand = /bin/zsh\n");
+        assert!(cfg.shell.is_none());
+        // Default (use_custom_command implicit-true) keeps the command.
+        let cfg = Config::parse_text("command = /bin/zsh\n");
+        assert_eq!(cfg.shell.as_deref(), Some("/bin/zsh"));
+        // The Terminator `custom_command` spelling is accepted as
+        // an alias for `command =`.
+        let cfg = Config::parse_text("custom_command = /bin/zsh\n");
+        assert_eq!(cfg.shell.as_deref(), Some("/bin/zsh"));
+        // copy_on_selection alias maps to copy_on_select.
+        let cfg = Config::parse_text("copy_on_selection = false\n");
+        assert!(!cfg.copy_on_select);
+        // enabled_plugins is recognized (parses without panic);
+        // value is intentionally discarded since kettle's plugin
+        // model is cycle-324 Lua.
+        let _ = Config::parse_text("enabled_plugins = LaunchpadBugURLHandler\n");
     }
 
     /// Cycle 692 drift guard. `palette = NAME` (no `=` after)
