@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 629 — **`docs/TERMINATOR-REMOTE-DESIGN.md` — Bucket D
+              design doc for `plugins/remote.py` port**:
+              SSH / Docker / Podman / kubectl session detection
+              via a new `kettle_remote` crate (sysinfo-backed
+              process-tree walk), `Terminal::child_pid()`
+              accessor, SSH + Container detectors, ~10 Hz poll
+              tied to cycle-290 trigger cadence, right-click
+              "Clone session" menu integration. 7 sub-cycles,
+              estimated +12-15 tests. Same shape as the existing
+              Bucket-D design docs (PLUGIN, DETACHABLE-TABS,
+              PANE-TITLEBAR, BG-IMAGE). Audit-doc row promoted
+              from C to D with cross-link. No code change.
+
   cycle 628 — **`tab-position` Terminator alias (config.py:144)**:
               cycle-331 wired the canonical kettle key
               `tab-bar-position` with all 4 Terminator values
