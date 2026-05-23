@@ -61,7 +61,10 @@ cargo test --workspace
 elapsed=$(($(date +%s) - start_sec))
 # Render 0s as "<1s" so an incremental rebuild that completed
 # faster than seconds-resolution doesn't print a misleading "(0s)".
-if [ "$elapsed" -eq 0 ]; then
+# Also handles the wall-clock-jumped-backward case (NTP correction,
+# manual clock set, container time jump) by treating any non-
+# positive elapsed as "<1s" rather than a misleading negative.
+if [ "$elapsed" -le 0 ]; then
     echo "pre-commit: PASSED (<1s)" >&2
 else
     echo "pre-commit: PASSED (${elapsed}s)" >&2
