@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 652 — **confirm-dialog sub-cycle 4: keyboard-nav pure
+              helper**: `confirm_dialog_keypress(current_focus,
+              num_buttons, key) -> ConfirmKeyResult`. Pure state
+              machine for the modal's Tab / Shift+Tab / ←→ /
+              Enter / Esc handling. Sub-cycle 5 wires this to
+              the App's winit key handler — without the wiring
+              the helper is just a pure function exercised by
+              tests, but landing it now lets the dispatch loop
+              be a thin wrapper.
+              New types:
+                - `ConfirmKey` (winit-decoupled named keys)
+                - `ConfirmKeyResult { Move, Confirm, Cancel,
+                  Ignore }`
+              Drift guard `confirm_dialog_keypress_walks_state_machine`
+              walks 12 input shapes including:
+                - Esc/Enter from any focus
+                - Tab/Shift+Tab wrap behavior
+                - Left/Right no-op at boundaries (Ignore vs
+                  Move discrimination)
+                - 0-button defensive fallback
+                - single-button no-op cycle
+              Workspace tests 381 → 382.
+
   cycle 651 — **vertical-tabs sub-cycle 2: `content_rect_for`
               pure helper**: extracts `App::area`'s layout math
               into a pure function that takes the inputs

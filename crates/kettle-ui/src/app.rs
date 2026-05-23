@@ -152,6 +152,73 @@ fn spawn_trigger_command(argv: &[String]) {
     }
 }
 
+/// Cycle 652 (sub-cycle 4 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): which named
+/// key was pressed in the confirm-modal keyboard handler. Lifted out
+/// of winit's `NamedKey` so the pure helper isn't coupled to a UI
+/// framework type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // sub-cycle 5 wires the consumer.
+pub enum ConfirmKey {
+    Escape,
+    Enter,
+    Tab,
+    ShiftTab,
+    Left,
+    Right,
+}
+
+/// Cycle 652: outcome of a key press in the confirm dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // sub-cycle 5 consumes this.
+pub enum ConfirmKeyResult {
+    /// Update `focus_idx` to the new value + redraw.
+    Move(usize),
+    /// Dispatch `on_confirm` + close the modal.
+    Confirm,
+    /// Close the modal without dispatching.
+    Cancel,
+    /// Key wasn't a nav key for the modal — caller can pass through
+    /// or ignore (we suppress non-nav input while a modal is open).
+    Ignore,
+}
+
+/// Cycle 652: pure helper that maps a (current_focus, num_buttons,
+/// key) tuple to the next action for the confirm-dialog state
+/// machine. Sub-cycle 5 wires this to the App's winit key handler.
+#[allow(dead_code)] // sub-cycle 5 wires the consumer.
+fn confirm_dialog_keypress(
+    current_focus: usize,
+    num_buttons: usize,
+    key: ConfirmKey,
+) -> ConfirmKeyResult {
+    if num_buttons == 0 {
+        return ConfirmKeyResult::Cancel;
+    }
+    match key {
+        ConfirmKey::Escape => ConfirmKeyResult::Cancel,
+        ConfirmKey::Enter => ConfirmKeyResult::Confirm,
+        ConfirmKey::Tab => ConfirmKeyResult::Move((current_focus + 1) % num_buttons),
+        ConfirmKey::ShiftTab => {
+            ConfirmKeyResult::Move((current_focus + num_buttons - 1) % num_buttons)
+        }
+        ConfirmKey::Left => {
+            if current_focus == 0 {
+                ConfirmKeyResult::Ignore
+            } else {
+                ConfirmKeyResult::Move(current_focus - 1)
+            }
+        }
+        ConfirmKey::Right => {
+            if current_focus + 1 >= num_buttons {
+                ConfirmKeyResult::Ignore
+            } else {
+                ConfirmKeyResult::Move(current_focus + 1)
+            }
+        }
+    }
+}
+
 /// Cycle 651 (sub-cycle 2 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
 /// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): pure helper
 /// that computes the pane-content rect from the inputs that govern
@@ -6818,6 +6885,78 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Cycle 652 drift guard. `confirm_dialog_keypress` is the pure
+    /// state machine for the confirm dialog's keyboard handler.
+    /// Sub-cycle 4 of confirm-dialog design.
+    #[test]
+    fn confirm_dialog_keypress_walks_state_machine() {
+        use super::{ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
+        // Escape always cancels.
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Escape),
+            ConfirmKeyResult::Cancel
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Escape),
+            ConfirmKeyResult::Cancel
+        );
+        // Enter always confirms.
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Enter),
+            ConfirmKeyResult::Confirm
+        );
+        // Tab cycles forward with wrap.
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Tab),
+            ConfirmKeyResult::Move(1)
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Tab),
+            ConfirmKeyResult::Move(0),
+            "Tab wraps at end"
+        );
+        // Shift+Tab cycles backward with wrap.
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::ShiftTab),
+            ConfirmKeyResult::Move(1),
+            "Shift+Tab wraps at start"
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::ShiftTab),
+            ConfirmKeyResult::Move(0)
+        );
+        // Left at idx 0 is a no-op (Ignore — caller suppresses).
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Left),
+            ConfirmKeyResult::Ignore
+        );
+        // Left at idx 1 moves to 0.
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Left),
+            ConfirmKeyResult::Move(0)
+        );
+        // Right at last idx is a no-op.
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Right),
+            ConfirmKeyResult::Ignore
+        );
+        // Right at idx 0 with 2 buttons moves to 1.
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Right),
+            ConfirmKeyResult::Move(1)
+        );
+        // Defensive: 0 buttons → any key cancels.
+        assert_eq!(
+            confirm_dialog_keypress(0, 0, ConfirmKey::Enter),
+            ConfirmKeyResult::Cancel
+        );
+        // Single-button dialog: Tab cycles to itself (no-op move).
+        assert_eq!(
+            confirm_dialog_keypress(0, 1, ConfirmKey::Tab),
+            ConfirmKeyResult::Move(0)
+        );
     }
 
     /// Cycle 651 drift guard. `content_rect_for` is the pure helper
