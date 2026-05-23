@@ -32,6 +32,15 @@ on:
 permissions:
   contents: read
 
+# Cycle 598: cancel superseded runs on the same ref. Same shape as
+# cycle 597's ci.yml concurrency block — no cron trigger here, no
+# release artifacts, purely diagnostic, so cancel-in-progress is
+# strictly a budget win. Workflow-files churn is rare but a rebase
+# of a workflow-touching PR used to queue duplicate runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   actionlint:
     name: lint workflows

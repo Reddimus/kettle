@@ -32,6 +32,14 @@ on:
 permissions:
   contents: read
 
+# Cycle 598: same concurrency block as ci.yml + actionlint.yml. No
+# cron, no release artifacts, purely diagnostic — cancel-in-progress
+# is strictly a budget win when a Cargo.toml-touching PR gets
+# multiple pushes in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   machete:
     name: unused deps
