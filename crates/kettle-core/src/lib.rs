@@ -47,5 +47,5 @@ pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedCo
 pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{ImageData, Images, Placement};
 pub use links::{Link, links};
-pub use search::{Match, search};
+pub use search::{CaseSensitivity, Match, search, search_with};
 pub use term::{SharedTerm, Terminal};

@@ -17,15 +17,42 @@ pub struct Match {
     pub end_col: usize,
 }
 
+/// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+/// `case_sensitive`): override the default smart-case policy
+/// at search time. `Smart` keeps ripgrep/vim's smart-case
+/// (insensitive until the pattern has any uppercase),
+/// `Always` forces case-sensitive even for lowercase patterns,
+/// `Never` forces case-insensitive even for mixed-case patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaseSensitivity {
+    #[default]
+    Smart,
+    Always,
+    Never,
+}
+
 /// Compile a search pattern with **smart-case** semantics: case-insensitive
 /// unless the pattern contains an uppercase letter (ripgrep/vim behavior).
 /// The pattern is a real regex; if it doesn't compile it falls back to a
 /// literal (escaped) search so a stray `(` or `*` never breaks search.
+///
+/// Preserved as the smart-case shorthand; new callers that want to
+/// honor a user-configured override should call `build_regex_with`.
 pub fn build_regex(pattern: &str) -> Option<Regex> {
+    build_regex_with(pattern, CaseSensitivity::Smart)
+}
+
+/// Cycle 617: same as `build_regex` but with an explicit override.
+/// Pure — no terminal state involved.
+pub fn build_regex_with(pattern: &str, mode: CaseSensitivity) -> Option<Regex> {
     if pattern.is_empty() {
         return None;
     }
-    let ci = !pattern.chars().any(|c| c.is_uppercase());
+    let ci = match mode {
+        CaseSensitivity::Smart => !pattern.chars().any(|c| c.is_uppercase()),
+        CaseSensitivity::Always => false,
+        CaseSensitivity::Never => true,
+    };
     let flag = if ci { "(?i)" } else { "" };
     Regex::new(&format!("{flag}{pattern}"))
         .or_else(|_| Regex::new(&format!("{flag}{}", regex::escape(pattern))))
@@ -33,7 +60,12 @@ pub fn build_regex(pattern: &str) -> Option<Regex> {
 }
 
 pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
-    let Some(re) = build_regex(pattern) else {
+    search_with(term, pattern, CaseSensitivity::Smart)
+}
+
+/// Cycle 617: search with an explicit case-sensitivity override.
+pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
+    let Some(re) = build_regex_with(pattern, mode) else {
         return Vec::new();
     };
 
@@ -144,5 +176,34 @@ mod tests {
         assert!(!re.is_match("ab"));
         // Empty pattern yields nothing.
         assert!(build_regex("").is_none());
+    }
+
+    /// Cycle 617 drift guard. The three CaseSensitivity modes drive
+    /// the (?i) flag override on `build_regex_with`:
+    ///   - Smart: case-insensitive unless any uppercase in pattern
+    ///   - Always: case-sensitive even for all-lowercase pattern
+    ///   - Never: case-insensitive even for mixed-case pattern
+    #[test]
+    fn build_regex_with_honors_explicit_case_sensitivity() {
+        use super::{CaseSensitivity, build_regex_with};
+        // Smart: lowercase → insensitive (matches ERROR).
+        let re = build_regex_with("error", CaseSensitivity::Smart).unwrap();
+        assert!(re.is_match("ERROR"));
+        // Always: even lowercase pattern is sensitive (no match on ERROR).
+        let re = build_regex_with("error", CaseSensitivity::Always).unwrap();
+        assert!(!re.is_match("ERROR"));
+        assert!(re.is_match("error"));
+        // Never: even mixed-case pattern is insensitive (matches ERROR).
+        let re = build_regex_with("Error", CaseSensitivity::Never).unwrap();
+        assert!(re.is_match("ERROR"));
+        assert!(re.is_match("error"));
+        // Empty pattern still None across all modes.
+        for mode in [
+            CaseSensitivity::Smart,
+            CaseSensitivity::Always,
+            CaseSensitivity::Never,
+        ] {
+            assert!(build_regex_with("", mode).is_none());
+        }
     }
 }

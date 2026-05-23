@@ -109,6 +109,17 @@ fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
 ///   - neither set: return `None`; dispatch logs a warn.
 ///
 /// Pure — unit-testable without constructing a Config or App.
+/// Cycle 617: bridge from kettle-config's `SearchCaseSensitivity`
+/// to kettle-core's `CaseSensitivity`. Kept as a pure helper so
+/// the two crates don't grow a circular trait dependency.
+fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core::CaseSensitivity {
+    match m {
+        kettle_config::SearchCaseSensitivity::Smart => kettle_core::CaseSensitivity::Smart,
+        kettle_config::SearchCaseSensitivity::Always => kettle_core::CaseSensitivity::Always,
+        kettle_config::SearchCaseSensitivity::Never => kettle_core::CaseSensitivity::Never,
+    }
+}
+
 fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<String> {
     let cur = current.trim().to_ascii_lowercase();
     let l = light.trim();
@@ -2171,7 +2182,13 @@ impl App {
                 .term
                 .lock()
                 .ok()
-                .map(|t| kettle_core::search(&t, &query))
+                .map(|t| {
+                    kettle_core::search_with(
+                        &t,
+                        &query,
+                        map_case_sensitivity(self.cfg.search_case_sensitive),
+                    )
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()

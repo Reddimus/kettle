@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 617 — **`case_sensitive` parity (Terminator
+              config.py:117)**:
+                - new enum `SearchCaseSensitivity { Smart,
+                  Always, Never }` on Config (default Smart =
+                  kettle's pre-617 ripgrep/vim behavior)
+                - parser accepts: `smart`/`auto` ⇒ Smart;
+                  `always`/`sensitive` ⇒ Always; `never`/
+                  `insensitive` ⇒ Never; Terminator-spelled
+                  `case-sensitive = true/false` (and the
+                  underscore form) maps to Always/Never
+                - new public API in kettle-core:
+                  `CaseSensitivity`, `build_regex_with`,
+                  `search_with` (the no-arg `search`/
+                  `build_regex` remain as Smart-mode
+                  shorthands; back-compat preserved)
+                - app.rs scrollback search now threads
+                  `cfg.search_case_sensitive` through to
+                  `kettle_core::search_with`
+                - new pure-helper `map_case_sensitivity` is
+                  the kettle-config ↔ kettle-core bridge
+              Drift guards: parser side
+              `search_case_sensitive_parses_terminator_and_named_forms`
+              (12 input shapes) + engine side
+              `build_regex_with_honors_explicit_case_sensitivity`
+              (round-trips all 3 modes + empty-pattern).
+              Workspace tests 356 → 358.
+
   cycle 616 — **`plugins/auto_theme.py` parity (manual toggle)**:
                 - new config keys `light-theme = <name>` and
                   `dark-theme = <name>` (kebab + underscore both

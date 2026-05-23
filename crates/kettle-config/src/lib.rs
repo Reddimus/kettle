@@ -87,6 +87,23 @@ pub enum BellMode {
     Both,
 }
 
+/// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+/// `case_sensitive`): scrollback-search case-sensitivity mode.
+///
+/// kettle defaults to `Smart` (ripgrep/vim semantics: case-
+/// insensitive until the pattern contains any uppercase letter).
+/// `Always` forces case-sensitive even for all-lowercase patterns
+/// (matches Terminator's default), `Never` forces case-insensitive
+/// even for mixed-case patterns. Maps to `kettle_core::search::
+/// CaseSensitivity` at search time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchCaseSensitivity {
+    #[default]
+    Smart,
+    Always,
+    Never,
+}
+
 impl BellMode {
     pub fn visual(self) -> bool {
         matches!(self, BellMode::Visual | BellMode::Both)
@@ -442,6 +459,13 @@ pub struct Config {
     /// the bottom up (newest matches first) instead of the default
     /// top-down (oldest first).
     pub invert_search: bool,
+    /// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+    /// `case_sensitive`): scrollback-search case-sensitivity
+    /// override. kettle's default is `smart` (ripgrep/vim:
+    /// insensitive until the pattern has any uppercase). `always`
+    /// forces sensitive (Terminator's default), `never` forces
+    /// insensitive.
+    pub search_case_sensitive: SearchCaseSensitivity,
     /// Cycle 335 (Terminator parity, terminatorlib/config.py:114
     /// `term`): TERM environment variable for spawned shells.
     /// Default `xterm-256color` matches kettle's pre-cycle-335
@@ -854,6 +878,7 @@ impl Default for Config {
             putty_paste_style: false,
             smart_copy: true,
             invert_search: false,
+            search_case_sensitive: SearchCaseSensitivity::Smart,
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
             login_shell: false,
@@ -1658,6 +1683,26 @@ impl Config {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.invert_search = b;
                     }
+                }
+                "search-case-sensitive"
+                | "search_case_sensitive"
+                | "case-sensitive"
+                | "case_sensitive" => {
+                    // Accept the three named modes, plus the Terminator
+                    // bool form (true ⇒ Always, false ⇒ Never) since
+                    // `case_sensitive = True` is the Terminator config.py
+                    // default.
+                    let v = e.value.trim().to_ascii_lowercase();
+                    cfg.search_case_sensitive = match v.as_str() {
+                        "smart" | "auto" => SearchCaseSensitivity::Smart,
+                        "always" | "sensitive" => SearchCaseSensitivity::Always,
+                        "never" | "insensitive" => SearchCaseSensitivity::Never,
+                        _ => match parse_bool(&e.value) {
+                            Some(true) => SearchCaseSensitivity::Always,
+                            Some(false) => SearchCaseSensitivity::Never,
+                            None => cfg.search_case_sensitive, // keep current; unknown value
+                        },
+                    };
                 }
                 "term" => {
                     let v = e.value.trim();
@@ -4455,6 +4500,40 @@ mod config_tests {
     /// spellings are accepted; an empty / whitespace-only value is
     /// ignored (so commenting-out via `light-theme = ` doesn't
     /// stick a stray empty string).
+    #[test]
+    fn search_case_sensitive_parses_terminator_and_named_forms() {
+        use SearchCaseSensitivity::*;
+        // Default is Smart (ripgrep semantics) — kettle's pre-617 behavior.
+        assert_eq!(Config::default().search_case_sensitive, Smart);
+        // Named modes (kettle convention).
+        for (input, want) in [
+            ("search-case-sensitive = smart", Smart),
+            ("search-case-sensitive = auto", Smart),
+            ("search-case-sensitive = always", Always),
+            ("search-case-sensitive = sensitive", Always),
+            ("search-case-sensitive = never", Never),
+            ("search-case-sensitive = insensitive", Never),
+            // Terminator bool form (config.py default `case_sensitive = True`).
+            ("case-sensitive = true", Always),
+            ("case-sensitive = false", Never),
+            // Underscore spelling (Terminator convention).
+            ("case_sensitive = true", Always),
+            ("case_sensitive = false", Never),
+            // search-case-sensitive bool form (kettle spelling).
+            ("search-case-sensitive = true", Always),
+            ("search-case-sensitive = false", Never),
+        ] {
+            let cfg = Config::parse_text(&format!("{input}\n"));
+            assert_eq!(
+                cfg.search_case_sensitive, want,
+                "input {input:?} should produce {want:?}"
+            );
+        }
+        // Garbage value leaves the field at the default.
+        let cfg = Config::parse_text("search-case-sensitive = banana\n");
+        assert_eq!(cfg.search_case_sensitive, Smart);
+    }
+
     #[test]
     fn light_and_dark_theme_parse_canonical_and_aliases() {
         // Lowercased input for a bundled theme → stored *canonical*
