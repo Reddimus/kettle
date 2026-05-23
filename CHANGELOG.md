@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 667 — **Deploy: redeploy with theme-schedule poll +
+              vertical-strip layout**. Binary at
+              `~/.local/bin/kettle` reports `1.45.1 (c7d6f6c)`.
+              User-visible end-to-end:
+                - `theme-schedule = 18:00 dark, 06:00 light`
+                  in config + a configured light/dark theme
+                  pair → theme flips automatically on the
+                  boundary minutes.
+                - `tab-bar-position = left` (or `right`) now
+                  carves a 180 px strip from the side instead
+                  of falling through to top. The strip's
+                  vertical rendering (paint side) is sub-cycle
+                  4 of vertical-tabs, but the layout math
+                  honors the orientation now — pane content
+                  shrinks correctly.
+
   cycle 666 — **auto-theme sub-cycle 5: App-side schedule
               poll**: `App::poll_theme_schedule` now runs on
               every redraw tick. When `cfg.theme_schedule` is
