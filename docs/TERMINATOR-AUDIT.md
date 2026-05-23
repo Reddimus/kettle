@@ -377,8 +377,8 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 |---|---|---|---|
 | ~~`rotate_cw` / `rotate_ccw`~~ (rotate panes) | paned.py + keybinds | ✅ cycle 347 — `Action::RotateCw` / `RotateCcw` (split-tree rotation; flip dir + swap-children for CW) | cycle-347 |
 | ~~`hide_window`~~ (Ctrl+Shift+Alt+A; toggle window visibility) | keybinds | ✅ cycle 342 — `Action::ToggleWindowVisibility` (wires the cycle-303 IPC path directly) | cycle-342 |
-| `group_tab` / `ungroup_tab` / `group_win` / `ungroup_win` | keybinds | D | cycle-631 — multi-cycle design in [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](TERMINATOR-NAMED-GROUPS-DESIGN.md). Extends `BroadcastScope` with `Group(String)`; promotes cycle-407 `pane.group_name` from display-only to broadcast-scoping. 8 sub-cycles. |
-| `create_group` | keybinds | D | cycle-631 — same design doc. Reuses cycle-369 title-edit overlay (`TitleEditScope::Group`). |
+| ~~`group_tab` / `ungroup_tab` / `group_win` / `ungroup_win`~~ | keybinds | A | cycles 642 + 678-682 — 7/8 sub-cycles complete + deployed. `BroadcastScope { Off, Tab, All, Group(String) }` enum; `compute_broadcast_targets` pure helper; `mux.broadcast` field migrated bool → enum; `GroupTab/Window` open the title-edit overlay with bulk-apply; `UngroupTab/Window` directly clear group_name on every pane in scope; `ToggleBroadcastGroup/Window` actions switch scope at runtime; pane titlebar shows `[group_name]` pill. Sub-cycle 8 (cross-window via cycle-302 IPC) is the only remaining gap. | cycle-682 |
+| ~~`create_group`~~ | keybinds | A | cycle 642 — `Action::CreateGroup` shares dispatch with cycle-407 `EditPaneGroup` (title-edit overlay with `TitleEditScope::Group`). Cycle 683 added right-click context-menu entries: "Set Group…" / "Group This Tab…" / "Ungroup This Tab". | cycle-683 |
 | ~~`zoom_in/out/normal_all`~~ (broadcast zoom) | keybinds | ✅ cycle 345 — `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (kettle's font-size is window-wide so they compose into the single-pane zoom) | cycle-345 |
 | ~~`toggle_scrollbar`~~ (runtime show/hide) | keybinds | ✅ cycle 342 — `Action::ToggleScrollbar` cycles Never → Always → Auto → Never | cycle-342 |
 | ~~`edit_window_title` / `edit_tab_title` / `edit_terminal_title`~~ | keybinds | ✅ cycle 369 — `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` with inline title-edit overlay (`TitleEditState`); cycle 407 added `EditPaneGroup` for the broadcast-group name | cycle-369 |
@@ -658,11 +658,11 @@ through sub-cycles. Status snapshot at cycle 677:
 | `ask_before_closing`         | ✅ A   | 7/8 + 1 polish-deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer is keyboard-driven. Mouse hit-test deferred to a follow-up centered-panel renderer upgrade. Deployed cycle 661+663. |
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed cycle 674. |
 | `plugins/terminalshot.py`    | 🟡    | 3/7        | Action surface + path helper + dispatch queues real `ScreenshotRequest`. wgpu surface readback (sub-cycle 4) is the heavy renderer work; pending. |
-| Named broadcast groups       | 🟡    | 1/8        | 5 Action variants + 12 aliases + EditPaneGroup overlay reuse. `BroadcastScope::Group(String)` refactor of `mux.broadcast: bool` → enum is the heavy core; pending. |
+| Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via cycle-302 IPC remain. Deployed cycles 679-682. |
 | Right-click theme submenu    | D     | 0/9        | Cycle-634 design doc only; no implementation cycles yet. cycle-329 command palette covers the same UX via `/theme NAME`. |
 
-**Four Bucket D features now ship end-to-end on the deployed
-binary** (`~/.local/bin/kettle 1.45.1` at the cycle-674 commit).
-The two `🟡` (terminalshot, named-groups) and one un-started
-(theme submenu) are the remaining gaps tracked here for the
-next pass.
+**Five Bucket D features now ship end-to-end on the deployed
+binary** (last deploy at cycle 682, commit `d2b7aca`). The one
+remaining `🟡` (terminalshot — wgpu surface readback) and the
+one un-started (theme submenu, covered by cycle-329 palette UX)
+are tracked for the next pass.

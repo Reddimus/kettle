@@ -3493,6 +3493,27 @@ impl App {
                 action: Action::NewTab,
                 enabled: true,
             },
+            // Cycle 683 (named-groups sub-cycle 7): right-click
+            // entries for the broadcast-group surface. Layered
+            // below the close-family + new-tab so they don't
+            // hijack muscle memory; users who never use groups
+            // see them at the bottom and can ignore.
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "Set Group…",
+                action: Action::CreateGroup,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Group This Tab…",
+                action: Action::GroupTab,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Ungroup This Tab",
+                action: Action::UngroupTab,
+                enabled: true,
+            },
         ]
     }
 

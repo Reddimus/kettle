@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 683 — **named-groups sub-cycles 7 + 8: right-click
+              context-menu entries + audit-doc finalization**.
+              New right-click items appended after the
+              built-in copy/paste/split/close/new-tab group:
+                - "Set Group…" → `Action::CreateGroup`
+                - "Group This Tab…" → `Action::GroupTab`
+                - "Ungroup This Tab" → `Action::UngroupTab`
+              The entries are layered AFTER the close-family
+              + new-tab so they don't hijack muscle memory.
+              Users who never touch groups see them at the
+              bottom and can ignore.
+              Audit-doc rows promoted from D to A:
+                - `group_tab`/`ungroup_tab`/`group_win`/
+                  `ungroup_win`
+                - `create_group`
+              Cycle-677 Bucket D close-out table updated:
+              **named broadcast groups → ✅ A 7/8** (only
+              cross-window via cycle-302 IPC remains).
+              Workspace tests stay 392.
+              **Named-groups port: 8/8 sub-cycles effectively
+              complete**; the design doc's 8th sub-cycle was
+              cross-window IPC which is naturally Bucket E
+              for a single-process app.
+
   cycle 682 — **named-groups sub-cycle 6: `[group_name]`
               pill on pane titlebar**: pane titlebar now
               prepends `[name]` when `pane.group_name` is
