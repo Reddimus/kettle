@@ -944,7 +944,7 @@ fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     }
     if !cfg.triggers.is_empty() {
         lines.push(format!(
-            "triggers: {} pattern(s) configured (cycle-289 Urgency action)",
+            "triggers: {} pattern(s) configured (window-urgency action)",
             cfg.triggers.len()
         ));
     }
@@ -1456,7 +1456,7 @@ mod tests {
         assert!(
             extra_check_config_lines(&cfg)
                 .iter()
-                .any(|l| l == "triggers: 2 pattern(s) configured (cycle-289 Urgency action)")
+                .any(|l| l == "triggers: 2 pattern(s) configured (window-urgency action)")
         );
 
         let mut cfg = kettle_config::Config::default();
