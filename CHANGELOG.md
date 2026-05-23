@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 615 — **Doc-truth refresh: `docs/TERMINATOR-AUDIT.md`**
+              flipped 9 rows from ❌/🟡 to ✅, citing the
+              cycles that closed them (604/606/607/609/611/
+              612/613/614). Plugin inventory + gap table +
+              roadmap list all now reflect ground truth.
+              `insert_number`/`insert_padded` reclassified to
+              Bucket E with rationale (kettle uses pane titles,
+              not numbered enumeration). Tests still 354/354.
+
   cycle 614 — **Terminator-spelling keybind aliases**
               (`config.py:133-134` / `:195`):
                 - `new_terminator` / `new-terminator` → kettle's

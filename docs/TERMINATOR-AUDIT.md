@@ -267,18 +267,18 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `activitywatch.py` | Highlight tab on activity | A | cycle-246 tab-activity dot |
 | `inactivitywatch.py` | Highlight on inactivity period | A | cycle-X silence-watcher dot (`tab-silence-threshold-ms`) |
 | `silencewatch.py` | Same as inactivitywatch | A | same as above |
-| `command_notify.py` | Notify when long command finishes | C | cycle-289 trigger model handles "regex on output → urgency"; need a "command finished" variant |
+| `command_notify.py` | Notify when long command finishes | A | cycle-612 OSC 133 + `command-notify-threshold-ms` |
 | `save_last_session_layout.py` | Auto-save layout on exit | A | cycle-X session.json + cycle-291 layouts |
 | `save_user_session_layout.py` | Manual save/load named layouts | A | cycle-291 `--layout NAME` |
-| `url_handlers.py` (Launchpad bug + code + APT) | Open URLs in browser | A | kettle Ctrl/Cmd+click opens URLs via `open` crate (cross-platform); custom handlers per-domain — C (extension to `kettle.on('url_match', fn)`) |
+| `url_handlers.py` (Launchpad bug + code + APT) | Open URLs in browser | A | kettle Ctrl/Cmd+click opens URLs via `open` crate (cross-platform); cycle-608 `docs/examples/init.lua` ports the three Launchpad/APT handlers as Lua `kettle.add_url_handler` recipes |
 | `mousefree_url_handler.py` | Keyboard URL selection | A | cycle-218 hint mode (Ctrl+Shift+H) — `kettle.on('url_match')` could extend |
 | `run_cmd_on_match.py` | Run command on regex match | C | extend cycle-289 triggers with a `RunCommand` action variant |
-| `custom_commands.py` | Custom menu items | C | extend cycle-245 context menu via Lua `kettle.add_menu_item` API |
+| `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | `remote.py` | SSH/Docker/Podman session detection | C | OSC 7 cwd + an env-var probe + title update |
 | `logger.py` | Log terminal output to file | C | new action `ToggleSessionLog` + a `log-output-to-file` config knob |
 | `terminalshot.py` | Screenshot focused terminal | A | cycle-294 `--annotate` + the existing `--screenshot` |
-| `dir_open.py` | Open cwd in file manager | C | new action `OpenCwdInFileManager` |
-| `insert_term_name.py` | Insert pane name into input | C | extends Terminator's `insert_number` |
+| `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
+| `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |
 | `auto_theme.py` | Switch theme on time of day / system | C | cycle-X theme cycling + a `light-theme` / `dark-theme` config + sunrise/sunset trigger |
 | `testplugin.py` | Example for development | E | dev-only |
@@ -367,7 +367,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `use_login_shell` | config.py | duplicate of `login_shell` | doc |
 | ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 — `Action::PastePrimary`; cycle-574 hardened it to go through `paste_clipboard` for `LOCAL_PASTE_MAX` clamp + bracketed-paste wrap + broadcast scope (arboard has no separate primary-selection API; on Linux+X11 the regular clipboard ≈ primary for keyboard paste, and middle-click already covers true X11 primary at a lower level) | cycle-345 |
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
-| `reset_clear` (Reset + Clear) | keybinds | ❌ | new action `Action::ResetAndClear` (composes existing two) |
+| ~~`reset_clear`~~ (Reset + Clear) | keybinds | ✅ cycle-342 — `Action::ResetAndClear` (composes Reset + ClearHistory) | cycle-342 |
 | half-page scroll variants | keybinds | ❌ | new actions `Action::ScrollPageUpHalf/Down`|
 | `scaled_zoom` | keybinds | ❌ aspect-preserving zoom | E (GTK-specific; kettle's single zoom suffices) |
 
@@ -382,16 +382,16 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `zoom_in/out/normal_all` (broadcast zoom) | keybinds | ❌ | new actions that loop existing zoom |
 | `toggle_scrollbar` (runtime show/hide) | keybinds | 🟡 `scrollbar` config key but no runtime toggle | new action |
 | `edit_window_title` / `edit_tab_title` / `edit_terminal_title` | keybinds | ❌ | new actions + title-edit overlay |
-| `insert_number` / `insert_padded` | keybinds | ❌ | new actions (send pane index as text) |
+| `insert_number` / `insert_padded` | keybinds | 🟡 cycle-606 ships `insert_term_name` (sends pane title); kettle uses titles not numbers (kettle doesn't enumerate panes 1..N for users) | E for `insert_number`; `insert_term_name` covered |
 | `next_profile` / `previous_profile` | keybinds | 🟡 launch-time only via `--profile NAME` | new actions + runtime profile cycle |
 | Theme presets in right-click menu | terminal_popup_menu.py | ❌ | extend cycle-245 menu with theme submenu |
 | Layout launcher overlay (Alt+L) | layoutlauncher.py | ❌ | new modal overlay (like cycle-218 hint mode) listing saved layouts |
-| `command_notify` (long-running command done) | plugins | ❌ | extend cycle-289 triggers with `command-finished` shell-integration hook |
+| ~~`command_notify`~~ (long-running command done) | plugins | ✅ cycle-612 — OSC 133 CommandEnd duration → `notify-rust` when window unfocused, gated by `command-notify-threshold-ms` | cycle-612 |
 | `run_cmd_on_match` (run cmd on regex match) | plugins | 🟡 cycle-289 fires urgency only | extend trigger action enum with `RunCommand(argv)` |
-| `custom_commands` (user-defined context menu items) | plugins | ❌ | extend cycle-245 menu + a `menu-item = LABEL=ARGV` config key |
+| ~~`custom_commands`~~ (user-defined context menu items) | plugins | ✅ cycle-611 — `menu-item = LABEL = CMD` config key splits on first `=`, writes CMD\n to focused pane PTY on click | cycle-611 |
 | `remote.py` (SSH/Docker/Podman detection) | plugins | ❌ | OSC 7 cwd + a probe + title update |
 | `logger.py` (log session to file) | plugins | ❌ | new action `ToggleSessionLog` + a per-pane `log-to-file = PATH` |
-| `dir_open.py` (open cwd in file manager) | plugins | ❌ | new action; use `open` crate (already a dep) |
+| ~~`dir_open.py`~~ (open cwd in file manager) | plugins | ✅ cycle-607 — `Action::OpenCwdInFileManager` builds `file://{cwd}` via `open_url()` (which uses the `open` crate) | cycle-607 |
 | `auto_theme.py` (light/dark switching) | plugins | ❌ | new config keys + sunrise/sunset / system-theme detection |
 | `cell_width` / `cell_height` (per-character cell scaling) | config.py | ❌ | new config keys; font-metric override |
 | `palette = solarized_dark` (named preset) | config.py | 🟡 kettle has ~500 themes; named palette presets are subset | new config-key syntax `palette = solarized_dark` (alias for full hex set) |
@@ -500,7 +500,7 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 9. `invert-search = true/false` (B). One cycle.
 10. `close-button-on-tab = true/false` (B; render tab chrome). One cycle.
 11. `Action::PastePrimary` (B; X11 primary selection). ✅ Cycle 345 added the action; cycle 574 routed it through `paste_clipboard` so it picks up the same `LOCAL_PASTE_MAX` clamp, bracketed-paste wrap, and broadcast scoping as `Action::Paste`.
-12. `Action::ResetAndClear` (B; composed). One cycle.
+12. ✅ Cycle 342 — `Action::ResetAndClear` (composed Reset + ClearHistory).
 13. `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (B). One cycle.
 14. `exit-action = close/restart/hold` (C). One cycle.
 15. `login-shell = true/false` (C; argv flag). One cycle.
@@ -508,20 +508,24 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 17. `Action::ToggleWindowVisibility` (C; in-process toggle). One cycle.
 18. `Action::ToggleScrollbar` (C; runtime toggle). One cycle.
 19. `Action::EditWindowTitle` / `EditTabTitle` / `EditPaneTitle` (C; title-edit overlay). One cycle each (3 total).
-20. `Action::InsertPaneNumber` / `InsertPanePadded` (C). One cycle.
+20. ✅ Cycle 606 — `Action::InsertPaneName` (writes pane title to PTY). `insert_number`/`insert_padded` reclassified to Bucket E (kettle doesn't enumerate panes 1..N).
 21. `Action::NextProfile` / `PrevProfile` (C; runtime profile cycle). One cycle.
 22. `Action::ZoomInAll` / `ZoomOutAll` / `ZoomNormalAll` (C; broadcast zoom). One cycle.
 23. Theme submenu in right-click context menu (C). One cycle.
 24. Layout-launcher overlay (Alt+L) (C). One cycle.
-25. `command-notify` trigger variant (C; extend trigger action enum). One cycle.
+25. ✅ Cycle 612 — `command-notify-threshold-ms` config key; OSC 133 CommandEnd duration → desktop notification when window unfocused.
 26. `run-cmd-on-match` trigger variant (C). One cycle.
-27. `Custom commands` menu items (C). One cycle.
-28. `OpenCwdInFileManager` action (C). One cycle.
+27. ✅ Cycle 611 — `menu-item = LABEL = CMD` config key + cycle-375 Lua `kettle.add_menu_item`.
+28. ✅ Cycle 607 — `Action::OpenCwdInFileManager` (file:// URL via `open` crate).
 29. Auto theme switching (C; light/dark + sunrise/sunset). One cycle.
 30. `backspace-binding` / `delete-binding` (C; escape encoding). One cycle.
 31. Named palette presets (`palette = solarized_dark`) (C). One cycle.
+32. ✅ Cycle 604 — `disable-mousewheel-zoom = true/false` (Ctrl+wheel font zoom opt-out).
+33. ✅ Cycle 609 — `smart-copy = true/false` (false → wipe-on-empty clipboard semantics).
+34. ✅ Cycle 613 — `force-no-bell = true` overrides bell mode to Off.
+35. ✅ Cycle 614 — Terminator-spelling keybind aliases (`new_terminator` → NewWindow, `cycle_next` → NextTab, `cycle_prev` → PrevTab).
 
-That's 31 cycles. Realistic shipping rate: 1-2 cycles per session. So the
+That's 35 cycles total (with cycles 604/606/607/609/611/612/613/614 shipped). Realistic shipping rate: 1-2 cycles per session. So the
 sweep is ~15-30 sessions of focused work, releasing every 5-10 cycles.
 
 Phase 3: write design docs for Bucket D (one each):
