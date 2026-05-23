@@ -286,6 +286,58 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     None
 }
 
+/// Cycle 658 (sub-cycle 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): format a
+/// `RemoteContext` as a shell command string the user can re-run.
+/// Drives the right-click "Reconnect to …" / "Re-attach …" menu
+/// entry — clicking writes this string to the focused pane's PTY
+/// (one shell-line away from re-establishing the session).
+///
+/// - `Ssh { user: None, host: "box" }` → `"ssh box"`
+/// - `Ssh { user: Some("me"), host: "box" }` → `"ssh me@box"`
+/// - `Container { Docker, c }` → `"docker exec -it c $SHELL"`
+/// - `Container { Kubectl, c }` → `"kubectl exec -it c -- $SHELL"`
+///
+/// Pure — no `&self`, no env. Unit-testable. The "$SHELL"
+/// placeholder leaves shell-choice to the user's environment
+/// (the running pane's shell resolves it at command time).
+pub fn clone_session_command(ctx: &RemoteContext) -> String {
+    match ctx {
+        RemoteContext::Ssh { host, user } => match user {
+            Some(u) => format!("ssh {u}@{host}"),
+            None => format!("ssh {host}"),
+        },
+        RemoteContext::Container { runtime, container } => match runtime {
+            ContainerRuntime::Docker => format!("docker exec -it {container} $SHELL"),
+            ContainerRuntime::Podman => format!("podman exec -it {container} $SHELL"),
+            ContainerRuntime::Kubectl => format!("kubectl exec -it {container} -- $SHELL"),
+            ContainerRuntime::Lxc => format!("lxc-attach -n {container}"),
+        },
+    }
+}
+
+/// Cycle 658: short user-friendly label for the right-click menu
+/// entry that reconnects to a detected remote session. The cycle-
+/// 611 `ContextMenuItem::ConfigItem { label, command }` consumes
+/// the pair `(clone_session_label(ctx), clone_session_command(ctx))`.
+pub fn clone_session_label(ctx: &RemoteContext) -> String {
+    match ctx {
+        RemoteContext::Ssh { host, user } => match user {
+            Some(u) => format!("Reconnect ssh {u}@{host}"),
+            None => format!("Reconnect ssh {host}"),
+        },
+        RemoteContext::Container { runtime, container } => {
+            let runtime_name = match runtime {
+                ContainerRuntime::Docker => "docker",
+                ContainerRuntime::Podman => "podman",
+                ContainerRuntime::Kubectl => "kubectl",
+                ContainerRuntime::Lxc => "lxc",
+            };
+            format!("Re-attach {runtime_name} {container}")
+        }
+    }
+}
+
 /// Cycle 643: format a `RemoteContext` as a one-line title string
 /// for use in the pane-title surface (Terminator's pattern).
 ///
@@ -369,6 +421,95 @@ mod tests {
                 container: "alpine".to_string(),
             }),
             "lxc: alpine"
+        );
+    }
+
+    /// Cycle 658 drift guard. `clone_session_command` is the pure
+    /// formatter for the right-click "Reconnect to …" menu entry's
+    /// dispatched command. Sub-cycle 7 of remote.py design.
+    #[test]
+    fn clone_session_command_for_all_shapes() {
+        // SSH without user.
+        assert_eq!(
+            clone_session_command(&RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+            }),
+            "ssh box"
+        );
+        // SSH with user.
+        assert_eq!(
+            clone_session_command(&RemoteContext::Ssh {
+                host: "box".into(),
+                user: Some("me".into()),
+            }),
+            "ssh me@box"
+        );
+        // Docker.
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "ubuntu".into(),
+            }),
+            "docker exec -it ubuntu $SHELL"
+        );
+        // Podman.
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Podman,
+                container: "fedora".into(),
+            }),
+            "podman exec -it fedora $SHELL"
+        );
+        // Kubectl (note the `--` separator).
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "my-pod".into(),
+            }),
+            "kubectl exec -it my-pod -- $SHELL"
+        );
+        // LXC.
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Lxc,
+                container: "alpine".into(),
+            }),
+            "lxc-attach -n alpine"
+        );
+    }
+
+    /// Cycle 658 drift guard: `clone_session_label` is the menu
+    /// label paired with `clone_session_command`.
+    #[test]
+    fn clone_session_label_for_all_shapes() {
+        assert_eq!(
+            clone_session_label(&RemoteContext::Ssh {
+                host: "box".into(),
+                user: Some("me".into()),
+            }),
+            "Reconnect ssh me@box"
+        );
+        assert_eq!(
+            clone_session_label(&RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+            }),
+            "Reconnect ssh box"
+        );
+        assert_eq!(
+            clone_session_label(&RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "foo".into(),
+            }),
+            "Re-attach docker foo"
+        );
+        assert_eq!(
+            clone_session_label(&RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "my-pod".into(),
+            }),
+            "Re-attach kubectl my-pod"
         );
     }
 

@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 658 — **remote.py sub-cycle 7: right-click "Reconnect"
+              menu entry — completes the remote.py port**.
+              When the focused pane has a detected remote
+              context, the context menu now shows a final
+              entry (after built-ins, config menu items, and
+              Lua items):
+                - SSH:        `Reconnect ssh user@host`
+                - Docker:     `Re-attach docker container`
+                - Podman:     `Re-attach podman container`
+                - Kubectl:    `Re-attach kubectl pod`
+                - LXC:        `Re-attach lxc name`
+              Click → reuses the cycle-611 `ConfigItem`
+              dispatch path to write the reconnect command +
+              `\n` to the focused pane's PTY (run after the
+              original session exits).
+              New public surface on kettle-remote:
+                - `pub fn clone_session_command(ctx) -> String`
+                - `pub fn clone_session_label(ctx) -> String`
+              New `App::append_remote_menu_items(items)`
+              hooked into `open_context_menu` after the Lua
+              items.
+              Drift guards on both new functions cover all 6
+              `RemoteContext` shapes (SSH ± user, 4 container
+              runtimes). Workspace tests 382 → 384.
+              Remote.py port now **7/7 sub-cycles complete**
+              end-to-end.
+
   cycle 657 — **Deploy: redeployed local kettle with the live
               remote-session detector** (cycle 656). Binary at
               `~/.local/bin/kettle` reports `1.45.1 (798ea71)`.

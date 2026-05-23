@@ -3303,6 +3303,31 @@ impl App {
         }
     }
 
+    /// Cycle 658 (sub-cycle 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): append the
+    /// "Reconnect to …" / "Re-attach …" menu entry when the
+    /// focused pane has a detected remote-session context.
+    ///
+    /// Click → cycle-611 `ContextMenuItem::ConfigItem` dispatch
+    /// writes `clone_session_command(ctx) + "\n"` to the focused
+    /// pane's PTY. The user can then split first if they want
+    /// the reconnect to land in a new pane, or hit the entry
+    /// directly to reconnect in-place after the original session
+    /// exits.
+    fn append_remote_menu_items(&mut self, items: &mut Vec<ContextMenuItem>) {
+        let Some(pane) = self.mux.focused() else {
+            return;
+        };
+        let Some(ctx) = &pane.remote_context else {
+            return;
+        };
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::ConfigItem {
+            label: kettle_remote::clone_session_label(ctx),
+            command: kettle_remote::clone_session_command(ctx),
+        });
+    }
+
     /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
     /// append every Lua-registered menu item to the context-menu
     /// item list. Called by `open_context_menu` after the built-in
@@ -3337,6 +3362,10 @@ impl App {
         self.append_config_menu_items(&mut items);
         // Cycle 375: append Lua-supplied items (if any).
         self.append_lua_menu_items(&mut items);
+        // Cycle 658 (remote.py sub-cycle 7): append the remote-
+        // session reconnect entry when the focused pane has a
+        // detected SSH/Docker/Podman/kubectl context.
+        self.append_remote_menu_items(&mut items);
         // Highlight the first enabled non-separator item.
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
