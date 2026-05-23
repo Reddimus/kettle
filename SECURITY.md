@@ -40,7 +40,14 @@ Reports that fit any of these are welcome:
   panics, allocates unbounded memory, or hangs the renderer on a small
   attacker-controlled payload (e.g. a sixel/kitty/iTerm2 image, OSC 52
   payload, scrollback line). The cycle-47 / cycle-49 / cycle-118 caps
-  already gate the obvious cases; new bypasses are in scope.
+  already gate the obvious cases; the cycle-576..582 kitty resource-cap
+  chain bounds the kitty graphics protocol (PNG/JPEG/GIF decompression-
+  bomb cap at 8192² / 256 MiB, `ImageData::new` `checked_mul` overflow
+  guard, 384 MiB per-chunk-stream cap, 32-slot in-flight cap, 256
+  frames-per-image cap, 64-slot caps on `store` / `anim` /
+  `virtual_placements` / `rel` / `frames`); the cycle-10 64 MiB cap in
+  `extract.rs` bounds any single APC/OSC payload. New bypasses are in
+  scope.
 - **Session/config tampering** — a config file or `session.json` that
   causes RCE, file-write outside the documented config/session paths,
   or persistent privilege escalation across launches.
