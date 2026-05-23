@@ -14,18 +14,20 @@ cargo test --workspace
 
 ## What's covered (automated)
 
-**~321 tests across the workspace** (post-v1.40.0 — the cycle-288 →
-303 feature sweep, the cycles 330-410 Terminator-parity sweep, and
-the cycles 411-438 production-polish run added drift guards for
-smart selection, triggers, status-bar, vi-mode entry, remote-control,
-detachable tabs, plugin event hooks + LuaCommand queue/drain
-contracts, etc.) — see [CHANGELOG.md](../CHANGELOG.md) for the
-per-cycle additions. The workspace grows by 1–3 tests per audit
-cycle, so per-crate counts below are order-of-magnitude snapshots
-rather than exact figures (run `cargo test --workspace` for today's
-number).
+**330+ tests across the workspace** — see
+[CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions
+(cycle-288 → 303 feature sweep, cycles 330-410 Terminator-parity
+sweep, cycles 411-438 production-polish run, cycles 576-587 resource-
+cap defense-in-depth sweep, etc.). The workspace grows by 1–3
+tests per audit cycle, so per-crate counts below are
+range-stable phrasings rather than exact figures — run
+`cargo test --workspace` for today's number. Cycle-179's drift
+guard scans user-facing docs for hardcoded "N workspace tests"
+claims that go stale; TESTING.md is exempt from that scan
+(contributor-leaning doc) but follows the same range-stable
+discipline here.
 
-- **kettle-vt** (~33 tests): plain-text passthrough is byte-exact;
+- **kettle-vt** (50+ tests): plain-text passthrough is byte-exact;
   iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
   decode to the right pixels; OSC 7 / OSC 133 are consumed and
   surrounding text still passes; OSC 1 → OSC 2 rewrite (cycle 102) so
@@ -34,7 +36,7 @@ number).
   interleaved stream passes through intact in well under 5 s
   (linear-time / bounded-memory guard).
 
-- **kettle-config** (~79 tests): TokyoNight Night is the verified
+- **kettle-config** (90+ tests): TokyoNight Night is the verified
   default palette; Ghostty `key = value` overrides, repeats, `palette`
   (0..=15 + cycle-124 out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
@@ -49,7 +51,7 @@ number).
   contracts; cycle-121/122 empty-value resets for every string-config
   key; cycle-118 `clamp_font_size` bounds.
 
-- **kettle-core VT conformance** (~83 tests): drives the *real*
+- **kettle-core VT conformance** (80+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
   grid/cursor/SGR/mode state across a broad `vttest`-style sweep —
   text + `\r\n` + CUP addressing, erase-line/erase-display, SGR
@@ -85,7 +87,7 @@ number).
   blank-menu render-pass-order regression class that bare logic
   tests can't see.
 
-- **kettle-ui** (~51 tests): split-tree layout tiles with no
+- **kettle-ui** (80+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
   splits keep every leaf; `Node::leaf_ids` DFS-order +
   `nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
