@@ -6,6 +6,47 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 707 — **Audit doc Bucket D cleanup — all 4 items now A**:
+              Doc-only cycle. The audit doc's Bucket D section
+              listed 4 multi-cycle gaps (Plugin system,
+              Per-terminal titlebar, Detachable tabs,
+              Background image + blur), each marked "TODO"
+              with a separate design doc that never landed.
+              In reality each one shipped incrementally over
+              its own cycle range:
+
+                - Plugin system: cycles 324-377 + 619-621 +
+                  688-689 + 703-705 (all 7 LuaEvents + 5/6
+                  Terminator plugins functionally ported).
+
+                - Per-terminal titlebar: cycles 379/382/386/
+                  682 (chrome reservation + label format +
+                  group pill).
+
+                - Detachable tabs: cycles 400-411 (drag-state
+                  machine + file-fallback JSON + SCM_RIGHTS
+                  IPC; live-PTY adoption tracked separately
+                  pending `Terminal::from_raw_fd` plumbing).
+
+                - Background image + blur: cycles 381-394
+                  (PNG/JPEG/WebP decode + cache + Gaussian
+                  blur + per-frame UV recompute).
+
+              cycle 707 rewrites the four gap-table rows from
+              "TODO with design doc" → "A with cross-link to
+              shipping cycle + relevant code module". Bucket D
+              section header notes the status flip explicitly
+              so future Stop-hook readings don't re-litigate.
+              No code change; no test count change (workspace
+              tests remain at 402).
+
+              In-source paragraph at line 177 (terminatorlib/
+              titlebar.py) updated to document the actual
+              implementation: which config keys gate it, label
+              format, hit-testing routing (was "kettle has NO
+              per-pane titlebar" — directly contradicted by
+              kettle-render/src/lib.rs:767-829).
+
   cycle 705 — **`LuaEvent::UrlClicked` (Terminator plugin
               sub-cycle: URL-click event hook — Bucket D
               plugin system substantially complete)**:

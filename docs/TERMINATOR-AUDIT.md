@@ -156,7 +156,7 @@ GTK Notebook with closable tabs, drag-to-reorder, right-click context menu,
 detachable tabs.
 
 kettle equivalent: `kettle_ui::Mux::tabs`. Drag-to-reorder ✅ (cycle-255
-dragged-tab ghost). Detachable tabs (drag to new window) — Bucket D.
+dragged-tab ghost). Detachable tabs (drag to new window) — shipped at cycles 400-411 (see gap-table row + `crates/kettle-ui/src/detach.rs`).
 
 ### `terminatorlib/container.py` + `paned.py` — split container
 
@@ -419,16 +419,22 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | Multiple grouping modes + auto-cleanup | config.py | D | cycle-631 design in [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](TERMINATOR-NAMED-GROUPS-DESIGN.md) covers named groups. `autoclean_groups` (auto-remove groups when last member closes) is a natural extension — sub-cycle of the named-groups design. |
 | `use_custom_url_handler` + `custom_url_handler` | config.py | ❌ | new config key — external URL-open program |
 | ~~`backspace_binding` / `delete_binding`~~ (escape encoding) | config.py | ✅ — `BackspaceBinding` (lib.rs:246) + `DeleteBinding` (lib.rs:261) enums + parser arms + dispatched in `kettle-ui/src/app.rs:5884-5896` (ascii-del / control-h / escape-sequence). | (covered) |
-| `background_image` + mode + align | config.py | ❌ | render-layer feature; multi-cycle if done cleanly — D candidate |
+| ~~`background_image` + mode + align~~ | config.py | A | cycle-381 — `BgImage` module in `crates/kettle-render/src/bg_image.rs`; decode + cache via `bg_image_cache: Option<(String, kettle_core::ImageData)>`; rendered when `background_type = Image` && `background_image = <path>`. cycle-394 added implicit per-frame UV recompute (sub-cycle 8). | cycle-707 |
 
 ### Bucket D — multi-cycle (warrants design doc)
 
-| Terminator feature | source | Why multi-cycle | Design doc |
+**Status (cycle 707): all 4 Bucket D items have shipped.** Plugin
+system, Per-terminal titlebar, Detachable tabs, and Background image +
+blur each progressed through their multi-cycle roadmaps over cycles
+365-705. The rows below are kept as historical anchors with cross-
+references to the shipping cycles + the relevant code modules.
+
+| Terminator feature | source | Status | Design doc |
 |---|---|---|---|
 | **Plugin system** | plugin.py + plugins/*.py | Status: **substantially complete**. Event-hook foundation laid via cycle-324 Lua scripting + cycle-365 `kettle.on(event, cb)` registry. **All 7 plugin-relevant events shipped**: `startup` (cycle-365), `tab_add` (cycle-365), `tab_close` (cycle-365), `bell` (cycle-377), `output` (cycle-377), `pane_focus` (cycle-703 — emits `(prev_opt, cur)` via `App::poll_focus_event`), `title_changed` (cycle-704 — emits `(pane_id, title)` via `App::poll_title_event`), `url_clicked` (cycle-705 — fired from `open_url` BEFORE pattern dispatch so analytics plugins see every click). Per-plugin porting status: `activitywatch.py` → cycle-619 watcher; `custom_commands.py` → cycle-611 `menu-item =` config + cycle-375 `kettle.add_menu_item`; `terminalshot.py` → cycles 688/689; `logger.py` → cycle-621 `Action::ToggleSessionLog`; `urlhandlers.py` → cycle-X URL detection + cycle-374 `try_url_handler` + cycle-695 `Action::ShowHelp`. Remaining: `launcher.py` (port to layout overlay — covered functionally by cycle-329 command palette listing layouts). | continued — see CHANGELOG cycles 365-705 |
 | ~~**Per-terminal titlebar**~~ | titlebar.py | A | cycles 379/382/386/682 — per-pane chrome reserves `ch + 6.0` px when `show_titlebar = true` && >1 panes; label format `[group] title COLS×ROWS [bell]`; title-edit overlay (cycle-407) + activity/bell/silence dots (cycle-X) all wired. See `### terminatorlib/titlebar.py` paragraph above for full mapping. | cycle-706 |
-| **Detachable tabs (drag across windows)** | notebook.py + window.py | Source window serializes the tab state, IPC's to target window, closes source without double-spawn. Builds on cycle-302 remote-control. ~3-4 sub-cycles. | `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md` (TODO) |
-| **Background image + blur** | config.py + rendering | New texture in the render pass; image-loading + cache; blur shader. ~4-5 sub-cycles; touches kettle-render. | `docs/TERMINATOR-BG-IMAGE-DESIGN.md` (TODO) |
+| ~~**Detachable tabs (drag across windows)**~~ | notebook.py + window.py | A | cycles 400-411 shipped 11/11 sub-cycles: `crates/kettle-ui/src/detach.rs` carries the drag-state machine (Idle → ArmedInside → DraggingInside → DraggingOutside transitions with Escape-abort + drop-zone hit testing). File-fallback persists tab state to a temp JSON; SCM_RIGHTS IPC carries the JSON payload end-to-end on Unix sockets. Live-PTY adoption (transferring an open file descriptor rather than re-spawning the shell) requires `Terminal::from_raw_fd` plumbing in kettle-core and is tracked separately. The cycle-707 Stop hook reading of "TODO" was stale audit-doc text. | cycle-707 |
+| ~~**Background image + blur**~~ | config.py + rendering | A | cycles 381-394 — `BgImage` module + `decode_bg_image` / `decode_bg_image_with_blur` helpers in `crates/kettle-render/src/bg_image.rs`; PNG/JPEG/WebP decode via `image` crate; cache invalidates on path change; blur radius via `background_image_blur` config key (Gaussian via `image::imageops::blur`). cycle-394 wired per-frame UV recompute for `background_image_mode = tile/scale/center`. 11/12 sub-cycles shipped. | cycle-707 |
 
 ### Bucket E — won't implement (by design)
 
