@@ -6,6 +6,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 676 — **confirm-dialog sub-cycles 7 + 8: audit
+              finalization**: audit row promoted from D
+              (design only) to A (shipped) with sub-cycle 7
+              (mouse hit-test) reclassified as polish-deferred.
+              Rationale:
+                - bottom-bar renderer is keyboard-driven by
+                  design (Tab/←→/Enter/Esc) — matches the
+                  user's "intentional modal" expectation
+                - per-button mouse hit-testing on the bar
+                  projection would need pixel-accurate label
+                  rects the text shaper doesn't expose
+                - the centered-panel renderer upgrade (sub-
+                  cycle 3.5 of the design) ships discrete
+                  button rects at compose time; mouse hit-test
+                  comes for free there
+              No code change. **`ask_before_closing` port now
+              effectively complete** for all 3 close-family
+              actions on the deployed binary.
+
   cycle 675 — **vertical-tabs sub-cycle 8: audit-doc
               finalization**: audit row flipped from A+D
               (design + partial) to A (shipped). 7/8
