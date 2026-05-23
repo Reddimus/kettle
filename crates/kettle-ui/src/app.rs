@@ -824,6 +824,11 @@ enum ContextMenuClick {
     /// Dispatch sets cfg.theme_name + cfg.theme and triggers a
     /// redraw (same path as cycle-3514 `NextTheme`).
     SetTheme(String),
+    /// Cycle 686 (sub-cycle 8 of theme-submenu design): profile
+    /// picked from the right-click "Profile ▸" submenu. Dispatch
+    /// sets `App::config_path` to the cycle-618 profile path
+    /// and calls `reload_config`.
+    SetProfile(String),
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -881,6 +886,16 @@ enum ContextMenuItem {
     ThemeChoice {
         label: String,
         theme: String,
+    },
+    /// Cycle 686 (sub-cycle 8 of theme-submenu design): a profile-
+    /// choice leaf row used inside a `Submenu { label: "Profile",
+    /// … }`. Clicking dispatches
+    /// `ContextMenuClick::SetProfile(profile)` which switches the
+    /// active profile (`App::config_path` + reload_config).
+    #[allow(dead_code)] // sub-cycle 3 wires the flyout-side click dispatch.
+    ProfileChoice {
+        label: String,
+        profile: String,
     },
 }
 
@@ -3590,6 +3605,33 @@ impl App {
     /// the reconnect to land in a new pane, or hit the entry
     /// directly to reconnect in-place after the original session
     /// exits.
+    /// Cycle 686 (sub-cycle 8 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// append a `Submenu { "Profile", … }` entry populated from
+    /// `Config::list_profiles()`. Same machinery as the cycle-
+    /// 685 Theme submenu; click on a profile entry sets
+    /// `App::config_path` to the cycle-618 profile path and
+    /// reloads. The flyout-render side is still sub-cycle 3
+    /// (shared with Theme).
+    fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        let profile_names = kettle_config::Config::list_profiles();
+        if profile_names.is_empty() {
+            return;
+        }
+        items.push(ContextMenuItem::Separator);
+        let inner: Vec<ContextMenuItem> = profile_names
+            .into_iter()
+            .map(|name| ContextMenuItem::ProfileChoice {
+                label: name.clone(),
+                profile: name,
+            })
+            .collect();
+        items.push(ContextMenuItem::Submenu {
+            label: "Profile".to_string(),
+            items: inner,
+        });
+    }
+
     /// Cycle 685 (sub-cycle 2 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
     /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
     /// append a `Submenu { "Theme", … }` entry populated from
@@ -3672,6 +3714,10 @@ impl App {
         // Theme submenu populated from Theme::list(). The flyout
         // open machinery lands in sub-cycle 3.
         self.append_theme_submenu_items(&mut items);
+        // Cycle 686 (theme-submenu sub-cycle 8): same machinery
+        // for Profile (only appended when ~/.config/kettle/
+        // profiles/ has any *.config files).
+        self.append_profile_submenu_items(&mut items);
         // Highlight the first enabled non-separator item.
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
@@ -3686,7 +3732,8 @@ impl App {
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. } => row_h,
+                | ContextMenuItem::ThemeChoice { .. }
+                | ContextMenuItem::ProfileChoice { .. } => row_h,
             })
             .sum();
         let max_chars = items
@@ -3703,6 +3750,8 @@ impl App {
                 // menu's width budget shouldn't grow for choices
                 // the user can't directly see.
                 ContextMenuItem::ThemeChoice { .. } => None,
+                // Cycle 686: same for ProfileChoice (flyout-only).
+                ContextMenuItem::ProfileChoice { .. } => None,
                 _ => None,
             })
             .max()
@@ -3773,7 +3822,8 @@ impl App {
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. } => row_h,
+                | ContextMenuItem::ThemeChoice { .. }
+                | ContextMenuItem::ProfileChoice { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 match item {
@@ -3806,6 +3856,10 @@ impl App {
                         // arm above).
                         return Some(ContextMenuClick::SetTheme(theme.clone()));
                     }
+                    ContextMenuItem::ProfileChoice { profile, .. } => {
+                        // Cycle 686: same shape as ThemeChoice.
+                        return Some(ContextMenuClick::SetProfile(profile.clone()));
+                    }
                     _ => return None,
                 }
             }
@@ -3832,7 +3886,8 @@ impl App {
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. } => row_h,
+                | ContextMenuItem::ThemeChoice { .. }
+                | ContextMenuItem::ProfileChoice { .. } => row_h,
             })
             .sum();
         let max_chars = menu
@@ -3895,6 +3950,12 @@ impl App {
                 ContextMenuItem::ThemeChoice { .. } => ContextMenuRow {
                     label: String::new(),
                     separator: true, // skip visually for now
+                    enabled: false,
+                },
+                // Cycle 686: same for ProfileChoice (flyout-only).
+                ContextMenuItem::ProfileChoice { .. } => ContextMenuRow {
+                    label: String::new(),
+                    separator: true,
                     enabled: false,
                 },
             })
@@ -6274,6 +6335,16 @@ impl ApplicationHandler<UserEvent> for App {
                             self.save_session();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
+                            }
+                        }
+                        // Cycle 686 (theme-submenu sub-cycle 8):
+                        // profile picked from a Profile submenu
+                        // flyout. Uses cycle-618
+                        // Config::path_for_profile + reload_config.
+                        ContextMenuClick::SetProfile(name) => {
+                            if let Some(p) = kettle_config::Config::path_for_profile(&name) {
+                                self.config_path = Some(p);
+                                self.reload_config();
                             }
                         }
                     }

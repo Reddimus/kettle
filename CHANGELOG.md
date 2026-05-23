@@ -6,6 +6,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 686 — **theme-submenu sub-cycle 8: Profile submenu**:
+              same machinery as cycle-685's Theme submenu,
+              different source.
+                - new `ContextMenuItem::ProfileChoice { label,
+                  profile }` leaf variant
+                - new `ContextMenuClick::SetProfile(String)`
+                  click outcome
+                - new `App::append_profile_submenu_items` walks
+                  `Config::list_profiles()` (cycle-618 helper)
+                  and produces a `Submenu { label: "Profile",
+                  items: vec![ProfileChoice...] }`
+                - empty profiles dir → submenu skipped (no
+                  visual artifact)
+                - `open_context_menu` calls it after the Theme
+                  submenu so the layered order reads:
+                  built-in → config → lua → remote → Theme ▸
+                  → Profile ▸
+                - dispatch sets `self.config_path` to the
+                  cycle-618 profile path and calls
+                  `reload_config()`
+              ProfileChoice rows are flyout-only (same
+              projection as cycle-685's ThemeChoice). Users
+              with `<config-dir>/profiles/dev.config` etc.
+              will see "Profile ▸" in the right-click menu;
+              clicking it logs the cycle-684 flyout-pending
+              nudge until sub-cycle 3 wires the side panel.
+              Workspace tests stay 392.
+              Theme-submenu port: **3/9** sub-cycles
+              complete (1: variant, 2: Theme populate, 8:
+              Profile populate; sub-cycles 3-7 + 9 remain).
+
   cycle 685 — **theme-submenu sub-cycle 2: populate Theme
               submenu + SetTheme dispatch**: data layer for
               the cycle-634 design's Theme submenu now lands.
