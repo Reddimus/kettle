@@ -265,14 +265,14 @@ jobs:
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
           generate_release_notes: true
 
-      # Cycle 285 defense-in-depth. softprops/action-gh-release@v2
+      # Cycle 285 defense-in-depth. softprops/action-gh-release@v3
       # uploads via Octokit with no built-in retry — a transient
       # `uploads.github.com:443` Connect Timeout (which hit the v1.3.11
       # Linux runner and dropped the .sha256 sidecar) fails the whole
