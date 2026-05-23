@@ -2368,6 +2368,16 @@ impl App {
             log::warn!("refused to open unsafe URL: {uri}");
             return;
         }
+        // Cycle 705 (Terminator plugin parity, plugin sub-cycle:
+        // `LuaEvent::UrlClicked`). Fired before pattern-handler
+        // dispatch so analytics / logging / workflow-trigger
+        // plugins see ALL URL clicks, regardless of which
+        // handler eventually opens them. The cycle-374
+        // `try_url_handler` chain below still owns the "actually
+        // launch" decision; this event is observation-only.
+        if let Some(eng) = &self.lua_engine {
+            eng.fire_event(&crate::LuaEvent::UrlClicked(uri.to_string()));
+        }
         // Cycle 374 (Terminator plugin parity, plugin sub-cycle 9):
         // Lua URL handlers get first dispatch. If a handler claims
         // the URL (its pattern matches), kettle does NOT fall

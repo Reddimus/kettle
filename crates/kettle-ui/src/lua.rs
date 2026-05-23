@@ -144,6 +144,13 @@ pub enum LuaEvent {
     /// (pane_id, new_title). Used by status-bar plugins and
     /// title-mirroring plugins.
     TitleChanged(u64, String),
+    /// Cycle 705 (Terminator plugin parity, plugin sub-cycle:
+    /// URL-click event hook). Emitted on every safe URL click
+    /// — before any pattern-handler dispatch — so analytics /
+    /// logging / workflow-trigger plugins see ALL URL clicks,
+    /// regardless of which handler ultimately opens them.
+    /// Payload: the URI string.
+    UrlClicked(String),
 }
 
 impl LuaEvent {
@@ -158,6 +165,7 @@ impl LuaEvent {
             LuaEvent::Output(_, _) => "output",
             LuaEvent::PaneFocus(_, _) => "pane_focus",
             LuaEvent::TitleChanged(_, _) => "title_changed",
+            LuaEvent::UrlClicked(_) => "url_clicked",
         }
     }
 }
@@ -566,6 +574,7 @@ impl LuaEngine {
                         LuaEvent::TitleChanged(pane_id, title) => {
                             cb.call((*pane_id, title.as_str()))
                         }
+                        LuaEvent::UrlClicked(uri) => cb.call(uri.as_str()),
                     };
                     if let Err(e) = call_result {
                         log::warn!("lua event {name} callback {i}: {e}");
@@ -881,6 +890,38 @@ mod tests {
             LuaEvent::TitleChanged(0, String::new()).name(),
             "title_changed"
         );
+    }
+
+    /// Cycle 705 drift guard. `LuaEvent::UrlClicked(uri)` emits
+    /// to Lua as `(uri_string,)` and is fired BEFORE pattern-
+    /// handler dispatch — analytics plugins see every URL click.
+    #[test]
+    fn url_clicked_event_emits_uri() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "urls = {}
+             kettle.on('url_clicked', function(uri)
+                urls[#urls + 1] = uri
+             end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::UrlClicked("https://kettle.dev".into()));
+        eng.fire_event(&LuaEvent::UrlClicked("file:///tmp/foo.txt".into()));
+        eng.fire_event(&LuaEvent::UrlClicked("mailto:user@example.com".into()));
+        assert_eq!(eng.eval_str("return #urls").unwrap(), "3");
+        assert_eq!(
+            eng.eval_str("return urls[1]").unwrap(),
+            "https://kettle.dev"
+        );
+        assert_eq!(
+            eng.eval_str("return urls[2]").unwrap(),
+            "file:///tmp/foo.txt"
+        );
+        assert_eq!(
+            eng.eval_str("return urls[3]").unwrap(),
+            "mailto:user@example.com"
+        );
+        assert_eq!(LuaEvent::UrlClicked(String::new()).name(), "url_clicked");
     }
 
     #[test]

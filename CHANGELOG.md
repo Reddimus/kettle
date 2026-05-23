@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 705 — **`LuaEvent::UrlClicked` (Terminator plugin
+              sub-cycle: URL-click event hook — Bucket D
+              plugin system substantially complete)**:
+              Bucket D rescue (plugin system) — final Lua
+              event for Terminator-plugin parity.
+              Terminator's `urlhandlers.py` + analytics
+              plugins watch every URL click for tracking /
+              logging / workflow triggers.
+              Adds:
+                - new `LuaEvent::UrlClicked(String)` variant —
+                  payload is the URI string.
+                - emits to Lua as `(uri_string,)`.
+                - fired from `App::open_url` AFTER the cycle-X
+                  `is_safe_url` safety check but BEFORE the
+                  cycle-374 `try_url_handler` pattern dispatch
+                  — analytics plugins see every safe URL
+                  click, regardless of which handler ultimately
+                  opens them (observation-only event).
+                - script-facing name is `url_clicked`,
+                  registered via `kettle.on('url_clicked',
+                  function(uri) … end)`.
+              Drift guard `url_clicked_event_emits_uri` walks
+              3 URL events (https / file / mailto) + asserts
+              the event name string.
+              Plugin system audit row promoted to
+              **substantially complete** — all 7 plugin-
+              relevant LuaEvents shipped (startup, tab_add,
+              tab_close, bell, output, pane_focus,
+              title_changed, url_clicked) + 5/6 Terminator
+              plugins functionally ported. Only `launcher.py`
+              remains, and cycle-329 command palette already
+              lists layouts as candidate sources.
+              Workspace tests 401 → 402.
+
   cycle 704 — **`LuaEvent::TitleChanged` (Terminator plugin
               sub-cycle: title-change event hook)**:
               Bucket D rescue (plugin system). Terminator's
