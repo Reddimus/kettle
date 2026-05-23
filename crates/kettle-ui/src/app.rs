@@ -548,17 +548,16 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     if bar_h <= 0.0 {
         return false;
     }
-    // Cycle 647: Left/Right (vertical strip) don't use the y-band
-    // check at all — hit-testing is x-axis-based. Until the render
-    // layer fully wires the vertical strip (sub-cycles 2-6 of
-    // [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-    // ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)) those
-    // values fall through to "no hit on the y-band" so the rest
-    // of the y-band-dependent code stays correct.
+    // Cycle 668 (vertical-tabs sub-cycle 4): Left/Right strips
+    // span the full window height — every y-coordinate inside
+    // the window is in the "tab bar band" along the y-axis.
+    // The x-axis distinction (which side of the window) is
+    // handled by `cursor_in_tab_bar` which checks the cursor's
+    // x against the strip's edge.
     match pos {
         TabBarPos::Top => y >= 0.0 && y < bar_h,
         TabBarPos::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
-        TabBarPos::Left | TabBarPos::Right => false,
+        TabBarPos::Left | TabBarPos::Right => y >= 0.0 && y <= surface_h,
     }
 }
 
@@ -1653,12 +1652,27 @@ impl App {
         if h <= 0.0 {
             return false;
         }
-        let (_, sh) = self
+        let (sw, sh) = self
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
+        // Cycle 668 (vertical-tabs sub-cycle 4): for Left/Right
+        // strips, the cursor needs to be within
+        // `VERTICAL_TAB_STRIP_W` of the configured edge.
+        match self.cfg.tab_bar_pos {
+            TabBarPos::Left => {
+                let x = self.cursor.x as f32;
+                (0.0..VERTICAL_TAB_STRIP_W).contains(&x)
+            }
+            TabBarPos::Right => {
+                let x = self.cursor.x as f32;
+                x >= sw as f32 - VERTICAL_TAB_STRIP_W && x <= sw as f32
+            }
+            TabBarPos::Top | TabBarPos::Bottom => {
+                cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
+            }
+        }
     }
 
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
@@ -1808,12 +1822,14 @@ impl App {
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
         let (sw, sh) = (w as f32, h as f32);
-        // Cycle 647: vertical strip rendering (Left / Right) is
-        // designed in [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-        // ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md). Until
-        // those sub-cycles land, Left + Right route to the same
-        // y = 0.0 as Top (the user's strip configuration parses +
-        // stores correctly; only the layout doesn't honor it yet).
+        let is_vertical = self.cfg.tab_bar_pos.is_vertical();
+        // Cycle 668 (vertical-tabs sub-cycle 4): Left / Right
+        // route through a separate vertical-stacked path.
+        // Horizontal Top/Bottom keeps the cycle-620
+        // compute_tab_segment_widths flow.
+        if is_vertical {
+            return self.tab_bar_vertical(sw, sh, height);
+        }
         let y = match self.cfg.tab_bar_pos {
             TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
             TabBarPos::Bottom => sh - height,
@@ -1911,6 +1927,80 @@ impl App {
             // ghost of the dragged segment under the cursor — gives
             // the cycle-249 reorder a "I'm picking this tab up"
             // affordance instead of the bare snap behavior.
+            drag_cursor_x: if self.tab_drag_active {
+                Some(self.cursor.x as f32)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Cycle 668 (vertical-tabs sub-cycle 4): tab-bar layout for
+    /// `TabBarPos::Left` / `Right`. Stacks segments vertically,
+    /// each one (`VERTICAL_TAB_STRIP_W` × `tab_bar_h`).
+    /// New-tab `+` button anchors at the bottom of the strip.
+    fn tab_bar_vertical(&self, sw: f32, sh: f32, height: f32) -> TabBar {
+        let strip_w = VERTICAL_TAB_STRIP_W;
+        let strip_x = match self.cfg.tab_bar_pos {
+            TabBarPos::Left => 0.0,
+            TabBarPos::Right => sw - strip_w,
+            _ => 0.0, // unreachable in this branch
+        };
+        let titles = self.mux.tab_titles();
+        let active = self.mux.active;
+        let now = std::time::Instant::now();
+        let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
+        let segments: Vec<TabSeg> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let seg_y = i as f32 * height;
+                let activity = self
+                    .mux
+                    .tabs
+                    .get(i)
+                    .map(|tab| {
+                        match crate::mux::classify_tab_activity(
+                            i == active,
+                            tab.bell,
+                            tab.last_output_at,
+                            tab.last_seen_at,
+                            now,
+                            silence,
+                        ) {
+                            crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
+                            crate::mux::TabActivity::Output => RenderTabActivity::Output,
+                            crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
+                            crate::mux::TabActivity::Silent => RenderTabActivity::Silent,
+                        }
+                    })
+                    .unwrap_or(RenderTabActivity::Normal);
+                TabSeg {
+                    idx: i,
+                    rect: (strip_x, seg_y, strip_w, height),
+                    // ✕ hit zone = the trailing-right square of the
+                    // segment (same axis convention as horizontal).
+                    close: (strip_x + strip_w - height, seg_y, height, height),
+                    title: t.clone(),
+                    active: i == active,
+                    activity,
+                }
+            })
+            .collect();
+        // `+` button at the bottom of the strip.
+        let plus_y = (titles.len() as f32 * height).min(sh - height);
+        TabBar {
+            height,
+            // `y` is the *band start* (top of the strip) for the
+            // renderer; for vertical strips the band spans the
+            // whole window height, so `y = 0`.
+            y: 0.0,
+            segments,
+            new_tab: (strip_x, plus_y, strip_w, height),
+            broadcast: self.mux.broadcast,
+            hovered_close_idx: self.hovered_close_idx,
+            // Drag-cursor preview is x-only in v1; vertical drag
+            // reorder is sub-cycle 6 of the design.
             drag_cursor_x: if self.tab_drag_active {
                 Some(self.cursor.x as f32)
             } else {

@@ -6,6 +6,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 668 — **vertical-tabs sub-cycle 4: tab_bar() stacks
+              segments vertically for Left/Right**: the
+              cycle-647/665 layout-side foundations + this
+              cycle's segment generation give actual vertical
+              tab strips. Specifics:
+                - new `App::tab_bar_vertical(sw, sh, height)`
+                  branches off `tab_bar()` for `is_vertical()`
+                  positions
+                - each `TabSeg` gets `(strip_x, i * h, strip_w,
+                  h)` — strip_x is 0 for Left, `sw - strip_w`
+                  for Right
+                - close-hit zone keeps the trailing-right axis
+                  convention (same as horizontal)
+                - new-tab `+` button anchors at the bottom of
+                  the strip
+                - `cursor_in_tab_bar` updated to do x-axis
+                  hit-test for vertical strips (instead of the
+                  y-band check)
+                - `cursor_in_tab_bar_band` returns y in `[0, sh]`
+                  for vertical strips (whole-window span)
+              Workspace tests stay 387 (the renderer's actual
+              paint still uses horizontal layout — the
+              `paint_tab_bar` orientation parameter is
+              sub-cycle 5). The mux side now hands the renderer
+              the correct vertical rects; renderer-side
+              tweaks for stacked drawing land next.
+              Vertical-tabs port: 4/8 sub-cycles complete.
+
   cycle 667 — **Deploy: redeploy with theme-schedule poll +
               vertical-strip layout**. Binary at
               `~/.local/bin/kettle` reports `1.45.1 (c7d6f6c)`.
