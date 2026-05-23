@@ -102,7 +102,7 @@ per-key audit against Terminator's source.
 | `putty-paste-style` | bool | `false` | Right-click pastes (PuTTY convention) |
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
-| `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib |
+| `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
 
 ### Parsed-but-currently-no-op keys
 

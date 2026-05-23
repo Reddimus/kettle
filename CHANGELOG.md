@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 608 — **`docs/examples/init.lua` sample script.** New
+              documented Lua example covering the full
+              `kettle.*` API surface — introspection,
+              `kettle.add_url_handler` (with Launchpad-bug /
+              Launchpad-code / APT-URL handlers ported from
+              Terminator's `url_handlers.py`), `kettle.on`
+              event hooks, `kettle.add_menu_item` right-click
+              entries, and `kettle.exec_action` (with cycle
+              606/607's new `insert_pane_name` /
+              `open_cwd` actions demoed). Documents the cycle-
+              601 send_text/notify/queue caps + the cycle-376
+              safe-vs-trusted sandbox model in the file header
+              so users see the security envelope before
+              writing a script. CONFIG.md `lua-sandbox` row
+              now cross-links to the example; the cycle-179
+              cross-link drift guard passes the new link. No
+              code change; workspace tests unchanged.
+
   cycle 607 — **`Action::OpenCwdInFileManager`** (Terminator parity,
               `terminatorlib/plugins/dir_open.py` → `CurrDirOpen`
               menu item). New action that reads the focused pane's
