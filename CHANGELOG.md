@@ -6,8 +6,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-Post-v1.40.0 polish, mostly tightening the cycle-494 pre-commit
-hook UX after first use exposed minor rough edges.
+Post-v1.40.0 polish — pre-commit hook UX tightens, real-bug
+catches from running shellcheck on scripts/, and crates.io
+metadata polish.
 
   cycle 501 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
               `docs/ARCHITECTURE.md` post-sweep summaries
@@ -42,6 +43,52 @@ hook UX after first use exposed minor rough edges.
               correction, manual clock set, container time
               jump) renders as `<1s` rather than the
               misleading `(-1s)`.
+
+  cycle 511 — Exact-numeric version snapshots in
+              `docs/TESTING.md` (`post-v1.37.0`) +
+              `docs/ROADMAP.md` (`v1.35.0`) bumped to v1.40.0.
+
+  cycle 512 — `packaging/linux/kettle.1` `--screenshot-menu`
+              description scrubbed of internal `v1.3.0 blank-
+              menu regression class` history-ref. Same anti-
+              pattern as cycle-475's cycle-N scrub but version
+              pattern.
+
+  cycle 515 — `.github/labeler.yml` extended to cover the
+              cycle-494 `.githooks/` directory under the
+              existing `tooling` label.
+
+  cycle 516 — **Real bug fix.** `scripts/release.sh` line 101
+              had backticks inside a double-quoted `echo` that
+              ran as command substitution at error time. The
+              "helpful hint" actually ran `git fetch && git
+              tag -d v${VERSION}`, mutating local state and
+              printing garbled output. Caught by manually
+              running shellcheck against scripts/. Fixed via
+              single-quote re-interpolation.
+
+  cycle 517 — **Durable infrastructure.** Pre-commit hook now
+              runs shellcheck against any staged scripts/ or
+              .githooks/ files before the cargo gauntlet —
+              catches the cycle-516 bug class at commit time.
+              Falls back silently when shellcheck isn't
+              installed.
+
+  cycle 518 — `scripts/install.sh`'s 4 SC2015 `cmd && X ||
+              true` ambiguity-pattern instances rewritten as
+              explicit `if … then … fi`. `shellcheck
+              scripts/*.sh .githooks/*` now warning-free
+              across the repo.
+
+  cycle 520 — `Cargo.toml [workspace.package]` gained
+              `homepage` / `readme` / `keywords` / `categories`
+              — best-practice metadata that future-proofs a
+              potential crates.io publish.
+
+  cycle 521 — `crates/kettle/Cargo.toml` inherits the cycle-520
+              new fields via `<field>.workspace = true` (without
+              this, the workspace defaults applied to no
+              published crate).
 
 ## [1.40.0] — 2026-05-22
 
