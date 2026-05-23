@@ -6,6 +6,50 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 717 — **Preferences ▸ submenu (C8 + C9)**:
+              The user-visible payoff for cycles 716. Right-
+              click → Preferences ▸ now opens a submenu with
+              13 runtime-mutable toggles + an `Advanced…` row
+              that opens the config file in `$EDITOR`. Each
+              toggle (a) updates `self.cfg` immediately so the
+              change is visible without restart, and (b) writes
+              `key = value` back to the config file via the
+              cycle-716 atomic helper.
+              Submenu rows (separator-grouped):
+                - Scrollbar radio: always / auto / hidden
+                - Cursor blink (✓), Copy on select (✓),
+                  Mouse-hide while typing (✓)
+                - Bell radio: off / visual / attention / both
+                - Font size + / Font size −
+                - Advanced… (open config in $EDITOR)
+              Implementation:
+                - new `ContextMenuItem::DynamicItem { label:
+                  String, action: Action, enabled: bool }`
+                  variant — owned label so the radio/check
+                  prefixes (`● /○ / ✓ /  `) can be baked in
+                  without leaking memory via `Box::leak`.
+                  Extends every menu hot-path (filter_disabled,
+                  item_is_dispatchable, context_menu_geometry,
+                  context_menu_click_action, assign_mnemonics,
+                  typeahead_match, context_menu_overlay).
+                - 10 new `Action::*` variants + `from_name`
+                  arms + palette entries + the cycle-117
+                  palette-completeness drift-guard arm.
+                - new `App::persist_pref(&self, key, value)`
+                  thin wrapper around the cycle-716 atomic
+                  helper.
+                - `append_preferences_submenu_items` slotted
+                  between Theme and Profile submenus in
+                  `open_context_menu`.
+              Drift guard `preferences_submenu_contains_all
+              _user_facing_toggles` walks the 13 Action
+              variants and asserts each parses through
+              `Action::from_name`. Catches any future
+              divergence between palette wiring + the menu
+              spec. Workspace tests 423 → 424. Closes both C8
+              (toggle wiring) and C9 (Advanced entry) of the
+              breezy-hopping-lollipop plan.
+
   cycle 716 — **Preferences submenu infrastructure: atomic
               config write-back (C7)**:
               Lays the plumbing for the Preferences ▸ submenu

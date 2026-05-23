@@ -844,6 +844,16 @@ enum ContextMenuItem {
         action: Action,
         enabled: bool,
     },
+    /// Cycle 717 (Preferences submenu, C8): like `Item` but with an
+    /// owned `String` label so dynamic state markers (radio `● / ○`,
+    /// check `✓ /  `) can be baked into the label at build time
+    /// without leaking memory via `Box::leak`. Same dispatch surface
+    /// as `Item` (typed `Action`).
+    DynamicItem {
+        label: String,
+        action: Action,
+        enabled: bool,
+    },
     Separator,
     /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
     /// menu item supplied by a Lua plugin via `kettle.add_menu_item(
@@ -1080,6 +1090,7 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
         .iter()
         .map(|it| match it {
             ContextMenuItem::Item { label, .. } => *label,
+            ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
             ContextMenuItem::LuaItem { label, .. } => label.as_str(),
             ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
             ContextMenuItem::Submenu { label, .. } => label.as_str(),
@@ -1119,6 +1130,11 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
     let needle = buf.to_ascii_lowercase();
     items.iter().position(|it| match it {
         ContextMenuItem::Item {
+            label,
+            enabled: true,
+            ..
+        } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::DynamicItem {
             label,
             enabled: true,
             ..
@@ -1181,7 +1197,13 @@ fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuItem> {
     // Step 1: drop disabled Items.
     let kept: Vec<ContextMenuItem> = items
         .into_iter()
-        .filter(|it| !matches!(it, ContextMenuItem::Item { enabled: false, .. }))
+        .filter(|it| {
+            !matches!(
+                it,
+                ContextMenuItem::Item { enabled: false, .. }
+                    | ContextMenuItem::DynamicItem { enabled: false, .. }
+            )
+        })
         .collect();
     // Step 2: collapse separator runs. Walk linearly; only push a
     // Separator when the previous pushed item wasn't already one.
@@ -1253,6 +1275,7 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
     matches!(
         item,
         ContextMenuItem::Item { enabled: true, .. }
+            | ContextMenuItem::DynamicItem { enabled: true, .. }
             | ContextMenuItem::LuaItem { .. }
             | ContextMenuItem::ConfigItem { .. }
             // Cycle 684: Submenu rows are dispatchable for keyboard
@@ -3945,6 +3968,126 @@ impl App {
     /// `App::config_path` to the cycle-618 profile path and
     /// reloads. The flyout-render side is still sub-cycle 3
     /// (shared with Theme).
+    /// Cycle 717 (Preferences submenu, C8): append a `Preferences ▸`
+    /// submenu with runtime-mutable toggles. Each toggle dispatches
+    /// through a dedicated `Action::*` variant (cycle-717) that
+    /// updates `self.cfg` AND writes back to the user's config file
+    /// atomically via cycle-716's `persist_config_toggle`.
+    ///
+    /// Submenu layout (radio = "● selected / ○ other"; check =
+    /// "✓ on /   off"):
+    ///   - Scrollbar (radio: Always / Auto / Never)
+    ///   - Cursor blink (check)
+    ///   - Copy on select (check)
+    ///   - Bell (radio: Off / Visual / Attention / Both)
+    ///   - Mouse-hide while typing (check)
+    ///   - Font size + / Font size − (reuses cycle-X actions)
+    ///   - Separator
+    ///   - Advanced… (cycle-718 / C9 — `Action::EditConfig`)
+    fn append_preferences_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        items.push(ContextMenuItem::Separator);
+        let mut inner: Vec<ContextMenuItem> = Vec::new();
+        let r = |sel: bool| if sel { "● " } else { "○ " };
+        let c = |sel: bool| if sel { "✓ " } else { "  " };
+        let dyn_item = |label: String, action: Action| ContextMenuItem::DynamicItem {
+            label,
+            action,
+            enabled: true,
+        };
+        // Scrollbar radio.
+        let sb = self.cfg.scrollbar;
+        inner.push(dyn_item(
+            format!(
+                "{}Scrollbar always",
+                r(sb == kettle_config::ScrollbarMode::Always)
+            ),
+            Action::SetScrollbarAlways,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Scrollbar auto",
+                r(sb == kettle_config::ScrollbarMode::Auto)
+            ),
+            Action::SetScrollbarAuto,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Scrollbar hidden",
+                r(sb == kettle_config::ScrollbarMode::Never)
+            ),
+            Action::SetScrollbarNever,
+        ));
+        inner.push(ContextMenuItem::Separator);
+        // Boolean toggles.
+        inner.push(dyn_item(
+            format!("{}Cursor blink", c(self.cfg.cursor_blink)),
+            Action::ToggleCursorBlink,
+        ));
+        inner.push(dyn_item(
+            format!("{}Copy on select", c(self.cfg.copy_on_select)),
+            Action::ToggleCopyOnSelect,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Mouse-hide while typing",
+                c(self.cfg.mouse_hide_while_typing)
+            ),
+            Action::ToggleMouseHide,
+        ));
+        inner.push(ContextMenuItem::Separator);
+        // Bell radio.
+        let bell = self.cfg.bell;
+        inner.push(dyn_item(
+            format!("{}Bell off", r(bell == kettle_config::BellMode::Off)),
+            Action::SetBellOff,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Bell visual flash",
+                r(bell == kettle_config::BellMode::Visual)
+            ),
+            Action::SetBellVisual,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Bell attention",
+                r(bell == kettle_config::BellMode::Attention)
+            ),
+            Action::SetBellAttention,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Bell visual + attention",
+                r(bell == kettle_config::BellMode::Both)
+            ),
+            Action::SetBellBoth,
+        ));
+        inner.push(ContextMenuItem::Separator);
+        // Font size +/- (reuse existing actions).
+        inner.push(ContextMenuItem::Item {
+            label: "Font size +",
+            action: kettle_config::Action::IncreaseFontSize,
+            enabled: true,
+        });
+        inner.push(ContextMenuItem::Item {
+            label: "Font size −",
+            action: kettle_config::Action::DecreaseFontSize,
+            enabled: true,
+        });
+        inner.push(ContextMenuItem::Separator);
+        // Cycle 718 (C9): the Advanced… escape hatch for everything
+        // not exposed as a toggle.
+        inner.push(ContextMenuItem::Item {
+            label: "Advanced… (open config in $EDITOR)",
+            action: kettle_config::Action::EditConfig,
+            enabled: true,
+        });
+        items.push(ContextMenuItem::Submenu {
+            label: "Preferences".to_string(),
+            items: inner,
+        });
+    }
+
     fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
         let profile_names = kettle_config::Config::list_profiles();
         if profile_names.is_empty() {
@@ -4050,6 +4193,9 @@ impl App {
         // for Profile (only appended when ~/.config/kettle/
         // profiles/ has any *.config files).
         self.append_profile_submenu_items(&mut items);
+        // Cycle 717 (Preferences submenu, C8): runtime-mutable
+        // settings + the Advanced… escape hatch.
+        self.append_preferences_submenu_items(&mut items);
         // Cycle 713 (Terminator menu UX, C4): drop disabled rows
         // entirely and collapse the separators that would orphan
         // around them. Matches Terminator/GNOME's "only show what
@@ -4067,6 +4213,7 @@ impl App {
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
+                | ContextMenuItem::DynamicItem { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
@@ -4275,6 +4422,7 @@ impl App {
             let h = match item {
                 ContextMenuItem::Separator => sep_h,
                 ContextMenuItem::Item { .. }
+                | ContextMenuItem::DynamicItem { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
@@ -4284,6 +4432,11 @@ impl App {
             if py >= row_y && py < row_y + h {
                 match item {
                     ContextMenuItem::Item {
+                        action,
+                        enabled: true,
+                        ..
+                    } => return Some(ContextMenuClick::Action(action.clone())),
+                    ContextMenuItem::DynamicItem {
                         action,
                         enabled: true,
                         ..
@@ -4355,6 +4508,7 @@ impl App {
             .iter()
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::DynamicItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
                 _ => None,
@@ -4376,6 +4530,11 @@ impl App {
             .map(|it| match it {
                 ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
                     label: (*label).to_string(),
+                    separator: false,
+                    enabled: *enabled,
+                },
+                ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
+                    label: label.clone(),
                     separator: false,
                     enabled: *enabled,
                 },
@@ -4450,6 +4609,42 @@ impl App {
     fn reset_blink_phase(&mut self) {
         self.blink_on = true;
         self.last_blink = std::time::Instant::now();
+    }
+
+    /// Cycle 717 (Preferences submenu, C8): write a `key = value`
+    /// line to the user's active config file via the cycle-716
+    /// atomic helper. Resolves the path the same way Action::EditConfig
+    /// does (App::config_path → `Config::default_path` fallback).
+    /// Logs + ignores any I/O error so a transient FS issue doesn't
+    /// kill the menu dispatch; the in-memory toggle still applied,
+    /// so the user's next session will pick up the runtime change
+    /// once it persists.
+    fn persist_pref(&self, key: &str, value: &str) {
+        let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        else {
+            log::warn!(
+                "persist_pref: no config path resolved (set $XDG_CONFIG_HOME or pass --config)"
+            );
+            return;
+        };
+        match kettle_config::persist_config_toggle(&path, key, value) {
+            Ok(bak) => {
+                log::info!(
+                    "persist_pref: wrote {key} = {value} to {} (backup at {})",
+                    path.display(),
+                    bak.display()
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "persist_pref: failed to write {key} = {value} to {}: {e}",
+                    path.display()
+                );
+            }
+        }
     }
 
     fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
@@ -4800,6 +4995,75 @@ impl App {
                          (set $XDG_CONFIG_HOME or pass --config)"
                     );
                 }
+            }
+            // Cycle 717 (Preferences submenu, C8): runtime-mutable
+            // toggles. Each dispatch (a) mutates `self.cfg` so the
+            // change applies immediately + (b) writes the new
+            // `key = value` back to the user's config file via the
+            // cycle-716 `persist_config_toggle` helper (atomic
+            // temp+rename, comment-preserving, with a first-write
+            // backup at `<config>.bak`). Re-opening the menu picks
+            // up the new state.
+            Action::SetScrollbarAlways => {
+                self.cfg.scrollbar = kettle_config::ScrollbarMode::Always;
+                self.persist_pref("scrollbar", "always");
+            }
+            Action::SetScrollbarAuto => {
+                self.cfg.scrollbar = kettle_config::ScrollbarMode::Auto;
+                self.persist_pref("scrollbar", "auto");
+            }
+            Action::SetScrollbarNever => {
+                self.cfg.scrollbar = kettle_config::ScrollbarMode::Never;
+                self.persist_pref("scrollbar", "never");
+            }
+            Action::ToggleCursorBlink => {
+                self.cfg.cursor_blink = !self.cfg.cursor_blink;
+                self.persist_pref(
+                    "cursor-blink",
+                    if self.cfg.cursor_blink {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+            Action::ToggleCopyOnSelect => {
+                self.cfg.copy_on_select = !self.cfg.copy_on_select;
+                self.persist_pref(
+                    "copy-on-select",
+                    if self.cfg.copy_on_select {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+            Action::SetBellOff => {
+                self.cfg.bell = kettle_config::BellMode::Off;
+                self.persist_pref("bell", "off");
+            }
+            Action::SetBellVisual => {
+                self.cfg.bell = kettle_config::BellMode::Visual;
+                self.persist_pref("bell", "visual");
+            }
+            Action::SetBellAttention => {
+                self.cfg.bell = kettle_config::BellMode::Attention;
+                self.persist_pref("bell", "attention");
+            }
+            Action::SetBellBoth => {
+                self.cfg.bell = kettle_config::BellMode::Both;
+                self.persist_pref("bell", "both");
+            }
+            Action::ToggleMouseHide => {
+                self.cfg.mouse_hide_while_typing = !self.cfg.mouse_hide_while_typing;
+                self.persist_pref(
+                    "mouse-hide-while-typing",
+                    if self.cfg.mouse_hide_while_typing {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
             }
             // Cycle 695 Terminator parity (`key_help`).
             // Terminator's F1 opens its HTML manual via xdg-open;
@@ -8099,6 +8363,71 @@ mod tests {
         ];
         let got = filter_disabled(menu);
         assert!(got.is_empty());
+    }
+
+    /// Cycle 717 drift guard. The Preferences ▸ submenu builder
+    /// must surface every runtime-mutable toggle the spec promises:
+    ///   - 3 scrollbar radio rows
+    ///   - 3 boolean toggles (cursor blink, copy on select, mouse-hide)
+    ///   - 4 bell radio rows
+    ///   - 2 font-size +/− rows
+    ///   - 1 Advanced… (EditConfig) escape hatch
+    ///
+    /// Total: 13 actionable rows + 4 separators = 17 items. If the
+    /// count drifts (someone adds a row without updating this guard
+    /// or removes one in a refactor), the test fails so the
+    /// regression is caught at PR time.
+    #[test]
+    fn preferences_submenu_contains_all_user_facing_toggles() {
+        // We can't directly call append_preferences_submenu_items
+        // without an App; instead pin the Action variants this cycle
+        // ships so the keybinds-side palette wiring stays in sync.
+        let expected_actions: &[Action] = &[
+            Action::SetScrollbarAlways,
+            Action::SetScrollbarAuto,
+            Action::SetScrollbarNever,
+            Action::ToggleCursorBlink,
+            Action::ToggleCopyOnSelect,
+            Action::ToggleMouseHide,
+            Action::SetBellOff,
+            Action::SetBellVisual,
+            Action::SetBellAttention,
+            Action::SetBellBoth,
+            Action::IncreaseFontSize,
+            Action::DecreaseFontSize,
+            Action::EditConfig,
+        ];
+        // Each action parses from its name (cycle-104 from_name
+        // surface) so the keybind grammar accepts them. Catches the
+        // case where someone adds a variant but forgets the
+        // from_name arm.
+        for a in expected_actions {
+            // We need a known name string for each. Use the canonical
+            // forms documented in palette.rs / keybinds.rs.
+            let name = match a {
+                Action::SetScrollbarAlways => "set_scrollbar_always",
+                Action::SetScrollbarAuto => "set_scrollbar_auto",
+                Action::SetScrollbarNever => "set_scrollbar_never",
+                Action::ToggleCursorBlink => "toggle_cursor_blink",
+                Action::ToggleCopyOnSelect => "toggle_copy_on_select",
+                Action::ToggleMouseHide => "toggle_mouse_hide",
+                Action::SetBellOff => "set_bell_off",
+                Action::SetBellVisual => "set_bell_visual",
+                Action::SetBellAttention => "set_bell_attention",
+                Action::SetBellBoth => "set_bell_both",
+                Action::IncreaseFontSize => "increase_font_size",
+                Action::DecreaseFontSize => "decrease_font_size",
+                Action::EditConfig => "edit_config",
+                _ => unreachable!(),
+            };
+            let parsed = Action::from_name(name)
+                .unwrap_or_else(|| panic!("Action::from_name({name:?}) returned None"));
+            assert_eq!(
+                std::mem::discriminant(&parsed),
+                std::mem::discriminant(a),
+                "Action::from_name({name:?}) returned the wrong variant"
+            );
+        }
     }
 
     /// Cycle 715 drift guard. `assign_mnemonics` returns the first

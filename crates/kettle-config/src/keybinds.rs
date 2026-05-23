@@ -204,6 +204,25 @@ pub enum Action {
     /// active config file to that pane's PTY too in case the
     /// user wants to switch editors mid-session.
     EditConfig,
+    /// Cycle 717 (Preferences submenu, C8): runtime-mutable
+    /// toggles that the Preferences ▸ right-click submenu wires
+    /// through `Config::persist_config_toggle` (cycle 716) so a
+    /// click both updates `self.cfg` AND writes the change back
+    /// to `~/.config/kettle/config` atomically. Each variant
+    /// targets one specific value; the submenu builder emits
+    /// radio-style rows (one variant per option) for enum
+    /// settings and toggle rows (one variant for the boolean)
+    /// for bools.
+    SetScrollbarAlways,
+    SetScrollbarAuto,
+    SetScrollbarNever,
+    ToggleCursorBlink,
+    ToggleCopyOnSelect,
+    SetBellOff,
+    SetBellVisual,
+    SetBellAttention,
+    SetBellBoth,
+    ToggleMouseHide,
     /// Cycle 693 Terminator parity (`key_scaled_zoom`).
     /// Terminator's "scaled zoom" maximizes the active pane AND
     /// scales the font proportionally so text fills the larger
@@ -485,6 +504,16 @@ pub fn action_names() -> Vec<&'static str> {
         "open_layout_picker",
         "preferences",
         "edit_config",
+        "set_scrollbar_always",
+        "set_scrollbar_auto",
+        "set_scrollbar_never",
+        "toggle_cursor_blink",
+        "toggle_copy_on_select",
+        "set_bell_off",
+        "set_bell_visual",
+        "set_bell_attention",
+        "set_bell_both",
+        "toggle_mouse_hide",
         "increase_font_size",
         "zoom_in",
         "decrease_font_size",
@@ -686,6 +715,22 @@ impl Action {
             | "edit-config"
             | "open_config"
             | "open-config" => EditConfig,
+            "set_scrollbar_always" | "set-scrollbar-always" | "scrollbar_always" => {
+                SetScrollbarAlways
+            }
+            "set_scrollbar_auto" | "set-scrollbar-auto" | "scrollbar_auto" => SetScrollbarAuto,
+            "set_scrollbar_never" | "set-scrollbar-never" | "scrollbar_never" => SetScrollbarNever,
+            "toggle_cursor_blink" | "toggle-cursor-blink" | "cursor_blink_toggle" => {
+                ToggleCursorBlink
+            }
+            "toggle_copy_on_select" | "toggle-copy-on-select" | "copy_on_select_toggle" => {
+                ToggleCopyOnSelect
+            }
+            "set_bell_off" | "set-bell-off" | "bell_off" => SetBellOff,
+            "set_bell_visual" | "set-bell-visual" | "bell_visual" => SetBellVisual,
+            "set_bell_attention" | "set-bell-attention" | "bell_attention" => SetBellAttention,
+            "set_bell_both" | "set-bell-both" | "bell_both" => SetBellBoth,
+            "toggle_mouse_hide" | "toggle-mouse-hide" | "mouse_hide_toggle" => ToggleMouseHide,
             "increase_font_size" | "zoom_in" => IncreaseFontSize,
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,

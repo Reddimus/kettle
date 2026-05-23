@@ -31,6 +31,19 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Send newline (Shift+Return) to focused pane", SendNewline),
         ("Open layout picker", OpenLayoutPicker),
         ("Edit config file in $EDITOR", EditConfig),
+        ("Preferences: scrollbar always-on", SetScrollbarAlways),
+        ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
+        ("Preferences: scrollbar hidden", SetScrollbarNever),
+        ("Preferences: toggle cursor blink", ToggleCursorBlink),
+        ("Preferences: toggle copy-on-select", ToggleCopyOnSelect),
+        ("Preferences: bell off", SetBellOff),
+        ("Preferences: bell visual flash", SetBellVisual),
+        ("Preferences: bell attention (urgency)", SetBellAttention),
+        ("Preferences: bell visual + attention", SetBellBoth),
+        (
+            "Preferences: toggle mouse-hide while typing",
+            ToggleMouseHide,
+        ),
         ("Focus next pane", FocusNext),
         ("Focus previous pane", FocusPrev),
         ("New window", NewWindow),
@@ -200,6 +213,16 @@ mod tests {
             SendNewline,
             OpenLayoutPicker,
             EditConfig,
+            SetScrollbarAlways,
+            SetScrollbarAuto,
+            SetScrollbarNever,
+            ToggleCursorBlink,
+            ToggleCopyOnSelect,
+            SetBellOff,
+            SetBellVisual,
+            SetBellAttention,
+            SetBellBoth,
+            ToggleMouseHide,
             IncreaseFontSize,
             DecreaseFontSize,
             ResetFontSize,
@@ -298,6 +321,16 @@ mod tests {
                 | SendNewline
                 | OpenLayoutPicker
                 | EditConfig
+                | SetScrollbarAlways
+                | SetScrollbarAuto
+                | SetScrollbarNever
+                | ToggleCursorBlink
+                | ToggleCopyOnSelect
+                | SetBellOff
+                | SetBellVisual
+                | SetBellAttention
+                | SetBellBoth
+                | ToggleMouseHide
                 | IncreaseFontSize
                 | DecreaseFontSize
                 | ResetFontSize
