@@ -46,6 +46,20 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 580 — **Kitty per-image frame cap.** Each successful `a=f`
+              frame transmission appends a `Frame` (carrying an
+              `ImageData` Arc) to `frames[id]`; chaining 100 000+
+              frame transmissions for one id grew the Vec
+              unboundedly. New `MAX_FRAMES_PER_IMAGE = 256` (well
+              above any realistic animation — `.gif` files top
+              out around 200 frames). Past the cap, additional
+              pushes are silently dropped; the animation keeps
+              playing the frames already captured. Drift guard
+              `kitty_frames_per_image_cap_holds_against_flood`
+              spams `MAX_FRAMES_PER_IMAGE + 16` 1×1 frames at one
+              id and asserts the Vec stops at the cap. Workspace
+              tests 329 → 330 (+ 1 ignored).
+
   cycle 579 — **Kitty in-flight slot cap.** Complement to cycle
               578. The cycle-578 per-slot byte cap stops any
               *single* chunked transmission from OOMing the host,

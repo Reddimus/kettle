@@ -47,6 +47,18 @@ const MAX_KITTY_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
 /// are evicted by the per-slot cap above.
 const MAX_IN_FLIGHT_SLOTS: usize = 32;
 
+/// Cycle 580: cap on per-image animation frames. Each successful
+/// `a=f` frame transmission appends a `Frame` (carrying an `ImageData`
+/// Arc) to `frames[id]`; without a cap, an attacker can chain
+/// 100 000+ frame transmissions for one id and grow the Vec
+/// unboundedly. 256 sits well above any realistic animation (`.gif`
+/// files top out around 200 frames; kitty's animation protocol
+/// imposes no spec-level bound but real content stays small). Past
+/// the cap, additional frame pushes are silently dropped — the
+/// existing animation continues to play with the frames already
+/// captured.
+const MAX_FRAMES_PER_IMAGE: usize = 256;
+
 #[derive(Default)]
 struct Acc {
     control: String,
@@ -448,10 +460,17 @@ impl KittyState {
                         fr.gap_ms = gap;
                     }
                 } else {
-                    self.frames.entry(fid).or_default().push(Frame {
-                        img: frame_img,
-                        gap_ms: gap,
-                    });
+                    // Cycle 580: cap per-image frame count. Beyond
+                    // MAX_FRAMES_PER_IMAGE, drop the push silently —
+                    // the animation already has plenty to play, and
+                    // refusing growth bounds the per-id memory ceiling.
+                    let frames = self.frames.entry(fid).or_default();
+                    if frames.len() < MAX_FRAMES_PER_IMAGE {
+                        frames.push(Frame {
+                            img: frame_img,
+                            gap_ms: gap,
+                        });
+                    }
                 }
             }
             return KittyOut::Animate { id: fid };
@@ -930,6 +949,27 @@ mod tests {
         // — these are compile-time invariants of the constant itself.
         const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
         const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+    }
+
+    /// Cycle 580 drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`
+    /// frame transmissions for one image must not grow the `frames[id]`
+    /// Vec past the cap. Verifies the silent-drop behavior so a hostile
+    /// PTY emitter can't OOM kettle by spamming `a=f` frames at one id.
+    #[test]
+    fn kitty_frames_per_image_cap_holds_against_flood() {
+        let mut k = KittyState::default();
+        // Establish the base image (`a=T` transmit).
+        k.feed(&format!("a=T,i=7,f=32,s=1,v=1;{PX}"));
+        // Spam more than the cap's worth of frames; each is a tiny
+        // 1×1 RGBA frame so the test allocation stays modest.
+        for _ in 0..(super::MAX_FRAMES_PER_IMAGE + 16) {
+            k.feed(&format!("a=f,i=7,f=32,s=1,v=1;{PX}"));
+        }
+        assert_eq!(
+            k.frames(7).len(),
+            super::MAX_FRAMES_PER_IMAGE,
+            "frames Vec for one id must clamp at MAX_FRAMES_PER_IMAGE"
+        );
     }
 
     /// Cycle 579 drift guard: a hostile PTY emitter that fires
