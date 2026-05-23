@@ -98,7 +98,12 @@ fi
 if remote_tag=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null) \
     && [ -n "$remote_tag" ]; then
     echo "::error::remote tag v${VERSION} already exists on origin" >&2
-    echo "  pick a different version, or `git fetch && git tag -d v${VERSION}`" >&2
+    # Cycle 516: backticks inside double-quoted echo run as command
+    # substitution. The original (cycle 51) line ran `git fetch && git
+    # tag -d` AT ERROR TIME, mutating state and printing garbled help.
+    # Use single quotes around the suggestion so the backticks are
+    # literal text the user can copy-paste.
+    echo '  pick a different version, or `git fetch && git tag -d v'"${VERSION}"'`' >&2
     echo "  if you need to overwrite (rarely the right move; cuts a fresh" >&2
     echo "  patch version is usually safer than retagging a published v)" >&2
     exit 1
