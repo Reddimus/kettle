@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 653 — **Deploy verification: install latest build to
+              `~/.local/bin/kettle`** via `./scripts/install.sh`.
+              The local binary now matches commit 82a827f
+              (cycle 652) and reports `1.45.1 (82a827f)` on
+              `--version`. Smoke-checked `--check-config`:
+              loads defaults cleanly, picks up the bundled
+              TokyoNight Night theme + JetBrainsMono Nerd Font.
+              Honors the user's standing instruction
+              ("[Keep local kettle current](memory/feedback_keep_local_kettle_current.md)"
+              — run install.sh after every meaningful build).
+              No code change; this cycle is the explicit
+              deployment step the /goal hook called out.
+
   cycle 652 — **confirm-dialog sub-cycle 4: keyboard-nav pure
               helper**: `confirm_dialog_keypress(current_focus,
               num_buttons, key) -> ConfirmKeyResult`. Pure state
