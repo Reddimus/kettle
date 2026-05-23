@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 655 — **remote.py sub-cycle 6 prep: `Pane::remote_context`
+              field + kettle-ui → kettle-remote dep**: now every
+              Pane carries `pub remote_context:
+              Option<kettle_remote::RemoteContext>` that the
+              upcoming poll loop will populate. kettle-ui's
+              Cargo.toml gains `kettle-remote = { path = ... }`
+              so the App can call `detect_remote_with(child_pid,
+              &mut sysinfo_system)` per pane on the cycle-290
+              trigger tick. `#[allow(dead_code)]` gates the
+              field until the poll wiring lands in a follow-up
+              sub-cycle. Workspace tests stay 382.
+
   cycle 654 — **terminalshot sub-cycle 3: `ScreenshotRequest`
               + `Renderer::pending_screenshot` slot**: queues
               a screenshot request on the renderer for the next

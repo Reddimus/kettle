@@ -25,6 +25,11 @@ crossbeam-channel = "0.5.15"
 kettle-config = { version = "1.2.0", path = "../kettle-config" }
 kettle-core = { version = "1.2.0", path = "../kettle-core" }
 kettle-render = { version = "1.2.0", path = "../kettle-render" }
+# Cycle 655 (sub-cycle 6 of TERMINATOR-REMOTE-DESIGN.md): SSH /
+# Docker / Podman / kubectl session detection. Carries the sysinfo
+# dep into kettle-ui where the App's poll loop will live; non-UI
+# consumers stay isolated.
+kettle-remote = { version = "1.2.0", path = "../kettle-remote" }
 log.workspace = true
 # Cycle 324: Lua scripting foundation. The `--lua-script PATH`
 # CLI flag executes a Lua file at startup with a `kettle`

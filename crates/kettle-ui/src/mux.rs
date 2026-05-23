@@ -139,6 +139,17 @@ pub struct Pane {
     /// shell. Doesn't track environment / cwd-after-launch — those
     /// re-derive from the OSC-7 cwd that's already snapshotted.
     pub argv: Vec<String>,
+    /// Cycle 655 (Terminator parity, `plugins/remote.py`, sub-cycle
+    /// 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): the most-recently
+    /// detected remote-session context for this pane. Updated by
+    /// the App's periodic poll (sub-cycle 6, to be wired). `None`
+    /// means either the pane's process tree has no SSH / container
+    /// descendant, or the poll hasn't run yet. When non-None, the
+    /// pane title shows `format_remote_title(...)` and the right-
+    /// click menu (sub-cycle 7) exposes a "Clone session" entry.
+    #[allow(dead_code)] // App-side poll loop lands in the next sub-cycle.
+    pub remote_context: Option<kettle_remote::RemoteContext>,
 }
 
 pub enum Node {
@@ -616,6 +627,7 @@ impl Mux {
                 closed: false,
                 last_history: None,
                 argv: argv.to_vec(),
+                remote_context: None,
             },
         );
         Ok(id)
