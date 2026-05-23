@@ -903,7 +903,7 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// Empty input yields a single "(no ssh-host entries configured)" line so
 /// the user sees their config is empty rather than no output at all.
 /// Pure so the formatting is unit-testable without the CLI.
-/// Format the cycles-461-470 opt-in echo lines for `--check-config`.
+/// Format the opt-in echo lines for `--check-config` (cycles 461-470).
 /// Pure helper: takes a `Config`, returns one `String` per echo line
 /// the user should see. Empty `Vec` for a default config — terse
 /// default-summary output is the contract.
