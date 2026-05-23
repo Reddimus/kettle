@@ -162,6 +162,19 @@ impl LuaEngine {
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
                 let _ = pkg.set("loadlib", mlua::Value::Nil);
             }
+            // NOTE on `debug.*` (audited cycle 591): mlua's `Lua::new()`
+            // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`
+            // library entirely. The dangerous methods —
+            // `debug.getregistry` (reach into mlua's reference table),
+            // `debug.sethook` (DoS via instruction hooks),
+            // `debug.set{metatable,local,upvalue}` (break opaque
+            // userdata) — are already unreachable from kettle's Lua
+            // VM. No explicit nil-sweep needed here. The
+            // `safe_sandbox_pins_mlua_default_excludes_debug` drift
+            // guard pins this so a future refactor that switches to
+            // `Lua::unsafe_new()` (or explicitly loads `StdLib::DEBUG`)
+            // fails the gauntlet rather than silently widening the
+            // surface.
         }
         let pending: Arc<Mutex<Vec<LuaCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
@@ -940,5 +953,30 @@ mod tests {
             eng.eval_str("return type(package.loadlib)").unwrap(),
             "function"
         );
+    }
+
+    /// Cycle 591 drift guard: pin that mlua's `Lua::new()` default
+    /// excludes the entire `debug` library (per its `StdLib::ALL_SAFE`
+    /// load list). If a future refactor switches to `Lua::unsafe_new()`
+    /// or explicitly loads `StdLib::DEBUG`, the dangerous methods
+    /// (`debug.getregistry` reaches into mlua's reference table,
+    /// `debug.sethook` is an instruction-level DoS hook, `debug.set*`
+    /// breaks opaque-userdata encapsulation) would silently become
+    /// reachable from user scripts. This test catches that on both
+    /// safe and trusted sandbox modes — neither is meant to expose
+    /// the debug surface.
+    #[test]
+    fn lua_default_globals_exclude_debug_library() {
+        for safe in [true, false] {
+            let eng = LuaEngine::new_with_sandbox("Default", safe).expect("init");
+            assert_eq!(
+                eng.eval_str("return type(debug)").unwrap(),
+                "nil",
+                "safe={safe}: `debug` library must be nil at the global \
+                 level — mlua's Lua::new() defaults exclude it. If a future \
+                 refactor switches to Lua::unsafe_new() or loads StdLib::DEBUG, \
+                 update SECURITY.md cycle-447 + cycle-591 notes accordingly"
+            );
+        }
     }
 }

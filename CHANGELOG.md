@@ -46,6 +46,26 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 591 — **Pin mlua-default debug-library exclusion as a drift
+              guard.** Audit revealed that mlua's `Lua::new()`
+              defaults already exclude the entire `debug` library
+              (via `StdLib::ALL_SAFE`), so the dangerous methods
+              `debug.getregistry` (sandbox-escape via reference-
+              table access), `debug.sethook` (instruction-level
+              DoS), and `debug.set{metatable,local,upvalue}` (break
+              opaque-userdata encapsulation) are already
+              unreachable from user scripts in both safe and
+              trusted modes. New positive drift guard
+              `lua_default_globals_exclude_debug_library` asserts
+              `type(debug) == "nil"` in both sandbox modes — if a
+              future refactor switches to `Lua::unsafe_new()` or
+              explicitly loads `StdLib::DEBUG`, the test fires
+              instead of the regression silently widening the
+              SECURITY.md cycle-447 "Lua plugin sandbox escape"
+              surface. Added a NOTE comment in `new_with_sandbox`
+              documenting why no explicit nil-sweep is needed.
+              Workspace tests 336 → 337.
+
   cycle 590 — **install-online.sh: accurate SHA-256 diagnostic.**
               The hash-verification branch tried `sha256sum -c`,
               fell back to `shasum -a 256 -c`, and printed "SHA-
