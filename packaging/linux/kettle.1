@@ -150,8 +150,9 @@ baseline.
 Same as
 .B \-\-screenshot
 but renders with a synthetic right-click context menu open over
-the pane. Pins the menu render-pass-order against the v1.3.0
-blank-menu regression class.
+the pane. Useful for visually verifying the menu's render path
+without an interactive window, and for pixel-level visual-
+regression tests in CI.
 .TP
 .BI \-\-cols \ "N\fR, \fP\fB\-\-rows \ N"
 Override the rendered grid size (in cells) for
