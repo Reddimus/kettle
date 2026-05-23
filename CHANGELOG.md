@@ -46,6 +46,25 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 585 — **Session.json read-into-memory cap.** `session::
+              load_from_path` previously called
+              `std::fs::read_to_string(p)` with no size cap. A
+              swap-attack with filesystem access (out of strict
+              scope per SECURITY.md but the same defense-in-depth
+              reasoning as cycle 584's bg-image fix) could
+              replace the auto-generated session file with a
+              multi-GB blob and OOM kettle on launch. Cheap
+              pre-read `metadata().len()` check against
+              `MAX_SESSION_BYTES = 16 MiB` (1000× over realistic
+              sessions, leaves the bomb on disk for forensics
+              renamed to `.json.toobig.<unix-seconds>` — same
+              shape as the cycle-108 corrupted-file recovery
+              path). Drift guard
+              `load_from_path_rejects_oversize_file_without_reading_into_memory`
+              writes a 17 MiB file, asserts the load returns
+              None, the file was renamed, and one `.toobig`
+              backup exists. Workspace tests 333 → 334.
+
   cycle 584 — **Bg-image decompression-bomb defense.** Companion
               to cycle 576 (PTY-layer kitty/iTerm2 images) at the
               renderer crate's user-configurable
