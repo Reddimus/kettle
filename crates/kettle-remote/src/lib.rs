@@ -60,6 +60,88 @@ pub enum ContainerRuntime {
     Lxc,
 }
 
+/// Cycle 730: process-tree abstraction so the BFS body of
+/// [`detect_remote_with`] is testable against a synthetic fixture
+/// instead of needing real OS processes.
+///
+/// Pre-729, the BFS read `sysinfo::System` directly; the only test
+/// that could exist was the `detect_remote_returns_none_for_invalid_pids`
+/// smoke (`detect_remote(0).is_none()`). Two-hop ssh, depth-3
+/// container, closer-wins-on-tie — none of those could be unit-
+/// tested without spawning real ssh / docker processes from CI,
+/// which the cycle-646 author specifically called out as too
+/// fragile (see the comment on that test).
+///
+/// Implementations:
+/// - [`sysinfo::System`](https://docs.rs/sysinfo) — built-in via
+///   the impl below; used by [`detect_remote_with`].
+/// - `tests::MockProcessTree` — `#[cfg(test)]`-only fixture in the
+///   test module; powers the 8 cycle-730 BFS tests.
+///
+/// The trait is intentionally minimal: four read-only methods +
+/// one `refresh`, all `u32`-pid typed (no `sysinfo::Pid` leak).
+/// External implementations are unusual but supported — a future
+/// e.g. `/proc`-only or seccomp-restricted impl would slot in
+/// here without changing kettle-remote's API.
+pub trait ProcessTree {
+    /// Refresh the snapshot. The BFS calls this once at the top of
+    /// each detection pass so a single-threaded poll loop sees a
+    /// consistent process map. For sysinfo this re-reads the OS;
+    /// for a fixture this is a no-op.
+    fn refresh(&mut self);
+    /// Parent PID of `pid`, or `None` if `pid` is missing / has no
+    /// parent recorded (top-level / scheduler).
+    fn parent_of(&self, pid: u32) -> Option<u32>;
+    /// Argv of `pid` as lossy UTF-8 strings, or `None` if the
+    /// process is gone or never existed. Lossy conversion mirrors
+    /// the pre-729 `to_string_lossy` behavior — non-UTF8 argv is
+    /// exotic and the detectors only care about `argv[0]` + flags
+    /// which are always ASCII in practice.
+    fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
+    /// All known PIDs in the current snapshot. Used to build the
+    /// children-by-parent map exactly once per detection pass.
+    fn all_pids(&self) -> Vec<u32>;
+}
+
+/// Cycle 730: the production `ProcessTree` impl. Wraps sysinfo's
+/// cmd-refresh + `processes()` map behind the trait's u32-pid API.
+///
+/// The refresh strategy matches the pre-729 in-line code: cmd-only
+/// refresh (not memory / disk / network), all PIDs, full refresh
+/// of any that disappeared. sysinfo's internal cache makes this
+/// cheap on the second + later calls (~hundreds of µs on a typical
+/// 200-process machine).
+impl ProcessTree for sysinfo::System {
+    fn refresh(&mut self) {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+        let refresh_kind = ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always);
+        self.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+    }
+
+    fn parent_of(&self, pid: u32) -> Option<u32> {
+        self.process(sysinfo::Pid::from_u32(pid))
+            .and_then(|p| p.parent())
+            .map(|p| p.as_u32())
+    }
+
+    fn argv_of(&self, pid: u32) -> Option<Vec<String>> {
+        // Lossy conversion is fine — non-UTF8 argv is exotic and
+        // would still be detected at the exe-name level (the
+        // detectors only inspect argv[0]'s last path component +
+        // ASCII flags).
+        self.process(sysinfo::Pid::from_u32(pid)).map(|p| {
+            p.cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    fn all_pids(&self) -> Vec<u32> {
+        self.processes().keys().map(|p| p.as_u32()).collect()
+    }
+}
+
 /// Cycle 646 (sub-cycle 5 of [`TERMINATOR-REMOTE-DESIGN.md`](
 /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): detect a remote-
 /// session context for the pane rooted at `child_pid`.
@@ -87,38 +169,62 @@ pub fn detect_remote(child_pid: u32) -> Option<RemoteContext> {
 /// `sysinfo::System`. The App's poll loop will own one of these
 /// across ticks so the process-list refresh amortizes (sysinfo's
 /// internal cache survives between calls).
+///
+/// Cycle 730: now a thin wrapper around the generic
+/// `detect_in_tree` helper (private — see the cycle-730 doc on
+/// `ProcessTree` for why the BFS body got extracted) so the
+/// detection logic is testable. Signature preserved —
+/// `kettle-ui::App` still passes `&mut self.remote_sysinfo` (a
+/// `SysinfoSystem`) and gets back the same `Option<RemoteContext>`.
 pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<RemoteContext> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
-    let refresh_kind = ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always);
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+    detect_in_tree(child_pid, sys)
+}
 
-    // Collect all descendants of child_pid via BFS over the parent
-    // chain. sysinfo gives us a flat `processes()` map; we group
-    // children by parent.
-    let root = Pid::from_u32(child_pid);
-    let mut children_by_parent: std::collections::HashMap<Pid, Vec<Pid>> =
-        std::collections::HashMap::new();
-    for (&pid, proc) in sys.processes() {
-        if let Some(parent) = proc.parent() {
-            children_by_parent.entry(parent).or_default().push(pid);
+/// Cycle 730: generic BFS over any [`ProcessTree`]. Walks descendants
+/// of `child_pid` breadth-first; closest descendants checked first
+/// so a `bash → docker → ssh` tree resolves to the docker context
+/// (the directly-spawned remote client), not the deeper-but-also-
+/// matching ssh.
+///
+/// Private — the public entry points ([`detect_remote`] /
+/// [`detect_remote_with`]) wrap it with a sysinfo `&mut System`.
+/// External impls of `ProcessTree` can still call it (the trait is
+/// `pub`), but routing through the sysinfo wrapper is the documented
+/// path. Tests use this directly with `MockProcessTree`.
+fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Option<RemoteContext> {
+    tree.refresh();
+
+    // Group children by parent so the BFS is O(N) snapshot + O(D)
+    // walk where D is the depth of descendants. The pre-729 sysinfo
+    // BFS used `sysinfo::Pid` keys; the trait abstraction is u32
+    // so the same map structure works for both `sysinfo::System`
+    // and `MockProcessTree`.
+    let pids = tree.all_pids();
+    let mut children_by_parent: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::with_capacity(pids.len());
+    for pid in &pids {
+        if let Some(parent) = tree.parent_of(*pid) {
+            children_by_parent.entry(parent).or_default().push(*pid);
         }
     }
 
-    // BFS from root; closer descendants checked first.
-    let mut queue: std::collections::VecDeque<Pid> = std::collections::VecDeque::new();
-    if let Some(initial) = children_by_parent.get(&root) {
-        queue.extend(initial.iter().copied());
+    // BFS from child_pid; closer descendants checked first. Loop
+    // bound: each pid is enqueued ≤ 1 time (a Pid only has one
+    // parent), so termination is guaranteed even on a cyclic
+    // children_by_parent (which shouldn't happen but the bound
+    // protects against a future fixture bug).
+    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+    let mut visited: std::collections::HashSet<u32> =
+        std::collections::HashSet::with_capacity(pids.len());
+    if let Some(initial) = children_by_parent.get(&child_pid) {
+        for &pid in initial {
+            if visited.insert(pid) {
+                queue.push_back(pid);
+            }
+        }
     }
     while let Some(pid) = queue.pop_front() {
-        if let Some(proc) = sys.process(pid) {
-            // Convert OsString argv to Vec<String> for the detectors.
-            // Lossy conversion is fine — non-UTF8 argv is exotic
-            // and would still be detected at the exe-name level.
-            let argv: Vec<String> = proc
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect();
+        if let Some(argv) = tree.argv_of(pid) {
             if let Some(ctx) = detect_ssh(&argv) {
                 return Some(ctx);
             }
@@ -127,7 +233,11 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
             }
         }
         if let Some(grand) = children_by_parent.get(&pid) {
-            queue.extend(grand.iter().copied());
+            for &gpid in grand {
+                if visited.insert(gpid) {
+                    queue.push_back(gpid);
+                }
+            }
         }
     }
     None
@@ -669,5 +779,196 @@ mod tests {
         assert!(detect_ssh(&argv(&[])).is_none());
         // ssh with no target (just flags) → None.
         assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
+    }
+
+    // === Cycle 730: ProcessTree fixture + mocked BFS tests =========
+    //
+    // Pre-729 the only `detect_remote_with` test was the
+    // `detect_remote_returns_none_for_invalid_pids` smoke (above)
+    // — it called the real sysinfo against pid 0 / u32::MAX. The
+    // BFS body (descendant walk, closer-wins-on-tie, refresh
+    // contract) was untested because spawning real ssh from CI
+    // is too fragile. Cycle 730 extracted [`ProcessTree`] so the
+    // BFS body is now testable with a synthetic process tree.
+
+    /// Cycle 730 fixture: a `ProcessTree` impl backed by a hashmap.
+    /// `add(pid, parent, argv)` builds the tree; `ProcessTree` reads
+    /// it. `refresh()` is a no-op (the fixture is already-built).
+    struct MockProcessTree {
+        procs: std::collections::HashMap<u32, MockProc>,
+    }
+
+    struct MockProc {
+        parent: Option<u32>,
+        argv: Vec<String>,
+    }
+
+    impl MockProcessTree {
+        fn new() -> Self {
+            Self {
+                procs: std::collections::HashMap::new(),
+            }
+        }
+
+        fn add(&mut self, pid: u32, parent: Option<u32>, argv: &[&str]) {
+            self.procs.insert(
+                pid,
+                MockProc {
+                    parent,
+                    argv: argv.iter().map(|s| (*s).to_string()).collect(),
+                },
+            );
+        }
+    }
+
+    impl ProcessTree for MockProcessTree {
+        fn refresh(&mut self) {
+            // Fixture is already-built; refresh is a no-op.
+        }
+
+        fn parent_of(&self, pid: u32) -> Option<u32> {
+            self.procs.get(&pid).and_then(|p| p.parent)
+        }
+
+        fn argv_of(&self, pid: u32) -> Option<Vec<String>> {
+            self.procs.get(&pid).map(|p| p.argv.clone())
+        }
+
+        fn all_pids(&self) -> Vec<u32> {
+            self.procs.keys().copied().collect()
+        }
+    }
+
+    /// Cycle 730 drift guard: ssh as a direct child of the pane's
+    /// shell is the most common shape. `detect_in_tree` must reach
+    /// it in a single BFS hop.
+    #[test]
+    fn detect_in_tree_direct_child_ssh() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(200, Some(100), &["ssh", "alice@server.example.com"]);
+        assert_eq!(
+            detect_in_tree(100, &mut tree),
+            Some(RemoteContext::Ssh {
+                host: "server.example.com".into(),
+                user: Some("alice".into()),
+            })
+        );
+    }
+
+    /// Cycle 730 drift guard: `ssh-with-credentials` wrappers
+    /// (e.g., `sshpass`, `assume-role`, corporate VPN wrappers)
+    /// spawn ssh one or more levels deep. The BFS must walk past
+    /// the non-matching intermediate process.
+    #[test]
+    fn detect_in_tree_two_hops_ssh_via_wrapper() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(150, Some(100), &["/usr/local/bin/run-with-creds"]);
+        tree.add(200, Some(150), &["ssh", "bob@deep.example"]);
+        assert_eq!(
+            detect_in_tree(100, &mut tree),
+            Some(RemoteContext::Ssh {
+                host: "deep.example".into(),
+                user: Some("bob".into()),
+            })
+        );
+    }
+
+    /// Cycle 730 drift guard: container exec at depth 3 (shell →
+    /// tmux session → window → `docker exec`). Matches the
+    /// terminator-parity assumption that a pane can have arbitrary-
+    /// depth descendants.
+    #[test]
+    fn detect_in_tree_container_at_depth_3() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(150, Some(100), &["tmux", "new-session"]);
+        tree.add(160, Some(150), &["zsh"]);
+        tree.add(
+            200,
+            Some(160),
+            &["docker", "exec", "-it", "ubuntu-2204", "bash"],
+        );
+        assert_eq!(
+            detect_in_tree(100, &mut tree),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "ubuntu-2204".into(),
+            })
+        );
+    }
+
+    /// Cycle 730 drift guard: when two descendants both match a
+    /// remote-client argv, the *closer* (depth-1) wins over the
+    /// deeper (depth-2). This pins the BFS-is-breadth-first
+    /// contract — a future swap to DFS would silently change
+    /// behavior on this tree, breaking which container the right-
+    /// click "Reconnect" menu offers.
+    #[test]
+    fn detect_in_tree_closer_descendant_wins_on_tie() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(200, Some(100), &["docker", "exec", "near", "sh"]);
+        tree.add(201, Some(200), &["ssh", "far.example"]);
+        assert_eq!(
+            detect_in_tree(100, &mut tree),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "near".into(),
+            })
+        );
+    }
+
+    /// Cycle 730 drift guard: when `child_pid` has no entry in the
+    /// tree AND nothing claims it as parent, return `None` without
+    /// looping forever or panicking.
+    #[test]
+    fn detect_in_tree_missing_root_returns_none() {
+        let mut tree = MockProcessTree::new();
+        tree.add(50, Some(40), &["bash"]); // unrelated tree
+        tree.add(60, Some(50), &["ssh", "elsewhere"]);
+        assert!(detect_in_tree(999, &mut tree).is_none());
+    }
+
+    /// Cycle 730 drift guard: an empty tree returns `None`.
+    /// Boundary case for the BFS init.
+    #[test]
+    fn detect_in_tree_empty_tree_returns_none() {
+        let mut tree = MockProcessTree::new();
+        assert!(detect_in_tree(100, &mut tree).is_none());
+    }
+
+    /// Cycle 730 drift guard: descendants that don't match a
+    /// remote-client argv return `None` even though the walk
+    /// completes successfully. Catches the "grep ssh log.txt"
+    /// false-positive class.
+    #[test]
+    fn detect_in_tree_non_remote_descendants_return_none() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(150, Some(100), &["vim", "file.txt"]);
+        tree.add(151, Some(100), &["python", "-c", "print('hi')"]);
+        // grep "ssh" is not an ssh client — argv[0] gates the
+        // detector. Pre-729 this couldn't be tested without
+        // spawning a real grep.
+        tree.add(200, Some(150), &["grep", "ssh", "log.txt"]);
+        assert!(detect_in_tree(100, &mut tree).is_none());
+    }
+
+    /// Cycle 730 drift guard: a cycle in the parent chain
+    /// (impossible in a real OS, but possible in a buggy fixture
+    /// or future trait impl) must not loop the BFS forever. The
+    /// `visited` set added in cycle 730 protects against this;
+    /// this test fails if someone removes that defensive code.
+    #[test]
+    fn detect_in_tree_handles_parent_cycle_without_looping() {
+        let mut tree = MockProcessTree::new();
+        // Pathological: A is parent of B, B is parent of A.
+        tree.add(100, Some(200), &["bash"]);
+        tree.add(200, Some(100), &["zsh"]);
+        // No remote client in the cycle → None, but the test
+        // would hang forever pre-`visited` if there's a regression.
+        assert!(detect_in_tree(100, &mut tree).is_none());
     }
 }

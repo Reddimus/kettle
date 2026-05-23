@@ -55,6 +55,27 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Cycle 730: verify the Justfile parses on every OS — catches
+      # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
+      # or `tempdir()`-builtin removal at CI time instead of a
+      # confused contributor's "why doesn't `just gauntlet` work on
+      # Windows?" bug report. Pre-730 the Justfile was bash-only
+      # (RUSTDOCFLAGS prefix, /tmp paths, ./scripts/install.sh
+      # invocations) and never exercised by CI; the cross-platform
+      # rewrite makes a parse-smoke worthwhile.
+      #
+      # `taiki-e/install-action@just` is cached so the install is
+      # ~1s after first run. `just --summary` prints every recipe
+      # across all platforms (including [unix]+[windows] gated
+      # ones), validating the entire file parses. `just --list`
+      # then filters to the current OS, confirming the gating logic
+      # returns a non-empty set on each runner.
+      - name: Install just (cycle 730)
+        uses: taiki-e/install-action@just
+      - name: Justfile validation (cycle 730)
+        run: |
+          just --summary
+          just --list
       - name: Packaging smoke — macOS .icns
         # Cycle 221: the release.yml's iconutil step only fires on a
         # `v*` tag push, so a regression like "remove a PNG from

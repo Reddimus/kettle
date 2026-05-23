@@ -25,14 +25,16 @@ automatically — nothing else to do.
 kettle ships the snippets embedded in the binary — install with one command:
 
 ```sh
-kettle --shell-integration bash >> ~/.bashrc
-kettle --shell-integration zsh  >> ~/.zshrc
-kettle --shell-integration fish >> ~/.config/fish/config.fish
+kettle --shell-integration bash       >> ~/.bashrc
+kettle --shell-integration zsh        >> ~/.zshrc
+kettle --shell-integration fish       >> ~/.config/fish/config.fish
+kettle --shell-integration powershell >> $PROFILE     # PowerShell 5+ / 7+
 ```
 
-The same snippets live at `shell-integration/kettle.{bash,zsh,fish}` in the
-source tree (also shipped in the Linux release tarball). The verbatim bodies
-follow below in case you want to read or tweak them first.
+The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` in
+the source tree (also shipped in the Linux release tarball and the Windows
+zip). The verbatim bodies follow below in case you want to read or tweak
+them first.
 
 ### bash — add to `~/.bashrc`
 
@@ -72,6 +74,52 @@ end
 # is enough; B is only useful if a tool wants to know where the
 # user's input area starts.)
 ```
+
+### PowerShell — add to `$PROFILE`
+
+Cycle 730 added a PowerShell snippet (`shell-integration/kettle.ps1`)
+emitted by `kettle --shell-integration powershell`. Works on
+Windows PowerShell 5.1+ (preinstalled on Windows 10+) and on
+PowerShell Core 7+ (any OS). To find your profile path:
+`echo $PROFILE`, then `code $PROFILE` to edit (it may not exist yet
+— PowerShell will create it on first save).
+
+```powershell
+if (-not $global:__kettle_prompt_installed) {
+    # Stash the user's pre-existing `prompt` so the kettle wrapper
+    # calls into it (preserves starship / oh-my-posh / posh-git).
+    $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue)
+
+    function global:prompt {
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 0 }
+        $esc = [char]27; $bel = [char]7
+        # D (last exit) + A (this prompt's start).
+        [Console]::Write("$esc]133;D;$code$bel$esc]133;A$bel")
+        $rendered = if ($null -ne $global:__kettle_original_prompt) {
+            & $global:__kettle_original_prompt
+        } else {
+            "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+        }
+        [Console]::Write("$esc]133;B$bel")   # B = end of prompt.
+        return $rendered
+    }
+
+    # C = command started. PSReadLine ships with PS 5.1+ on Windows;
+    # silently skipped if the user has it disabled.
+    if (Get-Module -ListAvailable PSReadLine) {
+        Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+            [Console]::Write([char]27 + ']133;C' + [char]7)
+            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        }
+    }
+    $global:__kettle_prompt_installed = $true
+}
+```
+
+The `$global:__kettle_prompt_installed` flag makes the snippet
+idempotent: re-sourcing `$PROFILE` (after a config tweak, after a
+new shell session loads it) won't stack multiple prompt wrappers.
 
 ## Marks
 

@@ -94,7 +94,42 @@ GitHub runners for every platform:
   for the one-time tap-repo setup that lets users install with
   `brew tap reddimus/kettle && brew install kettle`.
 - **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`. Unzip
-  anywhere and run; uses ConPTY + your default shell (PowerShell/cmd).
+  anywhere and run; uses ConPTY + your default shell (PowerShell/cmd). Add the
+  unzipped folder to `PATH` if you want to launch with just `kettle` instead
+  of the full `.\kettle.exe` path.
+
+## First run
+
+After install, launch `kettle` from any shell. A few one-liners worth
+trying first:
+
+```sh
+kettle --list-themes      # browse the ~512 bundled themes
+kettle --config-path      # show where your config file lives
+kettle --list-keybinds    # see every default keybind (with overrides applied)
+kettle --check-config     # validate the config; flags unknown keys
+kettle --gpu-info         # print the wgpu adapter / backend / texture limits
+```
+
+To bootstrap a commented starter config in the right spot for your OS:
+
+```sh
+# Linux / WSL    — ~/.config/kettle/config (or $XDG_CONFIG_HOME/kettle/config)
+# macOS          — ~/Library/Application Support/kettle/config
+# Windows        — %APPDATA%\kettle\config
+kettle --print-default-config > "$(kettle --config-path)"
+```
+
+(On Windows PowerShell: `kettle --print-default-config | Out-File -Encoding utf8 (kettle --config-path)`.)
+
+Inside kettle: **right-click anywhere in a pane** for the context menu —
+Copy / Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled
+themes), **Profile ▸**, and **Preferences ▸** with one-click toggles for
+cursor blink, scrollbar mode, bell, copy-on-select, mouse-hide, and font
+size. Reload config with `Ctrl+Shift+M`; cycle themes from the command
+palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with
+`Ctrl+Up` / `Ctrl+Down` after enabling [shell integration](SHELL-INTEGRATION.md)
+(bash / zsh / fish / **PowerShell**).
 
 ### Verifying a download (SHA-256)
 

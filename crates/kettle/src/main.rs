@@ -65,17 +65,20 @@ struct Cli {
     print_default_config: bool,
 
     /// Print the OSC 133 shell-integration snippet for SHELL (one of
-    /// `bash`, `zsh`, `fish`) and exit. Append to your shell rc file
-    /// to enable `Ctrl+Up` / `Ctrl+Down` jump-to-prompt:
+    /// `bash`, `zsh`, `fish`, `powershell` — also `pwsh` / `ps1`) and
+    /// exit. Append to your shell rc file to enable `Ctrl+Up` /
+    /// `Ctrl+Down` jump-to-prompt:
     ///
-    ///   kettle --shell-integration bash >> ~/.bashrc
-    ///   kettle --shell-integration zsh  >> ~/.zshrc
-    ///   kettle --shell-integration fish >> ~/.config/fish/config.fish
+    ///   kettle --shell-integration bash       >> ~/.bashrc
+    ///   kettle --shell-integration zsh        >> ~/.zshrc
+    ///   kettle --shell-integration fish       >> ~/.config/fish/config.fish
+    ///   kettle --shell-integration powershell >> $PROFILE   # PS 5+ / PS 7+
     ///
-    /// Snippets live at `shell-integration/kettle.{bash,zsh,fish}` in
-    /// the source tree and are embedded at build time so the binary
-    /// always emits the version that shipped with it (`cargo install
-    /// kettle` users included).
+    /// Snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}`
+    /// in the source tree and are embedded at build time so the
+    /// binary always emits the version that shipped with it
+    /// (`cargo install kettle` users included). The powershell variant
+    /// covers Windows PowerShell 5.1+ and cross-platform PowerShell Core.
     #[arg(long, value_name = "SHELL", verbatim_doc_comment)]
     shell_integration: Option<String>,
 
@@ -404,14 +407,22 @@ fn main() -> anyhow::Result<()> {
         // accessible) get the right snippet, and so the binary's
         // output can never drift from the in-tree source of truth
         // under `shell-integration/`.
+        //
+        // Cycle 730: added PowerShell (alias `powershell` / `ps1` /
+        // `pwsh`) so Windows users + cross-platform PowerShell Core
+        // users get jump-to-prompt parity with bash/zsh/fish. Same
+        // include_str!-at-build-time embedding pattern.
         let snippet = match shell {
             "bash" => include_str!("../../../shell-integration/kettle.bash"),
             "zsh" => include_str!("../../../shell-integration/kettle.zsh"),
             "fish" => include_str!("../../../shell-integration/kettle.fish"),
+            "powershell" | "pwsh" | "ps1" => {
+                include_str!("../../../shell-integration/kettle.ps1")
+            }
             other => {
                 return Err(anyhow::anyhow!(
                     "--shell-integration {other:?}: unknown shell \
-                     (supported: bash, zsh, fish)"
+                     (supported: bash, zsh, fish, powershell)"
                 ));
             }
         };
@@ -1102,12 +1113,17 @@ mod tests {
     #[test]
     fn shell_integration_snippets_match_in_tree_files() {
         // Cycle 229: `kettle --shell-integration <shell>` emits one
-        // of the embedded `shell-integration/kettle.{bash,zsh,fish}`
-        // files. The contract: the embedded content must equal the
-        // in-tree file byte-for-byte (so docs/SHELL-INTEGRATION.md
-        // and `--shell-integration` never diverge) and each snippet
-        // must include the OSC 133 prefix (catches an accidental
-        // truncated include_str! at build time).
+        // of the embedded `shell-integration/kettle.{bash,zsh,fish,ps1}`
+        // files (ps1 added in cycle 730). The contract: the embedded
+        // content must equal the in-tree file byte-for-byte (so
+        // docs/SHELL-INTEGRATION.md and `--shell-integration` never
+        // diverge) and each snippet must include the OSC 133 prefix
+        // (catches an accidental truncated include_str! at build
+        // time). The substring check uses `]133;` (without the
+        // escape prefix) so it matches bash/zsh/fish (`\033]133;` /
+        // `\e]133;` literals) AND the PowerShell snippet (which uses
+        // `[char]27 + ']133;X'` + `[char]7` — no escape prefix in
+        // the source text).
         for (shell, embedded) in [
             (
                 "bash",
@@ -1118,10 +1134,10 @@ mod tests {
                 "fish",
                 include_str!("../../../shell-integration/kettle.fish"),
             ),
+            ("ps1", include_str!("../../../shell-integration/kettle.ps1")),
         ] {
             assert!(
-                embedded.contains("OSC 133")
-                    && (embedded.contains("\\033]133") || embedded.contains("\\e]133")),
+                embedded.contains("OSC 133") && embedded.contains("]133;"),
                 "{shell}: embedded snippet missing OSC 133 marker — \
                  the file's body probably regressed"
             );
@@ -1559,6 +1575,17 @@ mod tests {
     ///   4. references both `scrot` and `xdotool` (so a refactor that
     ///      accidentally drops one of the load-bearing tools fails
     ///      here instead of at runtime on a contributor's machine).
+    ///
+    /// Cycle 730: gated `#[cfg(unix)]` because the test uses
+    /// `std::os::unix::fs::PermissionsExt::mode()` for the
+    /// executable-bit check (Windows has no equivalent — NTFS doesn't
+    /// have a Unix-style mode word). Pre-730 this test failed
+    /// compilation on Windows MSVC builds with E0433 "cannot find
+    /// `unix` in `os`". Caught locally on the cycle-730 Windows 11
+    /// audit; the fix matches the same `#[cfg(unix)]` pattern the
+    /// cycle-198 unreadable-config test at `main.rs:1052` already
+    /// uses for an equivalent unix-only chmod check.
+    #[cfg(unix)]
     #[test]
     fn scripts_menu_shot_exists_and_executable() {
         use std::os::unix::fs::PermissionsExt;

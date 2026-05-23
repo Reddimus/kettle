@@ -2,11 +2,55 @@
 #
 # Install `just` from https://just.systems (Rust ecosystem standard):
 #
-#   cargo install just         # or `brew install just`, `apt install just`
+#   cargo install just         # or `brew install just`, `apt install just`,
+#                              # `winget install Casey.Just` on Windows
 #
 # Run `just` (no args) to see the recipe list; `just <recipe>` to run.
 # Recipes intentionally mirror the CI gate so a green `just gauntlet`
 # locally is the same gate `.github/workflows/ci.yml` runs on every PR.
+#
+# Cross-platform: cycle 730 rewrote the Justfile so every recipe runs
+# on Windows PowerShell, Linux/macOS bash/zsh, and Git Bash on
+# Windows. Two patterns:
+#
+#   - `export RUSTDOCFLAGS := "-D warnings"` below makes the env
+#     var visible to all recipes without a shell-prefix (`FOO=bar
+#     cmd` is bash-only; just's `export` is shell-agnostic).
+#   - `[unix]` / `[windows]` recipe attributes platform-gate
+#     install/uninstall/bench/menu-shot/clean so Windows users
+#     get a graceful message + the Linux scripts stay shipped
+#     as-is.
+
+# Cycle 730: use Windows PowerShell (preinstalled on every Windows 10+
+# machine) as the recipe shell on Windows. Just's default is `sh` which
+# requires Git Bash on PATH — not a thing on a fresh Win11 install.
+# `-NoLogo -Command` suppresses the PS startup banner and accepts a
+# script body. All recipe bodies in this file are cargo / @echo /
+# explicit cmdlets — all of which work in PowerShell 5.1+.
+#
+# Native-command exit codes: just halts the recipe if any single line
+# returns non-zero (just's default --shell-arg flag is `-c` which
+# preserves native exit codes), so we don't need `$ErrorActionPreference
+# = 'Stop'` injection inside every recipe.
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# Cycle 730: surface rustdoc-lint denials to every recipe (doc,
+# gauntlet) without a bash-only env-var prefix. Just exports this
+# at recipe-entry as a real env var, working under bash, zsh,
+# PowerShell, and cmd. Pre-730 the `doc` + `gauntlet` recipes ran
+# `RUSTDOCFLAGS="-D warnings" cargo doc …` which broke under
+# PowerShell (the inline `FOO=bar cmd` prefix is bash-only).
+export RUSTDOCFLAGS := "-D warnings"
+
+# Cycle 730: OS-appropriate temp dir for default screenshot output.
+# Just has no `tempdir()` builtin (cache/data/config-directory yes;
+# temp deliberately omitted since temp semantics vary across OSes).
+# The `if os_family()` ternary picks `%TEMP%` on Windows (always
+# set) and `/tmp` on Linux/macOS (always present), so the
+# `screenshot` / `menu` recipes can default to a writable location
+# everywhere. Pre-730 they defaulted to `/tmp/...` which doesn't
+# exist on Windows.
+TMPDIR := if os_family() == "windows" { env_var("TEMP") } else { "/tmp" }
 
 # Default recipe: show the list when `just` is invoked with no args.
 default:
@@ -25,17 +69,18 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# `cargo test --workspace` — runs all 319+ unit + integration tests
-# including the cycle-251 visual-regression menu_visual.rs.
+# `cargo test --workspace` — runs all 432+ unit + integration tests
+# (post cycle 730; baseline was 424 + 8 new kettle-remote BFS tests).
 test:
     cargo test --workspace
 
 # `cargo doc` with `-D warnings` — rustdoc has its own warning class
 # (broken intra-doc-links, missing docs on public items) that
 # `clippy -D warnings` doesn't catch. CI runs this on Linux only
-# (rustdoc is platform-agnostic); same here.
+# (rustdoc is platform-agnostic); same here. RUSTDOCFLAGS exported
+# at the top.
 doc:
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    cargo doc --workspace --no-deps
 
 # === Supply chain ==================================================
 
@@ -78,8 +123,7 @@ gauntlet:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo build --workspace --all-targets
     cargo test --workspace
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    cargo doc --workspace --no-deps
     @echo ""
     @echo "GAUNTLET PASSED — same gate CI runs on every PR. Safe to push."
 
@@ -98,43 +142,79 @@ gauntlet-strict: gauntlet deny machete
 # Render the canonical "kettle in a terminal" screenshot — exercises
 # the full GPU pipeline (wgpu adapter + offscreen Vulkan device +
 # glyphon text + quad + image pipelines + image::save PNG encode).
-# Output at /tmp/kettle.png; pass `OUT=path` to override.
-screenshot OUT="/tmp/kettle.png":
-    cargo build --release -p kettle
-    ./target/release/kettle --screenshot {{OUT}}
+# Default OUT lands in the platform's temp dir (`/tmp` on Linux,
+# `$env:TEMP` on Windows). Pass `OUT=path` to override.
+#
+# Cycle 730: switched to `cargo run` (cargo handles the `.exe`
+# suffix automatically on Windows) and `TMPDIR` (OS-aware temp
+# dir, set at the top of this Justfile) instead of hardcoded
+# `/tmp/kettle.png`.
+screenshot OUT=(TMPDIR / "kettle.png"):
+    cargo run --release -p kettle -- --screenshot {{OUT}}
     @echo "wrote {{OUT}}"
 
 # Render the synthetic right-click context menu — useful for visually
 # verifying menu rendering changes. Pixel-level CI smoke
 # (tests/menu_visual.rs) covers the regression class; this gives you
 # a PNG to eyeball when tweaking colors / padding / etc.
-menu OUT="/tmp/kettle-menu.png":
-    cargo build --release -p kettle
-    ./target/release/kettle --screenshot-menu {{OUT}}
+menu OUT=(TMPDIR / "kettle-menu.png"):
+    cargo run --release -p kettle -- --screenshot-menu {{OUT}}
     @echo "wrote {{OUT}}"
 
-# Reproduce the docs/PERFORMANCE.md baseline (cycle 260). Runs each
-# measurement 5× via /usr/bin/time + scripts/bench.sh.
+# Reproduce the docs/PERFORMANCE.md baseline. Runs each measurement
+# 5× via `/usr/bin/time` (Linux/macOS) or `Measure-Command` (Win11).
+#
+# Cycle 730: platform-gated. The unix version calls scripts/bench.sh
+# (cycle 260's GNU-time based harness); the Windows version calls
+# scripts/bench.ps1 (cycle 730's Measure-Command based harness).
+# `powershell.exe` is the Windows-PowerShell-5.1 binary preinstalled
+# on every Windows 10+ machine; if `pwsh` (PS Core 7+) is also
+# present it'd work too, but powershell.exe is the universal default.
+[unix]
 bench:
     ./scripts/bench.sh
+
+[windows]
+bench:
+    & ./scripts/bench.ps1
 
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (the cycle-0 install script — Linux
 # only). Same path the cycle-253 `install-online.sh` curl|sh wrapper
 # uses for online installs.
+#
+# Cycle 730: Windows has no equivalent installer because the
+# release pipeline ships a portable .zip — Windows users grab that
+# and extract to their preferred PATH location. The recipe prints
+# a one-liner pointer instead of failing with a "./scripts/install.sh:
+# command not found" parser error.
+[unix]
 install:
     ./scripts/install.sh
 
-# Remove everything `just install` placed.
+[windows]
+install:
+    @echo "kettle on Windows ships as a portable .zip — grab"
+    @echo "kettle-windows-x86_64.zip from"
+    @echo "  https://github.com/Reddimus/kettle/releases/latest"
+    @echo "Unzip anywhere; add the folder to your PATH."
+
+# Remove everything `just install` placed (Linux only — see install).
+[unix]
 uninstall:
     ./scripts/install.sh --uninstall
 
+[windows]
+uninstall:
+    @echo "kettle on Windows is a portable .zip — to uninstall,"
+    @echo "delete the extracted folder + remove it from PATH."
+
 # === Misc ==========================================================
 
-# Run kettle in a real window (Linux: needs X11 / Wayland). Useful
-# when verifying interactive behavior the offscreen `--screenshot*`
-# paths can't reach.
+# Run kettle in a real window (Linux: needs X11 / Wayland; Windows:
+# native; macOS: native). Useful when verifying interactive behavior
+# the offscreen `--screenshot*` paths can't reach.
 run:
     cargo run --release -p kettle
 
@@ -142,11 +222,37 @@ run:
 # scrot + xdotool. Useful for visual regression of the C3-C9 context-
 # menu sub-cycles. Output lands in `target/menu-shots/`. Pass
 # `--name <slug>` to label the file; `--hold` to leave kettle running.
+#
+# Cycle 730: Linux-only by design — uses xdotool / scrot which only
+# exist on X11. Windows / macOS can use the offscreen `just menu`
+# recipe instead (cycle-251 visual regression pipeline covers the
+# same regression class without needing a real desktop).
+[unix]
 menu-shot *ARGS:
     ./scripts/menu-screenshot.sh {{ARGS}}
 
-# Clean every build artifact — `cargo clean` plus the bench /
-# screenshot output PNGs that may have leaked into /tmp.
+[windows]
+menu-shot *ARGS:
+    @echo "menu-shot requires xdotool + scrot (Linux X11). On Windows,"
+    @echo "use 'just menu' instead — it renders the same menu offscreen"
+    @echo "via the cycle-251 visual-regression pipeline."
+
+# Clean every build artifact — `cargo clean` plus any temp PNGs
+# the screenshot / menu / bench recipes may have left in the OS
+# temp dir.
+#
+# Cycle 730: split into [unix] / [windows] because `rm` and `/tmp`
+# are bash-only. cargo clean is the cross-platform core; the temp-
+# PNG cleanup is OS-specific. The Windows variant delegates the
+# delete to powershell.exe (Remove-Item is a cmdlet, not a binary)
+# and `-ErrorAction SilentlyContinue` swallows the not-found case
+# so re-running `just clean` after the first call doesn't fail.
+[unix]
 clean:
     cargo clean
     rm -f /tmp/kettle.png /tmp/kettle-menu.png /tmp/kettle-bench.png /tmp/kettle-bench-menu.png
+
+[windows]
+clean:
+    cargo clean
+    Remove-Item -ErrorAction SilentlyContinue $env:TEMP\kettle.png, $env:TEMP\kettle-menu.png, $env:TEMP\kettle-bench.png, $env:TEMP\kettle-bench-menu.png

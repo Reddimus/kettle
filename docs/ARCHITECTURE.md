@@ -301,3 +301,52 @@ In-process foundation: `Mux::serialize_tab` (cycle 397) +
 `fd_transport::send_fds`/`recv_fds` (cycle 399); drag FSM:
 `detach::DragState` (cycle 400). See
 [`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md).
+
+### Session restore (cycles 109, 411-420; cycle 730 diagram)
+
+Per-pane working directory + tab/split tree are captured live as the
+user works, atomically written to `session.json`, and replayed on the
+next launch:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Shell as Shell (PTY)
+    participant Core as kettle-core
+    participant Mux as kettle-ui::Mux
+    participant FS as session.json (atomic)
+    participant App as App (next launch)
+
+    Note over Shell,Mux: Per-keystroke / per-cd
+    Shell->>Core: OSC 7 (file://host/path/cwd)
+    Core->>Mux: Pane::cwd = path
+    Mux->>Mux: mark_dirty()
+
+    Note over Mux,FS: Debounced autosave (cycle 109)
+    Mux->>Mux: structural change (new tab / split / close)
+    Mux->>FS: tempfile write
+    FS->>FS: rename → session.json (atomic;<br/>notify-watcher ignores temp)
+
+    Note over App,FS: Next launch
+    App->>FS: read session.json
+    FS-->>App: tab tree + per-pane cwd
+    App->>Mux: rehydrate split layout
+    Mux->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
+    Note over Core,App: Pane reappears in same<br/>tab/split/cwd as last exit
+```
+
+Three notable invariants preserved by this flow:
+
+- **Atomic write** — `session.json` is written tempfile + rename, so a
+  power-loss between writes leaves the previous valid snapshot intact
+  (no truncated/partial JSON). Cycle 109 added this after a corrupted
+  save on shutdown.
+- **OSC 7 catchup** — kettle parses the shell's OSC 7 stream
+  continuously, not just at startup; pane cwd updates the moment
+  the user `cd`s.
+- **No replay of failed spawns** — if a saved cwd is gone (deleted /
+  unmounted), the pane spawns in `$HOME` and logs a warning instead
+  of aborting the whole restore (cycle 415).
+
+See [`docs/ROADMAP.md`](ROADMAP.md) for the cycle-by-cycle ledger of
+session-restore hardening (cycles 411-420).

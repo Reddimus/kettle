@@ -6,6 +6,128 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 730 — **Production-grade Windows 11 audit: ProcessTree trait
+              + cross-platform Justfile + PowerShell shell integration
+              + bench.ps1**:
+              Closes the four user-facing gaps surfaced by the
+              cycle-727 audit pass and the cycle-730 Windows 11
+              follow-up audit. One bundled commit; no public API
+              breakage; workspace tests 424 → 432.
+              1. **kettle-remote: `ProcessTree` trait + 8 mocked BFS
+                 tests.** Pre-730, `detect_remote_with(pid, &mut
+                 sysinfo::System)` read sysinfo directly — the only
+                 test that could run was the `detect_remote(0)`
+                 no-op smoke (cycle 646 punted on testing real
+                 process trees because spawning ssh from CI was too
+                 fragile). Cycle 730 extracts a `pub trait
+                 ProcessTree` with four methods (`refresh`,
+                 `parent_of`, `argv_of`, `all_pids`) + an impl for
+                 `sysinfo::System`; the BFS body moves to a generic
+                 `detect_in_tree<T: ProcessTree>` private helper.
+                 8 new `#[cfg(test)] MockProcessTree`-backed tests
+                 cover the previously-untestable cases: direct-
+                 child ssh, two-hop ssh-via-wrapper, depth-3
+                 container, closer-descendant-wins-on-tie, missing
+                 root, empty tree, non-remote-only descendants,
+                 parent-cycle defense via `visited` set. Public
+                 `detect_remote_with` signature unchanged; kettle-
+                 ui's call site at `crates/kettle-ui/src/app.rs:6101`
+                 doesn't move.
+              2. **Justfile cross-platform.** Pre-730 the Justfile
+                 was bash-only — `RUSTDOCFLAGS="-D warnings"
+                 cargo doc …` is bash-prefix syntax that breaks on
+                 PowerShell; `/tmp/kettle.png` doesn't exist on
+                 Windows; `./scripts/install.sh` is bash-only. CONTRIBUTING.md
+                 promises "a green `just gauntlet` locally is the
+                 same gate every PR runs on every OS" — broken on
+                 Windows pre-730. Fix: `export RUSTDOCFLAGS :=
+                 "-D warnings"` at file top (just exports at recipe-
+                 entry, working under any shell); `TMPDIR :=
+                 if os_family() == "windows" { env_var("TEMP") }
+                 else { "/tmp" }` replaces hardcoded `/tmp` defaults;
+                 `[unix]` / `[windows]` recipe attributes gate
+                 `install`, `uninstall`, `bench`, `menu-shot`,
+                 `clean` so Windows users get a graceful "use the
+                 prebuilt zip" message instead of a parser error.
+                 New CI step (`taiki-e/install-action@just` + `just
+                 --summary` + `just --list`) verifies the Justfile
+                 parses on every OS so a future regression fails
+                 CI instead of slipping past.
+              3. **PowerShell shell integration.** `kettle --shell-
+                 integration powershell` (or `pwsh` / `ps1` alias)
+                 emits a new `shell-integration/kettle.ps1` snippet
+                 with OSC 133 A/B/C/D markers wired via PowerShell's
+                 `prompt` function override + PSReadLine `Enter`
+                 handler. Idempotent (`$global:__kettle_prompt_installed`
+                 guard), preserves user's existing prompt (starship /
+                 oh-my-posh / posh-git all keep working), gracefully
+                 skips PSReadLine if disabled. Documented in
+                 `docs/SHELL-INTEGRATION.md` next to the bash/zsh/fish
+                 sections.
+              4. **INSTALL.md "First run" + kettle.example.config
+                 per-OS config-path callout.** Post-install path is
+                 the same on every OS: launch kettle, try `--list-
+                 themes`, `--config-path`, `--list-keybinds`,
+                 `--check-config`, `--gpu-info`. New section in
+                 INSTALL.md walks through it + lists the OS-specific
+                 config locations (`~/.config/kettle/config` on
+                 Linux/WSL, `~/Library/Application Support/kettle/config`
+                 on macOS, `%APPDATA%\kettle\config` on Windows).
+                 The example config gets a matching path block at
+                 the top so users grepping for "Windows" find their
+                 path immediately.
+              5. **ARCHITECTURE.md session-restore mermaid.** The
+                 cycle-109 atomic-save + cycle-411-420 hardening was
+                 documented in prose but not diagrammed. New
+                 sequence mermaid in `docs/ARCHITECTURE.md` covers
+                 OSC 7 cwd capture → debounced autosave → atomic
+                 tempfile + rename → next-launch read → tab tree
+                 rehydrate → per-pane shell respawn with saved cwd.
+                 Three named invariants (atomic write, OSC 7 catchup,
+                 no-replay-of-failed-spawns).
+              6. **PERFORMANCE.md Windows 11 row + scripts/bench.ps1.**
+                 Linux numbers were from cycle 277 (450 cycles
+                 stale). Cycle 730 keeps the v1.3.8 Linux baseline
+                 (annotated with "re-bench scheduled for v1.47") and
+                 adds a Windows 11 reference row from a new
+                 `scripts/bench.ps1` (PowerShell-native, uses
+                 `System.Diagnostics.Process.PeakWorkingSet64` for
+                 peak memory — comparable to Linux's max RSS).
+                 Methodology section documents the per-OS measurement
+                 difference.
+              7. **Bug surfaced + fixed: cycle-711 test failed Windows
+                 MSVC compilation.** The `scripts_menu_shot_exists_and_executable`
+                 test at `crates/kettle/src/main.rs:1573` used
+                 `std::os::unix::fs::PermissionsExt::mode()` without a
+                 `#[cfg(unix)]` gate; it broke `cargo build --workspace
+                 --all-targets` on Windows MSVC with E0433. The bug
+                 had survived since cycle 711 because Windows CI
+                 apparently wasn't actually catching it (likely a
+                 cycle-711-era Rust-toolchain quirk that newer rustc
+                 1.95 enforces strictly). Fix: add `#[cfg(unix)]` to
+                 the test (its executable-bit check is unix-only by
+                 design — NTFS has no mode word). The exact same
+                 cfg-gating pattern is used by the cycle-198 test at
+                 `main.rs:1052`.
+
+              No behavior change in the kettle.exe runtime; all
+              additions are test coverage + DX + docs (+ one
+              load-bearing test-compile fix). Local gauntlet green on
+              Win11 (cycle-730 verified by the maintainer on a
+              Surface Book 3); CI matrix verifies on Linux/macOS/Windows.
+
+  cycle 729 — **CI hygiene: align actions/checkout@v6 in the
+              cycle-723 release pretest job**:
+              Cycle 728's Dependabot run bumped `actions/checkout`
+              from v4 to v6 across the workflows that had it pinned
+              at v4 (PRs #1-#3), but the cycle-723 pretest job
+              inside `release.yml` (added the same day as cycle 728)
+              had a separate `actions/checkout@v4` pin that the
+              first Dependabot pass didn't catch. Aligned to v6 in
+              one line so the release workflow runs a consistent
+              checkout version everywhere. No behavior change;
+              workspace tests still at 424.
+
   cycle 728 — **Fix: rustdoc regression + close local-gauntlet
               gap with CI's doc gate**:
               Cycle-722's `<unix>-<pid>.png` placeholder in a doc

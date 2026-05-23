@@ -26,8 +26,10 @@
 - [x] Mouse reporting passthrough (X10 + SGR 1006): click/drag/wheel to
       vim/tmux/htop/fzf; local selection/scroll when tracking is off
 - [x] Shell integration (OSC 133 A/B/C/D) + jump-to-prompt
-      (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish snippets in
-      docs/SHELL-INTEGRATION.md
+      (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish/**powershell** snippets in
+      docs/SHELL-INTEGRATION.md (cycle 730 added the PowerShell variant
+      via `--shell-integration powershell` for Win11 + cross-platform
+      PowerShell Core users)
 
 - [x] Session save/restore: OSC 7 cwd capture, tab/split tree + per-pane
       cwd serialized to session.json, restored on launch, autosaved on
