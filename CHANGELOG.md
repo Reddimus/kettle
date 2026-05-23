@@ -6,8 +6,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-Post-v1.39.0 polish. The session caught two of its own bugs:
-cycle 484's doc-list overindentation (cycle 493) and the
+## [1.40.0] — 2026-05-22
+
+Pre-commit hook infrastructure. The session caught two of its own
+bugs: cycle 484's doc-list overindentation (cycle 493) and the
 cycle-494 hook's missing deletion filter (cycle 496) — both
 caught the bug class they exist to prevent.
 
