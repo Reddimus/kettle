@@ -556,9 +556,20 @@ fn main() -> anyhow::Result<()> {
             "cursor:  {:?} (blink={}, interval={}ms)",
             cfg.cursor_style, cfg.cursor_blink, cfg.cursor_blink_interval
         );
+        // Cycle 535: when force_no_bell silences every bell flavor
+        // regardless of mode, annotate the existing line so the user
+        // doesn't read "bell: Visual" while wondering why no bell
+        // actually fires. The cycle-461 `extra_check_config_lines`
+        // also echoes "bell:    force-no-bell=true (silences ...)"
+        // as its own line; this annotation pairs the two.
+        let bell_suffix = if cfg.force_no_bell {
+            " (force-no-bell overrides)"
+        } else {
+            ""
+        };
         println!(
-            "bell:    {:?}  osc52: {:?}  min-contrast: {}",
-            cfg.bell, cfg.osc52, cfg.minimum_contrast
+            "bell:    {:?}{}  osc52: {:?}  min-contrast: {}",
+            cfg.bell, bell_suffix, cfg.osc52, cfg.minimum_contrast
         );
         println!(
             "scroll:  on-keystroke={} on-output={} multiplier={}",
