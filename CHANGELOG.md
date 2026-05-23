@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 673 — **vertical-tabs sub-cycle 7: `tab-bar-width`
+              config key**: new `pub tab_bar_width: f32` field
+              on Config, default 180.0 (Firefox-style sidebar).
+              Parser clamps to `[40.0, 600.0]` — narrower
+              wouldn't fit a tab title; wider would be more
+              sidebar than terminal. Threaded through:
+                - new `content_rect_for_with_strip` helper takes
+                  explicit `strip_w` (the no-arg
+                  `content_rect_for` becomes a 180.0 default
+                  shim, kept for legacy callers)
+                - `App::area` now uses `_with_strip` +
+                  `self.cfg.tab_bar_width`
+                - `cursor_in_tab_bar` Left/Right x-axis checks
+                  use `self.cfg.tab_bar_width`
+                - `App::tab_bar_vertical` uses
+                  `self.cfg.tab_bar_width` for the strip width
+              No effect on horizontal layouts. Drift guard
+              `tab_bar_width_parses_and_clamps` walks 6 input
+              shapes incl. below-min, above-max, garbage-fallback.
+              Workspace tests 390 → 391.
+              Vertical-tabs port: 6/8 sub-cycles complete.
+
   cycle 672 — **vertical-tabs sub-cycle 5: renderer paints
               vertical strips correctly**: per-segment chrome
               now uses each segment's own `(y, h)` (from

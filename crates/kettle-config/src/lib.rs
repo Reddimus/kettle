@@ -980,6 +980,11 @@ pub struct Config {
     /// Cycle 669: longitude for sunrise/sunset-based theme schedule.
     /// Range `[-180.0, 180.0]`.
     pub theme_schedule_long: Option<f64>,
+    /// Cycle 673 (sub-cycle 7 of vertical-tabs design): width of
+    /// the vertical tab strip in pixels for `tab-bar-position =
+    /// left`/`right`. Default 180.0 (Firefox-style sidebar).
+    /// Range `[40.0, 600.0]`. No effect on horizontal layouts.
+    pub tab_bar_width: f32,
     /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
@@ -1339,6 +1344,7 @@ impl Default for Config {
             theme_schedule: None,
             theme_schedule_lat: None,
             theme_schedule_long: None,
+            tab_bar_width: 180.0,
             light_theme: String::new(),
             dark_theme: String::new(),
             icon_bell: true,
@@ -2468,6 +2474,12 @@ impl Config {
                         && (-180.0..=180.0).contains(&v)
                     {
                         cfg.theme_schedule_long = Some(v);
+                    }
+                }
+                "tab-bar-width" | "tab_bar_width" => {
+                    // Cycle 673 (vertical-tabs sub-cycle 7).
+                    if let Ok(v) = e.value.trim().parse::<f32>() {
+                        cfg.tab_bar_width = v.clamp(40.0, 600.0);
                     }
                 }
                 "light-theme" | "light_theme" => {
@@ -5207,6 +5219,29 @@ mod config_tests {
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Top);
         let cfg = Config::parse_text("tab-bar-position = bottom\n");
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
+    }
+
+    /// Cycle 673 drift guard. `tab-bar-width` config key parses
+    /// + clamps to `[40, 600]`. Sub-cycle 7 of vertical-tabs design.
+    #[test]
+    fn tab_bar_width_parses_and_clamps() {
+        // Default unchanged.
+        assert!((Config::default().tab_bar_width - 180.0).abs() < f32::EPSILON);
+        // In-range value applies.
+        let cfg = Config::parse_text("tab-bar-width = 240\n");
+        assert!((cfg.tab_bar_width - 240.0).abs() < f32::EPSILON);
+        // Underscore form works.
+        let cfg = Config::parse_text("tab_bar_width = 120\n");
+        assert!((cfg.tab_bar_width - 120.0).abs() < f32::EPSILON);
+        // Clamps below min.
+        let cfg = Config::parse_text("tab-bar-width = 20\n");
+        assert!((cfg.tab_bar_width - 40.0).abs() < f32::EPSILON);
+        // Clamps above max.
+        let cfg = Config::parse_text("tab-bar-width = 2000\n");
+        assert!((cfg.tab_bar_width - 600.0).abs() < f32::EPSILON);
+        // Garbage value leaves the default.
+        let cfg = Config::parse_text("tab-bar-width = wide\n");
+        assert!((cfg.tab_bar_width - 180.0).abs() < f32::EPSILON);
     }
 
     /// Cycle 670 drift guard. `sunrise_sunset_utc_secs` reproduces

@@ -232,6 +232,7 @@ fn confirm_dialog_keypress(
 /// doc proposes 180 px as the "sidebar default" (Firefox-style
 /// sidebar feel). A future cycle adds a `tab-bar-width` config
 /// override (sub-cycle 7 of the design).
+#[allow(dead_code)] // kept for legacy test/api compat; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
 /// Cycle 651 + 665 (sub-cycles 2 + 3 of vertical-tabs design):
@@ -248,12 +249,36 @@ pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 /// Pure — no `&self`, no renderer, no winit. Drives the `App::area`
 /// method (which now wraps this helper) so vertical-strip wiring
 /// can be unit-tested without constructing a full App.
+#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper is kept for cycle-651 tests + future no-cfg callers
 fn content_rect_for(
     surface: (u32, u32),
     tab_bar_h: f32,
     status_bar_h: f32,
     tab_bar_pos: kettle_config::TabBarPos,
     status_bar_mode: kettle_config::StatusBarMode,
+) -> Rect {
+    content_rect_for_with_strip(
+        surface,
+        tab_bar_h,
+        status_bar_h,
+        tab_bar_pos,
+        status_bar_mode,
+        VERTICAL_TAB_STRIP_W,
+    )
+}
+
+/// Cycle 673 (sub-cycle 7 of vertical-tabs design): explicit
+/// strip-width variant so callers with `cfg.tab_bar_width` in
+/// scope can pass it through. The non-`_with_strip` wrapper
+/// above keeps the cycle-651 signature for code paths that
+/// don't have a Config available.
+fn content_rect_for_with_strip(
+    surface: (u32, u32),
+    tab_bar_h: f32,
+    status_bar_h: f32,
+    tab_bar_pos: kettle_config::TabBarPos,
+    status_bar_mode: kettle_config::StatusBarMode,
+    strip_w: f32,
 ) -> Rect {
     let (sw, sh) = (surface.0 as f32, surface.1 as f32);
     let tb_on_top = matches!(tab_bar_pos, kettle_config::TabBarPos::Top);
@@ -269,16 +294,8 @@ fn content_rect_for(
         (if tb_on_top { tab_bar_h } else { 0.0 }) + (if sb_on_top { status_bar_h } else { 0.0 });
     let bot_offset = (if tb_on_bottom { tab_bar_h } else { 0.0 })
         + (if sb_on_bottom { status_bar_h } else { 0.0 });
-    let left_offset = if tb_on_left {
-        VERTICAL_TAB_STRIP_W
-    } else {
-        0.0
-    };
-    let right_offset = if tb_on_right {
-        VERTICAL_TAB_STRIP_W
-    } else {
-        0.0
-    };
+    let left_offset = if tb_on_left { strip_w } else { 0.0 };
+    let right_offset = if tb_on_right { strip_w } else { 0.0 };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
     let content_w = (sw - left_offset - right_offset).max(1.0);
     (left_offset, top_offset, content_w, content_h)
@@ -1663,11 +1680,11 @@ impl App {
         match self.cfg.tab_bar_pos {
             TabBarPos::Left => {
                 let x = self.cursor.x as f32;
-                (0.0..VERTICAL_TAB_STRIP_W).contains(&x)
+                (0.0..self.cfg.tab_bar_width).contains(&x)
             }
             TabBarPos::Right => {
                 let x = self.cursor.x as f32;
-                x >= sw as f32 - VERTICAL_TAB_STRIP_W && x <= sw as f32
+                x >= sw as f32 - self.cfg.tab_bar_width && x <= sw as f32
             }
             TabBarPos::Top | TabBarPos::Bottom => {
                 cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
@@ -1798,14 +1815,16 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        // Cycle 651: delegate to the pure helper so layout math is
-        // unit-testable without constructing a full App.
-        content_rect_for(
+        // Cycle 651 + 673: delegate to the pure helper, threading
+        // `cfg.tab_bar_width` so a user-configured strip width
+        // is honored.
+        content_rect_for_with_strip(
             surface,
             self.tab_bar_h(),
             self.status_bar_h(),
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
+            self.cfg.tab_bar_width,
         )
     }
 
@@ -1940,7 +1959,7 @@ impl App {
     /// each one (`VERTICAL_TAB_STRIP_W` × `tab_bar_h`).
     /// New-tab `+` button anchors at the bottom of the strip.
     fn tab_bar_vertical(&self, sw: f32, sh: f32, height: f32) -> TabBar {
-        let strip_w = VERTICAL_TAB_STRIP_W;
+        let strip_w = self.cfg.tab_bar_width;
         let strip_x = match self.cfg.tab_bar_pos {
             TabBarPos::Left => 0.0,
             TabBarPos::Right => sw - strip_w,
