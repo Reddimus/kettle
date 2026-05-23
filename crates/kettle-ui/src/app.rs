@@ -4054,6 +4054,36 @@ impl App {
             Action::ToggleBroadcastOff => {
                 self.mux.broadcast = crate::mux::BroadcastScope::Off;
             }
+            Action::ToggleBroadcastGroup => {
+                // Cycle 681 (named-groups sub-cycle 5): toggle
+                // broadcast scope between Off and
+                // Group(focused_pane.group_name). If focused
+                // pane has no group, log + no-op.
+                let focused_group = self.mux.focused().and_then(|p| p.group_name.clone());
+                let Some(group) = focused_group else {
+                    log::info!(
+                        "toggle-broadcast-group: focused pane has no group_name; \
+                         use Action::CreateGroup or Action::GroupTab first"
+                    );
+                    return;
+                };
+                self.mux.broadcast = match &self.mux.broadcast {
+                    crate::mux::BroadcastScope::Group(name) if name == &group => {
+                        crate::mux::BroadcastScope::Off
+                    }
+                    _ => crate::mux::BroadcastScope::Group(group),
+                };
+            }
+            Action::ToggleBroadcastWindow => {
+                // Cycle 681 (named-groups sub-cycle 5): toggle
+                // window-wide broadcast on/off. Distinct from
+                // ToggleBroadcastAll (which is misnamed —
+                // actually per-tab).
+                self.mux.broadcast = match &self.mux.broadcast {
+                    crate::mux::BroadcastScope::All => crate::mux::BroadcastScope::Off,
+                    _ => crate::mux::BroadcastScope::All,
+                };
+            }
             Action::ToggleZoom => {
                 self.mux.toggle_zoom();
                 self.resize_all();

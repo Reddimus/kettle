@@ -39,7 +39,15 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Decrease font size", DecreaseFontSize),
         ("Reset font size", ResetFontSize),
         ("Toggle fullscreen", ToggleFullscreen),
-        ("Broadcast input to all panes", ToggleBroadcastAll),
+        ("Broadcast input to all panes in tab", ToggleBroadcastAll),
+        (
+            "Broadcast input to focused pane's group",
+            ToggleBroadcastGroup,
+        ),
+        (
+            "Broadcast input to every pane in window",
+            ToggleBroadcastWindow,
+        ),
         ("Stop broadcasting input", ToggleBroadcastOff),
         ("Scroll up one line", ScrollLineUp),
         ("Scroll down one line", ScrollLineDown),
@@ -187,6 +195,8 @@ mod tests {
             ResetFontSize,
             StartSearch,
             ToggleBroadcastAll,
+            ToggleBroadcastGroup,
+            ToggleBroadcastWindow,
             ToggleBroadcastOff,
             ToggleFullscreen,
             Reset,
@@ -278,6 +288,8 @@ mod tests {
                 | ResetFontSize
                 | StartSearch
                 | ToggleBroadcastAll
+                | ToggleBroadcastGroup
+                | ToggleBroadcastWindow
                 | ToggleBroadcastOff
                 | ToggleFullscreen
                 | Reset

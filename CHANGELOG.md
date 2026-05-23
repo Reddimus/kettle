@@ -6,6 +6,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 681 — **named-groups sub-cycle 5: `ToggleBroadcastGroup`
+              + `ToggleBroadcastWindow` actions — broadcast
+              scope is end-to-end live**.
+              Two new actions land the runtime scope switch:
+                - `Action::ToggleBroadcastGroup` reads the
+                  focused pane's `group_name`. If set, toggles
+                  `mux.broadcast` between `Off` and
+                  `Group(name)`. If the focused pane has no
+                  group, logs + no-ops.
+                - `Action::ToggleBroadcastWindow` toggles
+                  between `Off` and `All` (window-wide).
+                  Distinct from the misnamed cycle-178
+                  `ToggleBroadcastAll` which is actually
+                  per-tab.
+              8 new aliases (kebab + underscore for each).
+              Palette includes all 3 broadcast actions with
+              clear labels distinguishing tab/group/window
+              scope. Workspace tests stay 392 (the cycle-678
+              `compute_broadcast_targets` drift guard covers
+              the routing; this cycle is dispatch wiring).
+              **Named-groups end-to-end is now live**:
+                1. `Action::GroupTab` → type "fleet" → Enter
+                2. Focus a fleet-tagged pane
+                3. `Action::ToggleBroadcastGroup` → broadcast
+                   scope set to `Group("fleet")`
+                4. Type anything → mirrors to every pane
+                   tagged "fleet" across every tab
+              Named-groups port: **5/8** sub-cycles complete.
+
   cycle 680 — **named-groups sub-cycle 4: `GroupTab` +
               `GroupWindow` bulk-apply + `Ungroup*` direct
               clear**: completes the action-dispatch wiring

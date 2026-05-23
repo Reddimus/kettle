@@ -172,6 +172,19 @@ pub enum Action {
     StartSearch,
     ToggleBroadcastAll,
     ToggleBroadcastOff,
+    /// Cycle 681 (Terminator parity, named-groups sub-cycle 5 of
+    /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)): toggle broadcast
+    /// scope to `Group(focused_pane.group_name)`. When the focused
+    /// pane has no group, log + no-op. Pressing again with the
+    /// same group already set switches to Off (toggle semantics).
+    /// Distinct from `ToggleBroadcastAll` (which sets Tab scope).
+    ToggleBroadcastGroup,
+    /// Cycle 681: window-wide broadcast — every pane in every tab
+    /// receives input. Terminator's true `broadcast_all`. Distinct
+    /// from the misnamed cycle-178 `ToggleBroadcastAll` which is
+    /// actually per-tab.
+    ToggleBroadcastWindow,
     ToggleFullscreen,
     Reset,
     /// Clear scrollback only, NOT the visible screen — `CSI 3 J`
@@ -431,6 +444,15 @@ pub fn action_names() -> Vec<&'static str> {
         "group_all",
         "broadcast_off",
         "ungroup_all",
+        // Cycle 681 — named-groups runtime broadcast scope.
+        "broadcast_group",
+        "broadcast-group",
+        "toggle_broadcast_group",
+        "toggle-broadcast-group",
+        "broadcast_window",
+        "broadcast-window",
+        "toggle_broadcast_window",
+        "toggle-broadcast-window",
         "toggle_fullscreen",
         "full_screen",
         "reset",
@@ -602,6 +624,14 @@ impl Action {
             "start_search" | "search" => StartSearch,
             "broadcast_all" | "group_all" => ToggleBroadcastAll,
             "broadcast_off" | "ungroup_all" => ToggleBroadcastOff,
+            "broadcast_group"
+            | "broadcast-group"
+            | "toggle_broadcast_group"
+            | "toggle-broadcast-group" => ToggleBroadcastGroup,
+            "broadcast_window"
+            | "broadcast-window"
+            | "toggle_broadcast_window"
+            | "toggle-broadcast-window" => ToggleBroadcastWindow,
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
