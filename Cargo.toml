@@ -61,6 +61,20 @@ categories = ["command-line-utilities"]
 # that its license is in deny.toml's allow-list. After adding: run
 # `cargo machete` locally to confirm it actually gets imported.
 [workspace.dependencies]
+# Cycle 718: declare every internal kettle-* crate as a workspace
+# dep so version + path stay in lockstep across every consumer
+# manifest. Pre-718 each `crates/*/Cargo.toml` hardcoded
+# `version = "1.2.0"` on its internal path deps while the workspace
+# was at 1.45.1; the literal version diverged every release because
+# nobody updated the path-dep pins. Workspace-deps make the next
+# `release.sh` version bump update one line instead of ten.
+kettle-config = { path = "crates/kettle-config", version = "1.45.1" }
+kettle-core = { path = "crates/kettle-core", version = "1.45.1" }
+kettle-vt = { path = "crates/kettle-vt", version = "1.45.1" }
+kettle-render = { path = "crates/kettle-render", version = "1.45.1" }
+kettle-remote = { path = "crates/kettle-remote", version = "1.45.1" }
+kettle-ui = { path = "crates/kettle-ui", version = "1.45.1" }
+
 anyhow = "1"
 thiserror = "2"
 log = "0.4"

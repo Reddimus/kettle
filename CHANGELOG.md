@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 718 — **Production-grade polish: workspace deps + doc sync**:
+              Three real bugs / gaps surfaced by the post-C9
+              audit pass, fixed in one cycle.
+              1. **Path-dep version drift**: every internal
+                 `kettle-X` path dependency in the per-crate
+                 manifests hardcoded `version = "1.2.0"` while
+                 the workspace lived at 1.45.1. Future releases
+                 would have re-diverged. Refactor: declare each
+                 `kettle-*` crate as a `[workspace.dependencies]`
+                 entry pinned to the workspace version (auto-
+                 bumped by `scripts/release.sh`); per-crate
+                 manifests switch to `kettle-config.workspace = true`
+                 etc. Touched 5 Cargo.toml files; `release.sh`
+                 now updates **one line** instead of ten.
+              2. **Stale v1.44.0 references** in `README.md`
+                 and `docs/INSTALL.md` (5 occurrences). Updated
+                 to v1.45.1 to match the current release.
+              3. **Missing `kettle-remote` in ARCHITECTURE.md**:
+                 the cycle-643 crate didn't appear in the
+                 mermaid graph. Added the box with its role
+                 (SSH / Docker / Podman / kubectl detection +
+                 kitty-@ control surface). Also added
+                 cross-references to cycle-716/717 helpers in
+                 the `kettle-ui` + `kettle-config` boxes.
+              No behavior change — Cargo build / clippy / test
+              all green at 424 (same as cycle 717).
+
   cycle 717 — **Preferences ▸ submenu (C8 + C9)**:
               The user-visible payoff for cycles 716. Right-
               click → Preferences ▸ now opens a submenu with

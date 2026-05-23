@@ -18,8 +18,8 @@ anyhow.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.11.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
-kettle-config = { version = "1.2.0", path = "../kettle-config" }
-kettle-core = { version = "1.2.0", path = "../kettle-core" }
+kettle-config.workspace = true
+kettle-core.workspace = true
 log.workspace = true
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"

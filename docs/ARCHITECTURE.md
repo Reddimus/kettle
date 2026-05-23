@@ -10,15 +10,17 @@ cwd, images, clipboard, title) flow back to the UI.
 ```mermaid
 graph TD
     bin["kettle (bin)<br/>CLI · entry"] --> ui
-    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session"] --> render
+    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu (cycle 717)"] --> render
     ui --> core
     ui --> cfg
+    ui --> remote
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · reader thread<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     core --> cfg
-    cfg["kettle-config<br/>Ghostty config · ~512 themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette"]
+    cfg["kettle-config<br/>Ghostty config · ~512 themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle (cycle 716)"]
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
+    remote["kettle-remote (cycle 643)<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
 ```
 
 ## Per-pane data flow
