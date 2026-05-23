@@ -5,6 +5,7 @@ members = [
     "crates/kettle-core",
     "crates/kettle-vt",
     "crates/kettle-render",
+    "crates/kettle-remote",
     "crates/kettle-ui",
     "crates/kettle",
 ]

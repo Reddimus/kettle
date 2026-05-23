@@ -6,6 +6,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 643 — **remote.py sub-cycle 2: `kettle-remote` crate
+              skeleton + `RemoteContext` type**: new workspace
+              member `crates/kettle-remote/`. Isolated from
+              kettle-core so the eventual sysinfo dep doesn't
+              propagate to non-UI consumers (the headless
+              `--screenshot` path, `--check-config` validator).
+              v1 of this crate ships:
+                - `pub enum RemoteContext { Ssh { host, user },
+                  Container { runtime, container } }`
+                - `pub enum ContainerRuntime { Docker, Podman,
+                  Kubectl, Lxc }`
+                - `pub fn detect_remote(child_pid) -> Option<
+                  RemoteContext>` — v1 stub returning None;
+                  sub-cycle 5 wires the sysinfo dep + actual
+                  process-tree walk.
+                - `pub fn format_remote_title(ctx) -> String`
+                  — pure formatter that drives the pane-title
+                  update path.
+              Two drift guards in the new crate cover the 6
+              format-title shapes (SSH ± user, 4 container
+              runtimes) + the stub-returns-None promise. The
+              public surface lands NOW so the App code-paths
+              can compile against the final return shape before
+              the sysinfo dep gets pulled in. Workspace tests
+              373 → 375.
+
   cycle 642 — **named-groups sub-cycle 1: action surface for
               `CreateGroup` + `GroupTab` + `GroupWindow` +
               `UngroupTab` + `UngroupWindow`**: 5 new Action

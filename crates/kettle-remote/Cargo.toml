@@ -1,0 +1,21 @@
+[package]
+name = "kettle-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Cycle 643 (sub-cycle 2 of TERMINATOR-REMOTE-DESIGN.md): isolated
+# from kettle-core so the eventual sysinfo dep doesn't propagate
+# to non-UI consumers (the headless --screenshot path, the
+# --check-config validator). This sub-cycle ships the
+# RemoteContext type + a no-op detect() stub; the actual sysinfo
+# walk lands in sub-cycle 3+.
+description = "kettle: SSH / Docker / Podman / kubectl remote-session detection for the focused pane"
+
+[lints]
+workspace = true
+
+[dependencies]
+log.workspace = true
