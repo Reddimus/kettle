@@ -105,38 +105,46 @@ per-key audit against Terminator's source.
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
 
-### Parsed-but-currently-no-op keys
+### Terminator-parity config keys by disposition
 
-These Terminator-parity keys parse cleanly + appear in
-`--check-config` enumerations but no kettle code consumes them
-today. They're kept in the parser for forward-compatibility:
-copying a Terminator config to kettle doesn't error on them, and
-a future cycle wiring the missing behavior reads them here
-without a parser change. Setting any of these in a kettle config
-has no runtime effect today.
+The Terminator config grammar has a few dozen keys kettle's parser
+accepts (so copying a Terminator config to kettle doesn't error
+on unknown keys) but where the runtime behavior differs from
+Terminator's. Each key falls into one of three buckets:
 
-| Key | What Terminator does with it |
+#### Effectively wired — kettle's behavior already matches the documented setting
+
+| Key | Why it's a "no-op" but works |
 |---|---|
-| `ask-before-closing` | When to show the close-confirmation dialog (always / multiple-terminals / never) |
-| `always-split-with-profile` | New splits inherit the parent pane's profile |
-| `autoclean-groups` | Remove empty broadcast groups automatically |
-| `broadcast-default` | Scope when broadcast is enabled (all / group / off). Previously mis-mapped to startup state; corrected so kettle no longer starts with broadcast on by default |
-| `cell-width` / `cell-height` | Font cell-grid pixel size overrides |
-| `cursor-color-default` | Use the system / terminal cursor color rather than a config override |
-| `detachable-tabs` | Allow tabs to be dragged out into separate windows. kettle implements this end-to-end via `Action::MoveTabToNewWindow`; the config toggle isn't wired (the feature is always available) |
-| `extra-styling` | Render bold/italic with the styled-font features even when palette lacks the variants |
-| `hide-from-taskbar` | Suppress the window from the taskbar / task switcher |
-| `homogeneous-tabbar` | Equal-width tab segments |
-| `http-proxy` | Pass-through HTTP proxy for any HTTP fetches the binary makes (kettle doesn't make any today) |
-| `inactive-color-offset` | Dim the colors of non-focused panes |
-| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` for clipboard-source distinction |
-| `scroll-tabbar` | Allow horizontal scroll across many tab segments |
-| `split-to-group` | New splits join the parent's broadcast group |
-| `sticky` | Pin the window above other windows (kettle's `always-on-top` is the implemented variant) |
-| `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides |
+| `detachable-tabs` | Terminator: a toggle to enable cross-window tab drag. kettle: cross-window detach drag is always available via `Action::MoveTabToNewWindow` + cycle-400's drag-FSM. The config toggle isn't read, but the feature it gates is on by default |
+| `homogeneous-tabbar` | Terminator: a toggle for equal-width tab segments. kettle: tab bar ALWAYS tiles segments equally (single-source-of-truth: `app.rs::tab_bar::seg_w = strip / n`). Setting the toggle has no effect because there's no inhomogeneous mode to disable |
+| `sticky` (X11 _NET_WM_STATE_STICKY) | Kettle's `always-on-top` is the closest cross-platform variant. winit doesn't expose "stick to all workspaces" portably (X11 hint only, no Wayland/macOS equivalent) — the kettle-style "above other windows" maps to a single config key that works everywhere |
+| `inactive-color-offset` | Kettle's `unfocused-split-opacity` is the implemented variant. The exact math differs (Terminator: two separate fg + bg offsets; kettle: single opacity blend), but the user-visible effect — dim unfocused panes — is equivalent |
 
-A future cycle wiring any of the above moves the row out of this
-table + into the main `Terminator-parity keys` table above.
+#### Won't implement — by-design divergence from Terminator
+
+| Key | Rationale |
+|---|---|
+| `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
+| `http-proxy` | The kettle binary makes no HTTP requests, so a proxy setting is meaningless. (The install scripts `install-online.sh` use system curl — kettle the binary itself never fetches HTTP) |
+| `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — corrected (cycle-560) so kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
+| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` (right-click pastes); meaningful only when kettle wires `putty-paste-style` itself. Kettle currently surfaces right-click as the context menu (cycle-245) — wiring putty-style would be a Bucket-C cycle that this companion key follows |
+
+#### Genuine future work — parsed for forward-compat
+
+The remaining keys parse cleanly but are not yet wired. A future cycle wiring any of them moves the row into the main `Terminator-parity keys` table above; the parser arm doesn't change.
+
+| Key | What Terminator does with it | Why it's future-work |
+|---|---|---|
+| `ask-before-closing` | Close-confirmation dialog (always / multiple-terminals / never) | Needs modal dialog primitive |
+| `always-split-with-profile` | New splits inherit the parent pane's profile | Needs the profile concept formalized first |
+| `autoclean-groups` | Auto-remove empty broadcast groups | Needs named broadcast groups (Bucket D) |
+| `cell-width` / `cell-height` | Font cell-grid pixel size overrides | Render-layer font-metric override |
+| `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
+| `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
+| `scroll-tabbar` | Horizontal-scroll across many tab segments | Needs scrollable tab-bar UI for many-tab cases |
+| `split-to-group` | New splits join the parent's broadcast group | Needs named broadcast groups (Bucket D) |
+| `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
 ## Keybind grammar
 

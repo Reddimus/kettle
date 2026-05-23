@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 610 — **CONFIG.md "no-op keys" reclassification.** The
+              cycle-564 "Parsed-but-currently-no-op keys" table
+              had grown stale as cycles 353 / 359 / 360 / 604 /
+              609 wired specific keys, and as cycle-575's audit
+              showed several entries were "no-op because
+              kettle's behavior already matches" rather than
+              "no-op because not implemented." Split the section
+              into three disposition buckets:
+                - **Effectively wired** (4 keys): kettle's
+                  behavior already matches the setting
+                  (`detachable-tabs`, `homogeneous-tabbar`,
+                  `sticky` via `always-on-top`,
+                  `inactive-color-offset` via
+                  `unfocused-split-opacity`).
+                - **Won't implement** (4 keys): by-design
+                  divergence (`cursor-color-default`,
+                  `http-proxy`, `broadcast-default`,
+                  `putty-paste-style-source-clipboard`).
+                - **Genuine future work** (9 keys): parsed for
+                  forward-compat; explicit "why not yet" rationale
+                  per row.
+              No code change. Doc-only. cycle-179 drift guards
+              all still pass after the rewrite.
+
   cycle 609 — **`smart-copy = false` honor.** Terminator parity
               (`terminal.py:real_copy_clipboard` +
               `config.py:smart_copy`). Pre-cycle-609 kettle
