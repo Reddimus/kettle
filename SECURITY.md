@@ -50,7 +50,13 @@ Reports that fit any of these are welcome:
   scope.
 - **Session/config tampering** — a config file or `session.json` that
   causes RCE, file-write outside the documented config/session paths,
-  or persistent privilege escalation across launches.
+  or persistent privilege escalation across launches. Note: the
+  cycle-584..587 read-size sweep adds defense-in-depth size caps on
+  every user-file read (1 MiB config, 16 MiB session.json, 4 MiB
+  init.lua, plus the bg-image 8192² / 256 MiB cap from cycle 584) so
+  a swap-attack with filesystem access can't OOM kettle on launch via
+  these paths — but tampering that bypasses the cap (config that
+  parses cleanly but escalates) remains in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (default since
   cycle 376) nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a
