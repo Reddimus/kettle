@@ -19,3 +19,14 @@ workspace = true
 
 [dependencies]
 log.workspace = true
+# Cycle 646 (sub-cycle 5 of TERMINATOR-REMOTE-DESIGN.md): cross-
+# platform process-tree walking. sysinfo handles
+# /proc on Linux, libproc on macOS, NtQuerySystemInformation on
+# Windows behind a single Rust API. Isolated to this crate so
+# the dep doesn't propagate to non-UI consumers (the headless
+# --screenshot path, --check-config validator).
+#
+# Default features turn on a lot of unused refreshers (disk, net,
+# components). We only need process enumeration; opt-out + opt-in
+# the bare minimum.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }

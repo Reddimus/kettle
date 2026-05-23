@@ -45,16 +45,76 @@ pub enum ContainerRuntime {
     Lxc,
 }
 
-/// Cycle 643 stub: detect a remote-session context for the pane
-/// rooted at `child_pid`. v1 always returns `None`. Sub-cycle 5
-/// of [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)
-/// adds the sysinfo dep + the actual process-tree walk.
+/// Cycle 646 (sub-cycle 5 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): detect a remote-
+/// session context for the pane rooted at `child_pid`.
 ///
-/// Kept in the public API now so the App can wire the per-pane
-/// `remote_context` field ahead of the heavy detection work —
-/// dispatch arms and right-click menu code paths compile against
-/// the final return shape from the start.
-pub fn detect_remote(_child_pid: u32) -> Option<RemoteContext> {
+/// Walks the process tree starting from `child_pid` (the shell
+/// kettle spawned), looks at each descendant's argv, and returns
+/// the first match from `detect_ssh` / `detect_container` (closest
+/// descendant of `child_pid` wins on tie).
+///
+/// Returns `None` when:
+///   - no descendant matches a known remote-client argv
+///   - `child_pid` itself is gone (process exited)
+///   - sysinfo can't enumerate processes (rare; permission denied
+///     on hardened systems)
+///
+/// Allocates a fresh `sysinfo::System` per call. For app-loop use
+/// (~10 Hz poll), prefer [`detect_remote_with`] which takes a
+/// caller-owned `System` so the refreshes amortize.
+pub fn detect_remote(child_pid: u32) -> Option<RemoteContext> {
+    let mut sys = sysinfo::System::new();
+    detect_remote_with(child_pid, &mut sys)
+}
+
+/// Cycle 646: same as [`detect_remote`] but reuses a caller-owned
+/// `sysinfo::System`. The App's poll loop will own one of these
+/// across ticks so the process-list refresh amortizes (sysinfo's
+/// internal cache survives between calls).
+pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<RemoteContext> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
+    let refresh_kind = ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+
+    // Collect all descendants of child_pid via BFS over the parent
+    // chain. sysinfo gives us a flat `processes()` map; we group
+    // children by parent.
+    let root = Pid::from_u32(child_pid);
+    let mut children_by_parent: std::collections::HashMap<Pid, Vec<Pid>> =
+        std::collections::HashMap::new();
+    for (&pid, proc) in sys.processes() {
+        if let Some(parent) = proc.parent() {
+            children_by_parent.entry(parent).or_default().push(pid);
+        }
+    }
+
+    // BFS from root; closer descendants checked first.
+    let mut queue: std::collections::VecDeque<Pid> = std::collections::VecDeque::new();
+    if let Some(initial) = children_by_parent.get(&root) {
+        queue.extend(initial.iter().copied());
+    }
+    while let Some(pid) = queue.pop_front() {
+        if let Some(proc) = sys.process(pid) {
+            // Convert OsString argv to Vec<String> for the detectors.
+            // Lossy conversion is fine — non-UTF8 argv is exotic
+            // and would still be detected at the exe-name level.
+            let argv: Vec<String> = proc
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            if let Some(ctx) = detect_ssh(&argv) {
+                return Some(ctx);
+            }
+            if let Some(ctx) = detect_container(&argv) {
+                return Some(ctx);
+            }
+        }
+        if let Some(grand) = children_by_parent.get(&pid) {
+            queue.extend(grand.iter().copied());
+        }
+    }
     None
 }
 
@@ -306,13 +366,18 @@ mod tests {
         );
     }
 
-    /// Cycle 643 drift guard: the v1 stub returns None for any
-    /// input. Locks the placeholder behavior so sub-cycle 5's
-    /// real detector replacement is a clear delta.
+    /// Cycle 646 drift guard: `detect_remote` returns None for
+    /// pids that aren't real (or have no descendants matching a
+    /// remote-client argv). Real-process testing isn't feasible
+    /// here — we'd need to actually spawn ssh, which adds CI
+    /// fragility. The argv-side detectors (detect_ssh +
+    /// detect_container) get exhaustive coverage above; this
+    /// test just locks the no-op no-match contract.
     #[test]
-    fn detect_remote_stub_always_returns_none() {
+    fn detect_remote_returns_none_for_invalid_pids() {
+        // PID 0 is the kernel scheduler on Linux — never has the
+        // shape we're looking for. u32::MAX is reserved / unused.
         assert!(detect_remote(0).is_none());
-        assert!(detect_remote(1).is_none());
         assert!(detect_remote(u32::MAX).is_none());
     }
 

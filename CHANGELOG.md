@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 646 — **remote.py sub-cycle 5: sysinfo process-tree
+              walk**: sysinfo 0.32 added as a kettle-remote
+              dep (default-features disabled; only the
+              `system` feature) — isolated to this crate so
+              the heavy process-enumeration code doesn't
+              propagate to non-UI consumers.
+              `detect_remote(child_pid)` now actually walks
+              the process tree:
+                - BFS from `child_pid` over `sysinfo`'s
+                  parent→children index (built once per call)
+                - each descendant's argv is fed through cycle-
+                  644 `detect_ssh` + cycle-645 `detect_container`
+                - closest descendant wins on tie (BFS gives
+                  that for free)
+              New companion `detect_remote_with(child_pid,
+              &mut System)` lets the App's eventual poll loop
+              own a single `System` across ticks so sysinfo's
+              internal cache amortizes (instead of allocating
+              one per call). Drift guard updated from the stub
+              `always None` to "no match for invalid pids 0 /
+              u32::MAX" — real-process testing would need
+              spawn/CI fragility; the argv-side detectors
+              already have exhaustive coverage. Workspace
+              tests stay 377.
+
   cycle 645 — **remote.py sub-cycle 4: Container detector**:
               new `pub fn detect_container(argv: &[String]) ->
               Option<RemoteContext>` covers the four container-
