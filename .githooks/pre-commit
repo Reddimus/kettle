@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# kettle — pre-commit hook (opt-in; cycle 494)
+#
+# Runs the local-only quality gate kettle's CONTRIBUTING.md
+# recommends ("a green `just gauntlet` locally is the same gate
+# every PR runs on every OS"). Skips the gate for commits that
+# touch ONLY non-code paths (CHANGELOG.md, README.md, docs/*,
+# packaging/*, .github/*) so doc-only edits stay fast.
+#
+# Install (one-time per checkout):
+#
+#     git config core.hooksPath .githooks
+#
+# Or disable on a per-commit basis:
+#
+#     git commit --no-verify -m "..."
+#
+# Cycle 493 caught a doc-list clippy regression that cycles 484-
+# 492 had landed without running clippy. This hook makes the
+# regression class catchable at commit time rather than at the
+# next manual `just gauntlet` invocation.
+
+set -euo pipefail
+
+# Detect doc-only commits (skip the heavy gate for them).
+non_doc=$(git diff --cached --name-only --diff-filter=ACMR \
+    | grep -vE '^(CHANGELOG\.md|README\.md|docs/|packaging/|\.github/|\.githooks/|NOTICE|LICENSE|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|deny\.toml|\.gitignore)' \
+    || true)
+
+if [ -z "$non_doc" ]; then
+    echo "pre-commit: doc-only change; skipping gauntlet (use --no-verify to skip on code changes too)" >&2
+    exit 0
+fi
+
+# Code paths touched — run the quality gate.
+echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test ..." >&2
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+echo "pre-commit: PASSED" >&2

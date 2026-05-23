@@ -98,6 +98,18 @@ Each cycle has the same shape:
    regression (cycle 251), a MSRV (Rust 1.89) build verification
    (cycle 250), and a `cargo audit` advisory scan (cycle 244). The
    local gate must be green before pushing.
+
+   **Optional pre-commit hook**: `.githooks/pre-commit` runs the
+   gate automatically on every `git commit` (skipping doc-only
+   commits to stay fast). Opt in once per checkout with:
+
+   ```sh
+   git config core.hooksPath .githooks
+   ```
+
+   Cycle 493 added this after a doc-list overindentation
+   regression landed across cycles 484-492 without anyone
+   running clippy — the hook catches that class at commit time.
 6. **Update docs.** `CHANGELOG.md` gets a paragraph under
    `[Unreleased]` describing the bug shape and the fix.
    `docs/ROADMAP.md`'s `Done` list gets a one-paragraph entry of the
