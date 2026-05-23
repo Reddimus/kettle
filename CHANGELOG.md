@@ -46,6 +46,26 @@ the next major event's release notes.
               enforced rather than manual-review-only.
               Workspace tests 323 → 325.
 
+  cycle 576 — **Decompression-bomb defense for terminal-embedded
+              images.** `ImageData::from_encoded` — the entry
+              point for Kitty graphics `f=100` (PNG) and iTerm2
+              OSC-1337 inline-image payloads — used to call
+              `image::load_from_memory(bytes).to_rgba8()` with no
+              dimension or allocation limits. A small attacker-
+              controlled PNG/GIF/JPEG could claim 2^31 × 2^31
+              pixels in the header and OOM kettle on decode.
+              Switched to `image::ImageReader` with `Limits`
+              configured (`max_image_width` / `max_image_height`
+              = 8192, matching `sixel::MAX_DIM`; `max_alloc` =
+              256 MiB, the matching RGBA cap). New unit test
+              `from_encoded_rejects_oversized_images` round-trips
+              a 4 × 4 PNG (positive) and rejects an 8193 × 1 PNG
+              encoded by the image crate itself (negative); the
+              drift guard fires if a future refactor drops the
+              `ImageReader::limits` wire-up. SECURITY.md cycle-
+              449 "Resource exhaustion via a single PTY frame"
+              scope is now tighter for the inline-image surface.
+
   cycle 574 — **Paste safety bug fix.** `Action::PastePrimary`
               (cycle 345) was reading the clipboard and writing
               raw bytes directly to the focused pane's PTY,

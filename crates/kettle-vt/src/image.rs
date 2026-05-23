@@ -2,6 +2,16 @@
 
 use std::sync::Arc;
 
+/// Cycle 576 decompression-bomb defense: max per-axis pixel count
+/// accepted by `ImageData::from_encoded`. Matches `sixel::MAX_DIM`
+/// (cycle predates the audit doc; same realistic-terminal envelope).
+const MAX_IMAGE_DIM: u32 = 8192;
+
+/// Cycle 576 decompression-bomb defense: max total bytes the `image`
+/// crate may allocate while decoding. 8192² × 4 RGBA bytes = 256 MiB,
+/// the natural upper bound paired with `MAX_IMAGE_DIM`.
+const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// A decoded image plus placement metadata (kitty image id + z-index;
 /// Sixel/iTerm2 use `id = None`, `z = 0`).
 #[derive(Clone, Debug)]
@@ -42,9 +52,21 @@ impl ImageData {
         })
     }
 
-    /// Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) via the `image` crate.
+    /// Decode an encoded terminal-embedded image (PNG / JPEG / GIF — the
+    /// only formats kettle-vt enables on the `image` crate per Cargo.toml
+    /// cycle-277 narrow features). Bounded against decompression bombs:
+    /// rejects images wider/taller than 8192 px or whose decoded RGBA
+    /// buffer would exceed 256 MiB. Cycle 576.
     pub fn from_encoded(bytes: &[u8]) -> Option<ImageData> {
-        let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_IMAGE_DIM);
+        limits.max_image_height = Some(MAX_IMAGE_DIM);
+        limits.max_alloc = Some(MAX_IMAGE_BYTES);
+        reader.limits(limits);
+        let img = reader.decode().ok()?.to_rgba8();
         ImageData::new(img.width(), img.height(), img.into_raw())
     }
 
@@ -160,6 +182,43 @@ mod tests {
         assert_eq!((s.width, s.height), (2, 3));
         assert!(s.rgba.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
         assert!(ImageData::solid(0, 4, [0; 4]).is_none());
+    }
+
+    /// Cycle 576 drift guard for the decompression-bomb defense in
+    /// `from_encoded`. Encodes a small PNG (positive case) and a PNG
+    /// whose width exceeds `MAX_IMAGE_DIM` (negative case) via the
+    /// `image` crate's encoder, then re-decodes through `from_encoded`
+    /// and asserts the oversized one is rejected by the `Limits` we
+    /// install. If a future refactor of `from_encoded` drops the
+    /// `ImageReader::limits` wire-up, this test fails immediately
+    /// rather than the regression slipping into a release.
+    #[test]
+    fn from_encoded_rejects_oversized_images() {
+        use image::ImageEncoder;
+        let encode_solid = |w: u32, h: u32| -> Vec<u8> {
+            let pixels = vec![0u8; (w as usize) * (h as usize) * 4];
+            let mut buf = Vec::new();
+            let enc = image::codecs::png::PngEncoder::new(&mut buf);
+            enc.write_image(&pixels, w, h, image::ExtendedColorType::Rgba8)
+                .expect("encode test PNG");
+            buf
+        };
+
+        // Positive: 4×4 PNG round-trips through from_encoded.
+        let ok = encode_solid(4, 4);
+        let decoded = ImageData::from_encoded(&ok).expect("small PNG should decode");
+        assert_eq!((decoded.width, decoded.height), (4, 4));
+
+        // Negative: width exceeds MAX_IMAGE_DIM (8192). The image-crate
+        // encoder accepts arbitrary widths; our decoder must reject.
+        // Use 8193 × 1 — minimal pixel-count over the dim cap, so the
+        // test cost stays low (8193 × 4 = ~32 KB encoded buffer).
+        let oversized = encode_solid(MAX_IMAGE_DIM + 1, 1);
+        assert!(
+            ImageData::from_encoded(&oversized).is_none(),
+            "from_encoded must reject width {} (cap {MAX_IMAGE_DIM})",
+            MAX_IMAGE_DIM + 1
+        );
     }
 
     #[test]
