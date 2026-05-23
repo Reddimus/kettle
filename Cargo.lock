@@ -1532,6 +1532,7 @@ dependencies = [
  "crossbeam-channel",
  "kettle-config",
  "kettle-core",
+ "kettle-remote",
  "kettle-render",
  "libc",
  "log",
