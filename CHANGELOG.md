@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 637 — **`docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md` —
+              Bucket D for `ask_before_closing` + a reusable
+              confirm-dialog primitive**: the cycle-343-360
+              parsed-but-unwired `AskBeforeClosing` config gets
+              a real consumer. Architecture:
+                - new `ConfirmDialogState` + `ConfirmAction` enum
+                - generic primitive — first user is the close
+                  family (Window/Tab/Pane), future users include
+                  "kill running process" + "discard unsaved
+                  layout" + "reset config"
+                - new `should_prompt(mode, scope_count) -> bool`
+                  pure helper (matrix over the 3 modes × scope)
+                - new `maybe_confirm_then(action)` dispatch
+                  wrapper — intercepts close-family actions and
+                  opens modal vs falls through based on mode
+                - centered modal renderer + dim backdrop +
+                  focus-on-Cancel safe default
+                - keyboard nav: Tab cycles focus, Enter confirms,
+                  Esc cancels
+              8 sub-cycles, +6-8 estimated tests. Audit row
+              promoted from 🟡 (parsed not wired) to D. No code
+              change.
+
   cycle 636 — **`cell_width` / `cell_height` renderer wiring
               (Terminator parity, config.py)**: the config keys
               were parsed (and clamped to [0.5, 3.0]) since
