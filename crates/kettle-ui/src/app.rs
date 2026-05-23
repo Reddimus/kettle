@@ -623,8 +623,11 @@ pub struct App {
     /// Cycle 412 (Terminator parity, exit-action = restart impl):
     /// pane ids whose shell exited + cfg.exit_action requested
     /// restart. Drained AFTER drain_events (so we don't borrow
-    /// self.mux mutably twice in one tick), respawns the shell
-    /// with the same argv into the same pane id slot.
+    /// self.mux mutably twice in one tick), spawns a NEW tab
+    /// containing the same argv + cwd via `Mux::new_tab_with`
+    /// (cycle 418); the dead pane is reaped at end-of-redraw.
+    /// Dedup'd on push (cycle 452) so alacritty's `Exit` +
+    /// `ChildExit` pair only spawn one new tab.
     pending_pane_restarts: Vec<u64>,
     /// Cycle 366 (Terminator plugin parity, plugin Bucket-D
     /// sub-cycle 3): the live LuaEngine persisted across the App's
