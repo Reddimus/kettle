@@ -947,10 +947,18 @@ impl App {
         // their keystrokes mirrored across every other pane in the
         // tab — the bug the cycle-560 user-report flagged.
         //
-        // Correct mapping: broadcast STATE always starts off. The
-        // `broadcast_default` config still governs scope decisions
-        // elsewhere (the cycle-178 per-tab broadcast set, the
-        // cycle-406 named-group code).
+        // Correct mapping: broadcast STATE always starts off.
+        //
+        // NOTE (cycle 562): with the cycle-360 mapping removed, the
+        // `broadcast_default` config field currently has no runtime
+        // effect — it parses but no consumer reads it. The field is
+        // kept in `kettle_config::Config` for forward-compatibility:
+        // a future cycle wiring the scope-when-enabled semantics
+        // (cycle-406 named-group integration with Terminator's
+        // `broadcast_default = all` route) will read it. Until then,
+        // setting `broadcast-default = all` in a config has no
+        // visible effect; broadcast scope defaults to the cycle-178
+        // active-tab leaves.
         let mut app = App {
             cfg: initial_cfg,
             window: None,
