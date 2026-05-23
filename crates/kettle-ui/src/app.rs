@@ -4589,13 +4589,24 @@ impl App {
                 }
             }
             Action::TakeScreenshot => {
-                // Cycle 654 (sub-cycle 3 of terminalshot design).
-                // Computes the output path via cycle-650
-                // session_screenshot_path + queues a request on
-                // the renderer's pending_screenshot slot.
-                // Sub-cycle 4 wires the actual wgpu readback +
-                // PNG encode + write to out_path; for now the
-                // request sits unread until that sub-cycle lands.
+                // Cycle 654 + 688 + 689 (terminalshot sub-cycles
+                // 3/4/5). Compute the output path, queue the
+                // request, then fire a desktop notification so the
+                // user knows where to look.
+                // Cycle 690 (terminalshot sub-cycle 6): compute
+                // the focused pane's rect at dispatch time so the
+                // screenshot crops to just that pane. Computed
+                // BEFORE the `&mut self.renderer` borrow to keep
+                // the borrow window narrow.
+                let area = self.area();
+                let active = self.mux.active;
+                let focus_id = self.mux.tabs.get(active).map(|t| t.focus).unwrap_or(0);
+                let crop = self
+                    .mux
+                    .layout(active, area)
+                    .into_iter()
+                    .find(|(id, _)| *id == focus_id)
+                    .map(|(_, rect)| rect);
                 if let Some(renderer) = self.renderer.as_mut() {
                     let secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -4607,10 +4618,20 @@ impl App {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     log::info!("take_screenshot: queued → {}", path.display());
+                    let path_str = path.display().to_string();
                     renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
                         out_path: path,
-                        crop: None,
+                        crop,
                     });
+                    // Cycle 689 (sub-cycle 5): toast notification.
+                    // Optimistic — we fire BEFORE the GPU readback
+                    // completes (which happens on the next frame).
+                    // If the capture fails the notification is a
+                    // mild lie, but capture failures are rare
+                    // (would require GPU/disk I/O error) and the
+                    // log::warn from capture_live_surface surfaces
+                    // them in --debug runs.
+                    fire_notify("kettle: screenshot queued", &path_str);
                 }
             }
             Action::ReloadConfig => self.reload_config(),

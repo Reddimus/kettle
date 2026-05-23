@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 689 — **terminalshot sub-cycles 5 + 6: desktop
+              notification + per-pane crop**.
+              Sub-cycle 5: `Action::TakeScreenshot` dispatch
+              now calls `fire_notify("kettle: screenshot
+              queued", &path_str)` so the user knows where
+              the file landed. Optimistic — fired before the
+              GPU readback completes; rare capture failures
+              would make the notification mildly inaccurate
+              (and the capture path's `log::warn` surfaces
+              them in --debug runs).
+              Sub-cycle 6: dispatch now computes the focused
+              pane's rect via `mux.layout(active, area)` and
+              passes it as `ScreenshotRequest::crop`. Cycle
+              688's `capture_live_surface` already handles
+              the crop math (when crop is Some, it carves
+              out the rect post-readback). v1 captures the
+              focused pane only; whole-window still
+              available via the existing `--screenshot=PATH`
+              CLI flag.
+              Workspace tests stay 392.
+              **terminalshot port: 6/7 — sub-cycle 7 (audit-
+              doc finalization) is the only piece left**.
+
   cycle 688 — **terminalshot sub-cycle 4: wgpu surface
               readback — live screenshots ship**. Last
               remaining heavy work on the cycle-630
