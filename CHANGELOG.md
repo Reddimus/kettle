@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.46.2] — 2026-05-23
+
+  Polish hot-fix following v1.46.1's Win11 audit pass. Two cycles:
+  cycle 736 fixes the PowerShell shell-integration install one-liner
+  (the docs' `kettle --shell-integration powershell >> $PROFILE`
+  captured zero bytes under SUBSYSTEM:WINDOWS); cycle 737 drops a
+  dead `log` dep from kettle-remote that cargo-machete surfaced on
+  the audit pass.
+
+  No Rust runtime change; no user-visible behavior change for users
+  who don't use PowerShell shell-integration. PowerShell users now
+  have two working install paths:
+    - `install.ps1 -WithShellIntegration` (preferred — opt-in flag,
+      idempotent, uninstall-aware).
+    - Manual `Add-Content $PROFILE (Get-Content kettle.ps1 -Raw)`
+      against the bundled snippet file at
+      `%LOCALAPPDATA%\Programs\kettle\shell-integration\kettle.ps1`
+      (documented in `docs/SHELL-INTEGRATION.md` "Windows / PowerShell"
+      section).
+
+  See per-cycle paragraphs below.
+
   cycle 737 — **kettle-remote: remove unused `log` workspace dep**:
               `cargo machete` on the Surface Book 3 Win11 audit pass
               (2026-05-23) flagged `log` as declared-but-never-used
