@@ -230,7 +230,27 @@ Write-Output "  created Start menu shortcut: $shortcutPath"
 # Add/Remove Programs entry. Per-user (HKCU); no admin required.
 New-Item -Path $uninstallKey -Force | Out-Null
 $exeForVersion = Join-Path $Prefix "kettle.exe"
-$kettleVersion = (& $exeForVersion --version) -replace '^kettle ([0-9.]+).*', '$1'
+# Cycle 734: kettle.exe is now SUBSYSTEM:WINDOWS, so `& kettle.exe
+# --version` returns nothing under PowerShell (PS doesn't wait for
+# GUI processes). Use Start-Process + redirect to a temp file to
+# reliably capture the version even under SUBSYSTEM:WINDOWS. Falls
+# back to "unknown" if the call fails (cycle-734 install tested
+# this path).
+$versionTmp = Join-Path $env:TEMP "kettle-install-ver.txt"
+Remove-Item -ErrorAction SilentlyContinue $versionTmp
+try {
+    Start-Process -FilePath $exeForVersion -ArgumentList '--version' `
+        -NoNewWindow -Wait -RedirectStandardOutput $versionTmp `
+        -ErrorAction Stop
+} catch {}
+$kettleVersion = if (Test-Path $versionTmp) {
+    $line = (Get-Content $versionTmp -Raw -ErrorAction SilentlyContinue)
+    if ($line) {
+        $m = [regex]::Match($line, '^kettle ([0-9.]+)')
+        if ($m.Success) { $m.Groups[1].Value } else { "unknown" }
+    } else { "unknown" }
+} else { "unknown" }
+Remove-Item -ErrorAction SilentlyContinue $versionTmp
 Set-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value "kettle"
 Set-ItemProperty -Path $uninstallKey -Name "DisplayVersion" -Value $kettleVersion
 Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "kettle contributors"

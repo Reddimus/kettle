@@ -31,6 +31,26 @@ log.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Cycle 734: AttachConsole(ATTACH_PARENT_PROCESS) — re-attaches the
+# process's stdout/stderr to a parent console (PowerShell / cmd /
+# Git Bash) when kettle.exe is launched from a shell, so CLI flags
+# (--version, --list-themes, --gpu-info, …) still print to the
+# calling terminal. Paired with the crate-level `#![cfg_attr(
+# windows, windows_subsystem = "windows")]` in src/main.rs, which
+# tells the linker NOT to allocate a phantom console window on
+# Explorer/Start menu launch.
+#
+# windows-sys is a transitive dep already (wgpu / winit / sysinfo
+# all pull it), so this is a near-zero binary-size cost. The
+# `Win32_System_Console` feature is the only one needed.
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+
 [target.'cfg(windows)'.build-dependencies]
 # Embed packaging/windows/kettle.ico into the .exe so Explorer, the
 # taskbar, Alt-Tab, and the Start menu all show the kettle icon

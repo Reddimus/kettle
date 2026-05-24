@@ -1,4 +1,28 @@
-//! kettle — a fast, cross-platform GPU terminal emulator.
+//! kettle - a fast, cross-platform GPU terminal emulator.
+
+// Cycle 734: build kettle.exe as a Windows GUI subsystem binary so
+// a Start-menu / Explorer launch doesn't allocate a phantom console
+// window alongside kettle's wgpu window. Pre-734 launching kettle
+// from the cycle-733 install.ps1 Start menu shortcut opened TWO
+// visible windows: the wgpu window (correct) AND a stock Windows
+// `ConsoleWindowClass` console (phantom, allocated automatically
+// because the default Rust target is the CONSOLE subsystem).
+//
+// On non-Windows targets this attribute is a no-op (Linux/macOS
+// don't have the subsystem concept). On Windows-MSVC, the linker
+// emits a SUBSYSTEM:WINDOWS PE header instead of SUBSYSTEM:CONSOLE,
+// so the OS doesn't allocate a console for us. fn main() below
+// then calls AttachConsole(ATTACH_PARENT_PROCESS) to re-attach
+// stdout/stderr to the calling shell when one exists, so CLI flags
+// (--version, --list-themes, --check-config, --gpu-info,
+// --shell-integration, --print-completions, …) keep printing to
+// the shell that ran us. When no parent console exists (Explorer
+// launch), AttachConsole fails silently and println!/eprintln!
+// become no-ops — exactly what we want for a GUI launch.
+//
+// This is the same pattern Alacritty, kitty, WezTerm, and Ghostty
+// use on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use clap::Parser;
 
@@ -299,6 +323,80 @@ fn reset_sigpipe() {
 fn reset_sigpipe() {}
 
 fn main() -> anyhow::Result<()> {
+    // Cycle 734: re-attach stdout/stderr to the parent console
+    // (PowerShell / cmd / Git Bash) when one exists. The
+    // crate-level `#![cfg_attr(windows, windows_subsystem =
+    // "windows")]` keeps Windows from allocating a phantom
+    // console window at process start - the trade-off is that
+    // CLI flags (--version, --list-themes, etc.) lose their
+    // default stdout. AttachConsole(ATTACH_PARENT_PROCESS)
+    // restores that path. We also have to re-open CONOUT$ /
+    // CONIN$ and stuff the new handles into STD_OUTPUT_HANDLE /
+    // STD_ERROR_HANDLE / STD_INPUT_HANDLE because the original
+    // stdio handles were established BEFORE AttachConsole ran -
+    // they point at nothing under SUBSYSTEM:WINDOWS. Without
+    // this re-open, println!() / eprintln!() see a valid
+    // SetStdHandle but write into the void.
+    //
+    // When no parent console exists (Explorer launch),
+    // AttachConsole returns 0; we skip the handle-rewire and
+    // println!/eprintln! become silent no-ops - exactly the
+    // desired GUI-launch behavior. Called before env_logger init
+    // so its log target also lands in the parent console when
+    // there is one.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileA, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::Console::{
+            ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE, SetStdHandle,
+        };
+        // SAFETY: AttachConsole + CreateFileA + SetStdHandle are
+        // standard Win32 startup calls; safe at single-threaded
+        // entry. They mutate only this process's own console +
+        // handle table. If AttachConsole fails, we skip the rest -
+        // running as a true GUI process with no console attached.
+        unsafe {
+            if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+                // GENERIC_READ | GENERIC_WRITE in raw form (the
+                // windows-sys named constants live in a separate
+                // feature; the literal hex is portable + matches
+                // every C++ AttachConsole example online).
+                const GENERIC_READ: u32 = 0x8000_0000;
+                const GENERIC_WRITE: u32 = 0x4000_0000;
+                let conout = CreateFileA(
+                    c"CONOUT$".as_ptr().cast::<u8>(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                let conin = CreateFileA(
+                    c"CONIN$".as_ptr().cast::<u8>(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                // INVALID_HANDLE_VALUE is -1 cast to handle; cheap
+                // check skips the SetStdHandle on failure.
+                let invalid: isize = -1;
+                if conout as isize != invalid {
+                    SetStdHandle(STD_OUTPUT_HANDLE, conout);
+                    SetStdHandle(STD_ERROR_HANDLE, conout);
+                }
+                if conin as isize != invalid {
+                    SetStdHandle(STD_INPUT_HANDLE, conin);
+                }
+            }
+        }
+    }
     reset_sigpipe();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     // Cycle 204: log the build identity at info level on startup. A user
@@ -1005,6 +1103,48 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
 mod tests {
     use super::{Cli, config_path_problem, extra_check_config_lines, format_ssh_hosts};
     use clap::Parser;
+
+    /// Cycle 734 drift guard. The crate-level
+    /// `#![cfg_attr(windows, windows_subsystem = "windows")]`
+    /// attribute is what stops the Windows linker from setting the
+    /// PE header's SUBSYSTEM to CONSOLE, which is what (pre-734)
+    /// caused kettle.exe to allocate a phantom ConsoleWindowClass
+    /// window alongside the wgpu window when launched from Explorer
+    /// or the Start menu.
+    ///
+    /// We can't directly assert on the linker output from a Rust
+    /// test, but we *can* assert the source attribute survives so a
+    /// future contributor who strips it (in a "this attribute looks
+    /// weird, let's remove it" cleanup) immediately fails this
+    /// test, reads the rationale in the panic message + the
+    /// surrounding source comment, and learns why it has to stay.
+    #[test]
+    fn windows_subsystem_attribute_survives() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains(r#"#![cfg_attr(windows, windows_subsystem = "windows")]"#),
+            "the Windows GUI-subsystem attribute was removed from \
+             crates/kettle/src/main.rs; this is what stops kettle \
+             from allocating a phantom console window on Start menu \
+             launch (cycle 734). If you really need to remove it, \
+             read the surrounding source comment first — the fix \
+             also requires removing the AttachConsole call in \
+             fn main()."
+        );
+        // Belt-and-suspenders: the AttachConsole call has to stay
+        // too, otherwise CLI flag stdout breaks under the
+        // SUBSYSTEM:WINDOWS configuration.
+        assert!(
+            src.contains("AttachConsole(ATTACH_PARENT_PROCESS)")
+                && src.contains("use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};"),
+            "the cycle-734 AttachConsole call in fn main() was \
+             removed; without it, `kettle --version` (and every \
+             other CLI flag) silently produces no output when \
+             invoked from a shell, because SUBSYSTEM:WINDOWS means \
+             stdout has no console to print to. Restore the cfg(windows) \
+             block at the top of fn main()."
+        );
+    }
 
     #[test]
     fn config_path_problem_catches_missing_and_directory() {
