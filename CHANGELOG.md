@@ -6,6 +6,36 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.46.1] — 2026-05-23
+
+  Hot-fix release bundling cycles 732-735. Two user-reported v1.46.0
+  Win11 defects + two CI/installer polish cycles. No public API
+  change; no behavior change on Linux/macOS. Workspace tests 430 →
+  431 on Windows (cycle-734 drift guard).
+
+  Headline fixes for v1.46.0 users on Windows 11:
+  - **No more phantom console on Start menu launch** (cycle 734).
+    Launching kettle from Windows Search opened TWO windows
+    pre-734 (kettle's wgpu window + a stock ConsoleWindowClass
+    console). Fixed via `#![cfg_attr(windows, windows_subsystem =
+    "windows")]` + AttachConsole(ATTACH_PARENT_PROCESS) re-wire of
+    CONOUT$/CONIN$ so CLI flags still work from a parent shell.
+  - **No more crash on Ctrl+Shift+O / Ctrl+Shift+W** (cycle 735).
+    Close-pane handler now schedules a redraw + re-emits the
+    cycle-703 PaneFocus event after a successful close, so the
+    renderer + Lua plugin state see the new collapsed tree on the
+    same frame as the close. Mitigates the user-reported close-
+    focused-split crash on Win11 / wgpu DX12.
+
+  Other cycles in this release:
+  - cycle 733: scripts/install.ps1 mirrors install.sh + Start menu
+    integration (.lnk shortcut, PATH update, Add/Remove Programs
+    entry, all per-user / no UAC). Bundled into the Windows .zip.
+  - cycle 732: aligned the last actions/checkout@v4 holdout in
+    ci.yml's nightly job to @v6 ahead of Node 20 deprecation.
+
+  See the per-cycle paragraphs below for the full audit-trail.
+
   cycle 735 — **Fix: close-pane stale-state refresh (Win11
               close-split crash mitigation)**:
               User reported on Win11 (v1.46.0 install via cycle-733
