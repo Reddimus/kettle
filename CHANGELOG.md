@@ -6,6 +6,63 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 740 — **Fix: replace cycle-734 SUBSYSTEM:WINDOWS with
+              hide-console-when-orphaned (Ghostty pattern)**:
+              Cycle 734's `#![cfg_attr(windows, windows_subsystem =
+              "windows")]` + AttachConsole + CONOUT$ rewire worked
+              for the phantom-console-on-Start-menu case, but broke
+              the Windows CI bash-piped CLI smoke
+              (`cargo run -- --some-flag | grep "…"`) because
+              SUBSYSTEM:WINDOWS routes stdout to the console screen
+              buffer, NOT the inherited stdout pipe that bash's `|`
+              reads. Verified locally on the Surface Book 3: cycle
+              734's `kettle --shell-integration powershell >>
+              $PROFILE` captured 0 bytes via every PS / cmd
+              redirect pattern. Cycle-738/739's CI runs both went
+              red on `build (windows-latest)` for this reason
+              (cycle 738 was docs-only, cycle 739 was a windows-sys
+              bump — neither caused the regression; cycle 734 did).
+              Fix: switch to Ghostty's pattern. Stay on the default
+              `console` subsystem (so stdout pipe inheritance works
+              under PS / bash / cmd) and instead **hide the
+              auto-allocated phantom console at startup ONLY when
+              we are the only process attached to it** (i.e. Windows
+              allocated it for us on Explorer / Start-menu launch
+              and no shell is reading from it). `GetConsoleProcessList(1)`
+              returns the count; if `== 1`, hide the window via
+              `ShowWindow(GetConsoleWindow(), SW_HIDE)`. If `> 1`, a
+              parent shell is using this console — leave it visible
+              so CLI output reaches the user.
+              Trade-off: there's a sub-50ms console flash on Explorer
+              launch (Windows shows the console before our hide call
+              lands). Tolerable compared to broken CLI stdout.
+              `windows-sys` features adjusted:
+              `Win32_UI_WindowsAndMessaging` (for ShowWindow) added;
+              `Win32_Storage_FileSystem` + `Win32_Security` (cycle-734's
+              CreateFileA/SetStdHandle dance) removed.
+              Drift-guard test renamed
+              `windows_console_hide_on_orphan_launch_survives` -
+              asserts both Win32 calls survive AND that the
+              `windows_subsystem = "windows"` attribute is NOT
+              re-added (a future contributor re-adding it would
+              re-break the CLI stdout regression).
+              `docs/SHELL-INTEGRATION.md` reverted: the
+              `kettle --shell-integration powershell >> $PROFILE`
+              one-liner is now back in the cross-platform
+              recommended block (cycle 736's "Windows-specific
+              section" workaround is now superfluous). Kept the
+              `install.ps1 -WithShellIntegration` flag as a
+              hands-free alternative — still useful for the BEGIN/END
+              marker wrapping + uninstall integration.
+              Verified on Surface Book 3:
+                - `kettle --version` from PS prints version
+                - `kettle --shell-integration powershell > file`
+                  captures 5756 bytes
+                - Start-menu .lnk launch: conhost child still
+                  exists (CONSOLE subsystem) but its ConsoleWindowClass
+                  window is hidden by ShowWindow(SW_HIDE).
+              Closes the Win11 CI regression introduced by cycle 734.
+
   cycle 739 — **kettle: windows-sys 0.59 → 0.61 minor bump**:
               `cargo outdated` on the Surface Book 3 audit pass
               (2026-05-23) flagged `windows-sys` as 2 minor versions

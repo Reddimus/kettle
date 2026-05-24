@@ -46,9 +46,8 @@ libc = "0.2"
 # `Win32_System_Console` feature is the only one needed.
 windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
-    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
-    "Win32_Security",
 ] }
 
 [target.'cfg(windows)'.build-dependencies]

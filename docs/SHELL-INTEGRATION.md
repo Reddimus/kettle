@@ -28,6 +28,7 @@ kettle ships the snippets embedded in the binary — install with one command:
 kettle --shell-integration bash       >> ~/.bashrc
 kettle --shell-integration zsh        >> ~/.zshrc
 kettle --shell-integration fish       >> ~/.config/fish/config.fish
+kettle --shell-integration powershell >> $PROFILE       # PowerShell 5+ / 7+
 ```
 
 The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` in
@@ -35,32 +36,29 @@ the source tree (also shipped in the Linux release tarball and the Windows
 zip). The verbatim bodies follow below in case you want to read or tweak
 them first.
 
-### Windows / PowerShell — use the bundled snippet file
+### Windows / PowerShell — hands-free alternative
 
-The `>>` pattern above doesn't work for `kettle --shell-integration
-powershell` because `kettle.exe` is a `SUBSYSTEM:WINDOWS` binary on
-Windows (so the Start menu launch doesn't open a phantom console —
-see cycle 734 in [CHANGELOG.md](../CHANGELOG.md)). The trade-off:
-stdout doesn't reach PowerShell's `>>` operator under that subsystem.
-The bundled `install.ps1` ships the `kettle.ps1` snippet file
-alongside `kettle.exe`, so use it directly:
+If you installed via the bundled `install.ps1`, you can let the
+installer wire up `$PROFILE` for you in one go (no manual
+`>> $PROFILE` step needed):
 
 ```powershell
-# After running install.ps1 from the release .zip, the snippet lives at
-#   %LOCALAPPDATA%\Programs\kettle\shell-integration\kettle.ps1
-# Append it to your PowerShell $PROFILE:
-$kp = "$env:LOCALAPPDATA\Programs\kettle\shell-integration\kettle.ps1"
-if (-not (Test-Path $PROFILE)) { New-Item $PROFILE -ItemType File -Force | Out-Null }
-Add-Content $PROFILE (Get-Content $kp -Raw)
-
-# Or hands-free: install.ps1 -WithShellIntegration (cycle 736) does the
-# same Add-Content as part of the install, with idempotency.
+# From the extracted release .zip folder:
+.\install.ps1 -WithShellIntegration
 ```
 
-The `kettle.ps1` snippet itself is idempotent — re-sourcing `$PROFILE`
-(or running `Add-Content` twice by accident) won't stack multiple
-prompt wrappers thanks to the `$global:__kettle_prompt_installed`
-guard inside the snippet.
+`-WithShellIntegration` reads `kettle.ps1` from
+`%LOCALAPPDATA%\Programs\kettle\shell-integration\` and appends it
+to `$PROFILE` (wrapped in `# >>> kettle …` / `# <<<` markers so the
+uninstall path can cleanly remove just that block later). Idempotent
+— re-running with the flag is a no-op if the markers are already
+there. `.\install.ps1 -Uninstall` strips the block from `$PROFILE`
+on its own; `appwiz.cpl` → kettle → Uninstall does the same.
+
+The `kettle.ps1` snippet itself also has an internal
+`$global:__kettle_prompt_installed` guard, so re-sourcing `$PROFILE`
+(or accidentally appending twice) won't stack multiple prompt
+wrappers.
 
 ### bash — add to `~/.bashrc`
 

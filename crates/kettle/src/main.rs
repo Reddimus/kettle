@@ -1,29 +1,30 @@
 //! kettle - a fast, cross-platform GPU terminal emulator.
 
-// Cycle 734: build kettle.exe as a Windows GUI subsystem binary so
-// a Start-menu / Explorer launch doesn't allocate a phantom console
-// window alongside kettle's wgpu window. Pre-734 launching kettle
-// from the cycle-733 install.ps1 Start menu shortcut opened TWO
-// visible windows: the wgpu window (correct) AND a stock Windows
-// `ConsoleWindowClass` console (phantom, allocated automatically
-// because the default Rust target is the CONSOLE subsystem).
+// Cycle 734 vs 740 trade-off note: cycle 734 tried
+// `#![cfg_attr(windows, windows_subsystem = "windows")]` + AttachConsole
+// to suppress the Start-menu phantom console. That broke Windows
+// CI's bash CLI smoke (`cargo run -q -- --some-flag | grep ...` -
+// SUBSYSTEM:WINDOWS sends stdout to the parent console's screen
+// buffer, NOT the inherited stdout pipe that bash's `|` reads). The
+// `kettle.exe -- shell-integration powershell >> $PROFILE` pattern
+// failed for the same reason (verified locally + reproduced in CI).
 //
-// On non-Windows targets this attribute is a no-op (Linux/macOS
-// don't have the subsystem concept). On Windows-MSVC, the linker
-// emits a SUBSYSTEM:WINDOWS PE header instead of SUBSYSTEM:CONSOLE,
-// so the OS doesn't allocate a console for us. fn main() below
-// then calls AttachConsole(ATTACH_PARENT_PROCESS) to re-attach
-// stdout/stderr to the calling shell when one exists, so CLI flags
-// (--version, --list-themes, --check-config, --gpu-info,
-// --shell-integration, --print-completions, …) keep printing to
-// the shell that ran us. When no parent console exists (Explorer
-// launch), AttachConsole fails silently and println!/eprintln!
-// become no-ops — exactly what we want for a GUI launch.
+// Cycle 740 switches to the simpler Ghostty pattern: stay on the
+// default `console` subsystem (so stdout pipe inheritance works
+// correctly under PS / bash / cmd) and instead **hide the
+// auto-allocated phantom console at startup ONLY when we are the
+// only process attached to it** (i.e. Windows allocated it for us
+// on Explorer / Start-menu launch and no shell is reading from it).
+// `GetConsoleProcessList(1)` returns the count; if == 1, we hide
+// the window via `ShowWindow(GetConsoleWindow(), SW_HIDE)`. If
+// > 1, a parent shell is using this console - leave it visible
+// so CLI output reaches the user.
 //
-// This is the same pattern Alacritty, kitty, WezTerm, and Ghostty
-// use on Windows.
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
+// Trade-off: there is a sub-50ms console flash on Explorer launch
+// (Windows shows the console before our hide call lands). The
+// previous SUBSYSTEM:WINDOWS approach had zero flash but broke
+// CLI stdout entirely. The flash is the correct trade — same
+// pattern Ghostty + most other Win11 terminals use.
 use clap::Parser;
 
 /// Version string shown by `kettle --version`. Concatenates the
@@ -323,76 +324,42 @@ fn reset_sigpipe() {
 fn reset_sigpipe() {}
 
 fn main() -> anyhow::Result<()> {
-    // Cycle 734: re-attach stdout/stderr to the parent console
-    // (PowerShell / cmd / Git Bash) when one exists. The
-    // crate-level `#![cfg_attr(windows, windows_subsystem =
-    // "windows")]` keeps Windows from allocating a phantom
-    // console window at process start - the trade-off is that
-    // CLI flags (--version, --list-themes, etc.) lose their
-    // default stdout. AttachConsole(ATTACH_PARENT_PROCESS)
-    // restores that path. We also have to re-open CONOUT$ /
-    // CONIN$ and stuff the new handles into STD_OUTPUT_HANDLE /
-    // STD_ERROR_HANDLE / STD_INPUT_HANDLE because the original
-    // stdio handles were established BEFORE AttachConsole ran -
-    // they point at nothing under SUBSYSTEM:WINDOWS. Without
-    // this re-open, println!() / eprintln!() see a valid
-    // SetStdHandle but write into the void.
+    // Cycle 740: hide the auto-allocated console window if it
+    // belongs only to us (Start-menu / Explorer launch). When a
+    // parent shell ran us, the console process list has > 1
+    // entries and we leave the console visible so CLI output
+    // (--version, --list-themes, --shell-integration, etc.) keeps
+    // reaching the user. Same pattern Ghostty uses; explicitly
+    // chosen over SUBSYSTEM:WINDOWS + AttachConsole (cycle 734's
+    // approach) because that broke CI's bash-piped CLI smoke tests
+    // (SUBSYSTEM:WINDOWS routes stdout to the console screen
+    // buffer, not the inherited stdout pipe `|` reads).
     //
-    // When no parent console exists (Explorer launch),
-    // AttachConsole returns 0; we skip the handle-rewire and
-    // println!/eprintln! become silent no-ops - exactly the
-    // desired GUI-launch behavior. Called before env_logger init
-    // so its log target also lands in the parent console when
-    // there is one.
+    // Trade-off: brief console flash on Explorer launch (Windows
+    // shows it before our hide call runs). Sub-50ms in practice;
+    // tolerable compared to broken CLI stdout.
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileA, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        };
-        use windows_sys::Win32::System::Console::{
-            ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-            STD_OUTPUT_HANDLE, SetStdHandle,
-        };
-        // SAFETY: AttachConsole + CreateFileA + SetStdHandle are
-        // standard Win32 startup calls; safe at single-threaded
-        // entry. They mutate only this process's own console +
-        // handle table. If AttachConsole fails, we skip the rest -
-        // running as a true GUI process with no console attached.
+        use windows_sys::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+        // SAFETY: All three Win32 calls are safe at single-threaded
+        // startup; they read/mutate only this process's own console
+        // window state, not shared state with other processes.
         unsafe {
-            if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
-                // GENERIC_READ | GENERIC_WRITE in raw form (the
-                // windows-sys named constants live in a separate
-                // feature; the literal hex is portable + matches
-                // every C++ AttachConsole example online).
-                const GENERIC_READ: u32 = 0x8000_0000;
-                const GENERIC_WRITE: u32 = 0x4000_0000;
-                let conout = CreateFileA(
-                    c"CONOUT$".as_ptr().cast::<u8>(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    std::ptr::null(),
-                    OPEN_EXISTING,
-                    0,
-                    std::ptr::null_mut(),
-                );
-                let conin = CreateFileA(
-                    c"CONIN$".as_ptr().cast::<u8>(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    std::ptr::null(),
-                    OPEN_EXISTING,
-                    0,
-                    std::ptr::null_mut(),
-                );
-                // INVALID_HANDLE_VALUE is -1 cast to handle; cheap
-                // check skips the SetStdHandle on failure.
-                let invalid: isize = -1;
-                if conout as isize != invalid {
-                    SetStdHandle(STD_OUTPUT_HANDLE, conout);
-                    SetStdHandle(STD_ERROR_HANDLE, conout);
-                }
-                if conin as isize != invalid {
-                    SetStdHandle(STD_INPUT_HANDLE, conin);
+            let mut pids = [0u32; 2];
+            let count = GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32);
+            // count == 1 => we're alone on this console (Windows
+            // allocated it for us at CreateProcess). Hide the
+            // window so the user doesn't see a phantom console
+            // alongside the wgpu window.
+            // count == 0 => no console attached at all (shouldn't
+            // happen under SUBSYSTEM:CONSOLE but defensive).
+            // count > 1 => a parent shell shares the console;
+            // leave it visible so CLI output flows.
+            if count == 1 {
+                let hwnd = GetConsoleWindow();
+                if !hwnd.is_null() {
+                    ShowWindow(hwnd, SW_HIDE);
                 }
             }
         }
@@ -1104,45 +1071,66 @@ mod tests {
     use super::{Cli, config_path_problem, extra_check_config_lines, format_ssh_hosts};
     use clap::Parser;
 
-    /// Cycle 734 drift guard. The crate-level
-    /// `#![cfg_attr(windows, windows_subsystem = "windows")]`
-    /// attribute is what stops the Windows linker from setting the
-    /// PE header's SUBSYSTEM to CONSOLE, which is what (pre-734)
-    /// caused kettle.exe to allocate a phantom ConsoleWindowClass
-    /// window alongside the wgpu window when launched from Explorer
-    /// or the Start menu.
+    /// Cycle 740 drift guard (supersedes cycle-734's version).
+    /// The fn main() startup needs both `GetConsoleProcessList` and
+    /// `ShowWindow(GetConsoleWindow(), SW_HIDE)` calls — together
+    /// they hide the auto-allocated console window when kettle was
+    /// launched from Explorer / Start menu (no parent shell) while
+    /// keeping the console visible when invoked from PowerShell /
+    /// cmd / Git Bash so CLI flag output (--version, --list-themes,
+    /// --shell-integration, etc.) reaches the user.
     ///
-    /// We can't directly assert on the linker output from a Rust
-    /// test, but we *can* assert the source attribute survives so a
-    /// future contributor who strips it (in a "this attribute looks
-    /// weird, let's remove it" cleanup) immediately fails this
-    /// test, reads the rationale in the panic message + the
-    /// surrounding source comment, and learns why it has to stay.
+    /// If a future contributor strips this block (in a "this Win32
+    /// dance looks weird, let's remove it" cleanup) the user-visible
+    /// regression is: a phantom ConsoleWindowClass window opens
+    /// alongside the wgpu window on every Start-menu launch. This
+    /// test catches the strip at gauntlet time so the contributor
+    /// reads the rationale in the panic message + the surrounding
+    /// source comment first.
+    ///
+    /// Pre-740 this test asserted on cycle 734's
+    /// `#![cfg_attr(windows, windows_subsystem = "windows")]`
+    /// attribute, but that approach broke the bash-piped CLI smoke
+    /// in CI (SUBSYSTEM:WINDOWS routes stdout to the console screen
+    /// buffer, not the inherited stdout pipe that bash's `|` reads).
     #[test]
-    fn windows_subsystem_attribute_survives() {
+    fn windows_console_hide_on_orphan_launch_survives() {
         let src = include_str!("main.rs");
+        // The two Win32 calls + cfg(windows) gate.
         assert!(
-            src.contains(r#"#![cfg_attr(windows, windows_subsystem = "windows")]"#),
-            "the Windows GUI-subsystem attribute was removed from \
-             crates/kettle/src/main.rs; this is what stops kettle \
-             from allocating a phantom console window on Start menu \
-             launch (cycle 734). If you really need to remove it, \
-             read the surrounding source comment first — the fix \
-             also requires removing the AttachConsole call in \
-             fn main()."
+            src.contains("GetConsoleProcessList"),
+            "the cycle-740 GetConsoleProcessList call in fn main() \
+             was removed; without it, every Start-menu / Explorer \
+             launch will show a phantom console alongside the wgpu \
+             window. Restore the cfg(windows) block at the top of \
+             fn main() (see surrounding source comment)."
         );
-        // Belt-and-suspenders: the AttachConsole call has to stay
-        // too, otherwise CLI flag stdout breaks under the
-        // SUBSYSTEM:WINDOWS configuration.
         assert!(
-            src.contains("AttachConsole(ATTACH_PARENT_PROCESS)")
-                && src.contains("use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};"),
-            "the cycle-734 AttachConsole call in fn main() was \
-             removed; without it, `kettle --version` (and every \
-             other CLI flag) silently produces no output when \
-             invoked from a shell, because SUBSYSTEM:WINDOWS means \
-             stdout has no console to print to. Restore the cfg(windows) \
-             block at the top of fn main()."
+            src.contains("ShowWindow(hwnd, SW_HIDE)"),
+            "the cycle-740 ShowWindow(SW_HIDE) call was removed; \
+             without it, GetConsoleProcessList detects the orphan \
+             console but kettle never hides it. Restore the \
+             ShowWindow line in fn main()."
+        );
+        // Belt-and-suspenders: the cycle-734 GUI-subsystem attribute
+        // must NOT be present (cycle 740 reverted it because it broke
+        // the bash-piped CLI smoke in CI). A future contributor
+        // re-adding it under the misimpression that GUI apps want it
+        // would re-break stdout capture. Check by scanning lines for
+        // an ACTIVE attribute (column-0 `#![cfg_attr(`); ignores
+        // comments + this assert's own text.
+        let attr_active = src
+            .lines()
+            .any(|line| line.starts_with("#![cfg_attr(windows, windows_subsystem"));
+        assert!(
+            !attr_active,
+            "cycle 734's GUI-subsystem attribute was re-added at \
+             crate root. Cycle 740 reverted it because it broke the \
+             `cargo run -- --some-flag | grep ...` smoke tests on \
+             Windows CI - stdout goes to the console screen buffer, \
+             not the inherited stdout pipe bash's `|` reads. The \
+             cycle-740 hide-on-orphan pattern below covers the \
+             phantom-console concern without the stdout regression."
         );
     }
 
