@@ -6,6 +6,57 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 736 — **Windows PowerShell shell-integration UX fix**:
+              v1.46.1 docs (`docs/SHELL-INTEGRATION.md`) showed
+              `kettle --shell-integration powershell >> $PROFILE`
+              as the install one-liner. Verified on the Surface Book
+              3 (Win11 26200, PowerShell 5.1): the redirect captures
+              **zero bytes** via any PowerShell pattern (`>>`, `>`,
+              `Out-String`, `Start-Process -RedirectStandardOutput`,
+              `cmd /c >`) because `kettle.exe` is now SUBSYSTEM:WINDOWS
+              (cycle 734 trade-off). stdout goes to the parent
+              console's screen buffer via `AttachConsole` + `CONOUT$`
+              rewire, NOT to the inherited stdout pipe that
+              PowerShell would read. Same limitation hits Alacritty
+              and other Rust terminals; the install one-liner was
+              just wrong for Windows.
+              Fix shipped two ways:
+                1. **`docs/SHELL-INTEGRATION.md`** — moved the
+                   PowerShell line out of the "one-liner" block and
+                   added a dedicated **"Windows / PowerShell — use
+                   the bundled snippet file"** section showing the
+                   working pattern: `Add-Content $PROFILE
+                   (Get-Content kettle.ps1 -Raw)` directly against
+                   the bundled snippet file at
+                   `%LOCALAPPDATA%\Programs\kettle\shell-integration\kettle.ps1`.
+                2. **`scripts/install.ps1 -WithShellIntegration`** —
+                   new opt-in flag that does the same `Add-Content`
+                   automatically as part of the install. Wraps the
+                   snippet in distinctive `# >>> kettle
+                   shell-integration (managed by install.ps1)` /
+                   `# <<< …` BEGIN/END markers (oh-my-posh /
+                   conda init / nvm pattern) so the uninstall
+                   path can find + remove the exact block we
+                   added without touching surrounding user
+                   customization. Idempotent: re-running with the
+                   flag detects the markers and skips. The default
+                   uninstall (`install.ps1 -Uninstall`) also strips
+                   the block automatically if present so
+                   `appwiz.cpl` -> kettle -> Uninstall cleans
+                   `$PROFILE` for free.
+              Verified end-to-end on the Surface Book 3:
+                - `install.ps1 -WithShellIntegration` -> snippet
+                  appears in `$PROFILE`, marker block detected.
+                - re-run -> "snippet already in `$PROFILE` (no
+                  change)".
+                - fresh PowerShell session sources `$PROFILE`
+                  without error; `$global:__kettle_prompt_installed`
+                  = True.
+                - `install.ps1 -Uninstall` -> marker block + snippet
+                  removed, surrounding `$PROFILE` content
+                  preserved.
+              No Rust code changes; v1.46.2 hot-fix candidate.
+
 ## [1.46.1] — 2026-05-23
 
   Hot-fix release bundling cycles 732-735. Two user-reported v1.46.0

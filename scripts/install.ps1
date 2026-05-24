@@ -68,6 +68,7 @@
 param(
     [switch] $Uninstall,
     [switch] $NoPath,
+    [switch] $WithShellIntegration,
     [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle")
 )
 
@@ -134,6 +135,30 @@ if ($Uninstall) {
     if (-not $portable) {
         if (Update-UserPath -Dir $Prefix -Remove) {
             Write-Output "  removed $Prefix from user PATH"
+        }
+    }
+    # Cycle 736: also strip any -WithShellIntegration block we
+    # appended to $PROFILE. The install path wraps the snippet
+    # between explicit BEGIN/END marker lines (same pattern oh-my-posh,
+    # conda init, nvm, etc. use) so the uninstall can find + remove
+    # the exact block we added without touching surrounding user
+    # customization. Leaves the user's $PROFILE intact except for
+    # the marker-delimited region.
+    if (Test-Path $PROFILE) {
+        $content = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+        $beginMarker = '# >>> kettle shell-integration (managed by install.ps1)'
+        $endMarker   = '# <<< kettle shell-integration (managed by install.ps1)'
+        if ($content -and $content.Contains($beginMarker) -and $content.Contains($endMarker)) {
+            $startIdx = $content.IndexOf($beginMarker)
+            $endIdx   = $content.IndexOf($endMarker, $startIdx) + $endMarker.Length
+            $before = $content.Substring(0, $startIdx).TrimEnd()
+            $after  = $content.Substring($endIdx).TrimStart()
+            $newContent = if ($before -and $after) { "$before`r`n`r`n$after`r`n" }
+                          elseif ($before) { "$before`r`n" }
+                          elseif ($after) { $after }
+                          else { '' }
+            Set-Content -Path $PROFILE -Value $newContent -NoNewline
+            Write-Output "  removed kettle.ps1 snippet from `$PROFILE"
         }
     }
     Write-Output ""
@@ -273,12 +298,65 @@ if (-not $NoPath) {
     }
 }
 
+# Cycle 736: optional opt-in install of the PowerShell shell
+# integration snippet (kettle.ps1) into $PROFILE. The recommended
+# install path (vs. the bash/zsh/fish "kettle --shell-integration
+# powershell >> $PROFILE" one-liner) because that one-liner does NOT
+# work under SUBSYSTEM:WINDOWS (cycle 734 trade-off - PS doesn't
+# read stdout from GUI processes). Idempotent: the snippet itself
+# has an internal $global:__kettle_prompt_installed guard, AND we
+# skip the Add-Content if the snippet's signature line is already
+# in $PROFILE so re-running install.ps1 -WithShellIntegration is
+# a no-op.
+if ($WithShellIntegration) {
+    $snippetSrc = Join-Path $Prefix "shell-integration\kettle.ps1"
+    if (-not (Test-Path $snippetSrc)) {
+        Write-Output "  -WithShellIntegration: snippet not found at $snippetSrc (skipping)"
+    } else {
+        if (-not (Test-Path $PROFILE)) {
+            $profileDir = Split-Path $PROFILE -Parent
+            if (-not (Test-Path $profileDir)) {
+                New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+            }
+            New-Item -ItemType File -Force -Path $PROFILE | Out-Null
+        }
+        # Wrap the snippet in distinctive BEGIN/END markers so the
+        # uninstall path can find + remove the exact block we added
+        # (oh-my-posh / conda init / nvm pattern). Re-run safety: if
+        # the marker already exists in $PROFILE, skip the append.
+        $beginMarker = '# >>> kettle shell-integration (managed by install.ps1)'
+        $endMarker   = '# <<< kettle shell-integration (managed by install.ps1)'
+        $current = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+        if ($current -and $current.Contains($beginMarker)) {
+            Write-Output "  -WithShellIntegration: snippet already in `$PROFILE (no change)"
+        } else {
+            $snippet = Get-Content $snippetSrc -Raw
+            # Prepend a blank-line separator for readability if the
+            # profile already has content.
+            if ($current -and $current.Trim().Length -gt 0) {
+                Add-Content $PROFILE "`r`n"
+            }
+            Add-Content $PROFILE $beginMarker
+            Add-Content $PROFILE $snippet
+            Add-Content $PROFILE $endMarker
+            Write-Output "  -WithShellIntegration: appended kettle.ps1 to `$PROFILE ($PROFILE)"
+            Write-Output "    (open a fresh PowerShell session to pick up the prompt marks)"
+        }
+    }
+}
+
 Write-Output ""
 Write-Output "Install complete."
 Write-Output ""
 Write-Output "Try:"
 Write-Output "  - Press Win, type 'kettle', hit Enter."
 Write-Output "  - Or from a fresh shell: kettle.exe --version"
+if (-not $WithShellIntegration) {
+    Write-Output ""
+    Write-Output "Tip: re-run with -WithShellIntegration to enable OSC 133"
+    Write-Output "  prompt marks in PowerShell (Ctrl+Up / Ctrl+Down to jump"
+    Write-Output "  between prompts inside kettle)."
+}
 Write-Output ""
 Write-Output "To uninstall later: appwiz.cpl (Add/Remove Programs) or"
 Write-Output "  powershell -File `"$Prefix\install.ps1`" -Uninstall"

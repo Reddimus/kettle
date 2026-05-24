@@ -28,13 +28,39 @@ kettle ships the snippets embedded in the binary — install with one command:
 kettle --shell-integration bash       >> ~/.bashrc
 kettle --shell-integration zsh        >> ~/.zshrc
 kettle --shell-integration fish       >> ~/.config/fish/config.fish
-kettle --shell-integration powershell >> $PROFILE     # PowerShell 5+ / 7+
 ```
 
 The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` in
 the source tree (also shipped in the Linux release tarball and the Windows
 zip). The verbatim bodies follow below in case you want to read or tweak
 them first.
+
+### Windows / PowerShell — use the bundled snippet file
+
+The `>>` pattern above doesn't work for `kettle --shell-integration
+powershell` because `kettle.exe` is a `SUBSYSTEM:WINDOWS` binary on
+Windows (so the Start menu launch doesn't open a phantom console —
+see cycle 734 in [CHANGELOG.md](../CHANGELOG.md)). The trade-off:
+stdout doesn't reach PowerShell's `>>` operator under that subsystem.
+The bundled `install.ps1` ships the `kettle.ps1` snippet file
+alongside `kettle.exe`, so use it directly:
+
+```powershell
+# After running install.ps1 from the release .zip, the snippet lives at
+#   %LOCALAPPDATA%\Programs\kettle\shell-integration\kettle.ps1
+# Append it to your PowerShell $PROFILE:
+$kp = "$env:LOCALAPPDATA\Programs\kettle\shell-integration\kettle.ps1"
+if (-not (Test-Path $PROFILE)) { New-Item $PROFILE -ItemType File -Force | Out-Null }
+Add-Content $PROFILE (Get-Content $kp -Raw)
+
+# Or hands-free: install.ps1 -WithShellIntegration (cycle 736) does the
+# same Add-Content as part of the install, with idempotency.
+```
+
+The `kettle.ps1` snippet itself is idempotent — re-sourcing `$PROFILE`
+(or running `Add-Content` twice by accident) won't stack multiple
+prompt wrappers thanks to the `$global:__kettle_prompt_installed`
+guard inside the snippet.
 
 ### bash — add to `~/.bashrc`
 
