@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 732 — **CI hygiene: last `actions/checkout@v4` holdout**:
+              The cycle-723 nightly job in `.github/workflows/ci.yml`
+              had stayed on `actions/checkout@v4` while everything
+              else moved to `@v6` (cycle 728 Dependabot bump + cycle
+              729 release.yml pretest alignment). v1.46.0's release
+              workflow surfaced this as a `Node.js 20 actions are
+              deprecated` annotation on every nightly run — Node 20's
+              runtime is scheduled to be removed from the GitHub
+              runner image on 2026-09-16. Bumped to `@v6` to match
+              the rest of the repo. No behavior change on the
+              nightly job; closes the deprecation warning four
+              months before the hard-fail date.
+
 ## [1.46.0] — 2026-05-23
 
   Polish + production-grade Windows 11 audit + cross-platform DX +

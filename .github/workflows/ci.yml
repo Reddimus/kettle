@@ -444,7 +444,17 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
-      - uses: actions/checkout@v4
+      # Cycle 732: align with the other workflows on `actions/checkout@v6`.
+      # The cycle-723 nightly job landed with @v4 (matching the era's
+      # default); cycle 728's Dependabot bump moved the rest of the
+      # repo to @v6 (PRs #1-#3) and cycle 729 caught release.yml's
+      # cycle-723 pretest job. This is the last @v4 holdout. Node 20
+      # actions are deprecated on the GitHub runner image; checkout@v4
+      # was producing a "Node.js 20 actions are deprecated" annotation
+      # on every nightly run, and the runtime is scheduled to be
+      # removed from the runner on 2026-09-16. Upgrade now, before the
+      # nightly job starts hard-failing.
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - name: Linux deps
         run: |
