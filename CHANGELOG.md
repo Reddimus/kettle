@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 739 — **kettle: windows-sys 0.59 → 0.61 minor bump**:
+              `cargo outdated` on the Surface Book 3 audit pass
+              (2026-05-23) flagged `windows-sys` as 2 minor versions
+              behind (we added it at 0.59 in cycle 734; current
+              latest is 0.61.2). No code change required (the
+              AttachConsole / CreateFileA / SetStdHandle / FILE_SHARE_*
+              constants we use are stable across 0.59-0.61). Bump
+              keeps us on the line of versions actively receiving
+              security fixes from the windows-rs project (and
+              matches what wgpu / winit / sysinfo pull as transitive
+              deps, reducing the workspace's duplicate-version
+              footprint).
+              `just gauntlet` green post-bump on Win11 (Surface Book
+              3, MSVC 14.44, Rust 1.95).
+
   cycle 738 — **CONTRIBUTING.md: Win11 Smart App Control gotcha**:
               The cycle-730/733/734/736 Win11 audit pass surfaced
               that Windows **Smart App Control (SAC)** — enabled

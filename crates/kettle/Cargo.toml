@@ -44,7 +44,7 @@ libc = "0.2"
 # windows-sys is a transitive dep already (wgpu / winit / sysinfo
 # all pull it), so this is a near-zero binary-size cost. The
 # `Win32_System_Console` feature is the only one needed.
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
