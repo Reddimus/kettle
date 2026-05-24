@@ -18,7 +18,17 @@ description = "kettle: SSH / Docker / Podman / kubectl remote-session detection 
 workspace = true
 
 [dependencies]
-log.workspace = true
+# Cycle 737: removed `log` workspace dep. cargo-machete on Win11
+# (Surface Book 3, 2026-05-23) flagged it as unused — kettle-remote
+# has no `log::` calls anywhere in src/. The dep was declared at
+# crate-creation (cycle 643) for the eventual remote-detection
+# diagnostic logging path that never materialized (the actual
+# diagnostics live in kettle-ui's per-pane state log). cargo-machete
+# CI hadn't caught this pre-737 because the `.github/workflows/
+# machete.yml` workflow only fires on Cargo.{toml,lock} changes,
+# and kettle-remote/Cargo.toml hadn't been touched since cycle 718;
+# cycle 730's ProcessTree refactor was purely src/ — no manifest
+# change → no machete re-run.
 # Cycle 646 (sub-cycle 5 of TERMINATOR-REMOTE-DESIGN.md): cross-
 # platform process-tree walking. sysinfo handles
 # /proc on Linux, libproc on macOS, NtQuerySystemInformation on

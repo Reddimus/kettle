@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 737 — **kettle-remote: remove unused `log` workspace dep**:
+              `cargo machete` on the Surface Book 3 Win11 audit pass
+              (2026-05-23) flagged `log` as declared-but-never-used
+              in `crates/kettle-remote/Cargo.toml`. Verified:
+              `grep -r 'log::\|use log' crates/kettle-remote/`
+              returns zero matches. The dep was declared at
+              crate-creation (cycle 643) for the eventual remote-
+              detection diagnostic logging path that never
+              materialized — the actual diagnostics live in
+              kettle-ui's per-pane state logging.
+              Pre-737 cargo-machete CI hadn't caught this because
+              `.github/workflows/machete.yml` only fires on
+              Cargo.{toml,lock} changes, and
+              `crates/kettle-remote/Cargo.toml` hadn't been touched
+              since cycle 718; cycle 730's ProcessTree refactor
+              was purely src/ changes → no manifest change → no
+              re-run.
+              Fix: drop `log.workspace = true` from
+              `crates/kettle-remote/Cargo.toml`. No behavior change;
+              workspace tests stay at 432. Bonus: cycle 737's
+              manifest touch will re-trigger
+              `.github/workflows/machete.yml` and confirm the rest
+              of the workspace is also machete-clean.
+
   cycle 736 — **Windows PowerShell shell-integration UX fix**:
               v1.46.1 docs (`docs/SHELL-INTEGRATION.md`) showed
               `kettle --shell-integration powershell >> $PROFILE`
