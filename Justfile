@@ -184,31 +184,28 @@ bench:
 # only). Same path the cycle-253 `install-online.sh` curl|sh wrapper
 # uses for online installs.
 #
-# Cycle 730: Windows has no equivalent installer because the
-# release pipeline ships a portable .zip — Windows users grab that
-# and extract to their preferred PATH location. The recipe prints
-# a one-liner pointer instead of failing with a "./scripts/install.sh:
-# command not found" parser error.
+# Cycle 730 / 733: Linux uses scripts/install.sh (cycle-0 XDG
+# installer); Windows now uses scripts/install.ps1 (per-user install
+# to %LOCALAPPDATA%\Programs\kettle + Start menu shortcut + PATH
+# update + Add/Remove Programs entry, no admin / UAC). Both run with
+# no system-wide side effects; the install.ps1 script mirrors
+# install.sh's shape and runs on PowerShell 5.1+ (built into Win10+).
 [unix]
 install:
     ./scripts/install.sh
 
 [windows]
 install:
-    @echo "kettle on Windows ships as a portable .zip — grab"
-    @echo "kettle-windows-x86_64.zip from"
-    @echo "  https://github.com/Reddimus/kettle/releases/latest"
-    @echo "Unzip anywhere; add the folder to your PATH."
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 
-# Remove everything `just install` placed (Linux only — see install).
+# Remove everything `just install` placed.
 [unix]
 uninstall:
     ./scripts/install.sh --uninstall
 
 [windows]
 uninstall:
-    @echo "kettle on Windows is a portable .zip — to uninstall,"
-    @echo "delete the extracted folder + remove it from PATH."
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Uninstall
 
 # === Misc ==========================================================
 

@@ -1,0 +1,264 @@
+#requires -Version 5.1
+<#
+.SYNOPSIS
+    kettle - Windows user-install (no admin / UAC required).
+
+.DESCRIPTION
+    Cycle 733: Windows equivalent of `scripts/install.sh`. Drops
+    everything into per-user paths so kettle shows up in Windows
+    Search / Start menu - no system-wide changes, no admin.
+
+      %LOCALAPPDATA%\Programs\kettle\kettle.exe            <- the binary
+      %LOCALAPPDATA%\Programs\kettle\kettle.ico            <- icon
+      %LOCALAPPDATA%\Programs\kettle\shell-integration\    <- OSC 133 snippets
+      %APPDATA%\Microsoft\Windows\Start Menu\Programs\kettle.lnk
+          ^ Start menu shortcut (so Win-key -> "kettle" finds it)
+      HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\kettle
+          ^ Add/Remove Programs entry pointing back at this script
+
+    Two layouts supported:
+    - Extracted release .zip: `scripts/install.ps1` lives next to
+      `kettle.exe`, ico, LICENSE, README, CHANGELOG, shell-integration/.
+    - In-tree repo: this script at `scripts/install.ps1`; binary at
+      `target/release/kettle.exe` (built by `cargo build --release -p
+      kettle` or `just release`).
+
+    User PATH update is on by default so `kettle.exe` is callable from
+    any shell after a restart of that shell. Pass `-NoPath` to skip.
+
+.PARAMETER Uninstall
+    Reverse everything this script did. Removes the install dir, the
+    Start menu shortcut, the Add/Remove Programs registry entry, and
+    the PATH addition (only if the entry is exactly this install dir).
+
+.PARAMETER NoPath
+    Skip the user PATH update. kettle.exe will still be launchable
+    from the Start menu shortcut, but you'll need the full
+    `%LOCALAPPDATA%\Programs\kettle\kettle.exe` path from the shell.
+
+.PARAMETER Prefix
+    Override the install location. Default: `%LOCALAPPDATA%\Programs\kettle`.
+    For a portable install on a USB stick, pass e.g.
+    `-Prefix "D:\PortableApps\kettle"` - the script doesn't write to
+    the registry or PATH when Prefix is non-default (the assumption is
+    a portable install means "no system traces").
+
+.EXAMPLE
+    .\install.ps1
+    # Default install. Drops kettle into %LOCALAPPDATA%\Programs\kettle,
+    # creates Start menu shortcut, adds to user PATH, registers in
+    # Add/Remove Programs.
+
+.EXAMPLE
+    .\install.ps1 -Uninstall
+    # Reverses everything.
+
+.EXAMPLE
+    .\install.ps1 -NoPath
+    # Default install minus the PATH addition.
+
+.NOTES
+    Runs in user scope (HKCU + %LOCALAPPDATA%); no UAC prompt. The
+    Start menu shortcut + Add/Remove Programs entry are per-user too,
+    so a different Windows user on the same machine doesn't see your
+    kettle install.
+#>
+
+[CmdletBinding()]
+param(
+    [switch] $Uninstall,
+    [switch] $NoPath,
+    [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle")
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Detect the layout: extracted-zip mode keeps `kettle.exe` next to
+# this script; in-repo mode has it under `target/release/`.
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$zipModeExe = Join-Path $scriptDir "kettle.exe"
+$repoModeExe = Join-Path (Split-Path -Parent $scriptDir) "target\release\kettle.exe"
+
+if (Test-Path $zipModeExe) {
+    $sourceMode = 'zip'
+    $sourceDir = $scriptDir
+    $sourceExe = $zipModeExe
+} elseif (Test-Path $repoModeExe) {
+    $sourceMode = 'repo'
+    $sourceDir = Split-Path -Parent $scriptDir   # repo root
+    $sourceExe = $repoModeExe
+} else {
+    $sourceMode = $null
+}
+
+$startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+$shortcutPath = Join-Path $startMenuDir "kettle.lnk"
+$uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\kettle"
+$portable = ($Prefix -ne (Join-Path $env:LOCALAPPDATA "Programs\kettle"))
+
+function Update-UserPath {
+    param([string] $Dir, [switch] $Remove)
+    $current = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($null -eq $current) { $current = '' }
+    # Split + filter exact-match (case-insensitive) so we don't strip a
+    # superstring entry by accident.
+    $parts = $current -split ';' | Where-Object { $_ -ne '' }
+    $without = $parts | Where-Object { $_ -ne $Dir }
+    if ($Remove) {
+        if ($without.Count -eq $parts.Count) { return $false }  # nothing to remove
+        $new = ($without -join ';')
+    } else {
+        if ($without.Count -ne $parts.Count) { return $false }  # already present
+        $new = (@($without) + $Dir) -join ';'
+    }
+    [Environment]::SetEnvironmentVariable("Path", $new, "User")
+    return $true
+}
+
+if ($Uninstall) {
+    Write-Output "Removing kettle..."
+    if (Test-Path $Prefix) {
+        Remove-Item -Recurse -Force $Prefix
+        Write-Output "  removed $Prefix"
+    } else {
+        Write-Output "  install dir already absent: $Prefix"
+    }
+    if (Test-Path $shortcutPath) {
+        Remove-Item -Force $shortcutPath
+        Write-Output "  removed Start menu shortcut"
+    }
+    if (Test-Path $uninstallKey) {
+        Remove-Item -Recurse -Force $uninstallKey
+        Write-Output "  removed Add/Remove Programs entry"
+    }
+    if (-not $portable) {
+        if (Update-UserPath -Dir $Prefix -Remove) {
+            Write-Output "  removed $Prefix from user PATH"
+        }
+    }
+    Write-Output ""
+    Write-Output "Uninstall complete. (Restart any open shells for PATH changes to take effect.)"
+    return
+}
+
+if ($null -eq $sourceMode) {
+    Write-Error @"
+Could not find kettle.exe to install.
+
+Looked for:
+  $zipModeExe   (extracted release .zip layout)
+  $repoModeExe  (in-tree repo layout - run `cargo build --release -p kettle` first)
+
+If you grabbed the release zip, make sure you extracted it AND ran
+install.ps1 from inside the extracted folder. If you cloned the repo,
+build the release binary first:
+
+    cargo build --release -p kettle
+    .\scripts\install.ps1
+"@
+    exit 1
+}
+
+Write-Output "Installing kettle (source: $sourceMode mode, from $sourceDir)"
+Write-Output ""
+
+New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+Copy-Item -Force $sourceExe (Join-Path $Prefix "kettle.exe")
+Write-Output "  installed kettle.exe -> $Prefix"
+
+# Icon: zip mode ships kettle.ico next to the .exe; repo mode pulls
+# from packaging/windows/.
+$icoSrc = if ($sourceMode -eq 'zip') {
+    Join-Path $sourceDir "kettle.ico"
+} else {
+    Join-Path $sourceDir "packaging\windows\kettle.ico"
+}
+if (Test-Path $icoSrc) {
+    Copy-Item -Force $icoSrc (Join-Path $Prefix "kettle.ico")
+    Write-Output "  installed kettle.ico"
+}
+
+# Bundle the supporting files so the install dir is self-contained.
+foreach ($extra in @('LICENSE', 'NOTICE', 'README.md', 'CHANGELOG.md')) {
+    $src = Join-Path $sourceDir $extra
+    if (Test-Path $src) {
+        Copy-Item -Force $src (Join-Path $Prefix $extra)
+    }
+}
+
+# Shell-integration snippets: both layouts have them at
+# `shell-integration/kettle.{bash,zsh,fish,ps1}` relative to the
+# source root.
+$shellIntegrationSrc = Join-Path $sourceDir "shell-integration"
+if (Test-Path $shellIntegrationSrc) {
+    $shellIntegrationDst = Join-Path $Prefix "shell-integration"
+    if (Test-Path $shellIntegrationDst) {
+        Remove-Item -Recurse -Force $shellIntegrationDst
+    }
+    Copy-Item -Recurse -Force $shellIntegrationSrc $shellIntegrationDst
+    Write-Output "  installed shell-integration\ (bash, zsh, fish, ps1)"
+}
+
+# Copy this script too so the Add/Remove Programs UninstallString
+# resolves even after the user moves on from the source dir.
+Copy-Item -Force $MyInvocation.MyCommand.Definition (Join-Path $Prefix "install.ps1")
+
+# Portable mode short-circuits the system-touching steps.
+if ($portable) {
+    Write-Output ""
+    Write-Output "Portable install complete at $Prefix"
+    Write-Output "  - no Start menu shortcut (portable mode)"
+    Write-Output "  - no PATH update (portable mode)"
+    Write-Output "  - no Add/Remove Programs entry (portable mode)"
+    Write-Output "Launch with: $Prefix\kettle.exe"
+    return
+}
+
+# Start menu shortcut - via WScript.Shell COM (built into Windows;
+# no external dependency). The shortcut lives under %APPDATA% so
+# Windows Search indexes it without admin.
+New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
+$ws = New-Object -ComObject WScript.Shell
+$lnk = $ws.CreateShortcut($shortcutPath)
+$lnk.TargetPath = Join-Path $Prefix "kettle.exe"
+$lnk.WorkingDirectory = $Prefix
+$lnk.IconLocation = Join-Path $Prefix "kettle.ico"
+$lnk.Description = "Fast, GPU-accelerated terminal emulator"
+$lnk.Save()
+Write-Output "  created Start menu shortcut: $shortcutPath"
+
+# Add/Remove Programs entry. Per-user (HKCU); no admin required.
+New-Item -Path $uninstallKey -Force | Out-Null
+$exeForVersion = Join-Path $Prefix "kettle.exe"
+$kettleVersion = (& $exeForVersion --version) -replace '^kettle ([0-9.]+).*', '$1'
+Set-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value "kettle"
+Set-ItemProperty -Path $uninstallKey -Name "DisplayVersion" -Value $kettleVersion
+Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "kettle contributors"
+Set-ItemProperty -Path $uninstallKey -Name "InstallLocation" -Value $Prefix
+Set-ItemProperty -Path $uninstallKey -Name "DisplayIcon" -Value (Join-Path $Prefix "kettle.ico")
+Set-ItemProperty -Path $uninstallKey -Name "URLInfoAbout" -Value "https://github.com/Reddimus/kettle"
+Set-ItemProperty -Path $uninstallKey -Name "NoModify" -Value 1 -Type DWord
+Set-ItemProperty -Path $uninstallKey -Name "NoRepair" -Value 1 -Type DWord
+$uninstallCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Prefix 'install.ps1')`" -Uninstall"
+Set-ItemProperty -Path $uninstallKey -Name "UninstallString" -Value $uninstallCmd
+Write-Output "  registered in Add/Remove Programs (HKCU)"
+
+# User PATH addition. Default-on; -NoPath to skip.
+if (-not $NoPath) {
+    if (Update-UserPath -Dir $Prefix) {
+        Write-Output "  added $Prefix to user PATH"
+        Write-Output "    (open a fresh shell to pick it up - already-running shells keep their snapshot)"
+    } else {
+        Write-Output "  $Prefix already on user PATH (no change)"
+    }
+}
+
+Write-Output ""
+Write-Output "Install complete."
+Write-Output ""
+Write-Output "Try:"
+Write-Output "  - Press Win, type 'kettle', hit Enter."
+Write-Output "  - Or from a fresh shell: kettle.exe --version"
+Write-Output ""
+Write-Output "To uninstall later: appwiz.cpl (Add/Remove Programs) or"
+Write-Output "  powershell -File `"$Prefix\install.ps1`" -Uninstall"

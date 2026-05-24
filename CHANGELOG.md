@@ -6,6 +6,48 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 733 — **Windows installer: `scripts/install.ps1` + Start menu
+              integration**:
+              Pre-733 the Windows release `.zip` shipped as a portable
+              archive — `kettle.exe` worked if you unzipped + ran it,
+              but didn't appear in **Windows Search / Start menu**
+              because portable zips don't create the `.lnk` shortcuts
+              the Windows search indexer needs. Linux had this solved
+              (cycle-0 `scripts/install.sh` writes the XDG `.desktop`
+              entry so GNOME Activities / KDE Krunner / Super-key
+              search find kettle); macOS got it for free via the
+              `.app` bundle's Spotlight indexing; only Windows users
+              had to manually pin or create a `.lnk`.
+              Fix: new `scripts/install.ps1`, mirroring `install.sh`'s
+              shape:
+                - Copies kettle.exe + .ico + LICENSE/NOTICE/README +
+                  shell-integration\\ + bundled `install.ps1` itself
+                  into `%LOCALAPPDATA%\\Programs\\kettle\\`.
+                - Creates a Start menu `.lnk` at
+                  `%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\kettle.lnk`
+                  with the proper icon — so `Win` -> type "kettle" ->
+                  Enter launches kettle.
+                - Adds the install dir to the user's PATH (default-on;
+                  pass `-NoPath` to skip) so any fresh shell can call
+                  `kettle.exe` by name.
+                - Registers an Add/Remove Programs entry under
+                  `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\kettle`
+                  so kettle shows up in `appwiz.cpl` and uninstall
+                  routes through `install.ps1 -Uninstall`.
+                - `-Uninstall` reverses everything atomically.
+                - `-Prefix D:\\path` flag = portable mode (skips
+                  Start menu / PATH / registry; just copies files
+                  somewhere the user picked).
+                - Runs entirely in user scope — no UAC prompt.
+              Wired into the release pipeline (`release.yml`'s Windows
+              package step now copies `scripts/install.ps1` into the
+              `.zip` next to `kettle.exe`) and the `Justfile`'s
+              `[windows] install` recipe (so `just install` works on
+              Windows too).
+              No behavior change in the kettle.exe runtime; closes
+              the "kettle doesn't show up when I search Windows" UX
+              gap the v1.46.0 release surfaced.
+
   cycle 732 — **CI hygiene: last `actions/checkout@v4` holdout**:
               The cycle-723 nightly job in `.github/workflows/ci.yml`
               had stayed on `actions/checkout@v4` while everything

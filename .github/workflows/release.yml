@@ -232,6 +232,15 @@ jobs:
           # users running Git Bash, MSYS2, or WSL inside kettle on
           # ConPTY. Same files as on the other platforms.
           Copy-Item -Recurse shell-integration dist/kettle/
+          # Cycle 733: bundled install.ps1 puts kettle into
+          # %LOCALAPPDATA%\Programs\kettle, creates a Start menu
+          # shortcut (so Win-key search finds "kettle"), adds to user
+          # PATH, and registers an Add/Remove Programs entry. Mirrors
+          # the cycle-0 Linux install.sh + the macOS .app bundle's
+          # Spotlight integration — pre-733 the Windows .zip was the
+          # only release artifact that didn't surface in the OS app
+          # launcher after the user extracted it.
+          Copy-Item scripts/install.ps1 dist/kettle/
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 
       # Generate a SHA-256 sidecar for the artifact so users (and the

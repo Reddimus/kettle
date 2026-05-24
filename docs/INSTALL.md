@@ -93,10 +93,29 @@ GitHub runners for every platform:
   see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)
   for the one-time tap-repo setup that lets users install with
   `brew tap reddimus/kettle && brew install kettle`.
-- **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`. Unzip
-  anywhere and run; uses ConPTY + your default shell (PowerShell/cmd). Add the
-  unzipped folder to `PATH` if you want to launch with just `kettle` instead
-  of the full `.\kettle.exe` path.
+- **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe` +
+  `install.ps1`. Unzip anywhere, then run the bundled installer for
+  Start menu + PATH integration:
+
+  ```powershell
+  # From the extracted folder:
+  .\install.ps1
+  ```
+
+  The installer copies kettle into `%LOCALAPPDATA%\Programs\kettle`,
+  creates a Start menu shortcut (so **Win-key → type "kettle"** finds
+  it), adds it to your user PATH, and registers an Add/Remove
+  Programs entry. No admin / UAC prompt — everything is per-user.
+  Uses ConPTY + your default shell (PowerShell/cmd) at runtime.
+
+  Or if you'd rather skip the installer and keep it portable: just
+  run `.\kettle.exe` from the extracted folder. Pass `-Prefix
+  "D:\PortableApps\kettle"` to `install.ps1` for a portable install
+  to a custom location (skips PATH + registry + Start menu — pure
+  copy).
+
+  Uninstall later via Add/Remove Programs (`appwiz.cpl`), or
+  `.\install.ps1 -Uninstall` from the install dir.
 
 ## First run
 
