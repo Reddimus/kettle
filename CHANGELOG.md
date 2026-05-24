@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 738 — **CONTRIBUTING.md: Win11 Smart App Control gotcha**:
+              The cycle-730/733/734/736 Win11 audit pass surfaced
+              that Windows **Smart App Control (SAC)** — enabled
+              by default on clean Win11 installs with Secure Boot
+              on — blocks any unsigned `.exe`, including every
+              `build.rs` artifact cargo produces. Symptom:
+              `cargo install <anything>` or `cargo build` on
+              crates with `build.rs` fails with `An Application
+              Control policy has blocked this file (os error
+              4551)`. New Win11 contributors who hit this would
+              be stuck trying to do Rust dev.
+              Fix: short paragraph in CONTRIBUTING.md (under "Run
+              the gate locally") naming the symptom, the toggle
+              path (Settings ▸ Privacy & Security ▸ Windows
+              Security ▸ App & browser control ▸ Smart App
+              Control ▸ Off), and the caveat that it's a one-way
+              toggle. Also mentions the winget-install workaround
+              for signed binaries (`winget install Casey.Just`
+              etc.) for users who prefer to keep SAC on.
+              No code change.
+
 ## [1.46.2] — 2026-05-23
 
   Polish hot-fix following v1.46.1's Win11 audit pass. Two cycles:

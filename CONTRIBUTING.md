@@ -99,6 +99,21 @@ Each cycle has the same shape:
    (cycle 250), and a `cargo audit` advisory scan (cycle 244). The
    local gate must be green before pushing.
 
+   **Windows 11 dev gotcha (cycle 738)**: `cargo install <anything>`
+   (and even some `cargo build` steps for crates with `build.rs`)
+   can be blocked by Windows **Smart App Control (SAC)** with the
+   error `An Application Control policy has blocked this file
+   (os error 4551)`. SAC blocks any unsigned `.exe`, and every
+   build-script artifact cargo produces is unsigned. SAC ships
+   enabled by default on clean Win11 installs with Secure Boot on.
+
+   Workaround: disable SAC at **Settings ▸ Privacy & Security ▸
+   Windows Security ▸ App & browser control ▸ Smart App Control ▸
+   Off**. **This is a one-way toggle** — re-enabling requires
+   reinstalling Windows. Required if you want to do Rust dev on
+   Win11. Use winget-installed tools (`winget install Casey.Just`
+   etc.) for signed binaries that bypass SAC.
+
    **Optional pre-commit hook**: `.githooks/pre-commit` runs the
    gate automatically on every `git commit` (skipping doc-only
    commits to stay fast). Opt in once per checkout with:
