@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.46.3] — 2026-05-23
+
+  Hot-fix release bundling cycles 738-740. Fixes a regression cycle
+  734 (in v1.46.1) introduced: SUBSYSTEM:WINDOWS broke the
+  bash-piped CLI smoke on Windows CI (`cargo run -- --some-flag |
+  grep "…"` captures 0 bytes because stdout goes to the console
+  screen buffer, not the inherited pipe). Cycle 740 replaces it
+  with the Ghostty pattern (CONSOLE subsystem + hide-console-when-
+  orphaned via `GetConsoleProcessList(1)` +
+  `ShowWindow(GetConsoleWindow(), SW_HIDE)`). Phantom console on
+  Start menu launch stays hidden (sub-50ms flash trade-off);
+  `kettle --version` / `--shell-integration powershell` / etc. now
+  print to PS/cmd/bash pipes correctly.
+
+  Headline fixes:
+  - cycle 740: hide-console-when-orphaned (fixes Win11 CI
+    regression + restores `kettle --shell-integration powershell
+    >> $PROFILE` one-liner working on Windows).
+  - cycle 739: windows-sys 0.59 -> 0.61 minor bump.
+  - cycle 738: CONTRIBUTING.md Win11 Smart App Control dev-setup
+    note.
+
+  See per-cycle paragraphs below for details.
+
   cycle 740 — **Fix: replace cycle-734 SUBSYSTEM:WINDOWS with
               hide-console-when-orphaned (Ghostty pattern)**:
               Cycle 734's `#![cfg_attr(windows, windows_subsystem =
