@@ -6,6 +6,121 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 735 — **Fix: close-pane stale-state refresh (Win11
+              close-split crash mitigation)**:
+              User reported on Win11 (v1.46.0 install via cycle-733
+              `install.ps1`): split via `Ctrl+Shift+O` then close
+              focused via `Ctrl+Shift+W` crashes kettle. Couldn't
+              reproduce via headless SendKeys on the Surface Book 3
+              repro pass (likely timing-specific to the user's pane
+              configuration or a specific running shell), but the
+              audit surfaced a concrete state-refresh gap in
+              `Action::ClosePane` at `crates/kettle-ui/src/app.rs`:
+              the handler called `mux.close_focused()` and returned
+              without scheduling a redraw or re-emitting the
+              cycle-703 `PaneFocus` event. The split tree had
+              collapsed (sibling promoted to root by cycle-602's
+              `neighbor_of` + `remove_leaf`) but the renderer's
+              cached layout + the last-emitted-focus pane id were
+              both stale until the next user input nudged a
+              redraw. On Windows under wgpu DX12, the stale
+              tab-bar render path appears to lock the
+              `Arc<Mutex<Terminal>>` of the dropped pane and panic
+              (the user's reported crash class).
+              Fix: add `window.request_redraw()` + a `poll_focus_event()`
+              call right after `close_focused()` returns false (pane
+              closed, tab survives). The `CloseTab` arm 30 lines
+              below already does the analog implicitly via
+              `fire_tab_close_event`'s Lua dispatch; `ClosePane`
+              had no equivalent. Mirrors the cycle-368 fire-event
+              pattern.
+              Pre-existing tests `close_focused_promotes_sibling_in_two_pane_split`
+              (`crates/kettle-ui/src/mux.rs:2017`) and
+              `close_focused_picks_nearest_neighbor_not_leftmost_root`
+              (line 2077) cover the tree mutation; the App-level
+              redraw + focus-event refresh wasn't testable from a
+              Mux unit test (no winit window, no Lua engine in the
+              test harness). Drift-guard pinned via the cycle-735
+              comment block in the source.
+
+  cycle 734 — **Fix: phantom Windows console window on Start menu
+              launch**:
+              User reported on Win11 (v1.46.0 via cycle-733
+              `install.ps1`): launching kettle from Windows Search
+              opened TWO windows — kettle's wgpu window AND a
+              stock Windows `ConsoleWindowClass` console. Surface
+              Book 3 audit confirmed via process enumeration:
+              `kettle.exe` owned 2 visible windows (the wgpu
+              `Window Class` + a `ConsoleWindowClass`), and the
+              child process list showed a non-headless `conhost.exe`
+              spawned by Windows at startup. Root cause: the kettle
+              binary inherited Rust's default `console` subsystem
+              with no `#![windows_subsystem]` attribute — every
+              Explorer / Start-menu launch allocates a phantom
+              console because the PE header asked for one. Pre-733
+              this was hidden because nobody had a Start menu
+              shortcut to launch from (the cycle-730 ".zip is a
+              portable archive" pattern said "extract + run from
+              shell"); the cycle-733 `install.ps1` Start menu .lnk
+              surfaced it.
+              Fix: standard Rust-terminal pattern (same shape
+              Alacritty / kitty / WezTerm / Ghostty use on
+              Windows):
+                1. `#![cfg_attr(windows, windows_subsystem =
+                   "windows")]` at the top of
+                   `crates/kettle/src/main.rs` — linker emits
+                   `SUBSYSTEM:WINDOWS` so Windows doesn't
+                   allocate the phantom console.
+                2. `AttachConsole(ATTACH_PARENT_PROCESS)` + the
+                   `CreateFileA` / `SetStdHandle` re-wire of
+                   `CONOUT$` / `CONIN$` at `fn main()` startup
+                   — when launched from a parent shell (PowerShell
+                   / cmd / Git Bash), stdout/stderr re-attach to
+                   that shell's console so CLI flags
+                   (`--version`, `--list-themes`, `--gpu-info`,
+                   `--shell-integration`, `--print-completions`,
+                   `--check-config`, `--list-keybinds`,
+                   `--list-actions`, `--list-ssh-hosts`,
+                   `--config-path`, `--print-default-config`)
+                   still print where the user expects. When no
+                   parent console exists (Explorer launch), the
+                   AttachConsole call returns FALSE and println!
+                   / eprintln! become silent no-ops — exactly
+                   the desired GUI-launch behavior.
+                3. New `windows-sys` Windows-only runtime dep at
+                   `crates/kettle/Cargo.toml` with
+                   `Win32_System_Console` + `Win32_Storage_FileSystem`
+                   features. `windows-sys` was already a
+                   transitive dep via wgpu / winit / sysinfo, so
+                   binary-size impact is near-zero.
+              Drift guard: `windows_subsystem_attribute_survives`
+              test in `crates/kettle/src/main.rs` reads the file
+              via `include_str!` and asserts both the cfg_attr
+              attribute + the AttachConsole call survive. If a
+              future contributor strips either, the panic message
+              tells them why both need to stay together (removing
+              one without the other breaks either the GUI launch
+              or the CLI stdout).
+              Bundled `scripts/install.ps1` also got a small
+              robustness tweak: `& kettle.exe --version` returns
+              nothing under SUBSYSTEM:WINDOWS when invoked via
+              PowerShell's `&` operator (PS doesn't wait for GUI
+              processes); the version capture for the Add/Remove
+              Programs `DisplayVersion` entry now uses
+              `Start-Process -Wait -RedirectStandardOutput` which
+              correctly captures the output, with a "unknown"
+              fallback if the call fails.
+              Caveat: under PowerShell's `& kettle.exe --version`
+              pattern, output capture is still not guaranteed (PS
+              doesn't `Wait` on GUI subprocesses). The same
+              limitation hits Alacritty / WezTerm / etc.; documented
+              in `docs/INSTALL.md` as the trade-off for a no-phantom-
+              console Start menu UX. CLI-from-shell users who need
+              guaranteed stdout capture can use `Start-Process kettle
+              -ArgumentList '--version' -Wait -NoNewWindow
+              -RedirectStandardOutput out.txt` or run from cmd which
+              is more forgiving.
+
   cycle 733 — **Windows installer: `scripts/install.ps1` + Start menu
               integration**:
               Pre-733 the Windows release `.zip` shipped as a portable

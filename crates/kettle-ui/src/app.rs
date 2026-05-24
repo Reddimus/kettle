@@ -4748,6 +4748,39 @@ impl App {
                 }
                 if self.mux.close_focused() {
                     event_loop.exit();
+                } else {
+                    // Cycle 735: explicit redraw + focus-event
+                    // refresh after a successful close-pane. Pre-735
+                    // the path returned without scheduling a frame
+                    // OR re-emitting the focus event; the split tree
+                    // had collapsed (sibling promoted to root) but
+                    // the renderer cache + the cycle-703 PaneFocus
+                    // event's last-fired pane id were both stale
+                    // until the next user input implicitly nudged
+                    // them. The CloseTab path (~30 lines below) gets
+                    // an analogous refresh implicitly via the
+                    // fire_tab_close_event Lua dispatch; ClosePane
+                    // had nothing equivalent.
+                    //
+                    // On Windows under wgpu DX12, the stale-layout
+                    // window has been reported as a crash via the
+                    // user's Surface Book 3 testing. The most likely
+                    // upstream chain: stale focus id -> tab-bar
+                    // render path indexes into a removed pane ->
+                    // panic on the Arc<Mutex<Terminal>> lock of a
+                    // dropped pane. The fix here is preventative:
+                    // the redraw + focus-event refresh forces the
+                    // renderer + lua to see the new, consistent
+                    // tree on the same frame as the close.
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    // The cycle-703 PaneFocus event needs to fire
+                    // with the new focused id (the sibling that
+                    // got promoted), so plugins that observe focus
+                    // don't keep stale per-pane state. Mirrors the
+                    // poll_focus_event helper's pattern at ~5987.
+                    self.poll_focus_event();
                 }
             }
             Action::CloseTab => {
