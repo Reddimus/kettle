@@ -1501,7 +1501,6 @@ dependencies = [
 name = "kettle-remote"
 version = "1.46.1"
 dependencies = [
- "log",
  "sysinfo",
 ]
 
