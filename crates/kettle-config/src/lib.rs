@@ -3189,6 +3189,18 @@ mod config_tests {
             // shouldn't have to remember "SECURITY.md is user-facing,
             // don't write `cycle 583` there".
             "SECURITY.md",
+            // Cycle 741: docs/ARCHITECTURE.md + CONTRIBUTING.md were
+            // outside the scanned set when the cycle-179 guard was
+            // first introduced — they were considered developer-
+            // facing. After the cycle-741 doc cleanup pass both files
+            // were re-scrubbed to leave only proper-noun hyphenated
+            // refs (`cycle-117 palette_includes_...` etc.), which
+            // pass the space-digit scan. Adding them to the scan list
+            // makes future regressions explicit at PR review time so
+            // a stray `(cycle 742)` parenthetical doesn't drift back
+            // into the prose.
+            "docs/ARCHITECTURE.md",
+            "CONTRIBUTING.md",
         ] {
             let path = repo_root.join(rel);
             let text = std::fs::read_to_string(&path)

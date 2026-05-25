@@ -10,7 +10,7 @@ cwd, images, clipboard, title) flow back to the UI.
 ```mermaid
 graph TD
     bin["kettle (bin)<br/>CLI · entry"] --> ui
-    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu (cycle 717)"] --> render
+    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu"] --> render
     ui --> core
     ui --> cfg
     ui --> remote
@@ -18,9 +18,9 @@ graph TD
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · reader thread<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     core --> cfg
-    cfg["kettle-config<br/>Ghostty config · ~512 themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle (cycle 716)"]
+    cfg["kettle-config<br/>Ghostty config · ~512 themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"]
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
-    remote["kettle-remote (cycle 643)<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
+    remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
 ```
 
 ## Per-pane data flow
@@ -116,24 +116,24 @@ renderer, so the menu pass reuses already-cached glyphs.
   extractor caps in-flight sequences (64 MiB) so a hostile stream can't hang
   or OOM — the cap is security-relevant: an SSH session into a 256 MiB
   container can otherwise OOM-kill kettle by emitting unbounded image data.
-- **Lua VM (cycle 324)** is parked on the App struct (single-threaded
+- **Lua VM** is parked on the App struct (single-threaded
   `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
   but kettle never clones it across threads. Event hooks
   (`LuaEvent::Startup` / `TabAdd` / `TabClose` / `Bell` / `Output` /
-  `PaneFocus` / `TitleChanged` / `UrlClicked` — cycles 365-705) fire
+  `PaneFocus` / `TitleChanged` / `UrlClicked`) fire
   synchronously on the App thread; Lua side-effects (`SendText`,
   `ExecAction`, `Notify`, `SetTheme`) queue onto
   `LuaEngine.pending: Arc<Mutex<Vec<LuaCommand>>>` and are drained
   back to the App's dispatcher each tick. A broken Lua plugin
   `log::warn`s and is skipped — it never aborts the terminal
-  (cycle-365 "broken plugin can't take down kettle" contract).
-- **Broadcast fan-out** (cycle 678 `BroadcastScope` enum) is App-side
+  ("broken plugin can't take down kettle" contract).
+- **Broadcast fan-out** (via the `BroadcastScope` enum) is App-side
   input dispatch, not a separate thread: on every keystroke the App
   walks `compute_broadcast_targets(scope, focus, in_tab, all)` and
   writes the encoded bytes to each target pane's PTY. The reader
   threads of the receiving panes pick up the echo through their
   normal byte-stream path.
-- **Allocation hot-paths (cycle 727 audit)**: `App::drain_events`
+- **Allocation hot-paths**: `App::drain_events`
   has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
   Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the
   byte slice into a fresh `Vec<u8>` for the Lua callback (no
@@ -146,7 +146,7 @@ renderer, so the menu pass reuses already-cached glyphs.
   refactor of `ContextMenuRow.label` is the natural next step if
   this ever shows up in a profile; today it's not measurable
   against winit's per-frame work.
-- **Synchronization primitives audit (cycle 724)**: ~13 `unsafe`
+- **Synchronization primitives audit**: ~13 `unsafe`
   blocks total, all FFI (libc `sendmsg/recvmsg/SCM_RIGHTS`, signal
   setup, `pre_exec` for fd-3 plumbing, `UnixStream::from_raw_fd`
   adoption). Each is ≤10 lines, narrowly scoped, with a doc comment
@@ -186,45 +186,34 @@ See [TESTING.md](TESTING.md) for the per-crate breakdown
 Comparative analysis behind these choices (with citations) is in
 [RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
 
-## Terminator-parity subsystems (cycles 330-410)
+## Terminator-parity subsystems
 
-The v1.8.0 → v1.31.0 sweep added four major subsystems. Each has its
-own design doc; the architectural integration is summarized here.
-Cycles 411-553 (v1.32.0 → v1.43.0) hardened the plugin contract,
-extended drift guards, surfaced opt-in keys via `--check-config`
-echo lines, scrubbed internal cycle refs from every user-facing
-doc surface (incl. binary stdout), corrected 3 stale field
-doc-comments in `crates/kettle-ui/src/app.rs`, added an opt-in
-pre-commit hook that catches clippy / fmt / test / shellcheck
-regressions at commit time (`.githooks/pre-commit`), fixed a real
-cycle-51-era backticks-as-command-substitution bug in
-`scripts/release.sh`, and fixed a real user-reported icon-cache
-bug in `scripts/install.sh` (broken stub from
-gtk-update-icon-cache against a user-local hicolor dir with no
-index.theme stopped GNOME's icon resolution) — see
-[`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md)'s post-sweep section
-for that polish run.
+Four major subsystems modeled after GNOME Terminator. Each has its own
+design doc under `docs/TERMINATOR-*.md`; the architectural integration is
+summarized here. Subsequent v1.32+ releases hardened the plugin contract,
+extended drift guards, surfaced opt-in keys via `--check-config` echo
+lines, scrubbed internal cycle refs from every user-facing doc surface
+(including binary stdout), added an opt-in pre-commit hook
+(`.githooks/pre-commit`) that catches clippy / fmt / test / shellcheck /
+rustdoc regressions at commit time, and shipped the per-pane right-click
+context menu polish (hover-to-highlight, disabled-row hiding, scrollable
+submenus, mnemonics + typeahead, atomic config write-back via
+`persist_config_toggle`, and the **Preferences ▸** submenu wiring 13
+runtime toggles).
 
-Cycles 554-723 (v1.44.0 → current) added the cycle-643
-`kettle-remote` crate (SSH / Docker / Podman / kubectl / lxc
-detection via sysinfo process-tree walk, surfaced as a per-pane
-title prefix + right-click "Clone session" entry), the cycle-678
-named-broadcast-groups subsystem (`BroadcastScope` enum + per-tab
-/ per-window / cross-tab named scopes), the cycle-687 right-click
-context-menu drill-in submenu UX (Theme + Profile + cycle-717
-Preferences), the cycle-665 vertical tab strips, and the
-cycle-688 wgpu surface-readback screenshot path. Cycles 711-717
-ran the user-facing right-click menu polish: hover-to-highlight,
-disabled-row hiding, scrollable submenus (~512 themes fit
-without overflowing), mnemonics + 750ms typeahead, atomic
-config write-back via `persist_config_toggle`, and the
-Preferences ▸ submenu wiring 13 runtime toggles to the
-cycle-716 atomic-write helper. Cycles 718-723 closed out the
-post-audit punch list: workspace-deps Cargo.toml refactor,
-stale-version + stale-cycle-comment scrubs, magic-number
-constants centralized in `kettle_render::menu`, 6 obsolete
-`#[allow(dead_code)]` gates removed, CI nightly early-warning
-job + release.yml pretest gate.
+The most recent additions:
+
+- **kettle-remote crate** (SSH / Docker / Podman / kubectl / lxc
+  detection via sysinfo process-tree walk) — drives per-pane title
+  prefixes and the right-click "Clone session" entry.
+- **named-broadcast-groups subsystem** (`BroadcastScope` enum with
+  per-tab / per-window / cross-tab named scopes).
+- **right-click drill-in submenu UX** (Theme + Profile + Preferences).
+- **vertical tab strips** and a **wgpu surface-readback screenshot path**.
+
+See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the full
+Terminator parity inventory; see [CHANGELOG.md](../CHANGELOG.md) for the
+per-cycle history.
 
 ### Plugin system (cycles 324, 365-378)
 
@@ -234,7 +223,7 @@ flowchart TD
     A --> B["LuaEngine"]
     B -->|registers| C["kettle.on / notify / set_theme<br/>send_text / exec_action<br/>add_url_handler / add_menu_item"]
     B --> D["App.lua_engine"]
-    D -->|fire_event| E["Startup · Bell · TabAdd · TabClose ·<br/>Output(bytes) ·<br/>PaneFocus(prev?, cur) (cycle 703) ·<br/>TitleChanged(pane, str) (cycle 704) ·<br/>UrlClicked(uri) (cycle 705)"]
+    D -->|fire_event| E["Startup · Bell · TabAdd · TabClose ·<br/>Output(bytes) ·<br/>PaneFocus(prev?, cur) ·<br/>TitleChanged(pane, str) ·<br/>UrlClicked(uri)"]
     D --> F["LuaCommand queue"]
     F -->|drain| G["App dispatch:<br/>SendText · ExecAction ·<br/>Notify · SetTheme"]
 ```
@@ -270,7 +259,7 @@ action edits the broadcast-group label. See
 ```mermaid
 flowchart LR
     A["cfg.background_image"] --> B["decode_bg_image<br/>(PNG / JPEG / WebP /<br/>BMP / GIF)"]
-    B --> C["Optional box blur<br/>(cycle 396, 3-pass<br/>separable)"]
+    B --> C["Optional box blur<br/>3-pass separable"]
     C --> D["BgImage<br/>(Arc-cached by path)"]
     D --> E["imgpipe"]
     E --> F["Render BEFORE pane<br/>backgrounds with UV-mode<br/>dispatch (stretch /<br/>tile / center / scale)"]
@@ -288,7 +277,7 @@ Three paths, all end-to-end:
 flowchart TD
     A["Action::MoveTabToNewWindow"]
     A --> B1["Wayland-fallback<br/>(keyboard-only)"]
-    A --> B2["Unix SCM_RIGHTS<br/>socketpair + fork+exec<br/>+ send_fds (cycle 399)"]
+    A --> B2["Unix SCM_RIGHTS<br/>socketpair + fork+exec<br/>+ send_fds"]
     A --> B3["File-fallback<br/>/tmp/handoff.json<br/>+ --tab-handoff PATH"]
     B1 --> C["Target kettle"]
     B2 --> C
@@ -296,13 +285,13 @@ flowchart TD
     C --> D["Session restore<br/>(split tree + cwds preserved)"]
 ```
 
-In-process foundation: `Mux::serialize_tab` (cycle 397) +
-`extract_tab`/`insert_tab` (cycle 398); IPC primitive:
-`fd_transport::send_fds`/`recv_fds` (cycle 399); drag FSM:
-`detach::DragState` (cycle 400). See
+In-process foundation: `Mux::serialize_tab` +
+`extract_tab`/`insert_tab`; IPC primitive:
+`fd_transport::send_fds`/`recv_fds`; drag FSM:
+`detach::DragState`. See
 [`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md).
 
-### Session restore (cycles 109, 411-420; cycle 730 diagram)
+### Session restore
 
 Per-pane working directory + tab/split tree are captured live as the
 user works, atomically written to `session.json`, and replayed on the
@@ -322,7 +311,7 @@ sequenceDiagram
     Core->>Mux: Pane::cwd = path
     Mux->>Mux: mark_dirty()
 
-    Note over Mux,FS: Debounced autosave (cycle 109)
+    Note over Mux,FS: Debounced autosave
     Mux->>Mux: structural change (new tab / split / close)
     Mux->>FS: tempfile write
     FS->>FS: rename → session.json (atomic;<br/>notify-watcher ignores temp)
@@ -339,14 +328,14 @@ Three notable invariants preserved by this flow:
 
 - **Atomic write** — `session.json` is written tempfile + rename, so a
   power-loss between writes leaves the previous valid snapshot intact
-  (no truncated/partial JSON). Cycle 109 added this after a corrupted
+  (no truncated/partial JSON). This was added after a corrupted
   save on shutdown.
 - **OSC 7 catchup** — kettle parses the shell's OSC 7 stream
   continuously, not just at startup; pane cwd updates the moment
   the user `cd`s.
 - **No replay of failed spawns** — if a saved cwd is gone (deleted /
   unmounted), the pane spawns in `$HOME` and logs a warning instead
-  of aborting the whole restore (cycle 415).
+  of aborting the whole restore.
 
 See [`docs/ROADMAP.md`](ROADMAP.md) for the cycle-by-cycle ledger of
 session-restore hardening (cycles 411-420).

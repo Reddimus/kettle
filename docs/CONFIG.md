@@ -36,7 +36,7 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `background-opacity` | float | `1.0` | 0..1 |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` accepted as Alacritty-spelled alias for `bar` |
-| `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the cycle-717 Preferences submenu writes back |
+| `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read |
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
@@ -101,7 +101,7 @@ per-key audit against Terminator's source.
 | `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
 | `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |
-| `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`, cycle-621) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
+| `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
 | `light-theme` | theme name | `""` | Terminator `auto_theme` parity. Theme that `Action::ToggleLightDark` switches **to** when leaving the dark variant (and stays-on when no chord yet). Empty = action no-ops on the light side. Case-insensitive bundled-name lookup (stored as the canonical bundle name when matched, otherwise stored verbatim trimmed) |
 | `dark-theme` | theme name | `""` | Terminator `auto_theme` parity. Theme that `Action::ToggleLightDark` switches **to** when leaving the light variant — and the default landing when current is a third-party theme. Empty = action no-ops on the dark side |
 | `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (default; ripgrep/vim: case-insensitive until any uppercase), `always` / `sensitive` (force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
@@ -123,7 +123,7 @@ Terminator's. Each key falls into one of three buckets:
 
 | Key | Why it's a "no-op" but works |
 |---|---|
-| `detachable-tabs` | Terminator: a toggle to enable cross-window tab drag. kettle: cross-window detach drag is always available via `Action::MoveTabToNewWindow` + cycle-400's drag-FSM. The config toggle isn't read, but the feature it gates is on by default |
+| `detachable-tabs` | Terminator: a toggle to enable cross-window tab drag. kettle: cross-window detach drag is always available via `Action::MoveTabToNewWindow` + the drag-state machine in `crates/kettle-ui/src/detach.rs`. The config toggle isn't read, but the feature it gates is on by default |
 | `homogeneous-tabbar` | Terminator: a toggle for equal-width tab segments. kettle: tab bar ALWAYS tiles segments equally (single-source-of-truth: `app.rs::tab_bar::seg_w = strip / n`). Setting the toggle has no effect because there's no inhomogeneous mode to disable |
 | `sticky` (X11 _NET_WM_STATE_STICKY) | Kettle's `always-on-top` is the closest cross-platform variant. winit doesn't expose "stick to all workspaces" portably (X11 hint only, no Wayland/macOS equivalent) — the kettle-style "above other windows" maps to a single config key that works everywhere |
 | `inactive-color-offset` | Kettle's `unfocused-split-opacity` is the implemented variant. The exact math differs (Terminator: two separate fg + bg offsets; kettle: single opacity blend), but the user-visible effect — dim unfocused panes — is equivalent |
@@ -134,8 +134,8 @@ Terminator's. Each key falls into one of three buckets:
 |---|---|
 | `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
 | `http-proxy` | The kettle binary makes no HTTP requests, so a proxy setting is meaningless. (The install scripts `install-online.sh` use system curl — kettle the binary itself never fetches HTTP) |
-| `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — corrected (cycle-560) so kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
-| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` (right-click pastes); meaningful only when kettle wires `putty-paste-style` itself. Kettle currently surfaces right-click as the context menu (cycle-245) — wiring putty-style would be a Bucket-C cycle that this companion key follows |
+| `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
+| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` (right-click pastes); meaningful only when kettle wires `putty-paste-style` itself. Kettle currently surfaces right-click as the context menu — wiring putty-style would be a Bucket-C task that this companion key follows |
 
 #### Genuine future work — parsed for forward-compat
 
@@ -153,7 +153,7 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 | `split-to-group` | New splits join the parent's broadcast group | Needs named broadcast groups (Bucket D) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
-## Editing the config from inside kettle (cycle-717 Preferences submenu)
+## Editing the config from inside kettle (Preferences submenu)
 
 Most of the keys above can be toggled at runtime via right-click → **Preferences ▸**.
 The submenu surfaces five common toggles + an `Advanced…` row that opens the
@@ -171,7 +171,7 @@ config file in `$EDITOR` for everything else:
 
 Each click both mutates the running `Config` (the change takes effect
 immediately) and atomically rewrites the matching line in the config file via
-the cycle-716 `persist_config_toggle` helper. The atomic write preserves every
+the `kettle_config::persist_config_toggle` helper. The atomic write preserves every
 existing comment, blank line, and key order byte-for-byte — only the targeted
 `key = value` line is replaced (or appended if it doesn't exist yet).
 

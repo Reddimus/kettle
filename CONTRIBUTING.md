@@ -24,9 +24,9 @@ Each cycle has the same shape:
 2. **Extract a pure helper if applicable.** Logic that depends only
    on its arguments (no `&self`, no I/O) is easier to test than a
    chrome wiring change. Many cycles' "real" change is the helper;
-   the wiring is two lines. See `kettle-config::keybinds::parse_bool`
-   (cycle 138), `kettle-render::cap_axis_cells` (cycle 119),
-   `kettle-render::clamp_font_size` (cycle 118) for examples.
+   the wiring is two lines. See `kettle-config::keybinds::parse_bool`,
+   `kettle-render::cap_axis_cells`, and
+   `kettle-render::clamp_font_size` for examples.
 3. **Wire it in.** Call the helper from the chrome path. Keep the
    call site small — the helper does the work.
 4. **Pin the contract with a test — and add a drift guard if the
@@ -68,10 +68,12 @@ Each cycle has the same shape:
    cargo fmt --all              # rewrite in place
    cargo fmt --all --check      # then assert no further drift — local
                                 # rustfmt may be older than CI's, and the
-                                # *check* form is what CI runs. Cycle 167
-                                # shipped fmt-clean locally and failed CI;
-                                # adding the --check step makes the local
-                                # gate match the CI gate exactly.
+                                # *check* form is what CI runs. The local
+                                # `--check` step exists because a past
+                                # release shipped fmt-clean locally and
+                                # failed CI — keeping both invocations
+                                # in lockstep makes the local gate match
+                                # the CI gate exactly.
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -94,12 +96,11 @@ Each cycle has the same shape:
    gauntlet + deny + machete for release-cut pre-flight.
    The CI matrix on `main` runs the same on Linux / macOS / Windows
    plus a headless GPU smoke under Xvfb on Linux, a `--screenshot`
-   end-to-end check (cycle 236), a `--screenshot-menu` visual
-   regression (cycle 251), a MSRV (Rust 1.89) build verification
-   (cycle 250), and a `cargo audit` advisory scan (cycle 244). The
-   local gate must be green before pushing.
+   end-to-end check, a `--screenshot-menu` visual regression, a
+   MSRV (Rust 1.89) build verification, and a `cargo audit` advisory
+   scan. The local gate must be green before pushing.
 
-   **Windows 11 dev gotcha (cycle 738)**: `cargo install <anything>`
+   **Windows 11 dev gotcha**: `cargo install <anything>`
    (and even some `cargo build` steps for crates with `build.rs`)
    can be blocked by Windows **Smart App Control (SAC)** with the
    error `An Application Control policy has blocked this file
@@ -122,9 +123,9 @@ Each cycle has the same shape:
    git config core.hooksPath .githooks
    ```
 
-   Cycle 493 added this after a doc-list overindentation
-   regression landed across cycles 484-492 without anyone
-   running clippy — the hook catches that class at commit time.
+   The hook exists because a doc-list overindentation regression
+   landed across several cycles without anyone running clippy —
+   the hook catches that class at commit time.
    The hook header comment in `.githooks/pre-commit` enumerates
    exactly which path categories trigger the gauntlet vs which
    skip it; bypass per-commit with `git commit --no-verify`.
@@ -168,19 +169,19 @@ should live in the crate it most belongs to and have unit tests there.
   someone reintroduces the same shape of bug.
 
 - **There's a test you'd want even without the bug.** Tests pin
-  contracts. The `defaults_has_no_shadow_collisions` test in
-  cycle 116 isn't just "I fixed the cycle-115 collision" — it's
-  "every default binding gets a unique trigger, forever."
+  contracts. The `defaults_has_no_shadow_collisions` test isn't
+  just "I fixed a binding collision" — it's "every default binding
+  gets a unique trigger, forever."
 
 - **The CHANGELOG paragraph names the user-visible effect.** Not
   "fixed widget", "fixed a thing in the code". State which input,
-  which output, what changed for the user. See cycles 148, 150,
-  151, 157 for shape.
+  which output, what changed for the user. See past CHANGELOG
+  entries for the shape we land on.
 
-## A real example (cycle 151)
+## A real example
 
 The notify-watcher reloaded config on *every* event in the watched
-directory. Cycle 109's atomic session save fires 3+ events per save
+directory. The atomic session save fires 3+ events per save
 (create-temp / write-temp / rename). Result: every focus change /
 tab switch / split → 3+ unrelated config reloads. The fix was three
 lines:
@@ -199,14 +200,14 @@ No new tests — `notify` needs a real FS + event loop to exercise, and
 the filter is correctness-by-construction (paths().any(==watched)).
 CHANGELOG paragraph names the user-visible effect ("Live config
 reload no longer fires on unrelated file events") and explains
-where the wasteful events came from (cycle 109 atomic save). Done.
+where the wasteful events came from (the atomic session save).
+Done.
 
 ## Where to start
 
-- **Read a few cycles in CHANGELOG.md** to see the shape. Recent
-  cycles 140–158 cover the breadth: blink-phase resets, modal-
-  close paths, BOM stripping, case-insensitivity sweeps, transparent
-  background rendering, screenshot alpha, config-clamp diagnostics.
+- **Read a few entries in CHANGELOG.md** to see the shape — each
+  paragraph names the user-visible effect, the root cause, and
+  the file:line of the fix.
 - **Pick a `_ => {}` arm in the codebase.** Trace what it ignores,
   identify whether the silent fallback is a real bug or
   intentional. If real, that's your cycle.
@@ -218,13 +219,13 @@ where the wasteful events came from (cycle 109 atomic save). Done.
 
 - **`cargo fmt --all` + `cargo clippy -D warnings` are mandatory.**
   The CI gate rejects anything that doesn't pass.
-- **Comments describe *why*, not *what*.** The cycle number gives
-  the audit trail; the paragraph explains the bug class. See
-  cycles 138 / 146 / 147 for the in-code comment template.
+- **Comments describe *why*, not *what*.** Git blame gives the
+  audit trail; the paragraph explains the bug class. Recent
+  drift-guard comments are good templates.
 - **Cite the convention.** If you're matching Alacritty, kitty,
   WezTerm, Ghostty, or Terminator behavior, say so in the
-  in-code comment. e.g. cycle 142's `beam` alias for `bar`
-  cites Alacritty's spelling.
+  in-code comment (e.g. the `beam` alias for `bar` cites
+  Alacritty's spelling).
 - **Tests live next to the code they test** (`#[cfg(test)] mod`),
   not in `tests/`. Workspace-wide tests don't exist; each crate
   is self-contained.
@@ -234,8 +235,8 @@ where the wasteful events came from (cycle 109 atomic save). Done.
 Releases go through `scripts/release.sh`, which does the four ops
 atomically (working-tree clean check, CHANGELOG section check,
 Cargo.toml bump, Cargo.lock refresh, single commit, annotated
-tag). Doing them by hand is what tripped cycle 307: the CHANGELOG
-section got committed AFTER the tag, the cycle-286 CI guard
+tag). Doing them by hand has tripped past releases: the CHANGELOG
+section got committed AFTER the tag, the release-pipeline CI guard
 correctly rejected the Linux job at pre-flight, and the macOS +
 Windows jobs uploaded a partial release. Always use the script.
 

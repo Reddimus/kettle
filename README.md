@@ -172,7 +172,7 @@ Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 
 > **Tip — right-click anywhere in a pane** for the context menu: Copy /
 > Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled
-> themes), **Profile ▸**, and the cycle-717 **Preferences ▸** submenu
+> themes), **Profile ▸**, and the **Preferences ▸** submenu
 > with one-click toggles for scrollbar mode, cursor blink, copy-on-select,
 > bell mode, mouse-hide, and font size. Settings persist atomically to
 > `~/.config/kettle/config` with a backup at `config.bak`. The menu
