@@ -127,7 +127,7 @@ Where today's code lives:
 | 1 | This doc (361). Design + roadmap. No code. | ✅ |
 | 2 | `kettle.on(event, callback)` foundation. New `LuaEvent` enum with one variant: `Startup`. Registry on `LuaEngine`; dispatch on App resumed. | pending |
 | 3 | `LuaEvent::Output(pane_id, bytes)` — wire the existing PTY-output loop to fire this event after each chunk drained. Throttle: max 100 fires/sec to bound Lua-callback overhead. | pending |
-| 4 | `LuaEvent::TabAdd/TabClose/PaneAdd/PaneClose` — fire from Mux mutations. | pending |
+| 4 | `LuaEvent::TabAdd/TabClose/PaneAdd/PaneClose` — fire from Mux mutations. | ✅ `tab_add` / `tab_close` (cycle 424), `pane_close` (cycle 750 — `kettle.on('pane_close', function(pane_id) … end)`, fires from every ClosePane path before the pane's PTY teardown); `pane_add` still pending |
 | 5 | `LuaEvent::Bell(pane_id)` — fire when TermEvent::Bell arrives. | pending |
 | 6 | `LuaEvent::UrlMatched(url, captures)` — fire from cycle-218 hint mode + cycle-X Ctrl-click path. | pending |
 | 7 | `kettle.notify(text)` — desktop notification via `notify-rust` crate. | pending |

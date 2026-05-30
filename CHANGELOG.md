@@ -22,6 +22,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - **Changed (internal):** the renderer now releases per-pane text
     buffers when splits close, instead of holding them at the session's
     peak pane count.
+  - **Added (plugins):** a `pane_close` event hook —
+    `kettle.on('pane_close', function(pane_id) … end)` fires with the
+    pane id whenever a split is closed, completing tab/pane close-event
+    parity for plugins (status bars, per-pane overlays, activity
+    watchers).
 
 ## [2.0.0] — 2026-05-30
 

@@ -121,6 +121,13 @@ pub enum LuaEvent {
     TabClose(usize),
     /// Emitted when a bell rings in a pane. Payload: pane id.
     Bell(u64),
+    /// Cycle 750 (Terminator plugin parity): emitted when a split pane is
+    /// closed — the pane analog of [`TabClose`](Self::TabClose). Payload: the
+    /// id of the pane that closed. Fired *before* the pane's PTY teardown so
+    /// plugins keyed by pane id (status bars, per-pane theme overlays,
+    /// activity watchers) can drop their state. Used by
+    /// `kettle.on('pane_close', function(pane_id) … end)`.
+    PaneClose(u64),
     /// Cycle 377 (Terminator plugin parity, plugin sub-cycle 3):
     /// emitted on each batch of PTY output drained from a pane.
     /// Payload: pane id + bytes since last emission. Throttled
@@ -162,6 +169,7 @@ impl LuaEvent {
             LuaEvent::TabAdd(_) => "tab_add",
             LuaEvent::TabClose(_) => "tab_close",
             LuaEvent::Bell(_) => "bell",
+            LuaEvent::PaneClose(_) => "pane_close",
             LuaEvent::Output(_, _) => "output",
             LuaEvent::PaneFocus(_, _) => "pane_focus",
             LuaEvent::TitleChanged(_, _) => "title_changed",
@@ -552,7 +560,9 @@ impl LuaEngine {
                     let call_result: mlua::Result<()> = match event {
                         LuaEvent::Startup => cb.call(()),
                         LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
-                        LuaEvent::Bell(pane_id) => cb.call(*pane_id),
+                        LuaEvent::Bell(pane_id) | LuaEvent::PaneClose(pane_id) => {
+                            cb.call(*pane_id)
+                        }
                         LuaEvent::Output(pane_id, bytes) => {
                             // Send bytes as a Lua string (UTF-8 not
                             // assumed — raw bytes are fine, callbacks
@@ -864,6 +874,31 @@ mod tests {
         assert_eq!(eng.eval_str("return history[3]").unwrap(), "17->42");
         // Name resolves correctly (script-facing).
         assert_eq!(LuaEvent::PaneFocus(None, 1).name(), "pane_focus");
+    }
+
+    /// Cycle 750 drift guard. `LuaEvent::PaneClose(pane_id)` emits to Lua as a
+    /// single integer pane id (the pane analog of `tab_close`), so plugins can
+    /// drop per-pane state when a split closes.
+    #[test]
+    fn pane_close_event_emits_pane_id() {
+        let eng = LuaEngine::new("Default").expect("init");
+        // Script-facing name.
+        assert_eq!(LuaEvent::PaneClose(1).name(), "pane_close");
+        eng.eval_str(
+            "closed = {}
+             kettle.on('pane_close', function(id)
+                closed[#closed + 1] = id
+             end)",
+        )
+        .expect("eval");
+        eng.fire_event(&LuaEvent::PaneClose(7));
+        eng.fire_event(&LuaEvent::PaneClose(13));
+        assert_eq!(eng.eval_str("return #closed").unwrap(), "2");
+        assert_eq!(eng.eval_str("return closed[1]").unwrap(), "7");
+        assert_eq!(eng.eval_str("return closed[2]").unwrap(), "13");
+        // No subscribers is a no-op (doesn't panic).
+        let eng2 = LuaEngine::new("Default").expect("init");
+        eng2.fire_event(&LuaEvent::PaneClose(99));
     }
 
     /// Cycle 704 drift guard. `LuaEvent::TitleChanged(pane_id,

@@ -1971,6 +1971,18 @@ impl App {
         self.drain_lua_hook_commands("tab_close hook");
     }
 
+    /// Cycle 750: fire LuaEvent::PaneClose + drain commands — the pane analog
+    /// of `fire_tab_close_event`. Every close-pane call site calls this with
+    /// the id captured *before* `Mux::close_focused` removes the pane, so
+    /// plugins listening for `pane_close` see the right id regardless of
+    /// trigger source (keybind, confirm dialog, menu).
+    fn fire_pane_close_event(&mut self, pane_id: u64) {
+        if let Some(eng) = &self.lua_engine {
+            eng.fire_event(&crate::LuaEvent::PaneClose(pane_id));
+        }
+        self.drain_lua_hook_commands("pane_close hook");
+    }
+
     fn waker(&self) -> kettle_core::Waker {
         let p = self.proxy.clone();
         Arc::new(move || {
@@ -4753,7 +4765,14 @@ impl App {
                     }
                     return;
                 }
-                if self.mux.close_focused() {
+                // Cycle 750: capture the focused pane id BEFORE the close —
+                // afterward active_focus() returns the promoted sibling.
+                let closing_pane = self.mux.active_focus();
+                let was_last = self.mux.close_focused();
+                if let Some(id) = closing_pane {
+                    self.fire_pane_close_event(id);
+                }
+                if was_last {
                     event_loop.exit();
                 } else {
                     // Cycle 735: explicit redraw + focus-event
@@ -6127,7 +6146,14 @@ impl App {
                 self.save_session();
             }
             ConfirmAction::ClosePane => {
+                // Cycle 750: capture the pane id before the close so the
+                // pane_close hook fires with the right id (mirrors the
+                // keybind path).
+                let closing_pane = self.mux.active_focus();
                 self.mux.close_focused();
+                if let Some(id) = closing_pane {
+                    self.fire_pane_close_event(id);
+                }
                 self.save_session();
             }
         }
