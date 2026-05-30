@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-05-30
+
+  **Major: the Windows 11 / PowerShell 7 release.** kettle 2.0 makes
+  PowerShell 7+ the default shell on Windows (a default-behavior change
+  from the old `cmd.exe` — the reason this is a major bump), adds OSC 9;4
+  taskbar progress so pwsh `Write-Progress` / `winget` drive the taskbar
+  button exactly like Windows Terminal, and folds in the v1.47.0 line —
+  the close-split UI-thread deadlock fix and crash logging. Net result:
+  kettle can now surface everything a Windows 11 PowerShell 7 session
+  drives in a modern terminal. Verified end-to-end on a Surface Book 3
+  (Windows 11 build 26200).
+
+  New since v1.47.0:
+  - cycle 745 — OSC 9;4 taskbar progress via `ITaskbarList3` (detail below).
+
+  Carried from v1.47.0 (now part of the 2.0 line):
+  - **PowerShell 7+ as the Windows default shell** (cycle 743) — the
+    default-behavior change behind the major bump; override with `shell =`.
+  - **Close-split deadlock fix** — `Ctrl+Shift+W` after a split no longer
+    freezes the window into "not responding" (cycle 742).
+  - **Crash logs** — a `panic = "abort"`-safe hook writes panics to
+    `%LOCALAPPDATA%\kettle\crash\` / `$XDG_STATE_HOME` (cycle 741).
+
+  See the [1.47.0] section below for the carried-in per-cycle detail.
+
   cycle 745 — **Add: OSC 9;4 taskbar progress (PowerShell 7 / Windows
               Terminal parity)**: kettle now parses the ConEmu/Windows
               Terminal `ESC ] 9 ; 4 ; <state> ; <pct> ST` progress
