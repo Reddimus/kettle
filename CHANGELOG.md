@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 744 — **Docs: README front-door polish for newcomers**: the
+              Windows install section now leads with the bundled
+              `install.ps1` (per-user Start-menu install + PATH, the
+              `-WithShellIntegration` and `-Uninstall` flags, and the
+              `-ExecutionPolicy Bypass` escape hatch) instead of a bare
+              "unzip + add to PATH", and documents that kettle opens
+              PowerShell 7+ by default (cycle 743) with the `shell =`
+              override. Adds a platform-support matrix at the top of
+              Install and a 5-step **First launch** walkthrough (theme,
+              right-click Preferences, splits/tabs, search + palette,
+              config). Refreshes the stale `v1.45.x` status line to
+              `v1.46.x`. Removes an internal `cycle-717` reference that
+              had leaked into the user-facing context-menu tip.
+
   cycle 743 — **Change: default to PowerShell 7+ on Windows (was
               `cmd.exe`)**: when no `shell`/`command` is configured,
               kettle now spawns `pwsh.exe` (PowerShell 7+) if it is on

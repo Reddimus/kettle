@@ -19,7 +19,7 @@ and **WezTerm** into one tool.
 
 ![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
-> **Status: v1.45.x — production-ready** on Linux, macOS and Windows 11.
+> **Status: v1.46.x — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
@@ -82,6 +82,17 @@ and **WezTerm** into one tool.
 
 ## Install
 
+| OS | Versions | Recommended install |
+|----|----------|---------------------|
+| **Linux** | X11 + Wayland | one-line installer (below) |
+| **macOS** | 11+ — Intel & Apple Silicon (universal `.app`) | drag-to-Applications (below) |
+| **Windows** | Windows 11 | `install.ps1` from the release `.zip` (below) |
+
+Every release ships prebuilt binaries on the
+[releases page](https://github.com/Reddimus/kettle/releases/latest)
+(Linux `.tar.gz` + `.sha256`, macOS universal `.app`, Windows `.zip`) — or
+build from source.
+
 ### Linux — one-line installer (recommended)
 
 Downloads the latest prebuilt binary + XDG launcher + icons and drops
@@ -94,7 +105,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v1.45.1 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v1.46.3 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -109,8 +120,24 @@ arm64 + x86_64 universal — runs natively on every Mac.
 
 Grab `kettle-windows-x86_64.zip` from
 [the latest release](https://github.com/Reddimus/kettle/releases/latest),
-unzip, and add the folder to your `PATH` (or just `cd` into it and run
-`kettle.exe`).
+unzip it, and run the bundled installer from the extracted folder:
+
+```powershell
+.\install.ps1                        # per-user install: Start-menu entry + PATH (no admin)
+.\install.ps1 -WithShellIntegration  # also wire OSC 133 prompt marks into your $PROFILE
+.\install.ps1 -Uninstall             # remove it again later
+```
+
+Then press **Win** and type **"kettle"** to launch it from the Start menu.
+(If PowerShell blocks the script, run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1`.) Prefer it
+portable? Skip the installer — just `cd` into the folder and run
+`kettle.exe`.
+
+kettle opens **PowerShell 7+ (`pwsh`)** by default when it's installed —
+the same default as Windows Terminal — falling back to Windows PowerShell
+then `cmd.exe`. Set `shell = cmd.exe` (or any program) in your config to
+override.
 
 ### Build from source
 
@@ -128,6 +155,23 @@ cargo run --release                   # try it
 Rust ≥ 1.89 (the workspace MSRV). See
 [`docs/INSTALL.md`](docs/INSTALL.md) for packaging details across all
 three platforms.
+
+## First launch
+
+1. **Run `kettle`** (or launch it from your app menu / Start menu). It
+   opens with the **TokyoNight Night** theme and the bundled JetBrains
+   Mono Nerd Font — zero setup. On Windows it starts **PowerShell 7+**.
+2. **Right-click any pane → Preferences ▸** to toggle the scrollbar,
+   cursor blink, bell, copy-on-select and font size — changes persist
+   instantly to your config.
+3. **Split** with `Ctrl+Shift+O` (top/bottom) or `Ctrl+Shift+E`
+   (left/right), cycle panes with `Ctrl+Shift+N` / `P`, and open a new
+   tab with `Ctrl+Shift+T`.
+4. **Search** the screen with `Ctrl+Shift+F` (regex, smart-case), or open
+   the **command palette** with `Ctrl+Shift+K` to fuzzy-find any action.
+5. **Configure** it:
+   `kettle --print-default-config > ~/.config/kettle/config` (Windows:
+   `%APPDATA%\kettle\config`) — edits live-reload the moment you save.
 
 ## CLI quick reference
 
