@@ -37,7 +37,7 @@ pub mod placeholder;
 pub mod sixel;
 pub mod tmux_cc;
 
-pub use extract::{Chunk, Extractor, PromptKind};
+pub use extract::{Chunk, Extractor, Progress, PromptKind};
 pub use image::{ImageData, Placed};
 
 #[cfg(test)]
@@ -187,6 +187,62 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(passed, b"xyz");
+    }
+
+    fn progress_chunks(chunks: &[Chunk]) -> Vec<Progress> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Progress(p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn osc9_4_progress_is_parsed_and_consumed() {
+        // state 1 with pct, BEL-terminated; surrounding text passes through.
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"a\x1b]9;4;1;42\x07b");
+        assert_eq!(progress_chunks(&chunks), vec![Progress::Normal(42)]);
+        let passed: Vec<u8> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(passed, b"ab");
+
+        // All states, ESC\-terminated. state 0/3 carry no pct.
+        let mut e = Extractor::new();
+        let chunks =
+            e.feed(b"\x1b]9;4;0\x1b\\\x1b]9;4;2;7\x1b\\\x1b]9;4;3\x1b\\\x1b]9;4;4;90\x1b\\");
+        assert_eq!(
+            progress_chunks(&chunks),
+            vec![
+                Progress::Clear,
+                Progress::Error(7),
+                Progress::Indeterminate,
+                Progress::Warning(90),
+            ]
+        );
+
+        // Over-range pct clamps to 100.
+        let mut e = Extractor::new();
+        assert_eq!(
+            progress_chunks(&e.feed(b"\x1b]9;4;1;250\x07")),
+            vec![Progress::Normal(100)]
+        );
+
+        // An unknown state is dropped (no Progress chunk, not forwarded raw).
+        let mut e = Extractor::new();
+        assert!(progress_chunks(&e.feed(b"\x1b]9;4;9;5\x07")).is_empty());
+
+        // A non-9;4 OSC 9 (e.g. iTerm2 notification) is NOT a progress chunk.
+        let mut e = Extractor::new();
+        assert!(progress_chunks(&e.feed(b"\x1b]9;hello\x07")).is_empty());
     }
 
     #[test]

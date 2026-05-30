@@ -30,6 +30,10 @@
       docs/SHELL-INTEGRATION.md (cycle 730 added the PowerShell variant
       via `--shell-integration powershell` for Win11 + cross-platform
       PowerShell Core users)
+- [x] OSC 9;4 taskbar progress (PowerShell 7 / Windows Terminal parity):
+      the focused pane's `ESC]9;4;state;pct` drives the Windows taskbar
+      button via `ITaskbarList3` (normal/error/indeterminate/paused);
+      no-op off Windows (cycle 745)
 
 - [x] Session save/restore: OSC 7 cwd capture, tab/split tree + per-pane
       cwd serialized to session.json, restored on launch, autosaved on
@@ -1401,14 +1405,6 @@ breakdown.
 The Terminator-parity sweep effectively closes the major missing-
 features list. What's left is genuinely-multi-week threads + polish.
 
-- [ ] **OSC 9;4 taskbar progress** (Windows Terminal / PowerShell 7
-      parity) — parse `ESC ] 9 ; 4 ; <state> ; <pct> ST` (emitted by
-      pwsh 7 `Write-Progress` when `$PSStyle.Progress.UseOSCIndicator`
-      is enabled, and by `winget`) and drive the Windows taskbar button
-      via `ITaskbarList3::SetProgressValue/State` (dock badge on macOS).
-      Today the sequence is parsed-through harmlessly but not surfaced.
-      Needs Win32 COM, so it's a self-contained cycle rather than a
-      drive-by.
 - [ ] tmux `-CC` post-parser integration (sub-cycles 3-7 per
       `docs/TMUX-CC-DESIGN.md`): pane-state plumbing, window-tab
       synthesis, input routing, layout-change, detach cleanup.

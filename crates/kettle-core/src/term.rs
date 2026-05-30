@@ -12,7 +12,7 @@ use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
 use anyhow::Result;
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
-use kettle_vt::{Chunk, Extractor, PromptKind};
+use kettle_vt::{Chunk, Extractor, Progress, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
@@ -146,6 +146,9 @@ pub struct Terminal {
     pub command_finished: Arc<Mutex<Vec<CommandFinished>>>,
     /// Latest working directory reported via OSC 7.
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// Cycle 745: latest OSC 9;4 progress state (drives the OS taskbar
+    /// indicator); `None` until the program reports progress / after clear.
+    pub progress: Arc<Mutex<Option<Progress>>>,
     /// The argv this pane was launched with (empty = default shell);
     /// persisted so SSH/remote panes can be restored.
     pub argv: Vec<String>,
@@ -469,6 +472,10 @@ impl Terminal {
         let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
+        // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
+        // The reader thread writes it; the App polls the focused pane's value
+        // each frame and drives the OS taskbar indicator (pwsh 7 parity).
+        let progress_cell: Arc<Mutex<Option<Progress>>> = Arc::new(Mutex::new(None));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
         // Cycle 621 (Terminator parity, `plugins/logger.py`): per-pane
         // session log. Default None; `Action::ToggleSessionLog`
@@ -495,6 +502,7 @@ impl Terminal {
             let output_started_at = output_started_at.clone();
             let command_finished = command_finished.clone();
             let cwd_cell = cwd_cell.clone();
+            let progress_cell = progress_cell.clone();
             let cell_px = cell_px.clone();
             let log_file = log_file.clone();
             let log_strip_ansi = log_strip_ansi.clone();
@@ -740,6 +748,15 @@ impl Terminal {
                                                 *c = Some(path);
                                             }
                                         }
+                                        // Cycle 745: OSC 9;4 taskbar progress.
+                                        // Record the latest; the App polls it
+                                        // and drives the OS taskbar indicator.
+                                        Chunk::Progress(p) => {
+                                            if let Ok(mut g) = progress_cell.lock() {
+                                                *g = Some(p);
+                                            }
+                                            (waker)();
+                                        }
                                     }
                                 }
                                 (waker)();
@@ -766,6 +783,7 @@ impl Terminal {
             output_started_at,
             command_finished,
             cwd: cwd_cell,
+            progress: progress_cell,
             argv: argv.to_vec(),
             log_file: log_file_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
@@ -776,6 +794,13 @@ impl Terminal {
     /// Last working directory reported via OSC 7, if any.
     pub fn current_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Cycle 745: latest OSC 9;4 taskbar-progress state reported by this pane
+    /// (`None` if never reported, or explicitly cleared with state 0). The
+    /// App polls the focused pane's value each frame to drive the OS taskbar.
+    pub fn progress(&self) -> Option<Progress> {
+        self.progress.lock().ok().and_then(|g| *g)
     }
 
     /// Cycle 639 (Terminator parity, sub-cycle 1 of

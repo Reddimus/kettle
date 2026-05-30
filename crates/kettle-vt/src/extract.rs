@@ -67,6 +67,29 @@ pub enum Chunk {
     Prompt(PromptKind),
     /// Working-directory report (OSC 7), absolute path.
     Cwd(String),
+    /// OSC 9;4 progress report — drives the OS taskbar/dock progress
+    /// indicator (Windows Terminal's behavior).
+    Progress(Progress),
+}
+
+/// OSC 9;4 taskbar-progress state. PowerShell 7 `Write-Progress` (with
+/// `$PSStyle.Progress.UseOSCIndicator = $true`), `winget`, and many CLIs
+/// emit `ESC ] 9 ; 4 ; <state> ; <pct> ST` so the terminal can drive the OS
+/// taskbar/dock progress indicator. Maps onto Win32
+/// `ITaskbarList3::SetProgressState` / `SetProgressValue` (the ConEmu/
+/// Windows Terminal convention).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Progress {
+    /// state 0 — clear the indicator.
+    Clear,
+    /// state 1 — normal progress, 0..=100%.
+    Normal(u8),
+    /// state 2 — error, 0..=100% (red).
+    Error(u8),
+    /// state 3 — indeterminate (marquee; no value).
+    Indeterminate,
+    /// state 4 — paused / warning, 0..=100% (yellow).
+    Warning(u8),
 }
 
 #[derive(PartialEq)]
@@ -207,6 +230,18 @@ impl Extractor {
         if mode == Mode::Osc && seq.starts_with(b"7;") {
             if let Some(path) = parse_osc7(&String::from_utf8_lossy(&seq[2..])) {
                 out.push(Chunk::Cwd(path));
+            }
+            return;
+        }
+        // OSC 9;4 progress report (ConEmu / Windows Terminal taskbar
+        // progress). pwsh 7 `Write-Progress` + `winget` emit it; the VT
+        // engine ignores it, so consume it here and surface a Progress chunk
+        // the UI maps onto the OS taskbar indicator. Other OSC 9 sequences
+        // (e.g. iTerm2's `OSC 9;<msg>` notification) are NOT matched here and
+        // fall through to the default handling unchanged.
+        if mode == Mode::Osc && seq.starts_with(b"9;4;") {
+            if let Some(p) = parse_osc9_4(&seq) {
+                out.push(Chunk::Progress(p));
             }
             return;
         }
@@ -449,6 +484,29 @@ fn parse_osc7(s: &str) -> Option<String> {
     // Lossy → invalid byte sequences become U+FFFD instead of dropping the
     // whole report; a partly-corrupted path is more useful than no path.
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Parse an OSC 9;4 body (`9;4;<state>[;<pct>]`) into a [`Progress`].
+/// Tolerant of a missing/over-range pct (clamped to 100) and surrounding
+/// whitespace; an unknown state yields `None` so the sequence is simply
+/// dropped rather than mis-rendered.
+fn parse_osc9_4(seq: &[u8]) -> Option<Progress> {
+    let rest = std::str::from_utf8(seq).ok()?.strip_prefix("9;4;")?;
+    let mut parts = rest.split(';');
+    let state: u8 = parts.next()?.trim().parse().ok()?;
+    let pct = parts
+        .next()
+        .and_then(|p| p.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        .min(100) as u8;
+    Some(match state {
+        0 => Progress::Clear,
+        1 => Progress::Normal(pct),
+        2 => Progress::Error(pct),
+        3 => Progress::Indeterminate,
+        4 => Progress::Warning(pct),
+        _ => return None,
+    })
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {

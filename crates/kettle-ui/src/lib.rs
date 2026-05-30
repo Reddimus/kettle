@@ -25,6 +25,8 @@ mod input;
 mod lua;
 mod mux;
 mod session;
+// Cycle 745: OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
+mod taskbar;
 
 // Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D.
 // Unix-only (Linux + macOS + BSDs); Windows users get the

@@ -1331,6 +1331,9 @@ fn clamp_context_menu_anchor(
 pub struct App {
     cfg: Config,
     window: Option<Arc<Window>>,
+    /// Cycle 745: OS taskbar progress, driven by the focused pane's OSC 9;4
+    /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
+    taskbar: crate::taskbar::Taskbar,
     renderer: Option<Renderer>,
     mux: Mux,
     mods: ModifiersState,
@@ -1835,6 +1838,7 @@ impl App {
         let mut app = App {
             cfg: initial_cfg,
             window: None,
+            taskbar: crate::taskbar::Taskbar::new(),
             renderer: None,
             mux: {
                 let mut m = Mux::new();
@@ -3483,6 +3487,9 @@ impl App {
         self.poll_theme_schedule();
         self.poll_focus_event();
         self.poll_title_event();
+        // Cycle 745: reflect the focused pane's OSC 9;4 progress onto the OS
+        // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
+        self.poll_taskbar_progress();
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into self.mux.panes when spawning a new tab.
@@ -5979,6 +5986,21 @@ impl App {
         self.last_emitted_focus = Some(cur_id);
         if let Some(eng) = self.lua_engine.as_ref() {
             eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
+        }
+    }
+
+    /// Cycle 745: reflect the FOCUSED pane's OSC 9;4 progress onto the OS
+    /// taskbar button each frame (pwsh 7 / Windows Terminal parity). Reads the
+    /// focused pane the same way the cursor-blink poll does; `Taskbar` dedups
+    /// internally, so an unchanged value costs nothing. No-op off Windows.
+    fn poll_taskbar_progress(&mut self) {
+        let progress = self
+            .mux
+            .active_focus()
+            .and_then(|id| self.mux.panes.get(&id))
+            .and_then(|p| p.term.progress());
+        if let Some(window) = self.window.clone() {
+            self.taskbar.apply(&window, progress);
         }
     }
 

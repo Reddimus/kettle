@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 745 — **Add: OSC 9;4 taskbar progress (PowerShell 7 / Windows
+              Terminal parity)**: kettle now parses the ConEmu/Windows
+              Terminal `ESC ] 9 ; 4 ; <state> ; <pct> ST` progress
+              sequence — pwsh 7 `Write-Progress` (with
+              `$PSStyle.Progress.UseOSCIndicator = $true`) and `winget`
+              emit it — and drives the Windows taskbar button via
+              `ITaskbarList3` to reflect the FOCUSED pane's progress
+              (normal / error / indeterminate / paused, 0–100%), exactly
+              like Windows Terminal. The extractor surfaces a
+              `Chunk::Progress`; the reader records the latest value per
+              pane; the App polls the focused pane each frame and updates
+              the taskbar (dedup'd, so an unchanged value costs nothing).
+              Cross-platform by construction — a no-op off Windows (a
+              macOS dock badge can follow via objc2). Parsing is
+              unit-tested (all five states + pct clamp + non-9;4 OSC 9
+              left untouched); the COM path is verified live on Windows
+              11 build 26200 (each state logged "applied via
+              ITaskbarList3"). Closes the last identified pwsh-7 terminal
+              gap, so kettle can now surface everything a Windows 11
+              PowerShell 7 session drives in a modern terminal.
+
 ## [1.47.0] — 2026-05-29
 
   Fixes the Windows 11 close-split freeze (the headline), adds crash
