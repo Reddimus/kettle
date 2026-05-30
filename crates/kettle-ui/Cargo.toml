@@ -22,6 +22,15 @@ anyhow.workspace = true
 # kettle-vt feature narrowing.
 arboard = { version = "3.6.1", default-features = false }
 crossbeam-channel = "0.5.15"
+# Cycle 752: decode the embedded PNG app icon into a winit window icon so
+# the title bar (system-menu glyph), taskbar button, and Alt-Tab show
+# kettle's icon for the *running* window. Only the `png` feature — the icon
+# assets are PNG. `image` is already built for the workspace (kettle-render
+# pulls it), so this adds no new crate to the dependency graph. The build.rs
+# winresource step embeds the same art as an .exe resource, which covers
+# Explorer / the file glyph / a pinned shortcut but NOT the live window's
+# WM_SETICON — hence this runtime path.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config.workspace = true
 kettle-core.workspace = true
 kettle-render.workspace = true

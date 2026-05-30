@@ -1530,6 +1530,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "crossbeam-channel",
+ "image",
  "kettle-config",
  "kettle-core",
  "kettle-remote",

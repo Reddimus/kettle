@@ -32,6 +32,25 @@ pub enum UserEvent {
     RemoteCommand,
 }
 
+/// Cycle 752: decode kettle's embedded PNG into a winit window icon for the
+/// *running* window — the title-bar system-menu glyph (top-left, beside the
+/// minimize/maximize/close controls), the taskbar button, and the Alt-Tab
+/// thumbnail. winit leaves the window icon unset by default, so Windows showed
+/// the generic placeholder even though `build.rs` embeds the same art as an
+/// `.exe` resource (that resource only covers Explorer / the file glyph / a
+/// pinned shortcut — not the live window's `WM_SETICON`). The 256px source is
+/// downscaled by the OS for the small title-bar icon and picked at the right
+/// size for the taskbar / switcher. Best-effort: a decode failure leaves the
+/// icon unset rather than aborting startup. No-op on Wayland (uses the
+/// `.desktop` app_id) and macOS (uses the `.app` bundle icon); effective on
+/// Windows and X11.
+fn load_window_icon() -> Option<winit::window::Icon> {
+    const ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-256.png");
+    let img = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 /// Translate a winit `MouseScrollDelta` into terminal lines, scaled by the
 /// configured `scroll-multiplier`. `LineDelta` ticks are ~3 lines × mult;
 /// `PixelDelta` is `y/20` × mult (~3 lines per typical notch). Pure.
@@ -7028,7 +7047,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let mut attrs = Window::default_attributes().with_title("kettle");
+        let mut attrs = Window::default_attributes()
+            .with_title("kettle")
+            // Cycle 752: show kettle's icon in the title bar / taskbar / Alt-Tab
+            // for the running window (winit leaves it unset by default).
+            .with_window_icon(load_window_icon());
         // Cycle 332 (Terminator parity, terminatorlib/config.py:75 +
         // 78). `borderless` removes OS chrome; `always-on-top` keeps
         // the window above other windows. Best-effort per OS; failure
