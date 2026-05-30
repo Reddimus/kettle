@@ -117,6 +117,18 @@ echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
 sed -i.bak "0,/^version = \"${PREV}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
+# Cycle 746 — durable lockstep for the inter-crate path-dep version
+# requirements in `[workspace.dependencies]`. They were pinned at a fixed
+# 1.x floor (`version = "1.45.1"`), which `^`-excludes a 2.0.0 MAJOR bump
+# and broke `release.sh 2.0.0` at the Cargo.lock refresh ("failed to select
+# a version for `kettle-vt = ^1.45.1` … candidate 2.0.0 didn't match").
+# Keeping each pin equal to the release version means every future bump —
+# including majors — resolves cleanly. The crates are never published to
+# crates.io (no `publish`/badge), so the version is only a resolver hint.
+echo "bumping inter-crate version pins → ${VERSION}"
+sed -i.bak -E "s|(path = \"crates/kettle-[a-z]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
+rm -f Cargo.toml.bak
+
 # Cycle 550 — durable lockstep with flake.nix. The Nix-side
 # version had drifted 39 releases (v1.3.5 → v1.42.0 at cycle 549)
 # because the file's "Keep in lockstep" comment was advisory-
