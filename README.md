@@ -19,7 +19,7 @@ and **WezTerm** into one tool.
 
 ![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
-> **Status: v1.47.x — production-ready** on Linux, macOS and Windows 11.
+> **Status: v1.48.x — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
