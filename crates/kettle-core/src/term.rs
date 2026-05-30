@@ -2,6 +2,7 @@
 //! driven by a dedicated reader thread.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -19,6 +20,22 @@ use crate::images::{
     AnimEntry, Animations, Images, Placement, RelEntry, Relatives, VirtualEntry, Virtuals,
     relative_origin, resolve_chain,
 };
+
+/// A `Write` sink that discards everything. Cycle 742: on `Terminal`
+/// teardown the PTY writer (the child's stdin / conin) is swapped for this
+/// so dropping the real writer closes the input handle immediately — an EOF
+/// nudge for shells that exit on stdin close — without leaving the field
+/// holding a dangling handle. Zero-sized; never errors.
+struct NullWrite;
+
+impl std::io::Write for NullWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
@@ -89,10 +106,18 @@ pub struct CommandFinished {
 
 pub struct Terminal {
     pub term: SharedTerm,
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    // Cycle 742: `Option` so `Drop` can `.take()` and drop the master
+    // (ClosePseudoConsole on Windows / close the master fd on Unix) WITHOUT
+    // moving a non-`Option` field out of `&mut self`. Always `Some` during
+    // normal operation; only `None` transiently inside `Drop`.
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     reader_thread: Option<JoinHandle<()>>,
+    // Cycle 742: cooperative stop flag for the reader thread. `Drop` sets it
+    // so the reader exits promptly during teardown instead of looping back
+    // into another blocking PTY read once the pseudoconsole closes.
+    stop: Arc<AtomicBool>,
     pub cols: usize,
     pub rows: usize,
     pub images: Images,
@@ -407,6 +432,8 @@ impl Terminal {
         // behavior.
         let log_strip_ansi: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
         let log_strip_ansi_for_struct = log_strip_ansi.clone();
+        // Cycle 742: teardown stop flag (see the `stop` struct field).
+        let stop = Arc::new(AtomicBool::new(false));
 
         let reader_thread = {
             let term = term.clone();
@@ -421,6 +448,7 @@ impl Terminal {
             let cell_px = cell_px.clone();
             let log_file = log_file.clone();
             let log_strip_ansi = log_strip_ansi.clone();
+            let stop = stop.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
@@ -428,12 +456,24 @@ impl Terminal {
                     let mut extractor = Extractor::new();
                     let mut buf = [0u8; 65536];
                     loop {
+                        // Cycle 742: bail out during teardown (Drop sets
+                        // `stop`). This can't interrupt a *currently* blocked
+                        // read — only the pseudoconsole closing does that —
+                        // but it stops us re-entering a fresh blocking read
+                        // after the close, so the detached thread winds down
+                        // immediately instead of processing stale output.
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => {
                                 proxy.send_event_exit();
                                 break;
                             }
                             Ok(n) => {
+                                if stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
                                 // Cycle 621 (Terminator parity, logger.py):
                                 // per-pane session log tap. Best-effort —
                                 // I/O errors are swallowed so a full disk
@@ -661,10 +701,11 @@ impl Terminal {
 
         Ok(Terminal {
             term,
-            master: pair.master,
+            master: Some(pair.master),
             writer: Arc::new(Mutex::new(writer)),
             child: Arc::new(Mutex::new(child)),
             reader_thread: Some(reader_thread),
+            stop,
             cols,
             rows,
             images,
@@ -950,12 +991,14 @@ impl Terminal {
         }
         self.cols = cols;
         self.rows = rows;
-        let _ = self.master.resize(PtySize {
-            rows: rows as u16,
-            cols: cols as u16,
-            pixel_width: cell_w * cols as u16,
-            pixel_height: cell_h * rows as u16,
-        });
+        if let Some(master) = self.master.as_ref() {
+            let _ = master.resize(PtySize {
+                rows: rows as u16,
+                cols: cols as u16,
+                pixel_width: cell_w * cols as u16,
+                pixel_height: cell_h * rows as u16,
+            });
+        }
         if let Ok(mut p) = self.cell_px.lock() {
             *p = (cell_w.max(1), cell_h.max(1));
         }
@@ -978,13 +1021,49 @@ impl Terminal {
 }
 
 impl Drop for Terminal {
+    /// Cycle 742: tear down the PTY WITHOUT ever blocking the calling thread.
+    ///
+    /// This runs on the UI thread — closing a pane drops the owned
+    /// `Pane.term` (`Mux::close_focused` → `panes.remove`) — so blocking here
+    /// freezes the whole window.
+    ///
+    /// The pre-742 body `join()`ed the reader thread while the master PTY was
+    /// still alive. The reader sits in a blocking `read()` on the ConPTY
+    /// conout pipe that only returns once the pseudoconsole is *closed* — but
+    /// the master (hence `ClosePseudoConsole`) wasn't dropped until after this
+    /// function returned, so the join could never complete and the UI thread
+    /// deadlocked. Windows then showed the window as "not responding", which
+    /// users reported as a crash. (Reproduced on build 26200: close-split left
+    /// the process alive with `Responding=false` for as long as it was sampled
+    /// — a hang, not a panic. See `target/cycle-742-repro.txt`.)
+    ///
+    /// The fix mirrors how WezTerm (portable_pty's own author) and Alacritty
+    /// drive teardown: signal stop, kill the child, close the writer (conin)
+    /// and the master (conout / pseudoconsole) so the reader's `read()` reaches
+    /// EOF, then DETACH the reader thread. Every step is non-blocking, so
+    /// `Drop` returns in sub-millisecond time and the UI keeps pumping. The
+    /// reader owns only `Arc` clones (no borrow of `Terminal`), so it is sound
+    /// for it to outlive this `Drop`; it ends the instant conout EOFs and drops
+    /// its clones. On Unix the same ordering applies (master fd close → slave
+    /// EOF), so there is no platform-specific branch.
     fn drop(&mut self) {
+        // 1. Tell the reader to stop looping.
+        self.stop.store(true, Ordering::Relaxed);
+        // 2. Kill the child (best-effort; already-exited returns Err).
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
         }
-        if let Some(h) = self.reader_thread.take() {
-            let _ = h.join();
+        // 3. Close the writer (conin / child stdin) by swapping in a discard
+        //    sink and dropping the real writer — an EOF nudge for shells that
+        //    exit on stdin close.
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = std::mem::replace(&mut *w, Box::new(NullWrite));
         }
+        // 4. Close the master / pseudoconsole NOW so the reader's blocked
+        //    read() returns EOF. We hold no lock and do NOT wait on the reader.
+        drop(self.master.take());
+        // 5. DETACH the reader thread — never join() on the UI thread.
+        drop(self.reader_thread.take());
     }
 }
 
@@ -2366,4 +2445,98 @@ mod conformance {
     // stops), DECSCA/DECSEL selective-erase and LNM LF→CRLF *output*
     // translation are not applied by alacritty_terminal, so no conformance
     // test asserts those behaviors (only LNM's mode bit) — see ROADMAP.
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose
+    /// child is alive and whose PTY reader is parked in a blocking `read()`
+    /// must return PROMPTLY. Pre-742 `Drop` `join()`ed the reader while the
+    /// master was still open; on Windows ConPTY that join could never
+    /// complete, so the UI thread (which owns the drop on a pane close)
+    /// deadlocked and the window went "not responding". We run the drop on a
+    /// worker thread and require it to finish far inside the old hang window.
+    #[test]
+    fn drop_is_prompt_with_blocked_reader() {
+        // A child that stays alive and quiet, so the reader is parked in a
+        // blocking read at drop time: `cmd.exe` waits on stdin; `cat` (no
+        // args) blocks reading stdin and emits nothing.
+        #[cfg(windows)]
+        let argv = vec!["cmd.exe".to_string()];
+        #[cfg(unix)]
+        let argv = vec!["/bin/cat".to_string()];
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            // A sandbox without a usable PTY (rare on the CI runners) — soft
+            // skip rather than red the suite. The deterministic source drift
+            // guard below pins the invariant without needing a real PTY.
+            Err(e) => {
+                eprintln!("skipping drop_is_prompt_with_blocked_reader: no PTY ({e})");
+                return;
+            }
+        };
+
+        // Let the child start and the reader settle into a blocking read.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            drop(term);
+            let _ = done_tx.send(());
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "Terminal::Drop blocked >5s — the cycle-742 reader-thread join \
+             deadlock has regressed (Drop must detach the reader, never join)"
+        );
+    }
+
+    /// Cycle 742 regression guard (source, deterministic / cross-platform).
+    /// `Terminal::Drop` must DETACH the reader thread, never `join()` it: a
+    /// future refactor that re-adds `.join()` reintroduces the Windows
+    /// UI-thread deadlock. Inspect just the `fn drop` body so doc comments
+    /// and surrounding code can't skew the check.
+    #[test]
+    fn drop_detaches_reader_never_joins() {
+        // Normalize CRLF→LF first: the repo checks out with Windows line
+        // endings, so byte patterns must not assume bare `\n`.
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn drop(&mut self) {")
+            .expect("Terminal::Drop present");
+        let rest = &src[start..];
+        // The fn body closes at a 4-space-indented `}`; every nested block
+        // inside closes at >=8 spaces, so the first `\n    }` is unambiguous.
+        let end = rest.find("\n    }").map(|e| e + 5).expect("drop fn close");
+        let body = &rest[..end];
+        assert!(
+            body.contains("reader_thread.take()"),
+            "Drop must take() (detach) the reader thread handle"
+        );
+        assert!(
+            !body.contains(".join("),
+            "Terminal::Drop must NOT join the PTY reader — joining on the UI \
+             thread deadlocks on a blocked ConPTY read (cycle 742)"
+        );
+    }
 }

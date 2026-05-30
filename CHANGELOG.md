@@ -6,6 +6,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 742 — **Fix: closing a split pane no longer freezes kettle on
+              Windows 11 (UI-thread PTY-teardown deadlock)**: splitting
+              a pane (`Ctrl+Shift+O`/`E`) then closing the focused split
+              (`Ctrl+Shift+W`) made the whole window stop responding —
+              users reported it as a crash. Root cause: `Terminal`'s
+              `Drop` runs on the UI thread (a pane close drops the owned
+              `Pane.term`) and `join()`ed the PTY reader thread while the
+              master pseudoconsole was still open. The reader sits in a
+              blocking `read()` on the ConPTY conout pipe that only
+              returns once the pseudoconsole is *closed* — but the master
+              wasn't dropped until after `Drop` returned, so the join
+              could never complete and the UI thread deadlocked. (On
+              build 26100+ / 24H2, Microsoft's `ClosePseudoConsole`
+              contract makes a UI-thread join on the blocked reader
+              unrecoverable.) Reproduced on the Surface Book 3 (build
+              26200): close-split left the process alive with
+              `Responding=false` indefinitely — a hang, not a panic, so
+              the cycle-734/735 render/Arc-lock theories were wrong. Fix
+              mirrors WezTerm/Alacritty teardown: signal a stop flag,
+              kill the child, close the writer (conin) and the master
+              (conout / pseudoconsole) so the reader reaches EOF, then
+              **detach** the reader thread — never `join()` on the UI
+              thread. `Drop` now returns in sub-millisecond time; the
+              detached reader owns only `Arc` clones (no borrow of
+              `Terminal`) and winds down on its own once conout EOFs.
+              Guards: `drop_is_prompt_with_blocked_reader` (runtime —
+              dropping a `Terminal` with a blocked reader completes < 5s,
+              verified on 26200) and `drop_detaches_reader_never_joins`
+              (source drift guard — pins "no `.join()` in `Drop`").
+              Verified live: post-fix, 5+ consecutive split→close cycles
+              (incl. a 3-pane tree) keep `Responding=true` throughout.
+
+  cycle 741 — **Add: crash logs (panics are no longer invisible on a
+              Start-menu launch)**: a `panic = "abort"`-safe panic hook
+              is installed first thing in `main()`. It prints the panic
+              message, thread, location and a forced backtrace to stderr
+              AND appends the same report to a crash-log file under the
+              platform state dir (`%LOCALAPPDATA%\kettle\crash\` on
+              Windows; `$XDG_STATE_HOME`/`~/.local/state/kettle/crash/`
+              on Unix). Before this, a panic on an Explorer/Start-menu
+              launch was completely silent — the cycle-740 console-hide
+              path swallows stderr and `panic = "abort"` skips unwinding
+              — which is exactly why two prior cycles had to *guess* at a
+              crash's cause. The crash-log path helper is pure +
+              env-injected (mirrors `home_dir_fallback`) with unit tests
+              for the Windows/XDG/HOME/fallback branches; the hook itself
+              never panics internally (no double-fault under abort).
+
 ## [1.46.3] — 2026-05-23
 
   Hot-fix release bundling cycles 738-740. Fixes a regression cycle
