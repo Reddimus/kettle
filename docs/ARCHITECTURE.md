@@ -108,7 +108,15 @@ renderer, so the menu pass reuses already-cached glyphs.
 - **One reader thread per pane** — blocking `read()` on the PTY master →
   `Extractor::feed` → image/side-channel chunks recorded, text chunks driven
   into the `alacritty_terminal::Term` (behind a `Mutex` shared with the
-  renderer) → wakes the UI.
+  renderer) → wakes the UI. **Teardown invariant (cycle 742):**
+  `Terminal::Drop` runs on the UI thread (a pane close drops the owned
+  `Pane.term`), so it must **never `join()`** this reader. On Windows a
+  ConPTY `read()` only unblocks once the pseudoconsole is *closed*, so
+  joining the reader before dropping the master deadlocks the UI thread and
+  the window goes "not responding". Drop instead sets a stop flag, kills the
+  child, closes the writer (conin) and the master (conout / pseudoconsole)
+  so the reader hits EOF, then **detaches** the thread — it owns only `Arc`
+  clones (no borrow of `Terminal`) and exits on its own.
 - Output floods are coalesced by `request_redraw` (≤1 frame/vsync). Per-pane
   registries (`images`, `virtuals`, `anims`, `relatives`, `prompts`, `cwd`)
   are `Arc<Mutex<…>>` snapshotted cheaply for rendering; a running kitty
