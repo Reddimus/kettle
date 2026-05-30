@@ -19,6 +19,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `login-shell` option no longer mis-injects `-l` for `wsl.exe` — `-l`
     means "list distributions" to wsl and would have exited instead of
     opening a shell.
+  - **Changed (internal):** the renderer now releases per-pane text
+    buffers when splits close, instead of holding them at the session's
+    peak pane count.
 
 ## [2.0.0] — 2026-05-30
 

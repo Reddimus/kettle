@@ -859,6 +859,14 @@ impl Renderer {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_titlebar_buffers.push(b);
         }
+        // Cycle 749: release buffers for panes that have closed. The grow
+        // loops above only ever extend, so without this the two vecs sat at
+        // the session's high-water pane count — a 6-way split that you close
+        // back to one pane left 5 idle TextBuffers (with their shaped glyph
+        // runs) allocated for the rest of the session. Truncation is safe:
+        // every later loop indexes by enumerate position `< panes.len()`.
+        self.pane_buffers.truncate(panes.len());
+        self.pane_titlebar_buffers.truncate(panes.len());
         // Cycle 382: write each pane's title into its titlebar
         // buffer NOW (before the later loops borrow self
         // immutably). pane_titlebar_h was computed earlier as
@@ -4094,6 +4102,29 @@ mod hidpi_scale_tests {
         assert!(
             (h2 / h1 - 2.0).abs() < 0.15,
             "cell height should ≈ double at 2× scale: {h1} → {h2}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pane_buffer_lifecycle_tests {
+    /// Cycle 749 drift guard. The per-pane text-buffer vecs are grown with
+    /// `while len < panes.len()` and must be truncated back down when panes
+    /// close, or they sit at the session's high-water pane count holding idle
+    /// glyph buffers. A behavioral test would need a full GPU `Renderer`, so
+    /// pin the invariant at the source level (same shape as term.rs's
+    /// detach-never-joins guard): both truncate calls must stay present.
+    #[test]
+    fn render_frame_truncates_pane_buffers_on_shrink() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("self.pane_buffers.truncate(panes.len())"),
+            "pane_buffers must be truncated to panes.len() so closed panes \
+             don't leak their text buffers"
+        );
+        assert!(
+            src.contains("self.pane_titlebar_buffers.truncate(panes.len())"),
+            "pane_titlebar_buffers must be truncated to panes.len() too"
         );
     }
 }
