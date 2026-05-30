@@ -323,7 +323,93 @@ fn reset_sigpipe() {
 #[cfg(not(unix))]
 fn reset_sigpipe() {}
 
+/// Cycle 741: compute where a crash report is written, in addition to
+/// stderr. Pure + env-injected so it is unit-testable, mirroring
+/// `home_dir_fallback` in kettle-core. Uses the platform STATE dir (crash
+/// logs are diagnostic state that should survive a cache clear):
+///
+///   - Windows: `%LOCALAPPDATA%\kettle\crash\kettle-crash-<unix>-<pid>.log`
+///   - Unix:    `$XDG_STATE_HOME/kettle/crash/…` else
+///     `$HOME/.local/state/kettle/crash/…`
+///   - fallback (nothing set): `./kettle/crash/…`
+fn crash_log_path(
+    unix_secs: u64,
+    pid: u32,
+    get: impl Fn(&str) -> Option<String>,
+) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    // Treat empty values as unset (a stripped `set VAR=` shouldn't yield an
+    // empty base) — same defensive shape as `home_dir_fallback`.
+    let env = |k: &str| get(k).filter(|s| !s.is_empty());
+    let base = if cfg!(windows) {
+        env("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        env("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+    }
+    .unwrap_or_else(|| PathBuf::from("."));
+    base.join("kettle")
+        .join("crash")
+        .join(format!("kettle-crash-{unix_secs}-{pid}.log"))
+}
+
+/// Cycle 741: install a `panic = "abort"`-safe panic hook as the very first
+/// thing `main` does. Before this, a panic on a Start-menu launch was
+/// invisible — the cycle-740 console-hide path swallows stderr, and
+/// `panic = "abort"` (Cargo.toml) skips unwinding — so two prior cycles had
+/// to *guess* at a crash's cause. The hook prints a full report (message,
+/// thread, location, backtrace) to stderr AND appends it to a crash-log file
+/// under the state dir, so a crash is always recoverable from a user even
+/// with no console. The hook itself never panics (all `let _ =` / `unwrap_or`)
+/// to avoid a double-fault under abort.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(move |info| {
+        // `force_capture` yields frames even when RUST_BACKTRACE is unset.
+        let bt = std::backtrace::Backtrace::force_capture();
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let thread = std::thread::current();
+        let tname = thread.name().unwrap_or("<unnamed>").to_string();
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+
+        let report = format!(
+            "kettle {KETTLE_VERSION} PANIC\ntime(unix): {when}\nthread: {tname}\n\
+             location: {loc}\nmessage: {msg}\nbacktrace:\n{bt}\n"
+        );
+
+        eprintln!("{report}");
+
+        let path = crash_log_path(when, std::process::id(), |k| std::env::var(k).ok());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write as _;
+            let _ = f.write_all(report.as_bytes());
+        }
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
+    // Cycle 741: capture panics (message + backtrace) to stderr AND a crash
+    // log under the state dir — must be first so even an early panic lands.
+    install_panic_hook();
     // Cycle 740: hide the auto-allocated console window if it
     // belongs only to us (Start-menu / Explorer launch). When a
     // parent shell ran us, the console process list has > 1
@@ -1064,6 +1150,78 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
     rows.into_iter()
         .map(|(name, target)| format!("{name:<width$}  {target}"))
         .collect()
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::crash_log_path;
+
+    /// Build an env lookup closure from `(name, value)` pairs.
+    fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_localappdata() {
+        let p = crash_log_path(
+            1700,
+            42,
+            from(&[("LOCALAPPDATA", r"C:\Users\me\AppData\Local")]),
+        );
+        let s = p.to_string_lossy().replace('/', "\\");
+        assert!(
+            s.starts_with(r"C:\Users\me\AppData\Local\kettle\crash\"),
+            "{s}"
+        );
+        assert!(s.ends_with(r"kettle-crash-1700-42.log"), "{s}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_falls_back_to_cwd_when_unset() {
+        let p = crash_log_path(1, 2, from(&[]));
+        let s = p.to_string_lossy().replace('/', "\\");
+        assert!(s.contains(r"kettle\crash\kettle-crash-1-2.log"), "{s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_prefers_xdg_state_home() {
+        let p = crash_log_path(1700, 42, from(&[("XDG_STATE_HOME", "/x/state")]));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/x/state/kettle/crash/kettle-crash-1700-42.log")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_falls_back_to_home_local_state() {
+        // XDG_STATE_HOME unset → $HOME/.local/state.
+        let p = crash_log_path(1, 2, from(&[("HOME", "/home/u")]));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/home/u/.local/state/kettle/crash/kettle-crash-1-2.log")
+        );
+    }
+
+    /// Empty primary var is treated as unset and falls through (cross-platform).
+    #[test]
+    fn empty_primary_var_falls_through() {
+        #[cfg(windows)]
+        let p = crash_log_path(1, 2, from(&[("LOCALAPPDATA", "")]));
+        #[cfg(unix)]
+        let p = crash_log_path(1, 2, from(&[("XDG_STATE_HOME", ""), ("HOME", "")]));
+        let s = p.to_string_lossy().to_string();
+        assert!(s.contains("kettle"), "{s}");
+        assert!(s.ends_with("kettle-crash-1-2.log"), "{s}");
+    }
 }
 
 #[cfg(test)]
