@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-05-30
+
+  **Minor: the HiDPI + WSL release.** kettle now renders text at the
+  correct size on high-DPI Windows 11 displays (the headline fix — text
+  was tiny at >100% scaling), supports launching WSL distributions as the
+  shell, and gains a `pane_close` plugin event. All verified end-to-end on
+  a Surface Book 3 at 200% scale: readable text, an interactive Ubuntu WSL
+  shell, and 6 split→close cycles with zero crashes.
+
   - **Fixed:** text now renders at the correct size on HiDPI displays.
     On Windows 11 at >100% display scaling (and Retina / fractional-scale
     monitors), the font appeared tiny because the renderer stored the
@@ -27,6 +36,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     pane id whenever a split is closed, completing tab/pane close-event
     parity for plugins (status bars, per-pane overlays, activity
     watchers).
+  - **Fixed (Windows/Linux):** the running window now shows kettle's icon
+    in the title bar (the system-menu glyph beside the window controls),
+    the taskbar button, and the Alt-Tab switcher. winit leaves the window
+    icon unset by default, so the title bar showed the generic placeholder
+    even though the `.exe` already embeds the icon as a resource (which
+    only covers Explorer / a pinned shortcut). The icon is now set at
+    window creation via `with_window_icon`.
   - **Docs:** install instructions now reference the current release
     version instead of stale `v1.45.1` / `v1.46.3` examples.
 
