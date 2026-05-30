@@ -27,6 +27,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     pane id whenever a split is closed, completing tab/pane close-event
     parity for plugins (status bars, per-pane overlays, activity
     watchers).
+  - **Docs:** install instructions now reference the current release
+    version instead of stale `v1.45.1` / `v1.46.3` examples.
 
 ## [2.0.0] — 2026-05-30
 
