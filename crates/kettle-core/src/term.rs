@@ -212,13 +212,18 @@ fn find_on_path(exe: &str) -> Option<std::path::PathBuf> {
 /// an interactive shell. So the `-l` injection is suppressed for wsl. A user
 /// who wants a WSL *login* shell should request it inside the distro (e.g.
 /// `command = wsl.exe -d Ubuntu -- bash -l`), where `-l` reaches bash, not wsl.
-/// Case-insensitive + stem-based so `wsl`, `wsl.exe`, and `C:\…\wsl.exe` match.
+/// Case-insensitive so `wsl`, `wsl.exe`, and `C:\…\wsl.exe` all match.
+///
+/// Splits on BOTH `/` and `\` rather than using `std::path::Path::file_stem`,
+/// because `Path` only treats `\` as a separator on Windows targets — on a
+/// Linux/macOS build (incl. CI) `C:\Windows\System32\wsl.exe` would be one
+/// opaque component and the stem check would miss it. wsl.exe only runs on
+/// Windows, but a target-independent check keeps the function and its unit
+/// test correct everywhere (the cross-platform CI pretest caught the
+/// `Path`-based version).
 fn is_wsl_launcher(prog: &str) -> bool {
-    std::path::Path::new(prog)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("wsl"))
-        .unwrap_or(false)
+    let last = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
+    last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
 }
 
 /// Cycle 743: the default shell `CommandBuilder` when no `command` is
