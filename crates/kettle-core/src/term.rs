@@ -205,6 +205,22 @@ fn find_on_path(exe: &str) -> Option<std::path::PathBuf> {
         })
 }
 
+/// Cycle 748: is `prog` the WSL launcher (`wsl` / `wsl.exe`, possibly given as
+/// a full path)? The cycle-343 `login_shell` flag prepends `-l` for POSIX
+/// `bash -l` login-shell semantics — but `wsl.exe -l` means **list
+/// distributions**: it would print the distro list and exit instead of opening
+/// an interactive shell. So the `-l` injection is suppressed for wsl. A user
+/// who wants a WSL *login* shell should request it inside the distro (e.g.
+/// `command = wsl.exe -d Ubuntu -- bash -l`), where `-l` reaches bash, not wsl.
+/// Case-insensitive + stem-based so `wsl`, `wsl.exe`, and `C:\…\wsl.exe` match.
+fn is_wsl_launcher(prog: &str) -> bool {
+    std::path::Path::new(prog)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("wsl"))
+        .unwrap_or(false)
+}
+
 /// Cycle 743: the default shell `CommandBuilder` when no `command` is
 /// configured. Windows prefers pwsh 7 → Windows PowerShell → `%ComSpec%`;
 /// every other platform defers to portable_pty (which honors `$SHELL`).
@@ -337,12 +353,14 @@ impl Terminal {
         let mut cmd = match argv.split_first() {
             Some((prog, rest)) => {
                 let mut c = CommandBuilder::new(prog);
-                if login_shell {
+                if login_shell && !is_wsl_launcher(prog) {
                     // Cycle 343: `-l` (POSIX-defined "shell that
                     // reads /etc/profile + ~/.profile + login dotfiles
                     // before running interactively"). Goes BEFORE
                     // the user's argv args so a config like
                     // `command = bash -i` still works.
+                    // Cycle 748: skipped for `wsl.exe`, where `-l` would
+                    // mean "list distros" and never open a shell.
                     c.arg("-l");
                 }
                 for a in rest {
@@ -2650,5 +2668,38 @@ mod default_shell_tests {
     #[test]
     fn none_when_neither_present() {
         assert_eq!(pick_windows_default_shell(|_| None), None);
+    }
+}
+
+#[cfg(test)]
+mod wsl_launcher_tests {
+    use super::is_wsl_launcher;
+
+    /// Cycle 748: the `login_shell` `-l` injection must be suppressed for the
+    /// WSL launcher (bare name, `.exe`, full path, any case) because
+    /// `wsl.exe -l` lists distros instead of opening a shell.
+    #[test]
+    fn recognizes_wsl_launcher_forms() {
+        assert!(is_wsl_launcher("wsl"));
+        assert!(is_wsl_launcher("wsl.exe"));
+        assert!(is_wsl_launcher("WSL.EXE"));
+        assert!(is_wsl_launcher(r"C:\Windows\System32\wsl.exe"));
+        assert!(is_wsl_launcher("/mnt/c/Windows/System32/wsl.exe"));
+    }
+
+    /// Real shells must NOT be treated as wsl — they still get `-l`.
+    #[test]
+    fn does_not_match_other_shells() {
+        for p in [
+            "bash",
+            "/bin/zsh",
+            "pwsh.exe",
+            "powershell.exe",
+            "cmd.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "wsltty.exe", // stem is "wsltty", not "wsl"
+        ] {
+            assert!(!is_wsl_launcher(p), "{p} should not match wsl");
+        }
     }
 }

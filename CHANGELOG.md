@@ -14,6 +14,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     sizing now multiply the logical font size by the device-pixel scale,
     and kettle rescales live when the window moves between monitors of
     different DPI (the `ScaleFactorChanged` event is now honored).
+  - **Added:** documented launching WSL (e.g. Ubuntu) as your shell on
+    Windows via `command = wsl.exe -d Ubuntu` (see docs/CONFIG.md). The
+    `login-shell` option no longer mis-injects `-l` for `wsl.exe` — `-l`
+    means "list distributions" to wsl and would have exited instead of
+    opening a shell.
 
 ## [2.0.0] — 2026-05-30
 

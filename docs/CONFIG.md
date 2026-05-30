@@ -71,6 +71,31 @@ any unrecognized keys). The file is **watched and reloaded live**.
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value — no `\|action` split, so alternation patterns like `(BUILD SUCCESSFUL\|FAILED)` survive intact |
 
+### Launching WSL / Ubuntu as your shell (Windows)
+
+On Windows you can point kettle at a WSL distribution instead of
+PowerShell or `cmd.exe` by setting `command` to the `wsl.exe` launcher:
+
+```ini
+# Open your default WSL distro
+command = wsl.exe
+
+# Or pick a specific distro
+command = wsl.exe -d Ubuntu
+
+# Start in your Linux home directory (not the Windows cwd)
+command = wsl.exe -d Ubuntu --cd ~
+```
+
+kettle runs `wsl.exe` over ConPTY just like any other shell, so colors,
+resizing, UTF-8, and mouse reporting all work. Run `wsl -l -v` in
+PowerShell to see your installed distro names.
+
+> **Note:** `login-shell = true` is ignored for `wsl.exe` — passing `-l`
+> to `wsl` means "list distributions", which would exit immediately
+> instead of opening a shell. To get a Linux *login* shell, ask for it
+> inside the distro: `command = wsl.exe -d Ubuntu -- bash -l`.
+
 ### Terminator-parity keys (cycles 331-410)
 
 Both kebab-case (kettle convention) and underscore form (Terminator's

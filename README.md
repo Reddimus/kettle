@@ -137,7 +137,8 @@ portable? Skip the installer — just `cd` into the folder and run
 kettle opens **PowerShell 7+ (`pwsh`)** by default when it's installed —
 the same default as Windows Terminal — falling back to Windows PowerShell
 then `cmd.exe`. Set `shell = cmd.exe` (or any program) in your config to
-override.
+override. To use **WSL / Ubuntu**, set `command = wsl.exe -d Ubuntu` — see
+[Launching WSL as your shell](docs/CONFIG.md#launching-wsl--ubuntu-as-your-shell-windows).
 
 ### Build from source
 
