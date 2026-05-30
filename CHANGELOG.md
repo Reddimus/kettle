@@ -6,15 +6,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-## [1.48.0] — 2026-05-30
-
-  Adds OSC 9;4 taskbar progress — the ConEmu / Windows Terminal
-  convention. PowerShell 7 `Write-Progress` (with
-  `$PSStyle.Progress.UseOSCIndicator = $true`) and `winget` now drive
-  kettle's Windows taskbar button via `ITaskbarList3`, closing the last
-  identified PowerShell-7 terminal-parity gap. Single-cycle feature
-  release on top of v1.47.0; verified live on Windows 11 build 26200.
-
   cycle 745 — **Add: OSC 9;4 taskbar progress (PowerShell 7 / Windows
               Terminal parity)**: kettle now parses the ConEmu/Windows
               Terminal `ESC ] 9 ; 4 ; <state> ; <pct> ST` progress
