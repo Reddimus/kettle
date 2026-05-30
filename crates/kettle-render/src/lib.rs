@@ -594,7 +594,8 @@ impl Renderer {
         // round-trip — same "downstream cache stale at startup" shape
         // as cycle 98's font-family fix.
         let font_size = clamp_font_size(cfg.font_size);
-        let metrics = Metrics::new(font_size, font_size * 1.25);
+        // Cycle 747: physical-pixel metrics — logical font size × DPI scale.
+        let metrics = metrics_for(font_size, scale);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -693,7 +694,39 @@ impl Renderer {
 
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = clamp_font_size(size);
-        self.metrics = Metrics::new(self.font_size, self.font_size * 1.25);
+        // Cycle 747: re-derive physical metrics at the current DPI scale so a
+        // font-size change (zoom, reload) keeps HiDPI scaling applied.
+        self.metrics = metrics_for(self.font_size, self.scale);
+        self.remeasure_cell();
+    }
+
+    /// The current *logical* font size (the user-facing pt value, before the
+    /// cycle-747 DPI multiply). Zoom keybinds step this rather than
+    /// back-deriving it from the now-physical `cell_h`, which would otherwise
+    /// double-apply the scale factor.
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Cycle 747: update the device-pixel scale factor (DPI). Wired to winit's
+    /// `ScaleFactorChanged` — fired at startup and whenever the window moves to
+    /// a monitor with a different scale. Recomputes physical metrics from the
+    /// unchanged *logical* `font_size` and re-measures the cell, so glyphs keep
+    /// the same visual size across DPI changes (and fixes tiny text that was
+    /// the result of `scale` being stored but never applied). No-op when the
+    /// scale is unchanged. The caller must re-grid afterward (cell_w/cell_h
+    /// change), e.g. via `App::resize_all`.
+    pub fn set_scale(&mut self, scale: f32) {
+        let s = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if (self.scale - s).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = s;
+        self.metrics = metrics_for(self.font_size, s);
         self.remeasure_cell();
     }
 
@@ -2763,6 +2796,25 @@ pub fn clamp_font_size(size: f32) -> f32 {
     size.clamp(5.0, 72.0)
 }
 
+/// Cycle 747: build glyphon [`Metrics`] for a *logical* `font_size` at a given
+/// device-pixel `scale` (the window's `scale_factor`). glyphon shapes and
+/// rasterizes in the same coordinate space as the wgpu surface, which winit
+/// sizes in **physical** pixels — so a logical `font_size` must be multiplied
+/// by the scale factor or text renders at `1/scale` of its intended size on
+/// HiDPI displays. That was the "tiny font at 200% Windows scaling" bug:
+/// `scale` was stored but never applied, so a 13pt font drew at ~6.5px on a 2×
+/// monitor. The line height keeps the historical 1.25 ratio. `scale` is
+/// sanitized (NaN / ≤0 → 1.0) so a bogus value can't produce zero-sized cells.
+pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let px = font_size * s;
+    Metrics::new(px, px * 1.25)
+}
+
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a
 /// column for it.
 fn truncate(s: &str, n: usize) -> String {
@@ -3981,6 +4033,68 @@ mod clamp_font_size_tests {
         // Infinities round to the bounds.
         assert_eq!(clamp_font_size(f32::INFINITY), 72.0);
         assert_eq!(clamp_font_size(f32::NEG_INFINITY), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod hidpi_scale_tests {
+    use super::{measure_cell, metrics_for};
+    use glyphon::{Buffer as TextBuffer, FontSystem};
+
+    /// Cycle 747 core invariant: a logical font size renders at
+    /// `font_size × scale` physical pixels. This is the bug that made text
+    /// tiny on a 200%-scaled Windows 11 display — `scale` was stored but the
+    /// metrics ignored it, so a 13pt font drew at ~6.5px on a 2× monitor.
+    #[test]
+    fn metrics_scale_with_dpi_factor() {
+        // 1× display: physical == logical.
+        let m1 = metrics_for(13.0, 1.0);
+        assert!((m1.font_size - 13.0).abs() < f32::EPSILON);
+        assert!((m1.line_height - 13.0 * 1.25).abs() < f32::EPSILON);
+        // 2× (200% Windows scaling / Retina): physical is doubled.
+        let m2 = metrics_for(13.0, 2.0);
+        assert!((m2.font_size - 26.0).abs() < f32::EPSILON);
+        assert!((m2.line_height - 26.0 * 1.25).abs() < f32::EPSILON);
+        // 1.5× (150%, common Surface scaling).
+        let m15 = metrics_for(20.0, 1.5);
+        assert!((m15.font_size - 30.0).abs() < f32::EPSILON);
+    }
+
+    /// A bogus scale (0, negative, NaN, inf) must not zero or NaN the cell —
+    /// it falls back to 1× rather than producing degenerate metrics.
+    #[test]
+    fn metrics_sanitize_bad_scale() {
+        for bad in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            let m = metrics_for(13.0, bad);
+            assert!((m.font_size - 13.0).abs() < f32::EPSILON, "scale {bad}");
+        }
+    }
+
+    /// End-to-end: the measured cell box scales (≈) with the DPI factor, so
+    /// the grid (cols×rows from physical window size ÷ physical cell) stays
+    /// consistent. Uses the embedded font — no GPU required.
+    #[test]
+    fn measured_cell_doubles_at_2x() {
+        let mut fs = FontSystem::new();
+        for face in kettle_config::font::all() {
+            fs.db_mut().load_font_data(face.to_vec());
+        }
+        let fam = "JetBrains Mono";
+        let m1 = metrics_for(16.0, 1.0);
+        let mut b1 = TextBuffer::new(&mut fs, m1);
+        let (w1, h1) = measure_cell(&mut fs, &mut b1, fam, m1);
+        let m2 = metrics_for(16.0, 2.0);
+        let mut b2 = TextBuffer::new(&mut fs, m2);
+        let (w2, h2) = measure_cell(&mut fs, &mut b2, fam, m2);
+        // Allow a little slack for hinting/rounding, but it must be ~2×, not 1×.
+        assert!(
+            (w2 / w1 - 2.0).abs() < 0.15,
+            "cell width should ≈ double at 2× scale: {w1} → {w2}"
+        );
+        assert!(
+            (h2 / h1 - 2.0).abs() < 0.15,
+            "cell height should ≈ double at 2× scale: {h1} → {h2}"
+        );
     }
 }
 

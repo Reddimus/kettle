@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fixed:** text now renders at the correct size on HiDPI displays.
+    On Windows 11 at >100% display scaling (and Retina / fractional-scale
+    monitors), the font appeared tiny because the renderer stored the
+    window's scale factor but never applied it to the glyph metrics —
+    a 13pt font drew at ~6.5px on a 200% display. Font metrics and cell
+    sizing now multiply the logical font size by the device-pixel scale,
+    and kettle rescales live when the window moves between monitors of
+    different DPI (the `ScaleFactorChanged` event is now honored).
+
 ## [2.0.0] — 2026-05-30
 
   **Major: the Windows 11 / PowerShell 7 release.** kettle 2.0 makes

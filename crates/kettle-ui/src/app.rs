@@ -4936,9 +4936,12 @@ impl App {
             Action::Paste => self.paste_clipboard(),
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
                 if let Some(r) = self.renderer.as_mut() {
+                    // Cycle 747: step the logical font size directly. Back-
+                    // deriving from `r.cell_h` (now physical-px after the DPI
+                    // fix) would double-apply the scale factor on HiDPI.
                     let new = match action {
-                        Action::IncreaseFontSize => r.cell_h / 1.25 + 1.0,
-                        Action::DecreaseFontSize => (r.cell_h / 1.25 - 1.0).max(6.0),
+                        Action::IncreaseFontSize => r.font_size() + 1.0,
+                        Action::DecreaseFontSize => (r.font_size() - 1.0).max(6.0),
                         _ => self.cfg.font_size,
                     };
                     r.set_font_size(new);
@@ -5708,12 +5711,13 @@ impl App {
             // arm — same shape as ResetAndClear.
             Action::ZoomInAll => {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_font_size(r.cell_h / 1.25 + 1.0);
+                    // Cycle 747: step logical size (see IncreaseFontSize).
+                    r.set_font_size(r.font_size() + 1.0);
                 }
             }
             Action::ZoomOutAll => {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_font_size((r.cell_h / 1.25 - 1.0).max(6.0));
+                    r.set_font_size((r.font_size() - 1.0).max(6.0));
                 }
             }
             Action::ZoomNormalAll => {
@@ -7360,7 +7364,19 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Cycle 747: actually apply the new DPI scale. Previously this
+                // arm only requested a redraw and dropped the factor, so text
+                // stayed at the launch scale — tiny at >100% Windows scaling,
+                // and never rescaling when dragged to a different-DPI monitor.
+                // set_scale re-derives physical font metrics + cell size; the
+                // surface itself is reconfigured by the Resized event winit
+                // emits alongside this one. Re-grid so panes reflow to the new
+                // cell dimensions.
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_scale(scale_factor as f32);
+                }
+                self.resize_all();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -7930,10 +7946,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.cfg.disable_mousewheel_zoom,
                 ) && let Some(r) = self.renderer.as_mut()
                 {
+                    // Cycle 747: step logical size, not the now-physical
+                    // cell_h (which would double-apply the DPI scale).
                     let new = if sign > 0 {
-                        r.cell_h / 1.25 + 1.0
+                        r.font_size() + 1.0
                     } else {
-                        (r.cell_h / 1.25 - 1.0).max(6.0)
+                        (r.font_size() - 1.0).max(6.0)
                     };
                     r.set_font_size(new);
                     if let Some(w) = &self.window {
