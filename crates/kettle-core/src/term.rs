@@ -165,6 +165,56 @@ pub struct Terminal {
     cell_px: Arc<Mutex<(u16, u16)>>,
 }
 
+/// Cycle 743: pick Windows' default shell when the user configured no
+/// `command` / `shell`. Prefers PowerShell 7+ (`pwsh.exe`), then Windows
+/// PowerShell 5.1 (`powershell.exe`); returns `None` to let the caller fall
+/// back to portable_pty's default (`%ComSpec%` → `cmd.exe`). This matches
+/// Windows Terminal, which defaults to pwsh 7 when it is installed — a plain
+/// `cmd.exe` default feels dated on a modern Windows 11 box. `resolve` maps
+/// an exe name to its full path if present on `PATH`; it is injected so the
+/// preference order is unit-testable without depending on what is installed.
+#[cfg(windows)]
+fn pick_windows_default_shell(
+    resolve: impl Fn(&str) -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    ["pwsh.exe", "powershell.exe"].into_iter().find_map(resolve)
+}
+
+/// Cycle 743: full path of `exe` if it is a file on any `PATH` entry.
+/// pwsh 7's installer adds `C:\Program Files\PowerShell\7` to `PATH`, and
+/// `powershell.exe` lives in `System32` (always on `PATH`), so a bare-name
+/// PATH walk resolves both without hard-coding install locations.
+#[cfg(windows)]
+fn find_on_path(exe: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|p| {
+            // NOT `is_file()`: that follows reparse points and FAILS on the
+            // Store "app execution alias" stubs (0-byte reparse points under
+            // `%LOCALAPPDATA%\Microsoft\WindowsApps\`) that a Store-installed
+            // pwsh 7 uses. `symlink_metadata` (lstat) succeeds on the alias
+            // itself, so it detects both a real `pwsh.exe` and a Store alias;
+            // exclude directories so a stray dir named `pwsh.exe` can't match.
+            std::fs::symlink_metadata(p)
+                .map(|m| !m.is_dir())
+                .unwrap_or(false)
+        })
+}
+
+/// Cycle 743: the default shell `CommandBuilder` when no `command` is
+/// configured. Windows prefers pwsh 7 → Windows PowerShell → `%ComSpec%`;
+/// every other platform defers to portable_pty (which honors `$SHELL`).
+fn default_prog() -> CommandBuilder {
+    #[cfg(windows)]
+    {
+        if let Some(path) = pick_windows_default_shell(find_on_path) {
+            return CommandBuilder::new(path);
+        }
+    }
+    CommandBuilder::new_default_prog()
+}
+
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
@@ -298,7 +348,7 @@ impl Terminal {
                 c
             }
             None => {
-                let mut c = CommandBuilder::new_default_prog();
+                let mut c = default_prog();
                 if login_shell {
                     c.arg("-l");
                 }
@@ -2538,5 +2588,42 @@ mod teardown_tests {
             "Terminal::Drop must NOT join the PTY reader — joining on the UI \
              thread deadlocks on a blocked ConPTY read (cycle 742)"
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod default_shell_tests {
+    use super::pick_windows_default_shell;
+    use std::path::PathBuf;
+
+    const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+    const WPS: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    /// Cycle 743: pwsh 7 wins when both it and Windows PowerShell are present
+    /// (matches Windows Terminal's default).
+    #[test]
+    fn prefers_pwsh_over_windows_powershell() {
+        let pick = pick_windows_default_shell(|e| match e {
+            "pwsh.exe" => Some(PathBuf::from(PWSH)),
+            "powershell.exe" => Some(PathBuf::from(WPS)),
+            _ => None,
+        });
+        assert_eq!(pick, Some(PathBuf::from(PWSH)));
+    }
+
+    /// Falls back to Windows PowerShell 5.1 when pwsh 7 is not installed.
+    #[test]
+    fn falls_back_to_windows_powershell() {
+        let pick = pick_windows_default_shell(|e| match e {
+            "powershell.exe" => Some(PathBuf::from(WPS)),
+            _ => None,
+        });
+        assert_eq!(pick, Some(PathBuf::from(WPS)));
+    }
+
+    /// Neither present → None, so the caller falls back to %ComSpec% / cmd.exe.
+    #[test]
+    fn none_when_neither_present() {
+        assert_eq!(pick_windows_default_shell(|_| None), None);
     }
 }

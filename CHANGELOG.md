@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  cycle 743 — **Change: default to PowerShell 7+ on Windows (was
+              `cmd.exe`)**: when no `shell`/`command` is configured,
+              kettle now spawns `pwsh.exe` (PowerShell 7+) if it is on
+              `PATH`, falling back to Windows PowerShell 5.1
+              (`powershell.exe`), then `%ComSpec%` / `cmd.exe`. This
+              matches Windows Terminal, whose default is pwsh 7 when
+              installed — a bare `cmd.exe` felt dated on a modern Windows
+              11 box and couldn't show off kettle's truecolor / OSC 133 /
+              bracketed-paste support that PSReadLine relies on. Users
+              who prefer cmd (or anything else) still set `shell =
+              cmd.exe` in their config; only the *unset* default changed.
+              Detection is robust to Store-installed pwsh: it uses
+              `symlink_metadata` (lstat) rather than `is_file()` so the
+              `%LOCALAPPDATA%\Microsoft\WindowsApps\` app-execution-alias
+              stub for a Microsoft-Store pwsh is found too. The
+              preference order is unit-tested via an injected resolver
+              (`pwsh` > `powershell` > cmd fallback). Verified live on
+              build 26200: kettle now opens to the `PowerShell 7.6.2`
+              banner instead of `cmd.exe`.
+
   cycle 742 — **Fix: closing a split pane no longer freezes kettle on
               Windows 11 (UI-thread PTY-teardown deadlock)**: splitting
               a pane (`Ctrl+Shift+O`/`E`) then closing the focused split
