@@ -560,9 +560,7 @@ impl LuaEngine {
                     let call_result: mlua::Result<()> = match event {
                         LuaEvent::Startup => cb.call(()),
                         LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
-                        LuaEvent::Bell(pane_id) | LuaEvent::PaneClose(pane_id) => {
-                            cb.call(*pane_id)
-                        }
+                        LuaEvent::Bell(pane_id) | LuaEvent::PaneClose(pane_id) => cb.call(*pane_id),
                         LuaEvent::Output(pane_id, bytes) => {
                             // Send bytes as a Lua string (UTF-8 not
                             // assumed — raw bytes are fine, callbacks
