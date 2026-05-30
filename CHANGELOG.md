@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [1.47.0] — 2026-05-29
+
+  Fixes the Windows 11 close-split freeze (the headline), adds crash
+  logging so a Start-menu launch can never silently swallow a panic
+  again, and modernizes the Windows default shell to PowerShell 7+.
+  Bundles cycles 741-744 (numbered against a local branch point) plus
+  the prior on-`main` documentation pass that stripped internal
+  cycle-reference parentheticals from CONTRIBUTING / README /
+  ARCHITECTURE / CONFIG and extended the doc-scan drift guard.
+  Root-caused and verified end-to-end on a Surface Book 3 (Windows 11
+  build 26200).
+
+  Minor bump (not a patch): cycle 743 changes the default shell on
+  Windows, a user-visible behavior change, and cycle 741 adds crash-log
+  output — both warrant a "read the changelog" signal.
+
+  Headline changes:
+  - cycle 742: **closing a split pane no longer freezes the app on
+    Windows 11** — `Terminal::Drop` deadlocked the UI thread by
+    `join()`ing a PTY reader blocked on a ConPTY `read()`; it now detaches
+    the reader (never joins on the UI thread). This is the crash users hit
+    on `Ctrl+Shift+W` after a split.
+  - cycle 743: **defaults to PowerShell 7+ (`pwsh`) on Windows** when no
+    shell is configured (was `cmd.exe`), matching Windows Terminal;
+    override with `shell = …`.
+  - cycle 741: **crash logs** — a `panic = "abort"`-safe hook writes
+    panics (message + backtrace) to `%LOCALAPPDATA%\kettle\crash\`
+    (`$XDG_STATE_HOME`/`~/.local/state` on Unix) and stderr.
+  - cycle 744: README front-door polish — Windows `install.ps1` +
+    pwsh-7 default, platform matrix, first-launch walkthrough.
+
+  See per-cycle paragraphs below for details.
+
   cycle 744 — **Docs: README front-door polish for newcomers**: the
               Windows install section now leads with the bundled
               `install.ps1` (per-user Start-menu install + PATH, the

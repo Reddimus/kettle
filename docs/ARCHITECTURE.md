@@ -108,8 +108,8 @@ renderer, so the menu pass reuses already-cached glyphs.
 - **One reader thread per pane** — blocking `read()` on the PTY master →
   `Extractor::feed` → image/side-channel chunks recorded, text chunks driven
   into the `alacritty_terminal::Term` (behind a `Mutex` shared with the
-  renderer) → wakes the UI. **Teardown invariant (cycle 742):**
-  `Terminal::Drop` runs on the UI thread (a pane close drops the owned
+  renderer) → wakes the UI. **Teardown invariant** (`Terminal::Drop`,
+  `crates/kettle-core/src/term.rs`): it runs on the UI thread (a pane close drops the owned
   `Pane.term`), so it must **never `join()`** this reader. On Windows a
   ConPTY `read()` only unblocks once the pseudoconsole is *closed*, so
   joining the reader before dropping the master deadlocks the UI thread and
