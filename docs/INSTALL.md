@@ -219,8 +219,18 @@ launcher / window icon. The fixed-size PNGs that ship in the hicolor theme
 ```
 
 The script emits **8-bit/color RGBA** PNGs. This matters: 16-bit PNGs are
-silently rejected by GNOME Shell's icon loader, so an icon shipped at 16-bit
-depth shows blank in the Ubuntu Super-key / Activities search even though the
-files install correctly. After editing the SVG, re-run the script and commit
-the regenerated PNGs together. Verify with `file packaging/linux/kettle-*.png`
-(every line should read `8-bit/color RGBA`).
+silently rejected by GNOME Shell's icon loader. After editing the SVG, re-run
+the script and commit the regenerated PNGs together. Verify with
+`file packaging/linux/kettle-*.png` (every line should read `8-bit/color RGBA`).
+
+**Why the user-install `.desktop` uses an absolute `Icon=` path.** GNOME
+Shell's `StIconTheme` won't resolve a *themed* icon name (`Icon=kettle`) from
+a user-local `~/.local/share/icons/hicolor` that lacks an `icon-theme.cache`
+— so the Super-key search tile stays blank. `scripts/install.sh` therefore
+rewrites `Icon=` to the absolute installed PNG path, which bypasses icon-theme
+resolution and renders regardless of cache state (no shared cache to go stale
+and hide other apps' icons). The shipped `packaging/linux/kettle.desktop`
+keeps the themed `Icon=kettle`, which is correct for distro packages whose
+post-install hooks refresh the system hicolor cache. After the first install,
+an already-running GNOME session may need a log-out / log-in (or an icon-theme
+toggle) before the launcher entry appears.

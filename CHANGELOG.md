@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.1.2] — 2026-05-30
+
+  **Patch: completes the Super-key icon fix.** v2.1.1 converted the icons
+  to 8-bit (necessary) but the launcher tile was still blank in the Ubuntu
+  Super-key / GNOME Activities search — so this finishes the job.
+
+  - **Fixed:** the user-install launcher icon now actually renders in the
+    GNOME / Ubuntu Super-key search. Root cause (isolated on GNOME Shell 46
+    / Wayland): gnome-shell's `StIconTheme` does **not** resolve a *themed*
+    icon name (`Icon=kettle`) from a user-local
+    `~/.local/share/icons/hicolor` that has no `icon-theme.cache` — even
+    though GTK's own `IconTheme` does (which masked the bug:
+    `Gtk.IconTheme` resolves and loads `kettle`, but gnome-shell renders
+    nothing). The cycle-540 logic that skipped `gtk-update-icon-cache`
+    assumed GNOME would directory-scan the icon by name; it doesn't.
+    `scripts/install.sh` now rewrites `Icon=` to the **absolute installed
+    PNG path** for the no-sudo user install, which sidesteps icon-theme
+    resolution entirely — the icon renders regardless of cache state, and
+    (unlike generating a user-level cache) it can't go stale and hide other
+    apps' icons. The shipped `packaging/linux/kettle.desktop` keeps the
+    themed `Icon=kettle` for distro packages, whose post-install hooks
+    maintain the system hicolor cache.
+
+  Note: an existing GNOME session caches its icon theme, so after the first
+  install you may still need to log out / back in once (or toggle the icon
+  theme) for the running shell to pick up the new launcher entry.
+
 ## [2.1.1] — 2026-05-30
 
   **Patch: the Linux icon + hardening release.** The headline fix is the

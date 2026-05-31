@@ -128,8 +128,11 @@ echo "Installing into ${PREFIX}…"
 # 1) Binary.
 install -Dm755 "${BIN_SRC}" "${BIN_DIR}/kettle"
 
-# 2) XDG desktop entry — the file in packaging/linux/ already names
-# `Icon=kettle` so it resolves against hicolor.
+# 2) XDG desktop entry. The packaging file ships `Icon=kettle` (the
+# themed name distro packages rely on, since the package manager keeps
+# /usr/share/icons/hicolor's icon-theme.cache fresh). For this no-sudo
+# *user* install we rewrite Icon= to the absolute installed PNG path —
+# see the cycle-756 note below the icon copy for the full why.
 install -Dm644 "${REPO_ROOT}/packaging/linux/kettle.desktop" "${APP_DIR}/kettle.desktop"
 
 # 3) Icons.
@@ -140,6 +143,26 @@ for size in 16 24 32 48 64 128 256; do
     install -Dm644 "${src}" "${ICON_BASE}/${size}x${size}/apps/kettle.png"
   fi
 done
+
+# 3a) Cycle 756 — point Icon= at the absolute installed PNG.
+#
+# GNOME Shell's StIconTheme does NOT resolve a *themed* icon name
+# (`Icon=kettle`) from a user-local hicolor dir that has no
+# icon-theme.cache — so the Super-key / Activities search showed a blank
+# tile even though the PNGs were correctly in place and 8-bit (verified:
+# `Gtk.IconTheme` resolves + loads `kettle`, but gnome-shell does not).
+# Cycle 540 removed the gtk-update-icon-cache call to avoid leaving a
+# *broken* cache, but its assumption that GNOME would then directory-scan
+# the icon by name was wrong for gnome-shell. An absolute path sidesteps
+# icon-theme resolution entirely: the launcher icon renders regardless of
+# cache state, and — unlike generating a user-level cache — it can't go
+# stale and hide other apps' icons (the exact cycle-540 footgun). The
+# `#` sed delimiter avoids clashing with the `/`s in the path. System
+# (`--prefix=/usr`) installs get a valid absolute path too; distro
+# packages keep the themed `Icon=kettle` since their post-install hooks
+# maintain the system hicolor cache.
+ICON_ABS="${ICON_BASE}/256x256/apps/kettle.png"
+sed -i "s#^Icon=kettle\$#Icon=${ICON_ABS}#" "${APP_DIR}/kettle.desktop"
 
 # 3b) Man page (cycle 279) — `man kettle` works after install if
 # /usr/share/man/<...>/man1 (or the user's $MANPATH) is searched. Many
