@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fixed (Linux/headless/WSL):** kettle now falls back to software GPU
+    rendering (Mesa llvmpipe / lavapipe, or WARP on Windows) when no hardware
+    adapter is available, instead of hard-erroring with "no suitable GPU
+    adapter". This lets kettle run under WSLg, headless VMs, minimal Linux
+    installs, and GPU-less CI. Hardware is still preferred; the software path
+    only engages on failure and logs a warning.
+  - **Fixed:** the confirm dialog ("Close pane?", "Quit?") is now treated as a
+    modal — opening search/palette/a menu over it dismisses it instead of
+    stacking two overlays, and mouse/scroll no longer fall through to the
+    terminal behind it.
+  - **Changed:** `hide_from_taskbar` / `sticky` now log an informational note on
+    platforms where winit can't yet apply them (X11/Wayland), and kettle warns
+    at startup when the clipboard is unavailable (headless/SSH/sandbox), so
+    these degrade visibly instead of silently.
+
 ## [2.1.2] — 2026-05-30
 
   **Patch: completes the Super-key icon fix.** v2.1.1 converted the icons

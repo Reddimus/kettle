@@ -1866,7 +1866,25 @@ impl App {
             },
             mods: ModifiersState::empty(),
             proxy,
-            clipboard: arboard::Clipboard::new().ok(),
+            // Cycle 754: surface why the clipboard is unavailable instead of a
+            // silent `None`. On headless/SSH-without-X11-forwarding/sandboxed
+            // Linux, arboard can't connect to a display server, and copy/paste
+            // + OSC 52 then silently no-op. A startup warning makes the cause
+            // debuggable from `RUST_LOG` rather than "paste mysteriously does
+            // nothing".
+            clipboard: {
+                match arboard::Clipboard::new() {
+                    Ok(cb) => Some(cb),
+                    Err(e) => {
+                        log::warn!(
+                            "clipboard unavailable ({e}); copy/paste and OSC 52 \
+                             will no-op — no DISPLAY/Wayland, headless SSH, or a \
+                             sandbox without clipboard-portal access?"
+                        );
+                        None
+                    }
+                }
+            },
             fullscreen: false,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
@@ -3813,6 +3831,13 @@ impl App {
         // Cycle 298 vi-mode behaves like a modal — Esc exits it,
         // close_all_modals exits it. Sub-cycle 1.
         self.vi_mode = None;
+        // Cycle 754: the confirm dialog ("Close this pane?", "Quit?") is a
+        // modal too, but was omitted here — so opening search / palette / a
+        // menu while a confirm prompt was up rendered BOTH overlays at once
+        // with ambiguous key focus. Every modal-opener calls close_all_modals
+        // first (then sets its own modal), so clearing the confirm dialog here
+        // is safe: the confirm-open path clears-then-sets in that order.
+        self.confirm_dialog = None;
     }
 
     /// Cycle 369: apply the in-progress title edit + clear the
@@ -3890,6 +3915,11 @@ impl App {
             || self.context_menu.is_some()
             || self.editing_title.is_some()
             || self.vi_mode.is_some()
+            // Cycle 754: the confirm dialog is a modal too. Its key input has a
+            // dedicated priority branch, but without it here mouse/scroll/cursor
+            // gating let clicks fall through to the terminal behind a "Quit?" /
+            // "Close pane?" prompt.
+            || self.confirm_dialog.is_some()
     }
 
     /// Build the right-click context-menu item list. Each `Item`'s
@@ -7078,6 +7108,20 @@ impl ApplicationHandler<UserEvent> for App {
             use winit::platform::windows::WindowAttributesExtWindows;
             attrs = WindowAttributesExtWindows::with_skip_taskbar(attrs, true);
         }
+        // Cycle 754: on non-Windows the key parses but there's no winit API to
+        // honor it (X11 would need a `_NET_WM_STATE_SKIP_TASKBAR` atom write).
+        // Log so a user porting a Terminator config knows it's recognized but
+        // not yet applied here — mirrors the `sticky` log on macOS below
+        // (silent no-ops are the worst UX: the user can't tell parse-failed
+        // from not-implemented).
+        #[cfg(not(target_os = "windows"))]
+        if self.cfg.hide_from_taskbar {
+            log::info!(
+                "kettle: `hide_from_taskbar = true` is not yet applied on this \
+                 platform (winit 0.30 exposes the API on Windows only); the \
+                 window will still appear in the taskbar/dock"
+            );
+        }
         // Cycle 344 (Terminator parity, terminatorlib/config.py:75
         // `window_state`). Apply initial window state at creation.
         match self.cfg.window_state {
@@ -7160,6 +7204,17 @@ impl ApplicationHandler<UserEvent> for App {
                  (winit 0.30 dropped the underlying API; re-implementing \
                  via objc2 is a tracked follow-up). The window appears \
                  on the current Space only."
+            );
+        }
+        // Cycle 754: X11/Wayland sticky needs a `_NET_WM_STATE_STICKY` atom
+        // write that winit 0.30 doesn't expose; log (don't silently no-op) so
+        // the user knows the key is recognized but not yet applied here.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+        if self.cfg.sticky {
+            log::info!(
+                "kettle: `sticky = true` is not yet applied on X11/Wayland \
+                 (winit 0.30 exposes no API for `_NET_WM_STATE_STICKY`); the \
+                 window stays on its current workspace"
             );
         }
         let size = window.inner_size();
@@ -8414,6 +8469,38 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+    }
+}
+
+/// Cycle 754 drift guard. The confirm dialog ("Close pane?", "Quit?") is a
+/// modal: opening another overlay over it must clear it (`close_all_modals`),
+/// and it must count as a modal for mouse/scroll/cursor gating
+/// (`any_modal_open`). A full behavioral test would need a constructed `App`
+/// (window + renderer); pin the invariant at the source level instead — the
+/// same approach as `kettle-core`'s teardown guard.
+#[cfg(test)]
+mod modal_discipline_guard {
+    #[test]
+    fn confirm_dialog_is_tracked_as_a_modal() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let body = |name: &str| -> String {
+            let start = src
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("fn {name} not found"));
+            let rest = &src[start..];
+            let end = rest.find("\n    }").expect("fn end");
+            rest[..end].to_string()
+        };
+        assert!(
+            body("close_all_modals").contains("self.confirm_dialog = None"),
+            "close_all_modals must clear confirm_dialog so it can't stack under \
+             another overlay"
+        );
+        assert!(
+            body("any_modal_open").contains("self.confirm_dialog.is_some()"),
+            "any_modal_open must count the confirm dialog so input doesn't fall \
+             through to the terminal behind it"
+        );
     }
 }
 
