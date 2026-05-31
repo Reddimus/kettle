@@ -226,6 +226,19 @@ fn is_wsl_launcher(prog: &str) -> bool {
     last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
 }
 
+/// One axis of a `PtySize`, computed without overflow. `cell` is the
+/// per-cell pixel extent (1 when computing the row/column count itself);
+/// `count` is the grid dimension in cells. The product is evaluated in
+/// `u32` and clamped into `u16`, the type `PtySize` requires. The old
+/// `cell_w * cols as u16` did the whole multiply in `u16` — a panic in
+/// debug and a silent wrap in release once the product passed 65535,
+/// reachable with a HiDPI cell on a very wide grid — and `cols as u16`
+/// truncated a pathological `usize` before the multiply.
+fn clamp_pty_dim(cell: u16, count: usize) -> u16 {
+    let count = count.min(u16::MAX as usize) as u32;
+    (cell as u32 * count).min(u16::MAX as u32) as u16
+}
+
 /// Cycle 743: the default shell `CommandBuilder` when no `command` is
 /// configured. Windows prefers pwsh 7 → Windows PowerShell → `%ComSpec%`;
 /// every other platform defers to portable_pty (which honors `$SHELL`).
@@ -884,8 +897,9 @@ impl Terminal {
             for p in &mut v {
                 if let Some(id) = p.id
                     && let Some(e) = am.get(&id)
+                    && let Some(frame) = e.current()
                 {
-                    p.img = e.current().clone();
+                    p.img = frame.clone();
                 }
             }
         }
@@ -1091,10 +1105,10 @@ impl Terminal {
         self.rows = rows;
         if let Some(master) = self.master.as_ref() {
             let _ = master.resize(PtySize {
-                rows: rows as u16,
-                cols: cols as u16,
-                pixel_width: cell_w * cols as u16,
-                pixel_height: cell_h * rows as u16,
+                rows: clamp_pty_dim(1, rows),
+                cols: clamp_pty_dim(1, cols),
+                pixel_width: clamp_pty_dim(cell_w, cols),
+                pixel_height: clamp_pty_dim(cell_h, rows),
             });
         }
         if let Ok(mut p) = self.cell_px.lock() {
@@ -2706,5 +2720,36 @@ mod wsl_launcher_tests {
         ] {
             assert!(!is_wsl_launcher(p), "{p} should not match wsl");
         }
+    }
+}
+
+#[cfg(test)]
+mod pty_dim_tests {
+    use super::clamp_pty_dim;
+
+    #[test]
+    fn ordinary_sizes_pass_through() {
+        // A typical 4K-wide grid: 8px cells × 480 cols = 3840px, well
+        // within u16. The row/col count case uses cell = 1.
+        assert_eq!(clamp_pty_dim(1, 200), 200);
+        assert_eq!(clamp_pty_dim(8, 480), 3840);
+        assert_eq!(clamp_pty_dim(20, 100), 2000); // HiDPI cell
+    }
+
+    #[test]
+    fn overflowing_product_saturates_instead_of_wrapping() {
+        // 30px HiDPI cell × 5000 cols = 150_000 — overflows u16. The old
+        // `cell_w * cols as u16` panicked here in debug / wrapped to 18928
+        // in release; we clamp to u16::MAX instead.
+        assert_eq!(clamp_pty_dim(30, 5000), u16::MAX);
+        // Pathological count that would truncate in the old `cols as u16`.
+        assert_eq!(clamp_pty_dim(1, usize::MAX), u16::MAX);
+        assert_eq!(clamp_pty_dim(10, usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn zero_inputs_are_benign() {
+        assert_eq!(clamp_pty_dim(0, 80), 0);
+        assert_eq!(clamp_pty_dim(8, 0), 0);
     }
 }

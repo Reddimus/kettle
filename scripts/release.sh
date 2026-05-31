@@ -113,8 +113,14 @@ fi
 # `[workspace.package]` block has the single `version = "X.Y.Z"`
 # line; per-crate Cargo.tomls inherit via `version.workspace = true`.
 PREV=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
+# Escape BRE metacharacters before splicing PREV into the sed *address*
+# patterns below. A plain `X.Y.Z` semver works either way (the dots only
+# ever match their literal selves in Cargo.toml), but a pre-release tag
+# like `1.0.0-rc.1+build` carries chars BRE would misinterpret — escaping
+# keeps the match exact regardless of the version shape.
+PREV_RE=$(printf '%s' "${PREV}" | sed 's/[.[\*^$/]/\\&/g')
 echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
-sed -i.bak "0,/^version = \"${PREV}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
+sed -i.bak "0,/^version = \"${PREV_RE}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
 # Cycle 746 — durable lockstep for the inter-crate path-dep version
@@ -142,7 +148,7 @@ rm -f Cargo.toml.bak
 # (the package version, not any cargo-vendor-deps version etc.).
 if [ -f flake.nix ]; then
     echo "bumping flake.nix:  ${PREV} → ${VERSION}"
-    sed -i.bak "0,/^          version = \"${PREV}\";\$/s//          version = \"${VERSION}\";/" flake.nix
+    sed -i.bak "0,/^          version = \"${PREV_RE}\";\$/s//          version = \"${VERSION}\";/" flake.nix
     rm -f flake.nix.bak
 fi
 

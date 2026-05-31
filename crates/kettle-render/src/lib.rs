@@ -1651,7 +1651,12 @@ impl Renderer {
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, w, _) = s.rect;
                 // chars that fit: segment minus the ✕ zone, ~cell_w each.
-                let maxc = (((w - tabbar.height) / cw) as usize).clamp(3, 24);
+                // `max(0.0)` so a segment narrower than the ✕ zone can't go
+                // negative, and `cw.max(1.0)` guards a degenerate cell width
+                // — both keep the `as usize` cast in its defined range
+                // rather than relying on float→int saturation. `.clamp` then
+                // bounds it to a sane 3..=24 chars.
+                let maxc = (((w - tabbar.height).max(0.0) / cw.max(1.0)) as usize).clamp(3, 24);
                 let n = (s.idx + 1).to_string();
                 let title = truncate(&s.title, maxc);
                 let body =

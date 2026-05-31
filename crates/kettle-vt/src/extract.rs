@@ -525,3 +525,88 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Chunk, Extractor, PromptKind};
+    use base64::Engine;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let pixels = vec![0u8; (w as usize) * (h as usize) * 4];
+        let mut buf = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(&pixels, w, h, image::ExtendedColorType::Rgba8)
+            .expect("encode test PNG");
+        buf
+    }
+
+    #[test]
+    fn plain_bytes_pass_through_unchanged() {
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"hello world");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Chunk::Pass(b) => assert_eq!(b, b"hello world"),
+            other => panic!("expected Pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_split_across_feeds_still_passes_verbatim() {
+        // A lone ESC at the end of one chunk must not be misread as the
+        // start of a sequence and dropped — `ESC` + `M` (reverse index) is
+        // a plain VT control the engine handles, so it round-trips.
+        let mut ex = Extractor::new();
+        let mut bytes = Vec::new();
+        for c in ex.feed(b"a\x1b") {
+            if let Chunk::Pass(b) = c {
+                bytes.extend_from_slice(&b);
+            }
+        }
+        for c in ex.feed(b"Mb") {
+            if let Chunk::Pass(b) = c {
+                bytes.extend_from_slice(&b);
+            }
+        }
+        assert_eq!(bytes, b"a\x1bMb");
+    }
+
+    #[test]
+    fn osc133_prompt_mark_is_consumed_and_surfaced() {
+        // `ESC ] 133 ; A BEL` — a prompt-start mark. It is consumed (not
+        // forwarded to the VT engine) and surfaced as a Prompt chunk; the
+        // trailing text passes through.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]133;A\x07$ ");
+        assert!(
+            matches!(out.first(), Some(Chunk::Prompt(PromptKind::PromptStart))),
+            "first chunk should be PromptStart, got {out:?}"
+        );
+        let passed: Vec<u8> = out
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(passed, b"$ ");
+    }
+
+    #[test]
+    fn iterm2_inline_image_is_extracted() {
+        // Full OSC 1337 round-trip: a base64 PNG between `ESC ]` and `BEL`
+        // is pulled out as an Image chunk before the VT engine sees it.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png(2, 2));
+        let seq = format!("\x1b]1337;File=inline=1:{b64}\x07");
+        let mut ex = Extractor::new();
+        let out = ex.feed(seq.as_bytes());
+        let img = out.iter().find_map(|c| match c {
+            Chunk::Image(p) => Some(&p.img),
+            _ => None,
+        });
+        let img = img.expect("an Image chunk should be emitted");
+        assert_eq!((img.width, img.height), (2, 2));
+    }
+}

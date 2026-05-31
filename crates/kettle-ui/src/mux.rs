@@ -1562,23 +1562,26 @@ impl Mux {
     /// an empty Vec when scope is Off. Used by `broadcast_write`
     /// and `broadcast_paste`.
     fn broadcast_target_ids(&self) -> Vec<u64> {
-        let panes_in_focused_tab: Vec<u64> = self
-            .tabs
-            .get(self.active)
-            .map(|t| t.root.leaf_ids())
-            .unwrap_or_default();
+        if matches!(self.broadcast, BroadcastScope::Off) {
+            return Vec::new();
+        }
+        // No active tab → no anchor pane and nothing to broadcast to.
+        // Previously the focused-pane id fell back to `0` (a sentinel that
+        // is never a real pane), which `compute_broadcast_targets` would
+        // hand back as a phantom target in `Off` scope; guarding here keeps
+        // an invalid id from ever entering the pipeline.
+        let Some(tab) = self.tabs.get(self.active) else {
+            return Vec::new();
+        };
+        let panes_in_focused_tab = tab.root.leaf_ids();
         let all_with_groups: Vec<(u64, Option<&str>)> = self
             .panes
             .iter()
             .map(|(id, p)| (*id, p.group_name.as_deref()))
             .collect();
-        let focused = panes_in_focused_tab.first().copied().unwrap_or(0);
-        if matches!(self.broadcast, BroadcastScope::Off) {
-            return Vec::new();
-        }
         compute_broadcast_targets(
             &self.broadcast,
-            focused,
+            tab.focus,
             &panes_in_focused_tab,
             &all_with_groups,
         )
@@ -1791,6 +1794,27 @@ mod node_tests {
         );
         // Default scope is Off.
         assert_eq!(BroadcastScope::default(), BroadcastScope::Off);
+    }
+
+    /// `broadcast_target_ids` must never emit a phantom pane id when there
+    /// is no active tab. A fresh `Mux` has no tabs/panes; in every scope
+    /// the target set is empty rather than the old `[0]` sentinel that the
+    /// `Off` arm would have produced from `unwrap_or(0)`.
+    #[test]
+    fn broadcast_target_ids_empty_when_no_active_tab() {
+        let mut mux = Mux::new();
+        for scope in [
+            BroadcastScope::Off,
+            BroadcastScope::Tab,
+            BroadcastScope::All,
+            BroadcastScope::Group("fleet".to_string()),
+        ] {
+            mux.broadcast = scope.clone();
+            assert!(
+                mux.broadcast_target_ids().is_empty(),
+                "scope {scope:?} should yield no targets with no active tab"
+            );
+        }
     }
 
     #[test]

@@ -32,6 +32,13 @@
 #   --uninstall` (the script copies a reference under share/ so the
 #   uninstall path doesn't depend on the original temp dir).
 
+# NOTE: this script is `#!/usr/bin/env sh` and is run via `curl … | sh`,
+# so it must stay POSIX. `set -o pipefail` is a bashism — under dash
+# (Ubuntu's /bin/sh) it errors and, with `set -e`, would abort the whole
+# installer. Pipeline robustness is handled explicitly below instead
+# (the download is staged to a temp file and its gzip magic bytes are
+# validated before extraction, so a truncated `curl` can't masquerade as
+# a clean extract).
 set -eu
 
 REPO="Reddimus/kettle"

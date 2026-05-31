@@ -225,3 +225,59 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
     }
     if !any { (0, i) } else { (v, i) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_DIM, decode};
+
+    // One sixel char encodes a 6-pixel-tall column; bits = byte - 0x3f.
+    // `@` (0x40) → bits 0b1 → only the top pixel of the band is lit.
+    #[test]
+    fn single_sixel_yields_a_1x6_column() {
+        let img = decode(b"@").expect("one sixel char should decode");
+        assert_eq!((img.width, img.height), (1, 6));
+        // Top pixel lit with palette color 1 (VT340 default 20/20/80%),
+        // opaque; the five below it are transparent.
+        assert_eq!(&img.rgba[0..4], &[51, 51, 204, 255]);
+        assert_eq!(&img.rgba[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn empty_band_char_is_transparent_but_sized() {
+        // `?` (0x3f) → bits 0 → no pixel lit, but the column still sizes
+        // the image to 1×6.
+        let img = decode(b"?").expect("'?' sizes an empty band");
+        assert_eq!((img.width, img.height), (1, 6));
+        assert!(img.rgba.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn repeat_introducer_widens_the_band() {
+        // `!3@` = repeat `@` three times → a 3-wide, 6-tall band.
+        let img = decode(b"!3@").expect("repeat should decode");
+        assert_eq!((img.width, img.height), (3, 6));
+    }
+
+    #[test]
+    fn newline_introducer_adds_a_band_below() {
+        // `@-@` = column in band 0, carriage `-` to the next band, column
+        // in band 1 → 1 wide, 12 tall.
+        let img = decode(b"@-@").expect("two bands should decode");
+        assert_eq!((img.width, img.height), (1, 12));
+    }
+
+    #[test]
+    fn empty_input_decodes_to_nothing() {
+        // No pixels ⇒ 0×0 ⇒ ImageData::new rejects it as None.
+        assert!(decode(b"").is_none());
+    }
+
+    #[test]
+    fn oversized_raster_attr_is_rejected_without_panicking() {
+        // A raster-attribute size hint past MAX_DIM must not allocate or
+        // panic; the `ensure` bound rejects it and the (still 0×0) image
+        // decodes to None.
+        let attr = format!("\"1;1;1;{}", MAX_DIM + 1);
+        assert!(decode(attr.as_bytes()).is_none());
+    }
+}

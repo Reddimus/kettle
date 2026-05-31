@@ -6,6 +6,41 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.1.1] — 2026-05-30
+
+  **Patch: the Linux icon + hardening release.** The headline fix is the
+  Ubuntu Super-key launcher icon, which showed blank even though the icon
+  files installed correctly. Plus a batch of robustness fixes shaken out
+  by a full-repo sweep, each landed with a regression test.
+
+  - **Fixed:** the kettle icon now appears in the GNOME / Ubuntu Super-key
+    (Activities) search. The shipped `packaging/linux/kettle-*.png` icons
+    were encoded at **16-bit/color** depth, which GNOME Shell's icon loader
+    silently fails on, so the launcher tile rendered blank while an 8-bit
+    icon in the same folder showed fine. The icons are now rasterized from
+    `kettle.svg` as standard **8-bit/color RGBA**, and the set gained 16px
+    and 24px sizes for the panel / search-result list.
+  - **Added:** `scripts/gen-icons.sh` — rasterizes the SVG to every PNG
+    size as 8-bit (needs `rsvg-convert`), making the icon set reproducible
+    from one vector source. `install.sh` now installs the 16/24px sizes too
+    (see docs/INSTALL.md → "Regenerating the app icons").
+  - **Fixed:** a PTY resize on a very wide HiDPI grid could overflow the
+    `u16` pixel-extent math (`cell_w * cols`), panicking in debug and
+    wrapping in release; the product is now computed in `u32` and clamped.
+  - **Fixed:** a malformed kitty animation with zero frames panicked at
+    render time (`imgs[0]` index out of bounds) — an out-of-bounds index
+    reachable from untrusted PTY output. The frame lookup now returns
+    `Option` and the renderer keeps the existing image instead of crashing.
+  - **Fixed:** broadcast input no longer derives a phantom pane id `0` when
+    the active tab has no panes; it now anchors on the real focused pane and
+    short-circuits when there is none.
+  - **Changed:** `release.sh` now escapes the previous-version string
+    before splicing it into its `sed` version-bump patterns, so a
+    pre-release tag with regex metacharacters can't mis-match.
+  - **Internal:** added unit tests for previously-untested modules
+    (`iterm`, `sixel`, `extract`, core `event`) covering parse boundaries
+    and the failure paths most likely to regress.
+
 ## [2.1.0] — 2026-05-30
 
   **Minor: the HiDPI + WSL release.** kettle now renders text at the

@@ -61,7 +61,7 @@ Either way, after install:
 - Binary at `~/.local/bin/kettle`
 - Launcher at `~/.local/share/applications/kettle.desktop`
 - Icon at `~/.local/share/icons/hicolor/scalable/apps/kettle.svg`
-  (plus PNG fallbacks at 32/48/64/128/256)
+  (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256)
 
 Make sure `~/.local/bin` is on your `PATH`. Hit the **Super key** and
 type **"kettle"** to launch. To remove everything later:
@@ -207,3 +207,20 @@ cargo run -p kettle -- --list-themes | wc -l   # 512
 The GPU self-test (`kettle_render::offscreen_selftest`) compiles the WGSL
 shaders on the platform backend (Vulkan/Metal/DX12) and runs an offscreen
 render pass — it executes in CI on Linux, macOS and Windows.
+
+## Regenerating the app icons (contributors)
+
+`packaging/linux/kettle.svg` is the single source of truth for the Linux
+launcher / window icon. The fixed-size PNGs that ship in the hicolor theme
+(`kettle-16.png` … `kettle-256.png`) are rasterized from it:
+
+```sh
+./scripts/gen-icons.sh   # needs rsvg-convert (Debian/Ubuntu: librsvg2-bin)
+```
+
+The script emits **8-bit/color RGBA** PNGs. This matters: 16-bit PNGs are
+silently rejected by GNOME Shell's icon loader, so an icon shipped at 16-bit
+depth shows blank in the Ubuntu Super-key / Activities search even though the
+files install correctly. After editing the SVG, re-run the script and commit
+the regenerated PNGs together. Verify with `file packaging/linux/kettle-*.png`
+(every line should read `8-bit/color RGBA`).

@@ -98,10 +98,20 @@ pub struct AnimEntry {
 }
 
 impl AnimEntry {
-    /// The image to draw right now per the playback clock.
-    pub fn current(&self) -> &ImageData {
+    /// The image to draw right now per the playback clock, or `None` if the
+    /// entry has no frames. A well-formed entry always has `imgs[0]` (the
+    /// root frame), but the frame list is assembled from untrusted PTY
+    /// control sequences — a malformed kitty animation could register an
+    /// entry with an empty `imgs`, and the previous `&self.imgs[…]` would
+    /// then index `imgs[0]` (via `saturating_sub(1)` → 0) and panic at
+    /// render time. Returning `Option` lets the caller skip the swap and
+    /// keep the placement's existing image instead of crashing.
+    pub fn current(&self) -> Option<&ImageData> {
+        if self.imgs.is_empty() {
+            return None;
+        }
         let i = current_frame(&self.gaps, &self.state, self.started.elapsed().as_millis());
-        &self.imgs[i.min(self.imgs.len().saturating_sub(1))]
+        Some(&self.imgs[i.min(self.imgs.len() - 1)])
     }
 }
 
@@ -121,8 +131,47 @@ pub fn prune(images: &Images, oldest_abs: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{relative_origin, resolve_chain};
+    use super::{AnimEntry, AnimationState, ImageData, relative_origin, resolve_chain};
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    fn px(n: u32) -> ImageData {
+        // A 1×1 opaque pixel; the colour channel encodes which frame it is
+        // so equality below is meaningful.
+        ImageData {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![n as u8, 0, 0, 255]),
+        }
+    }
+
+    #[test]
+    fn current_returns_a_frame_for_a_well_formed_entry() {
+        let e = AnimEntry {
+            imgs: vec![px(1), px(2)],
+            gaps: vec![0, 0],
+            state: AnimationState::default(),
+            started: Instant::now(),
+        };
+        // Stopped at the default `current = 1` → root frame (index 0).
+        assert_eq!(e.current().map(|i| i.rgba[0]), Some(1));
+    }
+
+    #[test]
+    fn current_is_none_for_an_empty_frame_list() {
+        // A malformed kitty animation could register an entry with no
+        // frames. The old `&self.imgs[…]` indexed imgs[0] and panicked at
+        // render time; now we get a clean `None` and the caller keeps the
+        // placement's existing image.
+        let e = AnimEntry {
+            imgs: Vec::new(),
+            gaps: Vec::new(),
+            state: AnimationState::default(),
+            started: Instant::now(),
+        };
+        assert!(e.current().is_none());
+    }
 
     #[test]
     fn relative_origin_offsets_and_clamps() {

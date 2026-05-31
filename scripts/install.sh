@@ -9,7 +9,7 @@
 #   ~/.local/bin/kettle                          ← the binary
 #   ~/.local/share/applications/kettle.desktop   ← XDG launcher entry
 #   ~/.local/share/icons/hicolor/scalable/apps/kettle.svg
-#   ~/.local/share/icons/hicolor/<NNN>x<NNN>/apps/kettle.png  (32,48,64,128,256)
+#   ~/.local/share/icons/hicolor/<NNN>x<NNN>/apps/kettle.png  (16,24,32,48,64,128,256)
 #
 # Usage (from the repo root):
 #   ./scripts/install.sh           # cargo build --release && install
@@ -74,6 +74,8 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${APP_DIR}/kettle.desktop" \
     "${MAN_DIR}/kettle.1" \
     "${ICON_BASE}/scalable/apps/kettle.svg" \
+    "${ICON_BASE}/16x16/apps/kettle.png" \
+    "${ICON_BASE}/24x24/apps/kettle.png" \
     "${ICON_BASE}/32x32/apps/kettle.png" \
     "${ICON_BASE}/48x48/apps/kettle.png" \
     "${ICON_BASE}/64x64/apps/kettle.png" \
@@ -132,7 +134,7 @@ install -Dm644 "${REPO_ROOT}/packaging/linux/kettle.desktop" "${APP_DIR}/kettle.
 
 # 3) Icons.
 install -Dm644 "${REPO_ROOT}/packaging/linux/kettle.svg"     "${ICON_BASE}/scalable/apps/kettle.svg"
-for size in 32 48 64 128 256; do
+for size in 16 24 32 48 64 128 256; do
   src="${REPO_ROOT}/packaging/linux/kettle-${size}.png"
   if [[ -f "${src}" ]]; then
     install -Dm644 "${src}" "${ICON_BASE}/${size}x${size}/apps/kettle.png"
