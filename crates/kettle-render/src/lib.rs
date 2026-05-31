@@ -507,14 +507,16 @@ impl Renderer {
     {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = request_adapter_or_fallback(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|e| anyhow!("no suitable GPU adapter: {e:?}"))?;
+            },
+            "Renderer::new",
+        )
+        .await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
@@ -2828,6 +2830,39 @@ pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
     Metrics::new(px, px * 1.25)
 }
 
+/// Cycle 753: request a GPU adapter, preferring real hardware but transparently
+/// retrying with a **software rasterizer** (Mesa llvmpipe / lavapipe, or WARP on
+/// Windows) when no hardware adapter is available. Before this, all four adapter
+/// sites passed `force_fallback_adapter: false` and hard-errored with "no
+/// suitable GPU adapter" — so kettle could not start under **WSLg**, headless
+/// VMs, minimal Linux installs, or GPU-less CI runners, where a software Vulkan/GL
+/// ICD is the only option. Hardware is tried first so a machine with a real GPU
+/// never silently drops to the slower software path; the fallback engages only
+/// when the first request fails, and emits a `log::warn` so the degraded mode is
+/// visible in `RUST_LOG`. `context` labels the call site in the error/warning.
+async fn request_adapter_or_fallback(
+    instance: &wgpu::Instance,
+    options: &wgpu::RequestAdapterOptions<'_, '_>,
+    context: &str,
+) -> Result<wgpu::Adapter> {
+    if let Ok(adapter) = instance.request_adapter(options).await {
+        return Ok(adapter);
+    }
+    log::warn!(
+        "{context}: no hardware GPU adapter; retrying with software fallback \
+         (llvmpipe / lavapipe / WARP) — expected under WSLg / headless / VM / CI"
+    );
+    let fallback = wgpu::RequestAdapterOptions {
+        power_preference: options.power_preference,
+        compatible_surface: options.compatible_surface,
+        force_fallback_adapter: true,
+    };
+    instance
+        .request_adapter(&fallback)
+        .await
+        .map_err(|e| anyhow!("{context}: no GPU adapter, even software fallback: {e:?}"))
+}
+
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a
 /// column for it.
 fn truncate(s: &str, n: usize) -> String {
@@ -3127,14 +3162,16 @@ pub fn capture_png(
 pub fn gpu_info() -> Result<String> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = request_adapter_or_fallback(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|e| anyhow!("no GPU adapter: {e:?}"))?;
+            },
+            "gpu_info",
+        )
+        .await?;
         let info = adapter.get_info();
         let limits = adapter.limits();
         Ok(format!(
@@ -3213,14 +3250,16 @@ pub fn capture_png_with_annotation(
 ) -> Result<(u32, u32)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = request_adapter_or_fallback(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|e| anyhow!("no GPU adapter: {e:?}"))?;
+            },
+            "capture_png",
+        )
+        .await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-screenshot"),
@@ -3824,13 +3863,16 @@ pub fn capture_png_with_annotation(
 pub fn offscreen_selftest() -> anyhow::Result<bool> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = match request_adapter_or_fallback(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
-            })
-            .await
+            },
+            "offscreen_selftest",
+        )
+        .await
         {
             Ok(a) => a,
             Err(_) => return Ok(false),
