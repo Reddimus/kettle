@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-06-01
+
+  **Patch: macOS sticky + bundle polish.** Implements the macOS `sticky`
+  window behavior (all-Spaces) that had been a no-op since winit dropped the
+  API, and rounds out the `.app` Info.plist. macOS build verified green on CI.
+
   - **macOS:** `sticky = true` is now implemented — the window joins all Spaces
     (Mission Control workspaces) via `NSWindowCollectionBehavior` through objc2,
     replacing the no-op stub left when winit 0.30 dropped the native method.
