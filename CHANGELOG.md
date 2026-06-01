@@ -31,6 +31,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     in-flight memory cap (1 GiB across all slots) in addition to the existing
     per-slot 384 MiB cap, so a hostile PTY stream chaining many concurrent
     large partial image/animation transmissions can't accumulate ~12 GiB.
+  - **Docs/CI:** corrected the documented macOS config path (kettle uses
+    `~/.config`, not `~/Library/Application Support`); the release workflow now
+    enforces the full `## [X.Y.Z] — YYYY-MM-DD` CHANGELOG format (matching
+    release.sh); and `scripts/release.sh` rolls back the version bump if the
+    pre-tag build fails, so a failed release leaves a clean tree.
 
 ## [2.2.0] — 2026-05-31
 

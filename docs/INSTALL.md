@@ -134,8 +134,9 @@ To bootstrap a commented starter config in the right spot for your OS:
 
 ```sh
 # Linux / WSL    — ~/.config/kettle/config (or $XDG_CONFIG_HOME/kettle/config)
-# macOS          — ~/Library/Application Support/kettle/config
-# Windows        — %APPDATA%\kettle\config
+# macOS          — ~/.config/kettle/config (kettle uses XDG paths, not ~/Library)
+# Windows        — ~/.config/kettle/config if HOME is set, else %APPDATA%\kettle\config
+# (always run `kettle --config-path` to see the exact resolved location)
 kettle --print-default-config > "$(kettle --config-path)"
 ```
 
@@ -200,7 +201,7 @@ system packages. Minimum supported Rust version is **1.89** (Cargo.toml
 ## Verifying your build
 
 ```sh
-cargo test --workspace      # 319+ tests incl. an offscreen GPU pipeline check
+cargo test --workspace      # 330+ tests incl. an offscreen GPU pipeline check
 cargo run -p kettle -- --list-themes | wc -l   # 512
 ```
 

@@ -179,7 +179,18 @@ if ! command -v "$CARGO" >/dev/null 2>&1 && [ ! -x "$CARGO" ]; then
     exit 1
 fi
 echo "refreshing Cargo.lock"
-"$CARGO" build --workspace --quiet
+# Cycle 765: roll back the version bumps if the build fails. The bump touched
+# Cargo.toml (+ inter-crate pins), flake.nix, and possibly Cargo.lock BEFORE
+# this build; under `set -e` a build failure would otherwise exit with those
+# files dirty and no commit, leaving the maintainer to clean up by hand.
+# Restore them so a failed release attempt leaves the tree exactly as it was.
+if ! "$CARGO" build --workspace --quiet; then
+    echo "::error::cargo build failed — rolling back the version bump" >&2
+    git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true
+    [ -f flake.nix ] && git checkout -- flake.nix 2>/dev/null || true
+    echo "  working tree restored; fix the build error and re-run" >&2
+    exit 1
+fi
 
 # Commit.
 # Cycle 550: include flake.nix in the release commit since the

@@ -91,9 +91,13 @@ jobs:
           # not the human-curated [Unreleased] → [vX.Y.Z] promotion
           # which is what the repo's Keep-a-Changelog format relies
           # on.
-          if ! grep -qE "^## \[${TAG_VER}\]" CHANGELOG.md; then
-            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER]' section"
-            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' before tagging"
+          # Cycle 765: enforce the full '## [X.Y.Z] — YYYY-MM-DD' form, matching
+          # scripts/release.sh's check. The looser '^## \[ver\]' pattern would
+          # accept an undated '## [2.2.1]' heading, shipping a release whose
+          # CHANGELOG entry is missing its date.
+          if ! grep -qE "^## \[${TAG_VER}\] — [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
+            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER] — YYYY-MM-DD' section"
+            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' (with the date) before tagging"
             exit 1
           fi
           # Cycle 550: also assert flake.nix's hardcoded version
