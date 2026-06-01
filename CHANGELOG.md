@@ -36,6 +36,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     Enter on a row, then press the chord you want, and it's bound immediately
     and saved to your config (Esc cancels). Covers split/close/tab-nav/search/
     palette/settings/zoom/copy/paste.
+  - **Added (ARM64 Linux):** releases now ship a `kettle-linux-aarch64.tar.gz`
+    artifact (Raspberry Pi 4/5, ARM servers/VPS, ARM laptops on Linux),
+    cross-compiled on CI; the one-line installer auto-detects aarch64/arm64.
   - **Docs/CI:** corrected the documented macOS config path (kettle uses
     `~/.config`, not `~/Library/Application Support`); the release workflow now
     enforces the full `## [X.Y.Z] — YYYY-MM-DD` CHANGELOG format (matching

@@ -18,7 +18,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | KETTLE_PREFIX=/usr/local sh
 #
 # Notes
-# - Linux x86_64 only today. macOS users: grab the `.app` bundle from
+# - Linux x86_64 + aarch64. macOS users: grab the `.app` bundle from
 #   https://github.com/Reddimus/kettle/releases/latest and drag it to
 #   /Applications. Windows users: extract the zip and add to PATH.
 # - The script uses `curl`, `tar`, and `gzip` — all standard on every
@@ -43,6 +43,7 @@ set -eu
 
 REPO="Reddimus/kettle"
 VERSION="${KETTLE_VERSION:-latest}"
+# ASSET is selected from `uname -m` in the arch check below (x86_64 / aarch64).
 ASSET="kettle-linux-x86_64.tar.gz"
 
 # --- Platform check ------------------------------------------------
@@ -62,11 +63,15 @@ case "$(uname -s)" in
     ;;
 esac
 
+# Cycle 767: pick the artifact for this CPU. x86_64 and aarch64 (ARM64:
+# Raspberry Pi 4/5, ARM servers/VPS, ARM laptops on Linux) both ship a
+# prebuilt tarball; anything else builds from source.
 case "$(uname -m)" in
-  x86_64 | amd64) ;;
+  x86_64 | amd64) ASSET="kettle-linux-x86_64.tar.gz" ;;
+  aarch64 | arm64) ASSET="kettle-linux-aarch64.tar.gz" ;;
   *)
     echo "kettle install-online.sh: unsupported arch '$(uname -m)'." >&2
-    echo "Prebuilt Linux binary is x86_64 only. Build from source via:" >&2
+    echo "Prebuilt Linux binaries are x86_64 and aarch64. Build from source via:" >&2
     echo "  git clone https://github.com/${REPO} && cd kettle && ./scripts/install.sh" >&2
     exit 1
     ;;

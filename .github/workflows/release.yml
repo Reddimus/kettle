@@ -51,6 +51,10 @@ jobs:
     # progress concurrency — a release must always complete, never
     # be canceled mid-upload (cycle-558 incident recovery).
     timeout-minutes: 75
+    # Cycle 767: the aarch64-linux cross-build entry is `experimental` —
+    # `continue-on-error` so a hiccup in the (newer, cross-compiled) ARM64
+    # artifact never blocks the established x86_64/macOS/Windows artifacts.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +65,14 @@ jobs:
             artifact: kettle-macos-universal.zip
           - os: windows-latest
             artifact: kettle-windows-x86_64.zip
+          # Cycle 767: ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
+          # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
+          # ci.yml early-warning job proves this target builds. Windowing deps
+          # load via dlopen, so only the GNU cross-linker is needed.
+          - os: ubuntu-latest
+            artifact: kettle-linux-aarch64.tar.gz
+            rust_target: aarch64-unknown-linux-gnu
+            experimental: true
     steps:
       - uses: actions/checkout@v6
       # Guard against tagging drift — if someone tags `v1.3.10` but
@@ -159,8 +171,23 @@ jobs:
             -output target/release/kettle
           file target/release/kettle
       - name: Build (Linux / Windows)
-        if: runner.os != 'macOS'
+        if: runner.os != 'macOS' && matrix.rust_target == ''
         run: cargo build --release -p kettle
+
+      # Cycle 767: ARM64 Linux cross-build. The runner is x86_64; install the
+      # aarch64 std + GNU cross-linker and build for the target, then copy the
+      # binary to the host-build path so the unchanged Package (Linux) step
+      # picks it up. Mirrors ci.yml's aarch64 early-warning job.
+      - name: Build (Linux aarch64 cross)
+        if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu -p kettle
+          mkdir -p target/release
+          cp target/aarch64-unknown-linux-gnu/release/kettle target/release/kettle
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
