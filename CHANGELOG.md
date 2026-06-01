@@ -20,6 +20,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     platforms where winit can't yet apply them (X11/Wayland), and kettle warns
     at startup when the clipboard is unavailable (headless/SSH/sandbox), so
     these degrade visibly instead of silently.
+  - **Fixed (X11):** middle-click / `paste_primary` now pastes the **PRIMARY
+    selection** (the last mouse-highlighted text) on X11, matching standard
+    terminal behavior, instead of the regular clipboard. Falls back to the
+    clipboard on Wayland/macOS/Windows (no separate PRIMARY there). Paste
+    safety (size clamp, bracketed-paste, broadcast scoping) is now shared
+    across all paste channels.
+  - **Changed (Linux):** the X11 `WM_CLASS` is derived from the binary name
+    (default `kettle`) instead of hardcoded, so renamed/forked binaries still
+    group correctly in GNOME/KDE task switchers and match their own `.desktop`.
 
 ## [2.1.2] — 2026-05-30
 

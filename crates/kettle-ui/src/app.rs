@@ -2722,6 +2722,52 @@ impl App {
             .as_mut()
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
+        self.paste_text(text);
+    }
+
+    /// Cycle 755: paste the **X11 PRIMARY selection** (middle-click). On X11 the
+    /// PRIMARY selection holds whatever was last highlighted with the mouse —
+    /// distinct from the CLIPBOARD (Ctrl+C / Ctrl+Shift+C). The standard
+    /// terminal convention is middle-click = paste PRIMARY, which kettle
+    /// previously got wrong by aliasing `PastePrimary` straight to the regular
+    /// clipboard. arboard exposes PRIMARY on Linux via `GetExtLinux`; on
+    /// Wayland (no separate PRIMARY surfaced here), macOS, and Windows there is
+    /// no PRIMARY selection, so we fall back to the regular clipboard — the
+    /// historical behavior. Shares `paste_text` so the clamp + bracketed-paste
+    /// + broadcast scoping match `Action::Paste`.
+    fn paste_primary(&mut self) {
+        #[cfg(target_os = "linux")]
+        let text = {
+            use arboard::{GetExtLinux, LinuxClipboardKind};
+            let primary = self
+                .clipboard
+                .as_mut()
+                .and_then(|c| c.get().clipboard(LinuxClipboardKind::Primary).text().ok())
+                .filter(|t| !t.is_empty());
+            match primary {
+                Some(t) => t,
+                // PRIMARY empty/unset (or under Wayland) → fall back to clipboard.
+                None => self
+                    .clipboard
+                    .as_mut()
+                    .and_then(|c| c.get_text().ok())
+                    .unwrap_or_default(),
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|c| c.get_text().ok())
+            .unwrap_or_default();
+        self.paste_text(text);
+    }
+
+    /// Cycle 755: shared paste path — clamp, broadcast scoping, bracketed-paste
+    /// wrap, write to the focused PTY. Extracted so `paste_clipboard` and
+    /// `paste_primary` (and any future paste channel) can't drift on the
+    /// safety/scoping rules.
+    fn paste_text(&mut self, text: String) {
         if text.is_empty() {
             return;
         }
@@ -5874,15 +5920,13 @@ impl App {
                     t.scroll_display(Scroll::Delta(dir));
                 }
             }
-            // Cycle 345: paste primary selection (X11 primary clipboard).
-            // arboard's get_text() reads the regular clipboard; macOS / Windows
-            // / Wayland don't have a separate primary selection, so X11 primary
-            // and the regular clipboard are equivalent through arboard's
-            // current surface — funnel through `paste_clipboard` so the
-            // primary path gets the same LOCAL_PASTE_MAX clamp, bracketed-
-            // paste wrap, and broadcast scoping as Action::Paste (cycle 574:
-            // the inline impl was bypassing all three).
-            Action::PastePrimary => self.paste_clipboard(),
+            // Cycle 755: paste the X11 PRIMARY selection (middle-click). On X11
+            // PRIMARY is the last mouse-highlighted text, distinct from the
+            // CLIPBOARD; `paste_primary` reads PRIMARY on Linux and falls back
+            // to the clipboard on Wayland/macOS/Windows. It shares `paste_text`
+            // so the LOCAL_PASTE_MAX clamp, bracketed-paste wrap, and broadcast
+            // scoping all match Action::Paste.
+            Action::PastePrimary => self.paste_primary(),
             // Cycle 345: in-process Quake toggle. Same tri-state
             // logic as cycle-319's --toggle remote command:
             //   hidden → show + focus
@@ -7163,7 +7207,17 @@ impl ApplicationHandler<UserEvent> for App {
             // doesn't put both methods in scope (which would make
             // `attrs.with_name(…)` ambiguous).
             use winit::platform::x11::WindowAttributesExtX11;
-            WindowAttributesExtX11::with_name(attrs, "kettle", "kettle")
+            // Cycle 755: derive WM_CLASS from the running binary's stem
+            // (default "kettle") instead of hardcoding, so a fork or renamed
+            // binary groups correctly in GNOME/KDE task switchers without
+            // editing code. The canonical build is `kettle`, so this matches
+            // `StartupWMClass=kettle` in packaging/linux/kettle.desktop exactly.
+            let wm_class = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "kettle".to_string());
+            WindowAttributesExtX11::with_name(attrs, wm_class.clone(), wm_class)
         };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
