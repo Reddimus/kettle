@@ -950,16 +950,22 @@ impl Renderer {
             }
         }
 
-        let mut quads: Vec<QuadInstance> = Vec::new();
+        // Cycle 761: pre-size the per-frame quad/image vectors so the render
+        // hot path doesn't repeatedly reallocate as they grow (borders +
+        // per-pane chrome + cell-background quads dominate `quads`). Capacities
+        // are rough upper-of-typical estimates; growth still happens for
+        // outliers but the common 60fps path avoids the realloc churn.
+        let mut quads: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 16 + 256);
         // Third quad pass — drawn after `over` so the right-click
         // context menu's bg/shadow/border/highlight sit on top of
         // every other UI element. The menu's text is rendered by
         // `menu_text_renderer` after this pass so the labels land on
         // top of the panel bg. Cycle 251.
-        let mut menu_q: Vec<QuadInstance> = Vec::new();
+        let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
-        let mut over: Vec<QuadInstance> = Vec::new();
-        let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
+        let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
+        let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> =
+            Vec::with_capacity(16);
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
         // Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
@@ -1884,7 +1890,8 @@ impl Renderer {
         // split fixes that by giving the menu its own
         // bg→border→highlight→text pipeline at the end of the render
         // pass.
-        let mut menu_areas: Vec<TextArea> = Vec::new();
+        // Cycle 761: pre-size for the menu / settings-overlay rows it collects.
+        let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
@@ -1954,7 +1961,9 @@ impl Renderer {
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rx as i32,
-                        top: (text_top - 2.0) as i32,
+                        // Cycle 761: clamp to ≥0 so a pane flush against the
+                        // window top can't hand glyphon a negative clip bound.
+                        top: (text_top - 2.0).max(0.0) as i32,
                         right: (rx + rw) as i32,
                         bottom: text_bot as i32,
                     },
@@ -2789,7 +2798,10 @@ impl Renderer {
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
-        let mut rich: Vec<(String, Attrs)> = Vec::new();
+        // Cycle 761: pre-size for the spans + interleaved line-break markers
+        // so a 120×50 pane doesn't realloc this vec several times per frame.
+        let mut rich: Vec<(String, Attrs)> =
+            Vec::with_capacity(spans.len() + span_line_breaks.len());
         let mut nb = 0usize;
         for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
             while nb < span_line_breaks.len() && span_line_breaks[nb] == i {

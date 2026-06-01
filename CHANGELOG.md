@@ -13,6 +13,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     can't panic the reader thread; and image composition computes byte offsets
     in `u64` to avoid wraparound on very large frames. Found by an exhaustive
     multi-agent audit of every crate.
+  - **Performance (render):** the per-frame quad / image / menu vectors and the
+    per-pane rich-text span vector are now pre-sized, eliminating repeated
+    reallocations on the 60fps render hot path; titlebar text-clip bounds are
+    clamped to ≥0.
 
 ## [2.2.0] — 2026-05-31
 
