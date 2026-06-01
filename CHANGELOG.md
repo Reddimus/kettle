@@ -6,6 +6,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fixed (cycle 779) — `persist_config_toggle` de-duplicates repeated keys.**
+    When a config file already had two lines for the same key (or a key somehow
+    got written twice), each toggle rewrote *every* matching line, so identical
+    lines accumulated indefinitely. The parser is last-wins so behavior was always
+    correct, but the on-disk file bloated. Now only the first match is rewritten
+    and later duplicates are dropped — collapsing to a single line, matching
+    `append_keybind`'s drop-old semantics. Drift guard
+    `persist_config_toggle_collapses_duplicate_keys_to_one`. Found by the
+    config-validation audit dimension (re-run after a prior tooling glitch).
+
+  - **Docs (cycle 780) — correct two stale config field doc-comments.** The
+    config-validation audit flagged `focus` and `detachable_tabs` as "no-op",
+    but adversarial verification against the code showed both were *stale
+    comments*, not real no-ops: `focus = sloppy` (focus-follows-mouse) **is**
+    wired (cycle 360, `app.rs` cursor-move handler) — the comment claiming it
+    "isn't wired yet" predated that impl; and the detachable-tabs **feature**
+    landed in cycles 397-410 (the comment said "No-op until Bucket-D lands").
+    Comments corrected to match reality (only the `detachable_tabs` on/off
+    *toggle field* remains unconsumed — the action is always available). No code
+    change; prevents a future maintainer from mistaking working features for dead
+    code. (The audit's other items were verified false/low-value: `cell-width`
+    is a no-op stub so surfacing its clamp would add noise; the no-op compat
+    stubs are intentional, documented Terminator-config acceptance.)
+
+  - **Docs (cycle 778) — add a Settings-overlay state diagram to ARCHITECTURE.md.**
+    The in-app Settings overlay + interactive keybind editor (cycles 756/766) — a
+    headline UI subsystem — was referenced in the crate and render-pass diagrams
+    but had no dedicated diagram of its own. Added a `stateDiagram-v2` mapping the
+    full UI/UX transitions (Closed → Browsing → EditValue/Capturing, with the
+    persist→reload and chord-capture→append_keybind flows) plus a prose subsection,
+    and listed the overlay under "most recent additions". Verified the other 8
+    ARCHITECTURE.md mermaid diagrams still match the current architecture.
+
 ## [2.3.2] — 2026-06-01
 
   **Patch: post-v2.3.1 hardening — audit fixes + macOS render verification + a

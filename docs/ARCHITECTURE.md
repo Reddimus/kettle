@@ -218,6 +218,9 @@ The most recent additions:
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
 - **vertical tab strips** and a **wgpu surface-readback screenshot path**.
+- **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
+  editor** — a keyboard-navigable preferences panel with live persist + reload
+  (see the dedicated subsection below).
 
 See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the full
 Terminator parity inventory; see [CHANGELOG.md](../CHANGELOG.md) for the
@@ -239,6 +242,42 @@ flowchart TD
 `lua-sandbox = safe` (default) nils unsafe stdlib APIs (os.execute,
 io.open, etc); `trusted` mode opt-in. See
 [`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
+
+### Settings overlay + interactive keybind editor (cycles 756, 766)
+
+A keyboard-navigable, non-technical-friendly preferences panel — the overlay
+evolution of the right-click **Preferences ▸** submenu. Opens via **Ctrl+,** or
+right-click ▸ **Settings…**. `crates/kettle-ui/src/settings.rs` is the *pure*
+catalogue (categories → fields, free functions over `&Config`, unit-tested
+without a window); `app.rs` owns the live `SettingsNav` state + input routing +
+persistence; `kettle-render` draws it through the **same menu pipeline**
+(render-pass steps 5–6 above). Every value edit writes straight to the user's
+config via the atomic `persist_pref` → `persist_config_toggle` path and
+live-reloads, so changes take effect without hand-editing the file. The
+**Keybinds** category is a full interactive rebinder: activating a row captures
+the next chord and appends a `keybind = <chord>=<action>` line via
+`kettle_config::append_keybind`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Browsing: Ctrl+, / right-click ▸ Settings…
+    Browsing --> Browsing: ↑/↓ select field · Tab/⇧Tab switch category
+    Browsing --> EditValue: ←/→ step · Space/Enter toggle-or-cycle
+    EditValue --> Browsing: persist_pref(key,value) → reload_config()
+    Browsing --> Capturing: Space/Enter on a Keybind row
+    Capturing --> Browsing: Esc cancels
+    Capturing --> Browsing: chord → keybinds.insert + append_keybind()
+    Browsing --> Closed: Esc
+    Closed --> [*]
+```
+
+Categories are **Appearance · Behavior · Keybinds**; field kinds are **Toggle ·
+Choice · Number · Keybind**. Field values are always read fresh from `Config`,
+so an external edit / live-reload is reflected immediately, and an unknown
+catalogue key degrades to "—" rather than panicking (`settings::read`,
+guarded by the `catalogue_keys_are_all_readable` drift test). See
+[`docs/SETTINGS.md`](SETTINGS.md) for the per-field reference.
 
 ### Per-pane titlebar (cycles 379-407)
 

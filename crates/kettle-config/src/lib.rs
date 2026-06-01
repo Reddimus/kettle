@@ -931,10 +931,12 @@ pub struct Config {
     /// `focus`): focus mode — click (default), sloppy (focus
     /// follows mouse), system (use the desktop's focus mode).
     ///
-    /// NOTE (cycle 563): parsed but currently no-op — kettle-ui
-    /// uses click-focus exclusively. Sloppy / system modes
-    /// aren't wired yet. Field kept for forward-compat; a future
-    /// cycle wiring focus-follows-mouse reads it here.
+    /// NOTE (corrected cycle 780): `sloppy` (focus-follows-mouse) **is**
+    /// wired — the pane under the cursor is focused on every cursor move
+    /// (kettle-ui `app.rs`, cycle 360). `system` is treated like `click`
+    /// because winit doesn't expose the OS-level focus policy. Surfaced as
+    /// an editable option in the Settings overlay (Behavior ▸ Focus mode).
+    /// (The old "no-op / not wired yet" note predated the cycle-360 impl.)
     pub focus: FocusMode,
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:74
     /// `handle_size`): split-divider grab width in px. -1 means
@@ -1079,7 +1081,12 @@ pub struct Config {
     pub cell_width: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:124
     /// `detachable_tabs`): allow dragging tabs between windows.
-    /// No-op until Bucket-D detachable-tabs lands.
+    /// NOTE (corrected cycle 780): the detachable-tabs FEATURE landed in
+    /// cycles 397-410 (Wayland-fallback / SCM_RIGHTS / file-fallback — see
+    /// ARCHITECTURE.md) and `Action::MoveTabToNewWindow` is always
+    /// available. This on/off *toggle* field, however, is not yet consumed
+    /// — setting `detachable-tabs = false` does not currently disable the
+    /// action. Kept for forward-compat; a future cycle gates the action on it.
     pub detachable_tabs: bool,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:96
     /// `putty_paste_style_source_clipboard`): when `putty_paste_
@@ -1360,8 +1367,19 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
         if let Some(line_key) = parse_line_key(line)
             && normalize_key(line_key) == needle
         {
-            out.push(format!("{key} = {new_value}"));
-            replaced = true;
+            // Cycle 779: only the FIRST matching line becomes the new
+            // value; any further duplicate lines for the same key are
+            // dropped. Previously every match was rewritten, so a file
+            // that already had two `cursor-blink = …` lines (or repeated
+            // UI toggles that somehow doubled up) accumulated identical
+            // lines forever. The parser is last-wins so behavior was
+            // always correct — this keeps the on-disk file de-duplicated
+            // to a single line, matching `append_keybind`'s drop-old
+            // semantics.
+            if !replaced {
+                out.push(format!("{key} = {new_value}"));
+                replaced = true;
+            }
             continue;
         }
         out.push(line.to_string());
@@ -6507,6 +6525,43 @@ mod config_tests {
         let lines: Vec<&str> = got.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 1, "got multiple lines: {got:?}");
         assert_eq!(lines[0], "cursor-blink = false");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 779 drift guard. A config that already has duplicate lines
+    /// for the same key must collapse to exactly ONE line after a toggle —
+    /// previously every match was rewritten, so duplicates accumulated
+    /// (file bloat). The parser is last-wins, so behavior was always
+    /// correct; this pins the on-disk de-duplication.
+    #[test]
+    fn persist_config_toggle_collapses_duplicate_keys_to_one() {
+        let dir = tempdir_for("dedup");
+        let path = dir.join("config");
+        // Seed with duplicates (dash + underscore forms both match) around
+        // an unrelated line that must survive untouched.
+        std::fs::write(
+            &path,
+            "cursor-blink = true\nfont-size = 14\ncursor_blink = false\n",
+        )
+        .expect("seed");
+        super::persist_config_toggle(&path, "cursor-blink", "false").expect("persist");
+        let got = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = got.lines().filter(|l| !l.trim().is_empty()).collect();
+        // Exactly one cursor-blink line remains, with the new value.
+        let cb: Vec<&&str> = lines
+            .iter()
+            .filter(|l| {
+                let k = l.split('=').next().unwrap_or("").trim();
+                k == "cursor-blink" || k == "cursor_blink"
+            })
+            .collect();
+        assert_eq!(cb.len(), 1, "duplicates not collapsed: {got:?}");
+        assert_eq!(*cb[0], "cursor-blink = false");
+        // The unrelated key is preserved.
+        assert!(
+            lines.contains(&"font-size = 14"),
+            "unrelated key dropped: {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
