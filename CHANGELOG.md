@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-06-01
+
+  **Patch: post-v2.3.1 hardening — audit fixes + macOS render verification + a
+  self-updating screenshot.** A nine-cycle grouped release driven by two
+  exhaustive multi-agent audits (an image/screenshot audit and a double-verified
+  8-dimension codebase audit). Headline: a **data-loss fix** in the Unix
+  detachable-tab handoff (a swallowed `send_fds` error could destroy the source
+  tab), consistent clipboard error logging, and a corrected config default. Plus
+  the macOS **render pipeline is now verified on real Metal hardware in CI**, the
+  week-long-red `actionlint` gate is fixed, the README hero/showcase screenshot is
+  refreshed and made **self-updating** (version tracks the crate), the macOS
+  `.iconset` is normalized to 8-bit RGBA, and two release/CI robustness gaps are
+  closed. No runtime API change beyond the bug fixes. Windows gauntlet + all-three-OS
+  CI green.
+
   - **Fixed (cycle 776) — cross-process tab handoff no longer silently loses a
     tab on a socket error.** In the Unix SCM_RIGHTS detachable-tab path
     (`try_move_tab_to_new_window_scm_rights`), the `fd_transport::send_fds` result
