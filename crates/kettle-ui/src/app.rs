@@ -6847,7 +6847,10 @@ impl App {
                 // Scope the cfg borrow so reload_config (&mut self) is free.
                 let (key_str, new_val) = {
                     let field = &cats[cat].fields[fld];
-                    (field.key, crate::settings::next_value(&self.cfg, field, dir))
+                    (
+                        field.key,
+                        crate::settings::next_value(&self.cfg, field, dir),
+                    )
                 };
                 self.persist_pref(key_str, &new_val);
                 self.reload_config();

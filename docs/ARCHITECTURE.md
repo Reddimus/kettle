@@ -10,7 +10,7 @@ cwd, images, clipboard, title) flow back to the UI.
 ```mermaid
 graph TD
     bin["kettle (bin)<br/>CLI · entry"] --> ui
-    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu"] --> render
+    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
     ui --> core
     ui --> cfg
     ui --> remote
@@ -85,7 +85,7 @@ flowchart LR
     imgs --> text["3. text_renderer.render<br/>pane text + tab text<br/>(NOT menu rows)"]
     text --> overlay["4. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
     overlay --> menuq["5. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> menut["6. menu_text_renderer.render<br/>context menu<br/>row labels"]
+    menuq --> menut["6. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
 ```
 
 Steps 5–6 own the right-click context menu so its labels land **on

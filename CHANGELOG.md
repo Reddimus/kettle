@@ -36,6 +36,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     fields, ←→ changes a value (Tab switches category, Esc closes). Changes
     apply live and persist to your config file — no hand-editing needed. An
     "Advanced" path to the raw config remains for the long tail.
+  - **Docs:** added a non-technical [Getting Started](docs/GETTING-STARTED.md)
+    walkthrough and a [Settings panel](docs/SETTINGS.md) reference; the
+    architecture diagrams now include the settings overlay.
 
 ## [2.1.2] — 2026-05-30
 

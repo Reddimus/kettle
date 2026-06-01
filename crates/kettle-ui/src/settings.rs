@@ -204,7 +204,11 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             suffix,
         } => {
             let cur = read_number(cfg, field.key);
-            let delta = if dir == 0 { *step } else { (dir as i64) * *step };
+            let delta = if dir == 0 {
+                *step
+            } else {
+                (dir as i64) * *step
+            };
             let next = (cur + delta).clamp(*min, *max);
             write_number(field.key, next, suffix)
         }
@@ -275,6 +279,11 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "stepwise `let mut cfg = Config::default(); cfg.x = …` reads clearer \
+              than a full struct literal for a one-field test tweak"
+)]
 mod tests {
     use super::*;
 

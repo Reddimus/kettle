@@ -243,6 +243,8 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 
 ## Documentation
 
+- [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — friendly first-run walkthrough (no jargon)
+- [docs/SETTINGS.md](docs/SETTINGS.md) — the in-app Settings panel (`Ctrl+,`)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design + diagrams
 - [docs/RESEARCH.md](docs/RESEARCH.md) — analysis of other terminals & citations
 - [docs/UX-COMPARISON.md](docs/UX-COMPARISON.md) — cited UI/UX matrix vs Ghostty/kitty/WezTerm/Terminator/Alacritty
