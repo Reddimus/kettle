@@ -75,10 +75,16 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
     let bottom = grid.bottommost_line().0;
 
     let mut matches = Vec::new();
+    // Cycle 762: reuse the line-text + byte→column scratch buffers across every
+    // scrollback line instead of allocating a fresh String + Vec per line. On a
+    // 10k-line scrollback that's 2 allocations total rather than ~20k; `.clear()`
+    // keeps the capacity.
+    let mut text = String::with_capacity(cols);
+    let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
     for line in top..=bottom {
         // Reconstruct the line text, tracking the byte->column mapping.
-        let mut text = String::with_capacity(cols);
-        let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
+        text.clear();
+        col_of_byte.clear();
         for c in 0..cols {
             let cell = &grid[Point::new(Line(line), Column(c))];
             let ch = cell.c;

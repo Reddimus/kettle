@@ -32,6 +32,11 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
     let cols = grid.columns();
     let rows = grid.screen_lines();
     let mut out: Vec<Link> = Vec::new();
+    // Cycle 762: reuse the URL-scan scratch buffers across every viewport row
+    // instead of allocating a String + Vec per row each time links are
+    // recomputed (every redraw). `.clear()` keeps the capacity.
+    let mut text = String::with_capacity(cols);
+    let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
 
     for row in 0..rows {
         // OSC 8 runs: consecutive cells sharing a hyperlink URI.
@@ -60,8 +65,8 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
         }
 
         // Autodetected URLs (skip cells already covered by an OSC 8 link).
-        let mut text = String::with_capacity(cols);
-        let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
+        text.clear();
+        col_of_byte.clear();
         for col in 0..cols {
             let ch = grid[Point::new(Line(row as i32), Column(col))].c;
             for _ in 0..ch.len_utf8() {

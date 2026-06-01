@@ -17,6 +17,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     per-pane rich-text span vector are now pre-sized, eliminating repeated
     reallocations on the 60fps render hot path; titlebar text-clip bounds are
     clamped to ≥0.
+  - **Performance (search / links):** scrollback regex search and viewport URL
+    detection reuse their per-line scratch buffers instead of allocating a
+    fresh `String` + `Vec` for every line/row (≈2 allocations total instead of
+    one pair per line — meaningful on a large scrollback).
 
 ## [2.2.0] — 2026-05-31
 
