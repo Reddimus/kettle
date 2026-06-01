@@ -3278,6 +3278,16 @@ fn gc(c: Rgb) -> GColor {
 /// the rendered pane so the menu's render path can be visually verified
 /// without opening the windowed app. Visible only via the
 /// `kettle --screenshot-menu PATH` CLI flag.
+/// The kettle version label baked into the `--screenshot` demo scene's
+/// `cargo test` compile line. Wired to the crate (= workspace) version
+/// so the README hero / UX showcase screenshots can never re-stale to a
+/// hardcoded string the way the original `kettle v0.1.0` did — by the
+/// v2.x series that frozen literal made the hero image look years out of
+/// date even though the pixels still matched the (equally frozen) scene.
+/// `env!` resolves at compile time, so a release version bump regenerates
+/// a correct screenshot with zero code churn (cycle 771).
+pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DebugScene {
     /// Existing `--screenshot` behavior (cycle 168).
@@ -3566,6 +3576,10 @@ pub fn capture_png_with_annotation(
         );
         tab_buf.shape_until_scroll(&mut font_system, false);
 
+        // The demo `cargo test` compile line carries the live crate
+        // version (cycle 771) — never a hardcoded literal — so the hero /
+        // showcase screenshots track the real product version forever.
+        let compile_line = format!("kettle v{SCREENSHOT_DEMO_VERSION}\n");
         let mut left = TextBuffer::new(&mut font_system, metrics);
         left.set_size(&mut font_system, Some(split_x - pad), Some(lh));
         left.set_rich_text(
@@ -3576,14 +3590,14 @@ pub fn capture_png_with_annotation(
                 ("~/Repos/kettle", blu.clone()),
                 ("$ cargo test --workspace\n", fg.clone()),
                 ("   Compiling ", dim.clone()),
-                ("kettle v0.1.0\n", dim.clone()),
+                (compile_line.as_str(), dim.clone()),
                 ("    Finished ", grn.clone()),
                 ("`test` profile [optimized]\n", fg.clone()),
                 ("     Running ", grn.clone()),
                 ("unittests\n", fg.clone()),
                 ("test result: ", fg.clone()),
                 ("ok", grn.clone()),
-                (". 74 passed; 0 failed\n\n", fg.clone()),
+                (". 481 passed; 0 failed\n\n", fg.clone()),
                 ("kevim@kettle", grn.clone()),
                 (":", fg.clone()),
                 ("~/Repos/kettle", blu.clone()),
@@ -3616,8 +3630,8 @@ pub fn capture_png_with_annotation(
                 ("JetBrainsMono NF", blu.clone()),
                 ("\n  theme: ", fg.clone()),
                 (cfg.theme_name.as_str(), yel.clone()),
-                ("\n  splits · tabs · ligatures ✓\n", dim.clone()),
-                ("  sixel · kitty · OSC 8 ✓", dim.clone()),
+                ("\n  splits · tabs · search · settings ✓\n", dim.clone()),
+                ("  keybinds · sixel · kitty · OSC 8 ✓", dim.clone()),
             ],
             &base,
             Shaping::Advanced,
@@ -4111,6 +4125,37 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod screenshot_demo_tests {
+    use super::SCREENSHOT_DEMO_VERSION;
+
+    /// Cycle 771 drift guard. The README hero / UX showcase screenshots are
+    /// generated from the hardcoded `DebugScene::Default` scene, whose demo
+    /// `cargo test` compile line used to bake a literal `kettle v0.1.0` into
+    /// the rendered pixels. By the v2.x series that frozen string made the
+    /// hero image look years out of date even though the PNG still matched
+    /// the (equally frozen) scene. The version is now sourced from the crate
+    /// (= workspace) version via `env!`, so a release bump regenerates a
+    /// correct screenshot for free. Guard that wiring so a future edit can't
+    /// silently reintroduce a hardcoded / stale version label.
+    #[test]
+    fn screenshot_demo_version_tracks_crate_version() {
+        assert_eq!(
+            SCREENSHOT_DEMO_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            "the --screenshot demo version must track the crate version, not a literal"
+        );
+        assert_ne!(
+            SCREENSHOT_DEMO_VERSION, "0.1.0",
+            "the hero/showcase screenshot must not advertise the legacy v0.1.0"
+        );
+        assert!(
+            !SCREENSHOT_DEMO_VERSION.starts_with("0."),
+            "the demo screenshot should advertise the real (>=1.0) product version, got {SCREENSHOT_DEMO_VERSION}"
+        );
     }
 }
 

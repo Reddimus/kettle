@@ -19,6 +19,12 @@ and **WezTerm** into one tool.
 
 ![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
+<!-- Hero regenerated with the real renderer (no mockups), same offscreen path as
+     the UX showcase:  kettle --screenshot docs/images/kettle-hero.png --cols 120 --rows 32
+     The rendered version label tracks the crate version automatically (kettle-render
+     SCREENSHOT_DEMO_VERSION = env!("CARGO_PKG_VERSION")), so it never re-stales. -->
+
+
 > **Status: v2.3 — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`

@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Docs (cycle 771) — refresh the README hero / UX showcase screenshot, and
+    make it self-updating.** The `--screenshot` hero (`docs/images/kettle-hero.png`,
+    embedded at the top of the README) and the UX showcase
+    (`docs/images/kettle-showcase.png`) are both rendered from the hardcoded
+    `DebugScene::Default` scene in `kettle-render`. That scene's demo content had
+    been frozen since the v0.1.0 era: it baked a literal `Compiling kettle v0.1.0`
+    and `74 passed` into the rendered pixels and listed a pre-v2.x feature set — so
+    by v2.3.x the hero image looked years out of date even though the PNG still
+    matched the (equally frozen) scene. The scene now (a) sources its version label
+    from the crate version via `SCREENSHOT_DEMO_VERSION = env!("CARGO_PKG_VERSION")`
+    so it renders the real `kettle v2.3.1` and auto-refreshes on every release bump
+    with zero code churn; (b) shows the current `481`-test workspace count; and
+    (c) advertises the current headline features (`splits · tabs · search ·
+    settings` / `keybinds · sixel · kitty · OSC 8`) in place of the old
+    `ligatures` / `OSC 8`-only list. Both PNGs were regenerated with the documented
+    commands (`--cols 120 --rows 32` hero, `--cols 100 --rows 30` showcase) and the
+    hero's reproduction command — previously undocumented — is now recorded in the
+    README. A `kettle-render` drift guard
+    (`screenshot_demo_version_tracks_crate_version`) asserts the demo version tracks
+    the crate version and is never the legacy `0.x`, so the screenshot can't
+    silently re-stale.
+
   - **CI (cycle 770) — fix the long-red `actionlint` workflow-lint gate.** The
     `actionlint` check had failed on *every* push since 2026-05-25 (through the
     entire v2.2.x/v2.3.x series) over a single `shellcheck` SC2015 finding: the
