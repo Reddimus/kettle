@@ -36,6 +36,14 @@ pub enum FieldKind {
         step: i64,
         suffix: &'static str,
     },
+    /// Cycle 766: a rebindable keybinding. `action` is the canonical
+    /// `Action::from_name` token (e.g. `"split_right"`). The displayed value is
+    /// the chord currently bound to that action (reverse-looked-up from
+    /// `cfg.keybinds`); activating it enters capture mode and the next chord is
+    /// bound to the action live + persisted. `key` is unused for these (they
+    /// don't persist via the key=value path; the editor appends a `keybind`
+    /// line), so it carries the action name too.
+    Keybind { action: &'static str },
 }
 
 /// One editable setting: a human label, the config key it persists to, and how
@@ -61,6 +69,10 @@ pub struct Category {
 pub struct SettingsNav {
     pub category: usize,
     pub field: usize,
+    /// Cycle 766: `true` while the focused Keybind field is waiting for the
+    /// user to press a chord to bind. The next non-modifier key press is
+    /// captured as the new binding; Esc cancels.
+    pub capturing: bool,
 }
 
 fn toggle(label: &'static str, key: &'static str) -> Field {
@@ -101,6 +113,16 @@ fn number(
             step,
             suffix,
         },
+    }
+}
+
+/// Cycle 766: a rebindable-keybinding field. `action` is the canonical action
+/// token; `label` is the human row label.
+fn keybind(label: &'static str, action: &'static str) -> Field {
+    Field {
+        label,
+        key: action,
+        kind: FieldKind::Keybind { action },
     }
 }
 
@@ -150,6 +172,23 @@ pub fn categories() -> Vec<Category> {
                 ),
             ],
         },
+        Category {
+            name: "Keybinds",
+            fields: vec![
+                keybind("Split right", "split_right"),
+                keybind("Split down", "split_down"),
+                keybind("Close pane", "close_pane"),
+                keybind("New tab", "new_tab"),
+                keybind("Next tab", "next_tab"),
+                keybind("Previous tab", "previous_tab"),
+                keybind("Search", "start_search"),
+                keybind("Command palette", "command_palette"),
+                keybind("Open settings", "open_settings"),
+                keybind("Zoom pane", "toggle_zoom"),
+                keybind("Copy", "copy"),
+                keybind("Paste", "paste"),
+            ],
+        },
     ]
 }
 
@@ -179,6 +218,20 @@ pub fn read(cfg: &Config, field: &Field) -> String {
         }
         FieldKind::Number { suffix, .. } => {
             format!("{}{}", read_number(cfg, field.key), suffix)
+        }
+        FieldKind::Keybind { action } => {
+            // Reverse-look-up the chord currently bound to this action in the
+            // effective keymap. Shows the first match (an action may have
+            // several bindings); "unbound" if none.
+            match kettle_config::Action::from_name(action) {
+                Some(a) => cfg
+                    .keybinds
+                    .iter()
+                    .find(|(_, v)| **v == a)
+                    .map(|(t, _)| t.label())
+                    .unwrap_or_else(|| "unbound".to_string()),
+                None => "—".to_string(),
+            }
         }
     }
 }
@@ -216,6 +269,24 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             let next = (cur + delta).clamp(*min, *max);
             write_number(field.key, next, suffix)
         }
+        // Keybinds don't change via ←/→: activating one enters capture mode in
+        // the overlay handler, which binds the next chord directly. No-op here.
+        FieldKind::Keybind { .. } => String::new(),
+    }
+}
+
+/// Cycle 766: is this field a rebindable keybinding? The overlay handler uses
+/// this to route Enter/Space into chord-capture instead of the value-cycle path.
+pub fn is_keybind(field: &Field) -> bool {
+    matches!(field.kind, FieldKind::Keybind { .. })
+}
+
+/// Cycle 766: the canonical action token for a keybind field (for capture +
+/// persistence). `None` for non-keybind fields.
+pub fn keybind_action(field: &Field) -> Option<&'static str> {
+    match field.kind {
+        FieldKind::Keybind { action } => Some(action),
+        _ => None,
     }
 }
 

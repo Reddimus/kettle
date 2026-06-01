@@ -1393,6 +1393,73 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     Ok(bak)
 }
 
+/// Cycle 766: append a `keybind = <trigger>=<action>` line to the user's config
+/// file, atomically and with the same first-write `.bak` backup as
+/// `persist_config_toggle`. `keybind` is *repeatable* (unlike the single-valued
+/// keys `persist_config_toggle` handles), so this appends rather than replaces —
+/// the interactive keybind editor uses it to add a binding live + persist it.
+/// Any prior `keybind` line that maps the SAME trigger is dropped first so the
+/// file doesn't accumulate stale duplicates for a re-rebound chord.
+pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Result<PathBuf> {
+    if path.components().any(|c| c.as_os_str() == "..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing path with `..` component: {}", path.display()),
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::other(format!("config path has no parent: {}", path.display()))
+    })?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing: String = std::fs::read_to_string(path).unwrap_or_default();
+    let bak_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!("{e}.bak"))
+        .unwrap_or_else(|| "bak".to_string());
+    let bak = path.with_extension(bak_ext);
+    if !bak.exists() {
+        std::fs::write(&bak, &existing)?;
+    }
+    // Drop any existing `keybind` line whose trigger (the part before the first
+    // `=` in the value) equals this one, case-insensitively — re-rebinding the
+    // same chord should overwrite, not stack.
+    let want = trigger.trim().to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::with_capacity(existing.lines().count() + 2);
+    for line in existing.lines() {
+        let drop = parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
+            && line
+                .split_once('=')
+                .and_then(|(_, v)| v.split_once('='))
+                .map(|(t, _)| t.trim().to_ascii_lowercase() == want)
+                .unwrap_or(false);
+        if !drop {
+            out.push(line.to_string());
+        }
+    }
+    if !out.is_empty() && !out.last().is_some_and(|l| l.is_empty()) {
+        out.push(String::new());
+    }
+    out.push(format!("keybind = {trigger}={action}"));
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, &text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(bak)
+}
+
 /// Cycle 716: extract the key from a `KEY = VALUE` config line.
 /// Returns `None` for blanks, comments, or malformed lines.
 fn parse_line_key(line: &str) -> Option<&str> {
@@ -6319,6 +6386,39 @@ mod config_tests {
         ));
         std::fs::create_dir_all(&p).expect("mkdir tmp");
         p
+    }
+
+    /// Cycle 766: `append_keybind` appends a repeatable `keybind` line, the
+    /// written line parses back to the intended binding, and re-binding the
+    /// SAME trigger overwrites rather than stacking. Backs the interactive
+    /// keybind editor's persistence.
+    #[test]
+    fn append_keybind_persists_and_parses_back() {
+        let dir = tempdir_for("keybind");
+        let path = dir.join("config");
+        std::fs::write(&path, "font-size = 14\n").unwrap();
+        // First bind.
+        super::append_keybind(&path, "Ctrl+Alt+R", "split_right").expect("append");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("keybind = Ctrl+Alt+R=split_right"),
+            "got: {text:?}"
+        );
+        assert!(text.contains("font-size = 14"), "must preserve other keys");
+        // The whole config parses and the binding takes effect.
+        let cfg = super::Config::parse_text(&text);
+        let trig = super::keybinds::parse_trigger("Ctrl+Alt+R").unwrap();
+        assert_eq!(cfg.keybinds.get(&trig), Some(&super::Action::SplitRight));
+        // Re-binding the SAME trigger overwrites (no duplicate keybind lines).
+        super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").expect("rebind");
+        let text2 = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text2.matches("Ctrl+Alt+R=").count(),
+            1,
+            "re-binding the same chord must not stack lines: {text2:?}"
+        );
+        assert!(text2.contains("keybind = Ctrl+Alt+R=new_tab"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Cycle 716: writing a new key into an empty config appends it.

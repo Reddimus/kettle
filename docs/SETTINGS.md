@@ -41,6 +41,13 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Hide mouse while typing | `mouse-hide-while-typing` | on / off |
 | Focus mode | `focus` | click · follows-mouse · system |
 
+**Keybinds** — rebind common actions interactively. Each row shows the chord
+currently bound to that action; press **Enter** on a row, then press the new
+chord you want (any modifier combination). It binds immediately and is saved to
+your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
+actions: split right/down, close pane, new/next/previous tab, search, command
+palette, open settings, zoom pane, copy, paste.
+
 ## Beyond the panel
 
 The panel covers the most-used options; kettle has many more config keys
@@ -49,7 +56,7 @@ For those, edit the config file directly — the full reference is in
 [CONFIG.md](CONFIG.md). You can jump straight to it from kettle with
 **right-click → Preferences ▸ Advanced… (open config in $EDITOR)**.
 
-> **Keybinds:** the settings panel doesn't yet edit keybindings interactively —
-> rebind keys in the config file (`keybind = ctrl+shift+e = split_right`) and
-> see your effective bindings any time with `kettle --list-keybinds`. An
-> interactive keybind editor is on the roadmap.
+> **Tip:** for keybinds beyond the curated list (or to unbind a default),
+> edit the config file directly (`keybind = ctrl+shift+e = split_right`,
+> `keybind = ctrl+shift+e = unbind`) and check your effective bindings any
+> time with `kettle --list-keybinds`.

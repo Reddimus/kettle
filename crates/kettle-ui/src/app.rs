@@ -3532,9 +3532,16 @@ impl App {
                 rows: active
                     .fields
                     .iter()
-                    .map(|f| kettle_render::SettingsRow {
+                    .enumerate()
+                    .map(|(i, f)| kettle_render::SettingsRow {
                         label: f.label.to_string(),
-                        value: crate::settings::read(&self.cfg, f),
+                        // Cycle 766: show a capture prompt on the focused keybind
+                        // row while waiting for the user's chord.
+                        value: if i == fld && nav.capturing {
+                            "‹press a chord — Esc to cancel›".to_string()
+                        } else {
+                            crate::settings::read(&self.cfg, f)
+                        },
                     })
                     .collect(),
                 focused_row: fld,
@@ -6823,8 +6830,8 @@ impl App {
             self.settings_nav = None;
             return;
         }
-        let (mut cat, mut fld) = match &self.settings_nav {
-            Some(n) => (n.category.min(cats.len() - 1), n.field),
+        let (mut cat, mut fld, capturing) = match &self.settings_nav {
+            Some(n) => (n.category.min(cats.len() - 1), n.field, n.capturing),
             None => return,
         };
         let field_count = cats[cat].fields.len();
@@ -6834,6 +6841,44 @@ impl App {
         if fld >= field_count {
             fld = field_count - 1;
         }
+
+        // Cycle 766: chord-capture mode — the focused Keybind field is waiting
+        // for the user to press a chord. Esc cancels. A bare modifier press maps
+        // to `None` via `to_kkey`, so we simply stay in capture until a real key
+        // arrives. Any other chord is bound to the action live AND appended to
+        // the config file so it survives restart.
+        if capturing {
+            if matches!(key, Key::Named(NamedKey::Escape)) {
+                if let Some(n) = self.settings_nav.as_mut() {
+                    n.capturing = false;
+                }
+                return;
+            }
+            if let Some(kk) = to_kkey(key) {
+                if let Some(action) = crate::settings::keybind_action(&cats[cat].fields[fld])
+                    && let Some(act) = Action::from_name(action)
+                {
+                    let trig = Trigger::new(to_mods(self.mods), kk);
+                    let label = trig.label();
+                    // Live: this chord now triggers the action.
+                    self.cfg.keybinds.insert(trig, act);
+                    // Persist: append `keybind = <chord>=<action>`.
+                    if let Some(path) = self
+                        .config_path
+                        .clone()
+                        .or_else(kettle_config::Config::default_path)
+                        && let Err(e) = kettle_config::append_keybind(&path, &label, action)
+                    {
+                        log::warn!("append_keybind({label}={action}) failed: {e}");
+                    }
+                }
+                if let Some(n) = self.settings_nav.as_mut() {
+                    n.capturing = false;
+                }
+            }
+            return;
+        }
+
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.settings_nav = None;
@@ -6855,21 +6900,36 @@ impl App {
             | Key::Named(NamedKey::ArrowLeft)
             | Key::Named(NamedKey::Space)
             | Key::Named(NamedKey::Enter) => {
-                let dir = match key {
-                    Key::Named(NamedKey::ArrowRight) => 1,
-                    Key::Named(NamedKey::ArrowLeft) => -1,
-                    _ => 0, // Space / Enter = activate (cycle forward / toggle)
-                };
-                // Scope the cfg borrow so reload_config (&mut self) is free.
-                let (key_str, new_val) = {
-                    let field = &cats[cat].fields[fld];
-                    (
-                        field.key,
-                        crate::settings::next_value(&self.cfg, field, dir),
-                    )
-                };
-                self.persist_pref(key_str, &new_val);
-                self.reload_config();
+                let field = &cats[cat].fields[fld];
+                if crate::settings::is_keybind(field) {
+                    // Enter/Space on a keybind row → enter chord-capture; ←/→ no-op.
+                    if matches!(
+                        key,
+                        Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter)
+                    ) {
+                        if let Some(n) = self.settings_nav.as_mut() {
+                            n.category = cat;
+                            n.field = fld;
+                            n.capturing = true;
+                        }
+                        return;
+                    }
+                } else {
+                    let dir = match key {
+                        Key::Named(NamedKey::ArrowRight) => 1,
+                        Key::Named(NamedKey::ArrowLeft) => -1,
+                        _ => 0, // Space / Enter = activate (cycle forward / toggle)
+                    };
+                    // Scope the cfg borrow so reload_config (&mut self) is free.
+                    let (key_str, new_val) = {
+                        (
+                            field.key,
+                            crate::settings::next_value(&self.cfg, field, dir),
+                        )
+                    };
+                    self.persist_pref(key_str, &new_val);
+                    self.reload_config();
+                }
             }
             _ => {}
         }

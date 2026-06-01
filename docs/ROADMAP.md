@@ -1405,14 +1405,12 @@ breakdown.
 The Terminator-parity sweep effectively closes the major missing-
 features list. What's left is genuinely-multi-week threads + polish.
 
-- [ ] **Interactive keybind editor in the settings overlay** (cycle 756
-      shipped Appearance/Behavior live-editing; the Keybinds category is the
-      next sub-cycle). Needs: a `Keybinds` category listing trigger→action,
-      chord-capture mode, conflict detection, a `trigger → config-string`
-      serializer, and a `persist_keybind` config helper that
-      appends/replaces repeatable `keybind = trigger=action` lines (the
-      current `persist_config_toggle` is single-line-replace). Until then,
-      rebind in the config file and view bindings via `--list-keybinds`.
+- [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
+      Keybinds category lists each action's current chord; Enter captures a new
+      chord, binds it live, and appends a `keybind` line (via
+      `kettle_config::append_keybind`, with `Trigger::label()` as the verified
+      round-tripping serializer). Add semantics; unbinding a default is still a
+      config-file edit.
 - [ ] tmux `-CC` post-parser integration (sub-cycles 3-7 per
       `docs/TMUX-CC-DESIGN.md`): pane-state plumbing, window-tab
       synthesis, input routing, layout-change, detach cleanup.

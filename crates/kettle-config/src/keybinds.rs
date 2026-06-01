@@ -1109,6 +1109,38 @@ pub(crate) fn is_unbind_token(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Cycle 766: `Trigger::label()` must round-trip through `parse_trigger`
+    /// for every `Key` variant — the interactive keybind editor uses `label()`
+    /// as the config-file serializer (`keybind = <label>=<action>`), so a
+    /// non-round-tripping label would persist a binding the parser can't read
+    /// back. Covers modifiers, letters, punctuation aliases, named keys, F-keys.
+    #[test]
+    fn trigger_label_round_trips_through_parse() {
+        let cs = Mods::CTRL | Mods::SHIFT;
+        let cases = [
+            Trigger::new(cs, Key::Char('e')),
+            Trigger::new(Mods::CTRL, Key::Char(',')),
+            Trigger::new(Mods::ALT, Key::Left),
+            Trigger::new(Mods::SUPER | Mods::SHIFT, Key::Char('g')),
+            Trigger::new(Mods::CTRL, Key::Char('+')),
+            Trigger::new(Mods::CTRL, Key::Char('-')),
+            Trigger::new(Mods::CTRL, Key::Char('=')),
+            Trigger::new(Mods::empty(), Key::F(5)),
+            Trigger::new(cs, Key::PageUp),
+            Trigger::new(Mods::ALT, Key::Char('1')),
+            Trigger::new(cs, Key::Enter),
+            Trigger::new(Mods::CTRL, Key::Up),
+        ];
+        for t in cases {
+            let label = t.label();
+            assert_eq!(
+                parse_trigger(&label),
+                Some(t),
+                "label {label:?} did not round-trip back to {t:?}"
+            );
+        }
+    }
+
     #[test]
     fn trigger_label_formats() {
         let t = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('e'));

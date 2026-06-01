@@ -31,6 +31,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     in-flight memory cap (1 GiB across all slots) in addition to the existing
     per-slot 384 MiB cap, so a hostile PTY stream chaining many concurrent
     large partial image/animation transmissions can't accumulate ~12 GiB.
+  - **Added:** the Settings overlay now has an **interactive Keybinds editor** —
+    a Keybinds category lists common actions with their current chord; press
+    Enter on a row, then press the chord you want, and it's bound immediately
+    and saved to your config (Esc cancels). Covers split/close/tab-nav/search/
+    palette/settings/zoom/copy/paste.
   - **Docs/CI:** corrected the documented macOS config path (kettle uses
     `~/.config`, not `~/Library/Application Support`); the release workflow now
     enforces the full `## [X.Y.Z] — YYYY-MM-DD` CHANGELOG format (matching
