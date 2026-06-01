@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-06-01
+
+  **Minor: post-v2.3.2 hardening — the exhaustive-review bundle.** One grouped
+  release of the entire post-v2.3.2 follow-up (cycles 778-783) rather than a
+  string of small patches. Driven by a per-dimension **production-readiness
+  audit** (all 11 named dimensions — Rust, testing, docs, mermaid, install/setup,
+  memory, time/space complexity, UI/UX, CI/CD, releases, architecture — assessed
+  by a multi-agent workflow with adversarial verification) that rated kettle
+  **production-grade across the board** and surfaced exactly three gaps, all fixed
+  here: a link-detection O(n²) on URL-dense viewports, a missing aarch64
+  supply-chain target in `deny.toml`, and stale install-doc version examples.
+  Also bundled: a real config-persistence de-duplication bug fix, two corrected
+  stale doc-comments (focus-follows-mouse and detachable-tabs were wrongly marked
+  "no-op"), and a new Settings-overlay architecture diagram. No new runtime
+  features or breaking changes — bundled as a minor to mark the consolidated
+  hardening pass. Windows gauntlet + all-three-OS CI green throughout.
+
   - **Performance (cycle 781) — URL link detection no longer scans all-rows
     links per match.** In `kettle-core::links`, the autodetect overlap check
     (skip an autodetected URL already covered by an OSC 8 hyperlink) walked the
