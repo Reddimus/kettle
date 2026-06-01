@@ -1371,6 +1371,10 @@ pub struct App {
     ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
     palette_input: Option<(String, usize)>,
+    /// Cycle 756: `Action::OpenSettings` overlay navigation. `Some` while the
+    /// in-app settings panel is open. Field values are read live from
+    /// `self.cfg`; changes persist immediately via `persist_pref` + reload.
+    settings_nav: Option<crate::settings::SettingsNav>,
     /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
     /// `Action::OpenLayoutPicker` modal state. Same shape as
     /// `palette_input` — (typed query, selected index) — but
@@ -1894,6 +1898,7 @@ impl App {
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
+            settings_nav: None,
             layout_picker_input: None,
             hint_state: None,
             context_menu: None,
@@ -3507,6 +3512,28 @@ impl App {
                         .collect(),
                     focus_idx: d.focus_idx,
                 });
+        // Cycle 756: project the settings overlay (independent of search, like
+        // the confirm dialog). Values are read from the live Config so the
+        // panel reflects the current state (incl. external reloads).
+        let settings_overlay = self.settings_nav.as_ref().map(|nav| {
+            let cats = crate::settings::categories();
+            let cat = nav.category.min(cats.len().saturating_sub(1));
+            let active = &cats[cat];
+            let fld = nav.field.min(active.fields.len().saturating_sub(1));
+            kettle_render::SettingsOverlay {
+                categories: cats.iter().map(|c| c.name.to_string()).collect(),
+                active_category: cat,
+                rows: active
+                    .fields
+                    .iter()
+                    .map(|f| kettle_render::SettingsRow {
+                        label: f.label.to_string(),
+                        value: crate::settings::read(&self.cfg, f),
+                    })
+                    .collect(),
+                focused_row: fld,
+            }
+        });
         let s = &self.mux.search;
         if !s.open {
             return Overlay {
@@ -3524,6 +3551,7 @@ impl App {
                 bell,
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
+                settings: settings_overlay,
                 ..Overlay::default()
             };
         }
@@ -3565,6 +3593,7 @@ impl App {
             vi_cursor: self.vi_mode.map(|v| (v.row, v.col)),
             vi_visual_anchor: self.vi_mode.and_then(|v| v.visual_anchor),
             confirm_dialog,
+            settings: settings_overlay,
         }
     }
 
@@ -3869,6 +3898,7 @@ impl App {
     fn close_all_modals(&mut self) {
         self.mux.search.open = false;
         self.palette_input = None;
+        self.settings_nav = None;
         self.layout_picker_input = None;
         self.hint_state = None;
         self.ssh_input = None;
@@ -3955,6 +3985,7 @@ impl App {
     fn any_modal_open(&self) -> bool {
         self.mux.search.open
             || self.palette_input.is_some()
+            || self.settings_nav.is_some()
             || self.layout_picker_input.is_some()
             || self.hint_state.is_some()
             || self.ssh_input.is_some()
@@ -4314,6 +4345,15 @@ impl App {
         // for Profile (only appended when ~/.config/kettle/
         // profiles/ has any *.config files).
         self.append_profile_submenu_items(&mut items);
+        // Cycle 756: top-level "Settings…" entry opens the full in-app
+        // settings overlay (the richer, keyboard-navigable panel). The
+        // Preferences ▸ submenu below stays as the quick-toggle surface.
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Item {
+            label: "Settings…",
+            action: kettle_config::Action::OpenSettings,
+            enabled: true,
+        });
         // Cycle 717 (Preferences submenu, C8): runtime-mutable
         // settings + the Advanced… escape hatch.
         self.append_preferences_submenu_items(&mut items);
@@ -5380,6 +5420,12 @@ impl App {
             Action::CommandPalette => {
                 self.close_all_modals();
                 self.palette_input = Some((String::new(), 0));
+            }
+            // Cycle 756: open the in-app settings overlay (Ctrl+, / right-click
+            // → Settings / palette "Open settings").
+            Action::OpenSettings => {
+                self.close_all_modals();
+                self.settings_nav = Some(crate::settings::SettingsNav::default());
             }
             // Cycle 708 (Terminator parity, layoutlauncher.py):
             // open the runtime layout picker. Empty layouts dir
@@ -6746,6 +6792,71 @@ impl App {
                     *sel = 0;
                 }
             }
+        }
+    }
+
+    /// Cycle 756: keyboard routing while the settings overlay is open.
+    /// ↑/↓ move between fields, Tab/Shift+Tab switch category, ←/→ change the
+    /// focused field's value, Space/Enter activate (toggle / cycle forward),
+    /// Esc closes. Every change persists to the config file via `persist_pref`
+    /// and reloads live, so the effect is immediate (matching the right-click
+    /// Preferences toggles).
+    fn settings_key(&mut self, key: &Key, _event_loop: &ActiveEventLoop) {
+        let cats = crate::settings::categories();
+        if cats.is_empty() {
+            self.settings_nav = None;
+            return;
+        }
+        let (mut cat, mut fld) = match &self.settings_nav {
+            Some(n) => (n.category.min(cats.len() - 1), n.field),
+            None => return,
+        };
+        let field_count = cats[cat].fields.len();
+        if field_count == 0 {
+            return;
+        }
+        if fld >= field_count {
+            fld = field_count - 1;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.settings_nav = None;
+                self.reset_blink_phase();
+                return;
+            }
+            Key::Named(NamedKey::ArrowDown) => fld = (fld + 1) % field_count,
+            Key::Named(NamedKey::ArrowUp) => fld = (fld + field_count - 1) % field_count,
+            Key::Named(NamedKey::Tab) => {
+                let n = cats.len();
+                cat = if self.mods.shift_key() {
+                    (cat + n - 1) % n
+                } else {
+                    (cat + 1) % n
+                };
+                fld = 0;
+            }
+            Key::Named(NamedKey::ArrowRight)
+            | Key::Named(NamedKey::ArrowLeft)
+            | Key::Named(NamedKey::Space)
+            | Key::Named(NamedKey::Enter) => {
+                let dir = match key {
+                    Key::Named(NamedKey::ArrowRight) => 1,
+                    Key::Named(NamedKey::ArrowLeft) => -1,
+                    _ => 0, // Space / Enter = activate (cycle forward / toggle)
+                };
+                // Scope the cfg borrow so reload_config (&mut self) is free.
+                let (key_str, new_val) = {
+                    let field = &cats[cat].fields[fld];
+                    (field.key, crate::settings::next_value(&self.cfg, field, dir))
+                };
+                self.persist_pref(key_str, &new_val);
+                self.reload_config();
+            }
+            _ => {}
+        }
+        if let Some(n) = self.settings_nav.as_mut() {
+            n.category = cat;
+            n.field = fld;
         }
     }
 
@@ -8266,6 +8377,15 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if self.palette_input.is_some() {
                     self.palette_key(&event.logical_key, text, event_loop);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Cycle 756: settings overlay key handling (exclusive modal).
+                if self.settings_nav.is_some() {
+                    self.settings_key(&event.logical_key, event_loop);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }

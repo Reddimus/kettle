@@ -225,6 +225,9 @@ pub struct Overlay {
     /// backdrop. The renderer paints the prompt + button row;
     /// the button at `focus_idx` gets the accent-border treatment.
     pub confirm_dialog: Option<ConfirmDialogOverlay>,
+    /// Cycle 756: `Some` while the in-app settings overlay is open. Painted
+    /// centered, above panes but below the confirm dialog.
+    pub settings: Option<SettingsOverlay>,
 }
 
 /// Cycle 660: renderer-side projection of `App::confirm_dialog`.
@@ -245,6 +248,29 @@ pub struct ConfirmDialogOverlay {
 pub struct ConfirmDialogButton {
     pub label: String,
     pub destructive: bool,
+}
+
+/// Cycle 756: renderer-side projection of `App::settings_nav` + the resolved
+/// field values. The UI computes labels/values (reading `Config`); the renderer
+/// just paints a centered panel — a row of category tabs, then label/value
+/// rows for the active category, with the focused row highlighted.
+#[derive(Debug, Clone)]
+pub struct SettingsOverlay {
+    /// Category tab names, in order.
+    pub categories: Vec<String>,
+    /// Index of the active category (its tab is highlighted, its rows shown).
+    pub active_category: usize,
+    /// The active category's fields as (label, current-value) pairs.
+    pub rows: Vec<SettingsRow>,
+    /// Index into `rows` of the focused field (gets the accent highlight).
+    pub focused_row: usize,
+}
+
+/// Cycle 756: one settings row — a human label and its current value string.
+#[derive(Debug, Clone)]
+pub struct SettingsRow {
+    pub label: String,
+    pub value: String,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -413,6 +439,10 @@ pub struct Renderer {
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
+    /// Cycle 756: one text buffer per display line of the settings overlay
+    /// (title, category tabs, field rows, footer). Grown + truncated like the
+    /// context-menu pool.
+    settings_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
     /// Single shared `✕` glyph buffer reused for every tab's close
     /// button. Rendered separately from the title text so we can:
@@ -635,6 +665,7 @@ impl Renderer {
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
+            settings_buffers: Vec::new(),
             tabbar_buffer,
             tab_close_buffer,
             search_buffer,
@@ -1782,6 +1813,34 @@ impl Renderer {
             }
         }
 
+        // Cycle 756: settings-overlay row buffers (one per display line).
+        if let Some(set) = &overlay.settings {
+            let lines = settings_display_lines(set);
+            while self.settings_buffers.len() < lines.len() {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.settings_buffers.push(b);
+            }
+            self.settings_buffers.truncate(lines.len());
+            // Panel width fits the content but never exceeds the surface
+            // (so it stays usable in a small window); see the matching clamp
+            // in the quad/area pass below.
+            let panel_w = (44.0 * cw + 48.0).min((sw - 40.0).max(120.0));
+            let row_h = ch + 6.0;
+            for (i, line) in lines.iter().enumerate() {
+                let buf = &mut self.settings_buffers[i];
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    line,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -2108,6 +2167,51 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
                 row_y += row_h;
+            }
+        }
+
+        // Cycle 756: settings overlay — a centered modal panel drawn on top via
+        // the menu pipeline (dim backdrop + panel + accent border + focused-row
+        // highlight as quads; one TextArea per display line).
+        if let Some(set) = &overlay.settings {
+            let lines = settings_display_lines(set);
+            let row_h = ch + 6.0;
+            let panel_w = (44.0 * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
+            let px = ((sw - panel_w) * 0.5).max(0.0);
+            let py = ((sh - panel_h) * 0.5).max(0.0);
+            let acc = theme.palette[4];
+            // Dim backdrop over the whole window so the panel reads as modal.
+            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, 0.55));
+            // Panel background (near-opaque) + accent border.
+            menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
+            menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
+            menu_q.push(rect(px, py + panel_h - 2.0, panel_w, 2.0, acc, 1.0));
+            menu_q.push(rect(px, py, 2.0, panel_h, acc, 1.0));
+            menu_q.push(rect(px + panel_w - 2.0, py, 2.0, panel_h, acc, 1.0));
+            // Focused field-row highlight.
+            let hi_line = SETTINGS_FIELD_START + set.focused_row;
+            let hi_y = py + 12.0 + hi_line as f32 * row_h;
+            menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
+            let sfg = theme.foreground;
+            for (i, _line) in lines.iter().enumerate() {
+                if i >= self.settings_buffers.len() {
+                    break;
+                }
+                menu_areas.push(TextArea {
+                    buffer: &self.settings_buffers[i],
+                    left: px + 16.0,
+                    top: py + 12.0 + i as f32 * row_h + 3.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: px as i32,
+                        top: py as i32,
+                        right: (px + panel_w) as i32,
+                        bottom: (py + panel_h) as i32,
+                    },
+                    default_color: GColor::rgb(sfg.r, sfg.g, sfg.b),
+                    custom_glyphs: &[],
+                });
             }
         }
 
@@ -2861,6 +2965,47 @@ async fn request_adapter_or_fallback(
         .request_adapter(&fallback)
         .await
         .map_err(|e| anyhow!("{context}: no GPU adapter, even software fallback: {e:?}"))
+}
+
+/// Cycle 756: number of header display-lines before the field rows in the
+/// settings panel (title, category tabs, blank). The focused-row highlight
+/// quad and the per-line text areas both index off this.
+const SETTINGS_FIELD_START: usize = 3;
+
+/// Cycle 756: build the settings panel's display lines from its renderer-side
+/// projection — title, a category-tab strip (active category bracketed), a
+/// blank, one `"▸ label        value"` line per field (focused row marked),
+/// a blank, then the keybind footer. Shared by the buffer-text pass and the
+/// quad/area pass so they stay in lockstep (same row count + ordering).
+fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
+    let mut lines = Vec::with_capacity(set.rows.len() + SETTINGS_FIELD_START + 2);
+    let cat = set
+        .categories
+        .get(set.active_category)
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    lines.push(format!("⚙  Settings — {cat}"));
+    let tabs: Vec<String> = set
+        .categories
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == set.active_category {
+                format!("[ {c} ]")
+            } else {
+                format!("  {c}  ")
+            }
+        })
+        .collect();
+    lines.push(tabs.join(" "));
+    lines.push(String::new());
+    for (i, row) in set.rows.iter().enumerate() {
+        let mark = if i == set.focused_row { "▸ " } else { "  " };
+        lines.push(format!("{mark}{:<26}{}", row.label, row.value));
+    }
+    lines.push(String::new());
+    lines.push("↑↓ field    ←→ change    Tab category    Esc close".to_string());
+    lines
 }
 
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a

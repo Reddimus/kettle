@@ -30,6 +30,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Open kettle help / README", ShowHelp),
         ("Send newline (Shift+Return) to focused pane", SendNewline),
         ("Open layout picker", OpenLayoutPicker),
+        ("Open settings", OpenSettings),
         ("Edit config file in $EDITOR", EditConfig),
         ("Preferences: scrollbar always-on", SetScrollbarAlways),
         ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
@@ -284,6 +285,7 @@ mod tests {
             ToggleWindowVisibility,
             MoveTabToNewWindow,
             EditPaneGroup,
+            OpenSettings,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -391,6 +393,7 @@ mod tests {
                 | ToggleWindowVisibility
                 | MoveTabToNewWindow
                 | EditPaneGroup
+                | OpenSettings
                 | GotoTab(_) => {}
             }
         }

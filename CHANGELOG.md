@@ -29,6 +29,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - **Changed (Linux):** the X11 `WM_CLASS` is derived from the binary name
     (default `kettle`) instead of hardcoded, so renamed/forked binaries still
     group correctly in GNOME/KDE task switchers and match their own `.desktop`.
+  - **Added:** an in-app **Settings overlay** — a keyboard-navigable panel of
+    the most-used options (font size, opacity, padding, cursor, scrollbar,
+    bell, scrollback, copy-on-select, focus mode, …) grouped into categories.
+    Open it with **Ctrl+,** or **right-click → Settings…**; ↑↓ moves between
+    fields, ←→ changes a value (Tab switches category, Esc closes). Changes
+    apply live and persist to your config file — no hand-editing needed. An
+    "Advanced" path to the raw config remains for the long tail.
 
 ## [2.1.2] — 2026-05-30
 

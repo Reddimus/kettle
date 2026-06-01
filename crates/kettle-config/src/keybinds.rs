@@ -204,6 +204,12 @@ pub enum Action {
     /// active config file to that pane's PTY too in case the
     /// user wants to switch editors mid-session.
     EditConfig,
+    /// Cycle 756: open the in-app **Settings overlay** — a keyboard-navigable
+    /// panel of the most-used config keys (font size, theme, scrollbar, bell,
+    /// cursor, opacity, …) that persists changes live. Distinct from
+    /// `EditConfig` (which opens the raw config file in `$EDITOR` for the long
+    /// tail). This is the "settings menu for non-technical users" surface.
+    OpenSettings,
     /// Cycle 717 (Preferences submenu, C8): runtime-mutable
     /// toggles that the Preferences ▸ right-click submenu wires
     /// through `Config::persist_config_toggle` (cycle 716) so a
@@ -511,6 +517,8 @@ pub fn action_names() -> Vec<&'static str> {
         "open_layout_picker",
         "preferences",
         "edit_config",
+        "settings",
+        "open_settings",
         "set_scrollbar_always",
         "set_scrollbar_auto",
         "set_scrollbar_never",
@@ -722,6 +730,7 @@ impl Action {
             | "edit-config"
             | "open_config"
             | "open-config" => EditConfig,
+            "settings" | "open_settings" | "open-settings" => OpenSettings,
             "set_scrollbar_always" | "set-scrollbar-always" | "scrollbar_always" => {
                 SetScrollbarAlways
             }
@@ -1025,6 +1034,10 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(sus, Char('g'), ToggleBroadcastOff);
     bind(Mods::empty(), F(11), ToggleFullscreen);
     bind(cs, Char('m'), ReloadConfig);
+    // Cycle 756: Ctrl+, opens the Settings overlay (VS Code / common
+    // convention). Ctrl+, is otherwise unused by shells, and the overlay is
+    // also reachable from the right-click menu.
+    bind(c, Char(','), OpenSettings);
     bind(c, Up, JumpPrevPrompt);
     bind(c, Down, JumpNextPrompt);
     bind(cs, Char('s'), OpenSsh);

@@ -25,6 +25,7 @@ mod input;
 mod lua;
 mod mux;
 mod session;
+mod settings;
 // Cycle 745: OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 
