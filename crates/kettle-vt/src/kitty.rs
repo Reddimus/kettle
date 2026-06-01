@@ -47,6 +47,16 @@ const MAX_KITTY_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
 /// are evicted by the per-slot cap above.
 const MAX_IN_FLIGHT_SLOTS: usize = 32;
 
+/// Cycle 764: global cap on the *sum* of all in-flight transmission payloads
+/// (every `in_flight` slot plus the animation `frame_in_flight` slot). The
+/// per-slot `MAX_KITTY_PAYLOAD_BYTES` (384 MiB) is sized for one legitimate
+/// 8192²-pixel image, but on its own `MAX_IN_FLIGHT_SLOTS` (32) × 384 MiB ≈
+/// 12 GiB could be accumulated by a hostile emitter chaining many large partial
+/// transmissions. 1 GiB total comfortably allows a couple of concurrent
+/// max-size images (or many small ones) while bounding the worst case to a
+/// fraction of host RAM. On breach the offending slot is dropped.
+const MAX_TOTAL_IN_FLIGHT_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Cycle 580: cap on per-image animation frames. Each successful
 /// `a=f` frame transmission appends a `Frame` (carrying an `ImageData`
 /// Arc) to `frames[id]`; without a cap, an attacker can chain
@@ -411,9 +421,10 @@ impl KittyState {
             };
             // Cycle 578: defense against an attacker chaining `m=1`
             // continuation chunks indefinitely. Drop the slot once it
-            // crosses the cap; any next-chunk for this transmission
-            // starts a fresh slot but will also fail past the cap.
-            if exceeded {
+            // crosses the per-slot cap. Cycle 764: also enforce the global
+            // cap (this frame slot + every in_flight slot) so concurrent
+            // image + animation transmissions can't sum past the ceiling.
+            if exceeded || self.in_flight_bytes() > MAX_TOTAL_IN_FLIGHT_BYTES {
                 self.frame_in_flight = None;
                 return KittyOut::None;
             }
@@ -583,8 +594,10 @@ impl KittyState {
             acc.payload.push_str(payload.trim());
             acc.payload.len() > MAX_KITTY_PAYLOAD_BYTES
         };
-        // Cycle 578: see frame-path comment above.
-        if exceeded {
+        // Cycle 578: per-slot cap. Cycle 764: also enforce the global cap
+        // across all slots so concurrent large transmissions can't sum past
+        // MAX_TOTAL_IN_FLIGHT_BYTES. Either breach drops this slot.
+        if exceeded || self.in_flight_bytes() > MAX_TOTAL_IN_FLIGHT_BYTES {
             self.in_flight.remove(&id);
             return KittyOut::None;
         }
@@ -667,6 +680,21 @@ impl KittyState {
     /// The relative-placement relation for `(image id, placement id)`.
     pub fn relative_placement(&self, id: u32, placement: u32) -> Option<&RelativePlacement> {
         self.rel.get(&(id, placement))
+    }
+
+    /// Cycle 764: total bytes currently buffered across every in-flight
+    /// transmission — all `in_flight` slots plus the animation `frame_in_flight`
+    /// slot. Used to enforce `MAX_TOTAL_IN_FLIGHT_BYTES`. O(slots) ≤ 32, called
+    /// once per chunk, so trivially cheap.
+    fn in_flight_bytes(&self) -> usize {
+        self.in_flight
+            .values()
+            .map(|a| a.payload.len())
+            .sum::<usize>()
+            + self
+                .frame_in_flight
+                .as_ref()
+                .map_or(0, |(_, a)| a.payload.len())
     }
 
     /// Test-only accessor for the cycle-579 in-flight slot cap drift guard.
@@ -1029,6 +1057,14 @@ mod tests {
         // — these are compile-time invariants of the constant itself.
         const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
         const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
+        // Cycle 764: the global in-flight cap must allow at least one legitimate
+        // max-size slot (else valid large images would always be refused) and
+        // stay well below the naive slots × per-slot worst case (~12 GiB).
+        const _: () = assert!(super::MAX_TOTAL_IN_FLIGHT_BYTES >= super::MAX_KITTY_PAYLOAD_BYTES);
+        const _: () = assert!(
+            super::MAX_TOTAL_IN_FLIGHT_BYTES
+                < super::MAX_IN_FLIGHT_SLOTS * super::MAX_KITTY_PAYLOAD_BYTES
+        );
     }
 
     /// Cycle 582 drift guard: `a=a,i=N` for many distinct N must not

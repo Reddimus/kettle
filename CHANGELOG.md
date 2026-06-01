@@ -27,6 +27,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     steady while the title-edit bar, confirm dialog, or settings overlay is
     open; and the settings overlay reads choice labels with bounds-checked
     access.
+  - **Hardened (DoS):** kitty graphics transmissions now enforce a **global**
+    in-flight memory cap (1 GiB across all slots) in addition to the existing
+    per-slot 384 MiB cap, so a hostile PTY stream chaining many concurrent
+    large partial image/animation transmissions can't accumulate ~12 GiB.
 
 ## [2.2.0] — 2026-05-31
 
