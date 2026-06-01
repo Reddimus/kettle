@@ -6204,7 +6204,8 @@ impl App {
         // the O(n) retain runs only when there are actually stale entries.
         if self.last_emitted_titles.len() > self.mux.panes.len() {
             let panes = &self.mux.panes;
-            self.last_emitted_titles.retain(|id, _| panes.contains_key(id));
+            self.last_emitted_titles
+                .retain(|id, _| panes.contains_key(id));
         }
     }
 
