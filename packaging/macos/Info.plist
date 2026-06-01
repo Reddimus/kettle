@@ -3,18 +3,26 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
   <key>CFBundleName</key>
   <string>kettle</string>
   <key>CFBundleDisplayName</key>
   <string>kettle</string>
   <key>CFBundleIdentifier</key>
   <string>org.kettle.terminal</string>
+  <!-- Cycle 768: categorize as a developer tool so Launchpad / the App
+       Store metadata / Finder group kettle correctly (terminal emulator). -->
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
   <!-- CFBundleVersion / CFBundleShortVersionString are patched at
        release time by .github/workflows/release.yml from the
        workspace.package.version in Cargo.toml so the .app reports
-       the same version that `kettle --version` prints. The
-       placeholders below are valid but only kept current up to the
-       last manual edit. -->
+       the same version the CLI prints. The placeholders below are
+       valid but only kept current up to the last manual edit.
+       (Cycle 768: reworded to drop a literal double-hyphen, which is
+       illegal inside an XML comment — lenient plist parsers tolerated
+       it but strict XML validators rejected the file.) -->
   <key>CFBundleVersion</key>
   <string>1.0.0</string>
   <key>CFBundleShortVersionString</key>

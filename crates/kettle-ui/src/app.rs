@@ -51,6 +51,40 @@ fn load_window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
+/// Cycle 768: macOS `sticky = true` — make the window appear on every Space
+/// (Mission Control workspace). winit 0.30 dropped the native method, so we
+/// reach the underlying `NSWindow` through the raw AppKit handle and set its
+/// collection behavior — exactly what `set_visible_on_all_workspaces` did. The
+/// objc2 / objc2-app-kit versions are pinned to winit's own (0.5 / 0.2) so the
+/// ObjC class layout matches. Best-effort: a missing handle just leaves the
+/// window on its current Space.
+#[cfg(target_os = "macos")]
+fn set_visible_on_all_spaces(window: &winit::window::Window) {
+    use objc2_app_kit::{NSView, NSWindowCollectionBehavior};
+    // winit re-exports raw-window-handle, so we don't need it as a direct dep.
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: on macOS winit hands us a live `NSView*`, and `resumed` runs on
+    // the main thread where AppKit requires UI mutations. We only borrow it.
+    let view: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    if let Some(ns_window) = view.window() {
+        // SAFETY: `setCollectionBehavior:` is an objc2 `unsafe fn` (any ObjC
+        // message send is). The behavior bits are valid and the window is live.
+        unsafe {
+            ns_window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary,
+            );
+        }
+    }
+}
+
 /// Translate a winit `MouseScrollDelta` into terminal lines, scaled by the
 /// configured `scroll-multiplier`. `LineDelta` ticks are ~3 lines × mult;
 /// `PixelDelta` is `y/20` × mult (~3 lines per typical notch). Pure.
@@ -7427,28 +7461,15 @@ impl ApplicationHandler<UserEvent> for App {
         // would need raw-window-handle direct atom writes (heavy
         // dep for one config key).
         //
-        // Cycle 730: macOS joined Bucket E too. winit 0.30 dropped
-        // the `WindowExtMacOS::set_visible_on_all_workspaces` method
-        // that the original sticky impl relied on; rebuilding it
-        // needs `objc2` + raw NSWindow handle (NSWindowCollectionBehavior
-        // with `.canJoinAllSpaces`). Heavy dep for one config key,
-        // same trade-off as X11/Wayland. Pre-730 this branch was
-        // breaking the macOS CI build (E0599: method not found on
-        // Arc<Window>) — the cycle-729 commit went out red on macOS
-        // because no maintainer hit it locally. Cycle-730 stubs the
-        // branch with a `log::info` so a user copying a Terminator
-        // config that sets `sticky = true` sees a debuggable
-        // message instead of silent no-op. Re-adding the feature
-        // proper is a separate cycle once the objc2 dep is on the
-        // table.
+        // Cycle 768: macOS `sticky` is now implemented for real. winit 0.30
+        // dropped `WindowExtMacOS::set_visible_on_all_workspaces` (cycle 730
+        // stubbed it as a log to stop breaking the macOS build), so we reach
+        // through the raw NSWindow handle and set
+        // `NSWindowCollectionBehavior::CanJoinAllSpaces | Stationary` via
+        // objc2 — the same thing the dropped winit method did internally.
         #[cfg(target_os = "macos")]
         if self.cfg.sticky {
-            log::info!(
-                "kettle: `sticky = true` is currently a no-op on macOS \
-                 (winit 0.30 dropped the underlying API; re-implementing \
-                 via objc2 is a tracked follow-up). The window appears \
-                 on the current Space only."
-            );
+            set_visible_on_all_spaces(&window);
         }
         // Cycle 754: X11/Wayland sticky needs a `_NET_WM_STATE_STICKY` atom
         // write that winit 0.30 doesn't expose; log (don't silently no-op) so

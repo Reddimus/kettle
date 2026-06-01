@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **macOS:** `sticky = true` is now implemented — the window joins all Spaces
+    (Mission Control workspaces) via `NSWindowCollectionBehavior` through objc2,
+    replacing the no-op stub left when winit 0.30 dropped the native method.
+    The `.app` Info.plist also gains `LSApplicationCategoryType`
+    (developer-tools) and `CFBundleInfoDictionaryVersion`, and a latent
+    invalid-XML comment (a literal `--`) was fixed.
+
 ## [2.3.0] — 2026-06-01
 
   **Minor: the audit-hardening + keybind-editor release.** An exhaustive

@@ -76,3 +76,16 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_Foundation",
 ] }
+
+# Cycle 768: objc2 / objc2-app-kit for the macOS `sticky = true` window
+# behavior (NSWindowCollectionBehavior::CanJoinAllSpaces) that winit 0.30 no
+# longer exposes natively. Versions pinned to match winit 0.30's own
+# objc2-app-kit (0.2 / objc2 0.5) so the ObjC class types are compatible and
+# no extra major version enters the lockfile. macOS-only — other platforms
+# never see these.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+# Class features must be opted into (objc2-app-kit ships none by default).
+# NSView + NSWindow + their shared NSResponder superclass — the same trio winit
+# 0.30 enables — give us `NSView::window()` and `NSWindow::setCollectionBehavior`.
+objc2-app-kit = { version = "0.2", features = ["NSView", "NSWindow", "NSResponder"] }
