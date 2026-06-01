@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Packaging (cycle 772) — normalize the macOS `.iconset` to 8-bit RGBA and
+    generate it from the SVG.** The 10 `packaging/macos/kettle.iconset/*.png`
+    files had been committed as **16-bit**/color RGBA — the same depth that
+    caused the v2.1.1 GNOME "Super-key" blank-icon bug on Linux. `iconutil`/Finder
+    consume 16-bit fine so the macOS `.icns` build never broke, but it was
+    inconsistent with the repo's documented 8-bit policy and ~3× larger on disk.
+    All 10 are re-exported to 8-bit RGBA (249 KB → 89 KB, **64% smaller**, pixels
+    visually identical), and `scripts/gen-icons.sh` — previously Linux-only — now
+    also rasterizes the full iconset from the single-source `kettle.svg` via
+    `rsvg-convert` (which emits 8-bit), so the depth can't drift back.
+
+  - **CI (cycle 773) — fail the release loudly on a missing icon raster.**
+    `release.yml` copied the Linux PNG icons with a trailing `|| true`, which
+    silently swallowed a `cp` failure — a missing or renamed raster would have
+    shipped an **iconless tarball** instead of failing the release. Dropped the
+    `|| true` so the glob mismatch surfaces at release time (the SVG copy on the
+    line above already had no such guard).
+
+  - **CI (cycle 774) — give the `cargo-machete` badge a refresh path.**
+    `machete.yml`'s push/PR triggers are path-filtered to Cargo manifests, so a
+    long run of non-manifest commits could leave the README badge showing a stale
+    state (or blank on a fresh branch) — unlike `audit.yml` (daily) and `deny.yml`
+    (weekly), which already cron. Added a weekly `schedule` mirroring `deny.yml`'s
+    Sunday 06:00 UTC slot so the badge always reflects a recent run.
+
   - **Docs (cycle 771) — refresh the README hero / UX showcase screenshot, and
     make it self-updating.** The `--screenshot` hero (`docs/images/kettle-hero.png`,
     embedded at the top of the README) and the UX showcase

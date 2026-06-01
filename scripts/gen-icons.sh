@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kettle — regenerate the Linux hicolor PNG icons from the SVG.
+# kettle — regenerate the Linux hicolor PNG icons + macOS .iconset from the SVG.
 #
 # `packaging/linux/kettle.svg` is the single source of truth for the
 # launcher / window icon. This script rasterizes it to the fixed-size
@@ -57,6 +57,37 @@ for size in "${SIZES[@]}"; do
   echo "  kettle-${size}.png"
 done
 
+# --- macOS .iconset (cycle 772) -------------------------------------------
+# The macOS bundle icon is built by `iconutil -c icns kettle.iconset`
+# (release.yml) from this directory of fixed-name PNGs. They had been
+# committed as 16-bit/color RGBA -- the SAME depth as the Super-key bug
+# above. iconutil/Finder consume 16-bit fine so it never broke the macOS
+# build, but it was inconsistent with the repo's 8-bit policy and ~3x
+# larger on disk. Rasterizing them from the same SVG via rsvg-convert keeps
+# one source of truth AND emits 8-bit. iconutil requires this exact
+# name->pixel mapping (the @2x entries are twice their nominal point size).
+ICONSET_DIR="${SCRIPT_DIR}/../packaging/macos/kettle.iconset"
+if [[ -d "${ICONSET_DIR}" ]]; then
+  echo
+  echo "Rasterizing ${SVG} -> 8-bit macOS .iconset:"
+  ICONSET=(
+    "icon_16x16.png=16" "icon_16x16@2x.png=32"
+    "icon_32x32.png=32" "icon_32x32@2x.png=64"
+    "icon_128x128.png=128" "icon_128x128@2x.png=256"
+    "icon_256x256.png=256" "icon_256x256@2x.png=512"
+    "icon_512x512.png=512" "icon_512x512@2x.png=1024"
+  )
+  for entry in "${ICONSET[@]}"; do
+    name="${entry%=*}"
+    px="${entry#*=}"
+    rsvg-convert --width "${px}" --height "${px}" \
+      --keep-aspect-ratio --format png \
+      --output "${ICONSET_DIR}/${name}" "${SVG}"
+    echo "  ${name} (${px}px)"
+  done
+fi
+
 echo
 echo "✓ regenerated ${#SIZES[@]} icons. Verify depth with:"
-echo "    file ${LINUX_DIR}/kettle-*.png"
+echo "    file ${LINUX_DIR}/kettle-*.png packaging/macos/kettle.iconset/*.png"
+echo "  (every line should read \"8-bit/color RGBA\")"

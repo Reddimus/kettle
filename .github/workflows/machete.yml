@@ -28,12 +28,20 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - ".github/workflows/machete.yml"
+  # Cycle 774: weekly cron so the README cargo-machete badge always has a
+  # recent run to reflect. The push/PR triggers above are path-filtered to
+  # Cargo manifests, so a long run of non-manifest commits would otherwise
+  # leave the badge showing a stale state (or blank on a fresh branch) —
+  # unlike audit.yml (daily) and deny.yml (weekly), which already cron.
+  # Mirrors deny.yml's Sunday 06:00 UTC slot.
+  schedule:
+    - cron: "0 6 * * 0"
 
 permissions:
   contents: read
 
-# Cycle 598: same concurrency block as ci.yml + actionlint.yml. No
-# cron, no release artifacts, purely diagnostic — cancel-in-progress
+# Cycle 598: same concurrency block as ci.yml + actionlint.yml. A
+# weekly cron (added cycle 774, see above) but no release artifacts, purely diagnostic — cancel-in-progress
 # is strictly a budget win when a Cargo.toml-touching PR gets
 # multiple pushes in quick succession.
 concurrency:
