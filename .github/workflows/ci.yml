@@ -467,3 +467,32 @@ jobs:
           key: nightly
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+
+  # Cycle 758: aarch64-linux cross-compile early-warning. Verifies kettle still
+  # builds for ARM64 Linux (Raspberry Pi 4/5, ARM VPS/servers, ARM laptops
+  # running Linux) without needing ARM hardware. Non-blocking
+  # (`continue-on-error`) — a cross-build regression warns on PRs but doesn't
+  # gate merges; a verified aarch64 *release artifact* is a tracked follow-up
+  # (ROADMAP) once this job is reliably green. kettle's Linux windowing deps
+  # (x11/wayland/xkbcommon/vulkan) are loaded via `dlopen` at runtime, so the
+  # cross-build needs only the Rust std for the target + the GNU linker.
+  aarch64-linux:
+    name: aarch64-linux (early warning)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: aarch64 GNU cross-linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-linux
+      - run: cargo build --workspace --target aarch64-unknown-linux-gnu

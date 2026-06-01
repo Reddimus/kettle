@@ -39,6 +39,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - **Docs:** added a non-technical [Getting Started](docs/GETTING-STARTED.md)
     walkthrough and a [Settings panel](docs/SETTINGS.md) reference; the
     architecture diagrams now include the settings overlay.
+  - **CI:** added a non-blocking aarch64-linux cross-compile check so ARM64
+    Linux (Raspberry Pi, ARM servers) build regressions are caught early.
 
 ## [2.1.2] — 2026-05-30
 
