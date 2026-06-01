@@ -14,6 +14,12 @@
 # Match what release.yml + ci.yml build for.
 targets = [
   { triple = "x86_64-unknown-linux-gnu" },
+  # Cycle 782: aarch64-linux is built by release.yml (cycle 767) + checked by
+  # ci.yml (cycle 758), so the supply-chain graph must cover it too — the
+  # comment above promised "match what release.yml + ci.yml build for" but this
+  # triple had been omitted, so a Linux/ARM-only advisory or banned-dep pull-in
+  # could have slipped past `cargo deny`.
+  { triple = "aarch64-unknown-linux-gnu" },
   { triple = "x86_64-apple-darwin" },
   { triple = "aarch64-apple-darwin" },
   { triple = "x86_64-pc-windows-msvc" },

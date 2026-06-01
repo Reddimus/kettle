@@ -39,6 +39,12 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
 
     for row in 0..rows {
+        // Cycle 781: this row's OSC 8 links occupy `out[osc8_start..osc8_end]`.
+        // The autodetect overlap check below scans only that slice instead of
+        // all-rows `out`, turning an O(total_links)-per-match scan (→ O(n²) on a
+        // link-dense viewport, e.g. a log full of URLs) into one bounded by this
+        // row's OSC 8 count.
+        let osc8_start = out.len();
         // OSC 8 runs: consecutive cells sharing a hyperlink URI.
         let mut c = 0usize;
         while c < cols {
@@ -63,8 +69,11 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
                 c += 1;
             }
         }
+        let osc8_end = out.len();
 
-        // Autodetected URLs (skip cells already covered by an OSC 8 link).
+        // Autodetected URLs (skip cells already covered by an OSC 8 link on
+        // THIS row — regex `find_iter` yields non-overlapping matches, so only
+        // OSC 8 links can collide with an autodetected one).
         text.clear();
         col_of_byte.clear();
         for col in 0..cols {
@@ -84,9 +93,9 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
                 .get(m.start() + matched.len().saturating_sub(1))
                 .copied()
                 .unwrap_or(s);
-            if out
+            if out[osc8_start..osc8_end]
                 .iter()
-                .any(|l| l.row == row && !(e < l.start_col || s > l.end_col))
+                .any(|l| !(e < l.start_col || s > l.end_col))
             {
                 continue;
             }

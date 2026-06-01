@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Performance (cycle 781) — URL link detection no longer scans all-rows
+    links per match.** In `kettle-core::links`, the autodetect overlap check
+    (skip an autodetected URL already covered by an OSC 8 hyperlink) walked the
+    entire accumulated `out` Vec for every regex match — O(total_links) per match,
+    so O(n²) on a link-dense viewport (e.g. a log full of URLs), risking frame
+    stutter. Since a row's OSC 8 links sit contiguously in `out` and regex matches
+    are non-overlapping, the check now scans only `out[osc8_start..osc8_end]`
+    (this row's OSC 8 links), bounding it by the per-row OSC 8 count. Surfaced by
+    the per-dimension production-readiness audit (time/space-complexity).
+
+  - **CI (cycle 782) — `deny.toml` now covers the aarch64-linux target.** The
+    supply-chain `[graph].targets` list (whose comment promises "match what
+    release.yml + ci.yml build for") omitted `aarch64-unknown-linux-gnu`, even
+    though release.yml builds it (cycle 767) and ci.yml checks it (cycle 758) — so
+    a Linux/ARM-only advisory or banned-dep pull-in could have slipped past
+    `cargo deny`. Added the triple.
+
+  - **Docs (cycle 783) — bump install version examples to v2.3.2.** The
+    `KETTLE_VERSION=` pin examples and the SHA-256 download URLs in
+    `docs/INSTALL.md` + `README.md` still referenced v2.3.1. The installers
+    resolve `/releases/latest` dynamically so they worked regardless, but the
+    copy-paste examples now match the current release.
+
   - **Fixed (cycle 779) — `persist_config_toggle` de-duplicates repeated keys.**
     When a config file already had two lines for the same key (or a key somehow
     got written twice), each toggle rewrote *every* matching line, so identical
