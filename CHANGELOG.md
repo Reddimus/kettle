@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-06-01
+
+  **Minor: the audit-hardening + keybind-editor release.** An exhaustive
+  multi-agent audit of every crate, UI/UX state, and CI surface drove a sweep
+  of overflow/panic-safety and DoS-cap fixes, render + search hot-path
+  allocation cuts, and a real per-pane title-map leak fix; the Settings overlay
+  gains an **interactive keybind editor**; and releases now ship an ARM64-Linux
+  artifact. Windows gauntlet green; Linux logic tests green.
+
   - **Hardened (overflow/panic safety):** the PTY is now opened with
     `clamp_pty_dim` so a very wide or HiDPI grid can't overflow the u16
     pixel dimensions (the resize path already did this); the Unicode-
