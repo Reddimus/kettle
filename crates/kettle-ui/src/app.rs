@@ -1681,7 +1681,18 @@ impl App {
                 drop(child);
                 // Send the JSON via send_fds (empty fds for now;
                 // future cycle adds PTY fds).
-                let _ = crate::fd_transport::send_fds(&parent, &json, &[]);
+                //
+                // Cycle 776: if the send fails the child never receives the
+                // tab — so we must NOT close the source tab. Returning false
+                // here drops `parent` (signalling EOF to the empty child) and
+                // routes the caller to the file-fallback, so the user keeps
+                // their session. The old `let _ =` swallowed the error and
+                // then closed the source tab unconditionally below, silently
+                // losing the tab on any socket error (ENOBUFS / EMSGSIZE / …).
+                if let Err(e) = crate::fd_transport::send_fds(&parent, &json, &[]) {
+                    log::error!("tab handoff send_fds failed, keeping source tab: {e}");
+                    return false;
+                }
                 drop(parent);
                 // Close the source tab now that the child is up.
                 // Cycle 424: fire TabClose so plugins see the close.
@@ -2849,7 +2860,11 @@ impl App {
             })
             .filter(|s| !s.is_empty());
         if let (Some(s), Some(cb)) = (sel, self.clipboard.as_mut()) {
-            let _ = cb.set_text(s);
+            // Cycle 777: log clipboard failures (was silently swallowed) so a
+            // broken clipboard is diagnosable — matches the vi-mode yank path.
+            if let Err(e) = cb.set_text(s) {
+                log::warn!("clipboard set_text failed (selection copy): {e}");
+            }
         }
     }
 
@@ -2955,7 +2970,10 @@ impl App {
                         if self.cfg.osc52.can_copy()
                             && let Some(cb) = &mut self.clipboard
                         {
-                            let _ = cb.set_text(clamp_osc52(&s, OSC52_MAX).to_string());
+                            // Cycle 777: log instead of silently swallowing.
+                            if let Err(e) = cb.set_text(clamp_osc52(&s, OSC52_MAX).to_string()) {
+                                log::warn!("clipboard set_text failed (OSC 52 write): {e}");
+                            }
                         }
                     }
                     TermEvent::ClipboardLoad(_, fmt) => {
@@ -5115,7 +5133,10 @@ impl App {
                     && let Some(cb) = &mut self.clipboard
                 {
                     let had_selection = !s.is_empty();
-                    let _ = cb.set_text(s);
+                    // Cycle 777: log instead of silently swallowing.
+                    if let Err(e) = cb.set_text(s) {
+                        log::warn!("clipboard set_text failed (copy): {e}");
+                    }
                     // Only treat it as a "real" copy when something was
                     // actually selected — the smart_copy = false
                     // clobber path writes empty but shouldn't clear a
@@ -6802,7 +6823,10 @@ impl App {
             // handler config.
             self.open_url(&h.text);
         } else if let Some(cb) = self.clipboard.as_mut() {
-            let _ = cb.set_text(h.text.clone());
+            // Cycle 777: log instead of silently swallowing.
+            if let Err(e) = cb.set_text(h.text.clone()) {
+                log::warn!("clipboard set_text failed (hint copy): {e}");
+            }
         }
     }
 

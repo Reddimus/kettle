@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fixed (cycle 776) — cross-process tab handoff no longer silently loses a
+    tab on a socket error.** In the Unix SCM_RIGHTS detachable-tab path
+    (`try_move_tab_to_new_window_scm_rights`), the `fd_transport::send_fds` result
+    was discarded with `let _`, then the source tab was closed unconditionally. If
+    the send failed (`ENOBUFS` / `EMSGSIZE` / any socket error) the target window
+    never received the tab, yet the source had already destroyed it — **data
+    loss** with no log trace. The send result is now checked: on failure it logs
+    `log::error!` and returns `false` **without** closing the source tab, so the
+    caller falls through to the file-fallback and the user keeps their session.
+    Found by an exhaustive multi-agent audit (double-verified). *(Unix only.)*
+
+  - **Fixed (cycle 777) — clipboard copy failures are now logged consistently.**
+    Four `clipboard.set_text(...)` sites — selection copy, OSC 52 write, the copy
+    action, and hint-click copy — swallowed errors with `let _`, while the vi-mode
+    yank path already logged via `log::warn!`. A user whose clipboard wasn't
+    working had no way to diagnose it for the majority of copy paths. All four now
+    log a `log::warn!` with a distinct site label, matching the yank precedent.
+
+  - **Docs (cycle 775) — correct the `background-darkness` default in CONFIG.md.**
+    The config reference listed the default as `1.0` (no tint), but the code
+    defaults to `0.5` (test-pinned at `lib.rs:4193`), matching Terminator's
+    upstream `background_darkness`. A user enabling a background image got 50%
+    darkening the docs said wouldn't happen. Fixed the docs (the code is the
+    Terminator-correct source of truth), not the code.
+
   - **Packaging (cycle 772) — normalize the macOS `.iconset` to 8-bit RGBA and
     generate it from the SVG.** The 10 `packaging/macos/kettle.iconset/*.png`
     files had been committed as **16-bit**/color RGBA — the same depth that

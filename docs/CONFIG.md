@@ -122,7 +122,7 @@ per-key audit against Terminator's source.
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
-| `background-darkness` | float 0..1 | `1.0` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark) |
+| `background-darkness` | float 0..1 | `0.5` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark; default `0.5` = 50% tint, matching Terminator's `background_darkness`) |
 | `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
 | `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |
