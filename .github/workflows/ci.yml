@@ -342,11 +342,18 @@ jobs:
               { echo "::error::--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
                 echo "$out"; \
                 exit 1; }
-          echo "$out" | grep -q 'font-size' && \
-              echo "✓ --profile cibad --check-config surfaces malformed font-size" || \
-              { echo "::error::--profile cibad output missing 'font-size' diagnostic"; \
-                echo "$out"; \
-                exit 1; }
+          # Cycle 770: proper if/then/else (was `A && B || C`, which
+          # SC2015 flags because the error branch C also fires if the
+          # success echo B ever fails). actionlint had been red on every
+          # push since 2026-05-25 over this single finding; fixing it
+          # turns the workflow-lint gate green.
+          if echo "$out" | grep -q 'font-size'; then
+              echo "✓ --profile cibad --check-config surfaces malformed font-size"
+          else
+              echo "::error::--profile cibad output missing 'font-size' diagnostic"
+              echo "$out"
+              exit 1
+          fi
           rm -f ~/.config/kettle/profiles/cibad.config
           # Cycle 229: --shell-integration <bash|zsh|fish> emits the
           # embedded shell-integration/kettle.{bash,zsh,fish} snippet.

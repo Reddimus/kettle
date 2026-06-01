@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **CI (cycle 770) — fix the long-red `actionlint` workflow-lint gate.** The
+    `actionlint` check had failed on *every* push since 2026-05-25 (through the
+    entire v2.2.x/v2.3.x series) over a single `shellcheck` SC2015 finding: the
+    `--profile cibad` CLI smoke used the `A && B || C` idiom, where the error
+    branch `C` would also fire if the success `echo B` ever failed. Rewritten as
+    a proper `if/then/else`, which is both correct and SC2015-clean — turning the
+    workflow-lint gate green for the first time in a week.
+
   - **CI (cycle 769) — macOS render-behavior verification on real Metal
     hardware.** The `--gpu-info`, `--screenshot`, and `--screenshot-menu` smokes
     — previously gated to the Linux job's software-Vulkan adapter — now also run
