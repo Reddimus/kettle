@@ -361,11 +361,16 @@ impl Terminal {
         output_tx: Option<crossbeam_channel::Sender<Vec<u8>>>,
     ) -> Result<Terminal> {
         let pty = portable_pty::native_pty_system();
+        // Cycle 760: clamp the same way `resize()` does. The raw casts
+        // (`cols as u16`, `cell_w * cols as u16`) truncate a large grid and can
+        // overflow the u16 multiply on a wide / HiDPI layout (e.g. cell_w=20 ×
+        // cols=5000 = 100000, wraps); `clamp_pty_dim` saturates to u16::MAX so
+        // the ConPTY/openpty always gets sane dimensions.
         let pair = pty.openpty(PtySize {
-            rows: rows as u16,
-            cols: cols as u16,
-            pixel_width: cell_w * cols as u16,
-            pixel_height: cell_h * rows as u16,
+            rows: clamp_pty_dim(1, rows),
+            cols: clamp_pty_dim(1, cols),
+            pixel_width: clamp_pty_dim(cell_w, cols),
+            pixel_height: clamp_pty_dim(cell_h, rows),
         })?;
 
         let mut cmd = match argv.split_first() {
@@ -948,15 +953,13 @@ impl Terminal {
                     runs.push(Vec::new());
                 }
                 let marks: Vec<char> = cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default();
-                // `last_mut().expect(...)` is safe: either we just pushed
-                // an empty Vec above (`runs.push(Vec::new())`) or
-                // `contiguous` was true *and* runs wasn't empty (the
-                // negation of the if-condition). Either way `runs` carries
-                // at least one entry. Documented via `expect` so a future
-                // refactor breaking the invariant fails clearly.
-                runs.last_mut()
-                    .expect("runs non-empty after the conditional push above")
-                    .push((
+                // Cycle 760: `runs` is non-empty here (we either just pushed an
+                // empty Vec or `contiguous` held with runs already non-empty).
+                // Use `if let` rather than `expect()` so the invariant can never
+                // panic the PTY reader thread (panic=abort) if a future refactor
+                // changes the push logic — the run is simply skipped instead.
+                if let Some(run) = runs.last_mut() {
+                    run.push((
                         RawCell {
                             fg: fg_id_bits(cell.fg),
                             // Underline color carries the placement id (0/absent
@@ -967,6 +970,7 @@ impl Terminal {
                         top + p.line.0 as i64,
                         p.column.0,
                     ));
+                }
                 last = Some((p.line.0, p.column.0 as i32));
             } else {
                 last = None;

@@ -134,8 +134,13 @@ impl ImageData {
         let dst = std::sync::Arc::make_mut(&mut self.rgba);
         for row in 0..ch {
             for col in 0..cw {
-                let s = ((row * src.width + col) * 4) as usize;
-                let d = (((y + row) * self.width + x + col) * 4) as usize;
+                // Cycle 760: compute byte offsets in u64 so the multiply can't
+                // wrap u32 for very large frames. `cw`/`ch` already clamp the
+                // result in-bounds (x+col < width, y+row < height), so the
+                // cast back to usize is always valid.
+                let s = ((row as u64 * src.width as u64 + col as u64) * 4) as usize;
+                let d = (((y as u64 + row as u64) * self.width as u64 + x as u64 + col as u64) * 4)
+                    as usize;
                 if replace {
                     dst[d..d + 4].copy_from_slice(&src.rgba[s..s + 4]);
                     continue;

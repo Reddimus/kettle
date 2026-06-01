@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Hardened (overflow/panic safety):** the PTY is now opened with
+    `clamp_pty_dim` so a very wide or HiDPI grid can't overflow the u16
+    pixel dimensions (the resize path already did this); the Unicode-
+    placeholder reader path uses checked access instead of `expect()` so it
+    can't panic the reader thread; and image composition computes byte offsets
+    in `u64` to avoid wraparound on very large frames. Found by an exhaustive
+    multi-agent audit of every crate.
+
 ## [2.2.0] — 2026-05-31
 
   **Minor: the production-hardening + Settings release.** Adds an in-app
