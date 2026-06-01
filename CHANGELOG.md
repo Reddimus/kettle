@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **CI (cycle 769) — macOS render-behavior verification on real Metal
+    hardware.** The `--gpu-info`, `--screenshot`, and `--screenshot-menu` smokes
+    — previously gated to the Linux job's software-Vulkan adapter — now also run
+    on the `macos-latest` runner, which has a real Metal GPU. This is the first
+    automated coverage of kettle's *actual* macOS render path: adapter
+    resolution, the full text + quad + image draw, GPU readback, and the
+    `image::save` PNG encode all execute on macOS hardware (the existing
+    `offscreen_selftest` unit test only compiles the WGSL shaders). The
+    `cargo build --release` that feeds these smokes was hoisted out of the
+    Linux-only headless step into a shared non-Windows step, and the size
+    assertions switched from GNU `stat -c%s` to the BSD/macOS-portable
+    `wc -c <`. The interactive/windowed UI (Spaces stickiness, menu clicks,
+    Retina/dock behavior) still requires a human-driven Mac; this closes the
+    *render-pipeline* half of macOS verification without one. Windows stays
+    excluded — its runtime smokes are bash-only.
+
 ## [2.3.1] — 2026-06-01
 
   **Patch: macOS sticky + bundle polish.** Implements the macOS `sticky`

@@ -130,12 +130,21 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
+      - name: Build release binary (Linux/macOS)
+        # Cycle 769: the GPU/render smokes below invoke
+        # ./target/release/kettle. Build it once here for both Linux and
+        # macOS — previously this `cargo build --release` lived inside the
+        # Linux-only headless smoke, so the new macOS --gpu-info /
+        # --screenshot / --screenshot-menu smokes (added this cycle for
+        # real-Metal-hardware render verification) would have had no
+        # binary to run. Windows stays out (its smokes are bash-only).
+        if: runner.os != 'Windows'
+        run: cargo build --release -p kettle
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
-          cargo build --release -p kettle
           # The `bash -c '…$rc…'` invocation is single-quoted on
           # purpose so the inner `$rc` expands inside the *nested*
           # bash, not the outer wrapper. SC2016 flags the outer-shell
@@ -146,14 +155,18 @@ jobs:
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
             echo "headless run OK (exit $rc)"'
-      - name: --gpu-info diagnostic smoke (Linux)
+      - name: --gpu-info diagnostic smoke (Linux/macOS)
         # Cycle 268: pin that the cycle-267 `--gpu-info` flag resolves
         # an adapter + prints the expected key:value layout under the
         # software-Vulkan adapter the CI runner has. Same env as the
         # other GPU-touching smokes. Floor on the "Backend:" prefix
         # so a regression that flips the output format (e.g. JSON-
         # ification later) catches here, not in a user bug report.
-        if: runner.os == 'Linux'
+        # Cycle 769: also run on macOS — the runner has a real Metal GPU,
+        # giving genuine macOS-hardware verification of adapter resolution
+        # (LIBGL_ALWAYS_SOFTWARE is a harmless no-op there). Bash-only step,
+        # so Windows (pwsh default) stays excluded.
+        if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -161,7 +174,7 @@ jobs:
           grep -qE '^Backend:[[:space:]]+' /tmp/gpu-info.txt
           grep -qE '^Adapter:[[:space:]]+' /tmp/gpu-info.txt
           grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' /tmp/gpu-info.txt
-      - name: --screenshot-menu visual regression (Linux)
+      - name: --screenshot-menu visual regression (Linux/macOS)
         # Cycle 251: the v1.3.0/v1.3.1 blank-menu bug shipped because
         # nothing in CI exercised the context menu's render path —
         # `--screenshot` renders a no-overlay frame and the unit
@@ -169,7 +182,11 @@ jobs:
         # (highlight stepping, anchor clamping), not its appearance.
         # The `--screenshot-menu` CLI flag + offscreen Vulkan adapter
         # closes that gap.
-        if: runner.os == 'Linux'
+        # Cycle 769: also run on macOS (real Metal GPU) so the menu
+        # render path is verified on macOS hardware, not just Linux's
+        # software-Vulkan. `wc -c <` instead of GNU `stat -c%s` keeps
+        # the size check portable to BSD/macOS stat.
+        if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -181,11 +198,11 @@ jobs:
           # well above 0 / the byte-identical blank-menu regression
           # would produce, well below the typical 55+ KB the real
           # render outputs.
-          size=$(stat -c%s /tmp/kettle-menu.png)
+          size=$(wc -c < /tmp/kettle-menu.png)
           test "$size" -gt 40000 \
             || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
           echo "screenshot-menu OK ($size bytes)"
-      - name: --screenshot end-to-end (Linux)
+      - name: --screenshot end-to-end (Linux/macOS)
         # Cycle 236: capture_png drives the real GPU text + quad +
         # image pipeline (bundled Nerd Font, glyphon shaping, wgpu
         # offscreen device + texture, image::save PNG encode) — none
@@ -195,7 +212,14 @@ jobs:
         # regression in any of those layers before users hit it.
         # No DISPLAY needed — capture_png builds its own offscreen
         # device with compatible_surface=None.
-        if: runner.os == 'Linux'
+        # Cycle 769: also run on macOS — the runner's real Metal GPU
+        # exercises the full text+quad+image render and PNG encode on
+        # macOS hardware (the offscreen_selftest unit test only compiles
+        # the shaders; this is the only macOS-hardware coverage of the
+        # actual draw + readback + image::save path). This is the
+        # achievable automated macOS render-behavior verification absent
+        # a windowed/interactive Mac. `wc -c <` is BSD/macOS-portable.
+        if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -211,7 +235,7 @@ jobs:
           # produced an empty PNG" failure mode without being too
           # strict on a future renderer change that shrinks the
           # default frame.
-          size=$(stat -c%s /tmp/kettle-ci.png)
+          size=$(wc -c < /tmp/kettle-ci.png)
           test "$size" -gt 10000 \
             || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
           echo "screenshot OK ($size bytes)"
