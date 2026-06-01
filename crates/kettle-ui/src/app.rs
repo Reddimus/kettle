@@ -3433,6 +3433,12 @@ impl App {
             || self.layout_picker_input.is_some()
             || self.hint_state.is_some()
             || self.mux.search.open
+            // Cycle 763: the title-edit and confirm-dialog input bars are also
+            // active text surfaces — keep the cursor steady (not mid-blink-off)
+            // while the user is typing/navigating them, like the other modals.
+            || self.editing_title.is_some()
+            || self.confirm_dialog.is_some()
+            || self.settings_nav.is_some()
         {
             true
         } else {
@@ -6190,6 +6196,15 @@ impl App {
         for (id, title) in changes {
             self.last_emitted_titles.insert(id, title.clone());
             eng.fire_event(&crate::LuaEvent::TitleChanged(id, title));
+        }
+        // Cycle 763: drop title state for panes that have closed so this map
+        // can't grow unbounded over a long session of opening/closing panes
+        // (it's only ever read for live panes). Covers every close path —
+        // keybind, confirm dialog, tab close, reap. The O(1) length guard means
+        // the O(n) retain runs only when there are actually stale entries.
+        if self.last_emitted_titles.len() > self.mux.panes.len() {
+            let panes = &self.mux.panes;
+            self.last_emitted_titles.retain(|id, _| panes.contains_key(id));
         }
     }
 

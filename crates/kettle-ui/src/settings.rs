@@ -167,10 +167,14 @@ pub fn read(cfg: &Config, field: &Field) -> String {
         }
         FieldKind::Choice { values, labels } => {
             let cur = read_choice(cfg, field.key);
+            // Cycle 763: `labels.get(i)` (not `labels[i]`) so a catalogue entry
+            // with mismatched values/labels lengths degrades to the raw value
+            // instead of panicking on an out-of-bounds index.
             values
                 .iter()
                 .position(|v| *v == cur)
-                .map(|i| labels[i].to_string())
+                .and_then(|i| labels.get(i))
+                .map(|label| label.to_string())
                 .unwrap_or_else(|| cur.clone())
         }
         FieldKind::Number { suffix, .. } => {

@@ -21,6 +21,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     detection reuse their per-line scratch buffers instead of allocating a
     fresh `String` + `Vec` for every line/row (≈2 allocations total instead of
     one pair per line — meaningful on a large scrollback).
+  - **Fixed (leak + UX):** the per-pane title-tracking map (used by the
+    `title_changed` plugin hook) now drops entries for closed panes instead of
+    growing unbounded over a long open/close session; the text cursor stays
+    steady while the title-edit bar, confirm dialog, or settings overlay is
+    open; and the settings overlay reads choice labels with bounds-checked
+    access.
 
 ## [2.2.0] — 2026-05-31
 
