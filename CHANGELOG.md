@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-05-31
+
+  **Minor: the production-hardening + Settings release.** Adds an in-app
+  **Settings overlay** (Ctrl+,) so common options are editable without
+  touching a config file, makes Linux/WSL/headless startup robust with a
+  software-GPU fallback, fixes X11 middle-click PRIMARY-selection paste, adds
+  a non-blocking ARM64-Linux CI check, and ships a non-technical Getting
+  Started guide. Verified on Win11 (live) and WSLg Ubuntu 24.04 (build + full
+  offscreen render).
+
   - **Fixed (Linux/headless/WSL):** kettle now falls back to software GPU
     rendering (Mesa llvmpipe / lavapipe, or WARP on Windows) when no hardware
     adapter is available, instead of hard-erroring with "no suitable GPU
