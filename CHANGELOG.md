@@ -6,6 +6,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.4.1] — 2026-06-03
+
+  **Patch: live UI/UX verification sweep — one cosmetic fix.** A live,
+  interactive, screenshot-driven UI/UX verification of kettle on real
+  **Windows 11** (driven via the winapp MCP) and **native WSLg Linux** —
+  exercising every overlay/modal/menu and transition, all three Windows shells
+  (cmd, PowerShell 7, WSL-Ubuntu), and **tmux + AstroNvim** inside kettle.
+  Everything rendered correctly (truecolor, splits/resize-reflow, tabs, settings
+  overlay, context menu, cursor-shape changes, treesitter highlighting; Linux
+  software-Vulkan/llvmpipe fallback renders cleanly under WSLg) — the sweep
+  surfaced exactly one cosmetic defect, fixed below. No features, no breaking
+  changes; Windows gauntlet + all-three-OS CI green.
+
+  - **UI/UX (cycle 784) — Settings overlay no longer clips its footer or the
+    keybind-capture prompt.** The settings panel hard-coded its width at 44
+    character cells, but two display lines are wider: the footer hint
+    `↑↓ field  ←→ change  Tab category  Esc close` (~50 cells, so the live
+    Windows-11 sweep saw it rendered as "Esc clo") and the in-capture
+    `‹press a chord — Esc to cancel›` value, which with its 26-col label is ~59
+    cells and overflowed onto the next row. The panel width is now derived from
+    the widest display line (new `settings_panel_cols`, with a 44-col floor) —
+    the same content-fit approach every other overlay already uses — so the
+    panel grows to fit the footer always and the chord prompt during capture.
+    Both render passes (buffer-text + quad/highlight) compute it off the same
+    `settings_display_lines` output, keeping them in lockstep. Surfaced by the
+    live interactive UI/UX verification sweep on Windows 11 (winapp MCP) +
+    native WSLg Linux; drift-guarded by `settings_panel_fits_footer_and_capture_prompt`.
+
 ## [2.4.0] — 2026-06-01
 
   **Minor: post-v2.3.2 hardening — the exhaustive-review bundle.** One grouped

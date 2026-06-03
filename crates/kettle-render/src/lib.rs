@@ -1830,7 +1830,7 @@ impl Renderer {
             // Panel width fits the content but never exceeds the surface
             // (so it stays usable in a small window); see the matching clamp
             // in the quad/area pass below.
-            let panel_w = (44.0 * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let row_h = ch + 6.0;
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
@@ -2185,7 +2185,7 @@ impl Renderer {
         if let Some(set) = &overlay.settings {
             let lines = settings_display_lines(set);
             let row_h = ch + 6.0;
-            let panel_w = (44.0 * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
             let px = ((sw - panel_w) * 0.5).max(0.0);
             let py = ((sh - panel_h) * 0.5).max(0.0);
@@ -3018,6 +3018,19 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
     lines.push(String::new());
     lines.push("↑↓ field    ←→ change    Tab category    Esc close".to_string());
     lines
+}
+
+/// Cycle 784: the settings panel's width in character cells — the widest
+/// display line, so the panel grows to fit its content. Both render passes
+/// (buffer-text + quad/highlight) call this off the same `settings_display_lines`
+/// output, keeping them in lockstep. The old hardcoded 44 cols clipped the
+/// ~50-cell footer hint ("Esc close" rendered as "Esc clo") and overflowed the
+/// in-capture "‹press a chord — Esc to cancel›" prompt (~59 cells with its
+/// 26-col label) onto the next row. A 44-col floor keeps a sparse category from
+/// rendering as a cramped panel.
+fn settings_panel_cols(lines: &[String]) -> f32 {
+    use unicode_width::UnicodeWidthStr;
+    lines.iter().map(|l| l.width()).max().unwrap_or(44).max(44) as f32
 }
 
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a
@@ -4405,5 +4418,49 @@ mod truncate_tests {
         assert_eq!(truncate("a", 0), "…");
         // Total-equals-limit: no ellipsis (everything fits exactly).
         assert_eq!(truncate("中", 2), "中");
+    }
+}
+
+#[cfg(test)]
+mod settings_panel_cols_tests {
+    use super::settings_panel_cols;
+    use unicode_width::UnicodeWidthStr;
+
+    // Cycle 784: the settings panel must be wide enough for its two widest
+    // lines — the footer hint and the in-capture chord prompt — both of which
+    // exceed the old hardcoded 44 cols. Live sweep saw "Esc close" clipped to
+    // "Esc clo" and the capture prompt overflowing onto the next row.
+    #[test]
+    fn settings_panel_fits_footer_and_capture_prompt() {
+        let footer = "↑↓ field    ←→ change    Tab category    Esc close";
+        // 26-col left-padded label + the capture-mode value (see app.rs).
+        let capture = format!(
+            "▸ {:<26}{}",
+            "Split right", "‹press a chord — Esc to cancel›"
+        );
+        let cols = settings_panel_cols(&[
+            footer.to_string(),
+            capture.clone(),
+            "  Font size".to_string(),
+        ]);
+        assert!(
+            cols as usize >= footer.width(),
+            "panel ({cols}) clips footer ({})",
+            footer.width()
+        );
+        assert!(
+            cols as usize >= capture.width(),
+            "panel ({cols}) clips capture prompt ({})",
+            capture.width()
+        );
+        // The footer alone already exceeds the old 44-col hardcode.
+        assert!(footer.width() > 44, "regression-guard premise broke");
+    }
+
+    #[test]
+    fn settings_panel_has_a_floor() {
+        // A hypothetical sparse category never renders narrower than 44 cols.
+        assert_eq!(settings_panel_cols(&["x".to_string()]) as usize, 44);
+        assert_eq!(settings_panel_cols(&[]) as usize, 44);
     }
 }
