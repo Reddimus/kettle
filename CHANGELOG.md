@@ -4,7 +4,28 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.6.0] — 2026-06-04
+
+  - **Feature (cycle 794) — in-app update checker (notify-only).** kettle now
+    checks GitHub at most **once/24h** for a newer release and shows a
+    dismissable bottom-bar banner (`⬆ kettle vX.Y.Z available — <url>`) plus one
+    desktop toast. Click the banner to open the release page (right-click to
+    dismiss); a dismissed version never re-nags, only a newer one does. It runs
+    on a background thread (`ureq` + pure-Rust `rustls`, no tokio) so it never
+    blocks startup, and **fails silent** on offline / timeout / rate-limit /
+    parse errors. Privacy guardrails: **opt-out** via `update-check = false`
+    (also a toggle in the Settings overlay), it **never checks on the first
+    launch** (only stamps the throttle), the 24h cache (shared across windows)
+    keeps well under GitHub's 60-req/hr/IP limit, and **packaged builds**
+    (distro / Homebrew / winget / source — they have their own update channel)
+    compile the auto-check out via `KETTLE_PACKAGED`. **Notify-only — kettle
+    never downloads or installs** (that would own a signed-artifact / elevation
+    security boundary; the OS package manager / release page is the installer,
+    matching WezTerm/kitty). `kettle --check-update` does a deliberate one-shot
+    check (bypassing the throttle). Version-compare + throttle are pure,
+    drift-guarded functions. (`webpki-roots`' Mozilla-CA-bundle data license
+    `CDLA-Permissive-2.0` added to the cargo-deny allow-list, in keeping with
+    the existing "data file licenses" allowance.)
 
 ## [2.5.0] — 2026-06-03
 

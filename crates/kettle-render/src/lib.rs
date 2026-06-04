@@ -228,6 +228,11 @@ pub struct Overlay {
     /// Cycle 756: `Some` while the in-app settings overlay is open. Painted
     /// centered, above panes but below the confirm dialog.
     pub settings: Option<SettingsOverlay>,
+    /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
+    /// available" banner is showing. Rendered as a passive, lowest-priority
+    /// bottom bar — any real modal (search/palette/…) takes the bar instead,
+    /// and it returns when they close. Dismissed with Esc, opened with Enter.
+    pub update_available: Option<(String, String)>,
 }
 
 /// Cycle 660: renderer-side projection of `App::confirm_dialog`.
@@ -1679,6 +1684,29 @@ impl Renderer {
             let label = format!(
                 "  ⚠ {}      {}      (Tab/←→ focus · Enter confirm · Esc cancel)",
                 dlg.prompt, buttons_label
+            );
+            self.search_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.search_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some((tag, url)) = &overlay.update_available {
+            // Cycle 794: passive "newer release available" banner — lowest
+            // priority, so any real modal above takes the bar and this returns
+            // when they close. Green accent (palette[2]) = good news.
+            have_search = true;
+            let bar_h = ch + 10.0;
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[2], 0.96));
+            let label = format!(
+                "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
             );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);

@@ -57,6 +57,13 @@ pollster = "0.4.0"
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.149"
+# Cycle 794: in-app update checker (notify-only) — one unauthenticated HTTPS GET
+# of the GitHub "latest release" endpoint on a background thread. `ureq` is a
+# blocking, pure-Rust HTTP client that matches kettle's thread-based model (no
+# tokio); `rustls` (pure-Rust TLS, no system OpenSSL) keeps the aarch64
+# cross-build trivial. default-features off drops `gzip`/`json`/`cookies` we
+# don't use; we parse with the serde_json already above.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 winit = "0.30.13"
 
 # Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D

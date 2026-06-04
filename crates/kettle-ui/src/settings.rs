@@ -170,6 +170,8 @@ pub fn categories() -> Vec<Category> {
                 number("Scrollback lines", "scrollback", 0, 100_000, 1_000, ""),
                 toggle("Copy on select", "copy-on-select"),
                 toggle("Hide mouse while typing", "mouse-hide-while-typing"),
+                // Cycle 794: opt out of the in-app update checker.
+                toggle("Check for updates", "update-check"),
                 choice(
                     "Focus mode",
                     "focus",
@@ -303,6 +305,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "copy-on-select" => cfg.copy_on_select,
+        "update-check" => cfg.update_check,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         _ => false,
     }

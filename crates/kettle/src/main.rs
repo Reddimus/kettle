@@ -73,6 +73,13 @@ struct Cli {
     #[arg(long)]
     gpu_info: bool,
 
+    /// Check GitHub for a newer kettle release and print the result, then exit.
+    /// Bypasses the once/24h throttle the background check uses. Notify-only —
+    /// kettle never downloads or installs; update via your package manager or
+    /// the release page it points you to.
+    #[arg(long)]
+    check_update: bool,
+
     /// Validate the config (resolved settings + unknown-key warnings).
     #[arg(long)]
     check_config: bool,
@@ -646,6 +653,11 @@ fn main() -> anyhow::Result<()> {
         // to what the windowed run would see. No GUI / PTY needed.
         let info = kettle_render::gpu_info()?;
         println!("{info}");
+        return Ok(());
+    }
+    if cli.check_update {
+        // Cycle 794: one-shot deliberate check (no throttle, no event loop).
+        println!("{}", kettle_ui::check_for_update_cli());
         return Ok(());
     }
     if cli.check_config {

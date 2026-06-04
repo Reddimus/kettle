@@ -30,6 +30,13 @@ pub enum UserEvent {
     /// One event per change (notify coalesces consecutive writes), so
     /// the main thread can batch-read all pending lines at once.
     RemoteCommand,
+    /// Cycle 794: the background update-check thread found a newer GitHub
+    /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
+    /// UI can show a dismissable banner + open it on Enter.
+    UpdateAvailable {
+        tag: String,
+        url: String,
+    },
 }
 
 /// Cycle 752: decode kettle's embedded PNG into a winit window icon for the
@@ -1594,6 +1601,11 @@ pub struct App {
     /// it to `true` for a configured `window_state = hidden`, so that case
     /// stays hidden (no reveal).
     window_shown: bool,
+    /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
+    /// available" banner is showing (set by `UserEvent::UpdateAvailable` from
+    /// the background check). Esc dismisses it (and records the tag so it never
+    /// re-nags); Enter opens the release URL.
+    update_available: Option<(String, String)>,
 }
 
 /// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
@@ -1987,6 +1999,7 @@ impl App {
             lua_engine,
             lua_startup_fired: false,
             window_shown: false,
+            update_available: None,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -3626,6 +3639,7 @@ impl App {
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
+                update_available: self.update_available.clone(),
                 ..Overlay::default()
             };
         }
@@ -3668,6 +3682,7 @@ impl App {
             vi_visual_anchor: self.vi_mode.and_then(|v| v.visual_anchor),
             confirm_dialog,
             settings: settings_overlay,
+            update_available: self.update_available.clone(),
         }
     }
 
@@ -7786,6 +7801,14 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        // Cycle 794: kick off the update check on a background thread — AFTER
+        // the first paint so it never blocks startup. It's opt-out
+        // (`update-check`), skips the very first launch, throttles to once/24h
+        // via a cache file, and no-ops in packaged builds; the cache throttle
+        // also dedups a Wayland re-resume or multiple windows hitting GitHub.
+        if self.cfg.update_check {
+            crate::update_check::maybe_spawn_check(self.proxy.clone(), env!("CARGO_PKG_VERSION"));
+        }
     }
 
     fn user_event(&mut self, _el: &ActiveEventLoop, ev: UserEvent) {
@@ -7802,6 +7825,21 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ReloadConfig => self.reload_config(),
             UserEvent::RemoteCommand => self.drain_remote_commands(),
+            UserEvent::UpdateAvailable { tag, url } => {
+                // Cycle 794: a newer release exists. Show the dismissable
+                // bottom-bar banner, fire one desktop toast, and nudge the
+                // taskbar/dock so the user notices even if kettle is unfocused.
+                // The background thread already filtered out dismissed versions.
+                fire_notify(
+                    "kettle update available",
+                    &format!("{tag} — click the banner in kettle to open the release page"),
+                );
+                self.update_available = Some((tag, url));
+                if let Some(w) = &self.window {
+                    w.request_user_attention(Some(UserAttentionType::Informational));
+                    w.request_redraw();
+                }
+            }
         }
     }
 
@@ -8104,6 +8142,30 @@ impl ApplicationHandler<UserEvent> for App {
                 // middle = close that tab).
                 let bar = self.tab_bar();
                 let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+                // Cycle 794: the update banner is the bottom bar when shown.
+                // Left-click opens the release page (+ records the dismissal so
+                // it won't re-nag); right-click dismisses without opening. Only
+                // reachable with no modal open (the gate above returned for
+                // those) — exactly when the banner is actually on screen.
+                if let Some((tag, url)) = self.update_available.clone() {
+                    let sh = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().height as f32)
+                        .unwrap_or(0.0);
+                    let banner_h = self.cell_px().1 as f32 + 10.0;
+                    if sh > 0.0 && py >= sh - banner_h && (bcode == 0 || bcode == 2) {
+                        if bcode == 0 {
+                            self.open_url(&url);
+                        }
+                        crate::update_check::record_dismissed(&tag);
+                        self.update_available = None;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };

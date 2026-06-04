@@ -26,6 +26,11 @@ mod lua;
 mod mux;
 mod session;
 mod settings;
+// Cycle 794: in-app "newer release available" checker (notify-only). Kept a
+// private mod (its spawn fn references the crate-internal `UserEvent`); the
+// `kettle` bin reaches the synchronous `--check-update` path via the public
+// `check_for_update_cli` wrapper below.
+mod update_check;
 // Cycle 745: OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 
@@ -101,4 +106,11 @@ pub fn run() -> anyhow::Result<()> {
 /// Launch kettle, applying first-tab CLI [`Options`].
 pub fn run_with(opts: Options) -> anyhow::Result<()> {
     App::run_with(opts)
+}
+
+/// Cycle 794: the synchronous `kettle --check-update` path. Does one GitHub
+/// "latest release" GET (bypassing the once/24h throttle — the user asked
+/// explicitly) and returns a human-readable line for the `kettle` bin to print.
+pub fn check_for_update_cli() -> String {
+    update_check::run_blocking_check(env!("CARGO_PKG_VERSION"))
 }

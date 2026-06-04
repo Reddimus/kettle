@@ -1151,6 +1151,10 @@ pub struct Config {
     pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
+    /// Cycle 794: check GitHub once/day for a newer kettle release and show a
+    /// dismissable notification. Opt-out (`update-check = false`); never runs on
+    /// the first launch or in packaged builds. Notify-only — never installs.
+    pub update_check: bool,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -1608,6 +1612,7 @@ impl Default for Config {
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
+            update_check: true,
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
@@ -2001,6 +2006,7 @@ impl Config {
                 // their typo in --check-config.
                 "cursor-style-blink"
                 | "copy-on-select"
+                | "update-check"
                 | "scroll-on-keystroke"
                 | "scroll-on-input"
                 | "scroll-on-output"
@@ -2957,6 +2963,12 @@ impl Config {
                 "copy-on-select" | "copy_on_selection" | "copy-on-selection" | "copy_on_select" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.copy_on_select = b;
+                    }
+                }
+                // Cycle 794: opt out of the in-app update checker.
+                "update-check" | "check-for-updates" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.update_check = b;
                     }
                 }
                 "scroll-on-keystroke" | "scroll-on-input" => {

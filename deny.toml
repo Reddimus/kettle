@@ -63,6 +63,11 @@ allow = [
   # `unicode-ident` etc. — DFS-style Unicode data tables.
   "Unicode-DFS-2016",
   "Unicode-3.0",
+  # Cycle 794: the Mozilla CA-certificate bundle (`webpki-roots`, the TLS trust
+  # anchors for the in-app update checker's rustls HTTPS GET) ships under the
+  # Community Data License Agreement — a permissive *data-file* license, exactly
+  # the "Mozilla CA bundle" case the section comment above anticipates.
+  "CDLA-Permissive-2.0",
   # Public-domain-equivalent free text.
   "0BSD",
   "Unlicense",
