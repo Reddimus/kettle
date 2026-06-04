@@ -6,6 +6,131 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-06-03
+
+  Multi-agent production audit batch (cycles 785–793): modal input-routing
+  fixes, an unbounded-channel invariant, overlay memory-leak fixes, new
+  drift-guard tests (incl. a `--layout` path-traversal security guard), doc +
+  release-tooling drift fixes, a render hot-path allocation removal, and
+  install ease-of-use. IME/CJK input (audit finding A3) is deferred to a
+  verified follow-up. All cycles gauntlet-green and live-verified on Win11 +
+  WSLg (startup paint, PowerShell, WSL Ubuntu, context-menu overlay, AstroNvim).
+
+  - **Install/docs (cycle 793) — clearer paths for unsupported arches +
+    Windows package managers.** The `install-online.sh` unsupported-arch error
+    was a dead end ("build from source" with no hint whether that's even
+    viable); it now names the tier-1 arches (x86_64 / aarch64), flags 32-bit
+    (armv7l / i686) as source-only + experimental (wgpu/glyphon have no tier-1
+    support there), points at a new **Supported platforms** tier matrix in
+    `docs/INSTALL.md`, and offers `nix run github:Reddimus/kettle` as a
+    zero-build sandbox (F1). And `docs/INSTALL.md` now documents that there's no
+    `winget` / `scoop` recipe yet, with the `packaging/homebrew` + `packaging/arch`
+    templates pointed out for would-be maintainers (F2). (Audit finding A3 — IME
+    / CJK input — is the one item deferred to a verified follow-up: doing it
+    right needs preedit rendering + a CJK-IME test environment, and enabling it
+    blind would risk the input path; see the design note in the repo memory.)
+
+  - **Performance (cycle 791) — no per-frame allocation for image-free panes.**
+    The render loop collected each pane's image placements into a fresh `Vec`
+    and `sort_by_key`'d it *every frame for every pane*, even the overwhelmingly
+    common 0-or-1-image case where ordering is meaningless — an allocation in
+    the hot render path for nothing. It now fast-paths `len <= 1` (iterate the
+    slice directly, no alloc/sort) and only collects+sorts when 2+ placements
+    genuinely need z-ordering, via one closure so the draw body stays single-
+    sourced. Output is identical (higher-z images still land on top).
+
+  - **Docs (cycle 790) — version + config-key drift fixed, and the version
+    drift automated away.** The audit found the README status banner stuck at
+    `v2.3` and `docs/INSTALL.md` claiming `current latest: v2.3.2` (+ stale
+    example `KETTLE_VERSION=` / download URLs) while Cargo.toml was already
+    2.4.1 — drift that had recurred every release because the bump was manual.
+    Corrected to v2.4.1, and `scripts/release.sh` now bumps every `vX.Y.Z`
+    string in `README.md` + `docs/INSTALL.md` in the same atomic step as
+    Cargo.toml / flake.nix, so it can't re-stale. Also (E3) the settings overlay
+    catalogue and `docs/SETTINGS.md` listed the cursor key as the back-compat
+    alias `cursor-shape`; both now use the canonical `cursor-style` (matching
+    the authoritative `docs/CONFIG.md`), so the overlay persists the canonical
+    spelling and all three agree.
+
+  - **Tests (cycle 789) — drift guards for three previously-untested
+    regression-prone units.** The audit flagged critical/correctness logic with
+    no unit coverage: **(D1, security)** layout-name sanitization — the only
+    barrier between an untrusted `kettle --layout <NAME>` and the filesystem —
+    is now extracted to the pure, tested `sanitize_layout_name` (proving
+    `../../etc/passwd` collapses to the in-`layouts/` `.._.._etc_passwd`, with no
+    separator surviving; a regression dropping the filter would fail the build,
+    not silently allow arbitrary-file reads); **(D2)** the `leaf_index_of` ↔
+    `nth_leaf` inverse that session restore uses to re-focus the right pane
+    across id reallocation (an off-by-one would silently focus the wrong pane on
+    relaunch); **(D3)** `keybind_action`, the settings-overlay accessor that
+    routes Enter into chord-capture. No behavior change beyond the D1 extraction.
+
+  - **Memory (cycle 788) — overlay text-buffer pools no longer grow unbounded.**
+    The audit found that `tab_buffers`, `context_menu_buffers`, and
+    `hint_buffers` were grown each frame with `while len < N` but, unlike the
+    `pane_buffers` / `settings_buffers` pools, never truncated — so each ratcheted
+    to its session high-water mark, retaining idle shaped-glyph `TextBuffer`s
+    (GPU + host font state): open 50 tabs then close to 5 and 50 stayed; a
+    50-row Lua context menu then a 5-row one kept 50; quick-select with varying
+    link densities pinned the peak. Each now `truncate`s to the current count
+    right after its grow loop (matching `settings_buffers`), and the drift guard
+    is extended to pin all five truncate calls at the source level.
+
+  - **Internals (cycle 787 — investigated, no change) — the per-pane `TermEvent`
+    channel stays `unbounded` by design.** The audit flagged it as an OOM risk
+    and suggested a bounded channel, but both bounded variants are unsafe here:
+    `TermEvent` is `alacritty_terminal::event::Event`, which carries one-shot
+    events that must never be dropped (`Exit` → pane close; `PtyWrite` → protocol
+    replies to the PTY), ruling out `try_send`-drop; and the sender runs inside
+    `processor.advance(..)` *while the reader holds `term.lock()`*, so a bounded
+    blocking `send` would block the reader with the lock held and deadlock the UI
+    thread (which locks the same `term` to render). The channel is drained every
+    UI iteration via `try_recv`, so it does not grow in normal operation. The
+    invariant is now documented at the creation site to prevent a future "fix"
+    from reintroducing the deadlock.
+
+  - **UI/UX (cycle 786) — modals now consume mouse input instead of leaking it
+    to the terminal behind them.** A multi-agent production audit found that the
+    `MouseInput`, `MouseWheel`, and `CursorMoved` handlers only gated the
+    context menu, so with **search / palette / ssh / settings / layout-picker /
+    hint / confirm-dialog / inline title-edit / vi copy-mode** open: a left
+    click switched tabs or focused a pane, a right click opened a context menu,
+    any click injected mouse-tracking events into the TUI behind the dialog
+    (**A1, critical** — the dialog was effectively invisible to the mouse);
+    Ctrl+wheel still zoomed the font and plain/Shift wheel still scrolled the
+    pane or cycled tabs (**A2**); and with `focus = sloppy`, cursor drift while
+    typing into a dialog silently reassigned pane focus (**A4**). All three now
+    gate on `any_modal_open()`: pointer presses/wheel are swallowed by any open
+    modal *except* a lone context menu (which owns its own click/scroll paths
+    and is relocated by a right-click), via the pure, drift-guarded
+    `modal_swallows_pointer`; sloppy-focus skips while any modal is open.
+
+  - **UI/UX (cycle 785) — no unpainted-window flash on Windows-11 startup.**
+    `App::resumed` shows the OS window and *then* blocks the event loop for
+    ~1.5s in `pollster::block_on(Renderer::new(...))` (the wgpu adapter+device
+    init — measured 1.48s on an Intel-iGPU/Vulkan box), so the user saw a blank
+    / "(Not Responding)" rectangle for that whole stall before the first frame
+    painted. The window is now **created hidden** (`with_visible(false)`) and
+    revealed with `set_visible(true)` only once the first frame is on the
+    surface (in `redraw`, after the render attempt — even on a render error, so
+    it can never get stuck invisible), so it appears already-painted (the
+    Ghostty / modern-terminal pattern). The first frame is painted by calling
+    `redraw` **directly at the end of `resumed`** rather than relying on the
+    `request_redraw` event: live testing on Win11 caught that Windows does NOT
+    deliver `RedrawRequested` to a window that has never been shown, so a purely
+    redraw-event-driven reveal left the window stuck invisible (the OS reported
+    the `'kettle'` window `visible=False` indefinitely). A configured
+    `window_state = hidden` stays hidden. NOTE: this is a *perceived-quality*
+    fix, not a wall-clock
+    speed-up — investigation (31-agent workflow) confirmed startup is
+    machine/environment-bound (the ~1.5s GPU/Vulkan init + cold-WSL boot when
+    the default shell is `wsl.exe`); the empty grid already paints right after
+    GPU init, independent of
+    the shell (which `portable_pty` spawns async). Reveal decision extracted to
+    the pure, drift-guarded `should_reveal_after_first_frame`. Verified live on
+    Win11 (winapp MCP) + WSLg Linux; surfaced by the user's startup-latency
+    question.
+
 ## [2.4.1] — 2026-06-03
 
   **Patch: live UI/UX verification sweep — one cosmetic fix.** A live,

@@ -638,6 +638,22 @@ impl Mux {
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
+        // Cycle 787 (audit B1, investigated + intentionally kept unbounded):
+        // a bounded channel here is UNSAFE in both variants. `TermEvent` is
+        // `alacritty_terminal::event::Event`, which carries one-shot events that
+        // must never be dropped — `Exit` (child gone → pane close; dropping it
+        // zombies the pane) and `PtyWrite(..)` (protocol replies written back to
+        // the PTY, e.g. cursor-position / device-attribute answers; dropping one
+        // hangs the querying program). So `bounded` + `try_send` (drop-on-full)
+        // is out. And `bounded` + blocking `send` deadlocks: the sender
+        // (`EventProxy::send_event`) runs inside `processor.advance(&mut *t, ..)`
+        // while the reader holds `term.lock()` (term.rs); a full channel would
+        // block the reader *with the lock held*, and the UI thread — which locks
+        // the same `term` to render — would block forever waiting for it. The
+        // channel is drained every UI iteration via `try_recv` and the waker
+        // fires per event, so it does not grow unbounded in normal operation;
+        // sustained growth only happens if the UI thread is already wedged, at
+        // which point OOM is a symptom, not the disease. Keep it unbounded.
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
         // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
         // optional output sidechannel for LuaEvent::Output emission.
@@ -1742,6 +1758,46 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    /// Cycle 789 drift guard (audit D2). Session focus persistence is the core
+    /// state machine for relaunch: `snapshot` records the focused pane's
+    /// DFS-order *index* via `leaf_index_of` (pane ids are reallocated across
+    /// restores, so the id itself isn't portable), and `restore` recreates
+    /// focus with `nth_leaf` at that index. The two walk children in the same
+    /// `a → b` order and MUST stay exact inverses, or relaunch silently focuses
+    /// the wrong pane. An off-by-one here is invisible to a behavioral test
+    /// (every shell still spawns) — this pins the invariant directly.
+    #[test]
+    fn leaf_index_of_and_nth_leaf_are_inverse() {
+        // Split( Split(L1,L2), Split(L3,L4) ) — DFS leaf order 1,2,3,4.
+        let split = |a, b| Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let tree = split(
+            split(Node::Leaf(1), Node::Leaf(2)),
+            split(Node::Leaf(3), Node::Leaf(4)),
+        );
+        assert_eq!(tree.leaf_ids(), vec![1, 2, 3, 4], "DFS leaf order");
+        for (idx, id) in [(0usize, 1u64), (1, 2), (2, 3), (3, 4)] {
+            assert_eq!(tree.leaf_index_of(id), Some(idx), "index of leaf {id}");
+            assert_eq!(tree.nth_leaf(idx), id, "leaf at index {idx}");
+            // The exact round trip restore relies on:
+            assert_eq!(tree.nth_leaf(tree.leaf_index_of(id).unwrap()), id);
+        }
+        // A pane id no longer in the tree → None (snapshot then stores 0).
+        assert_eq!(tree.leaf_index_of(999), None);
+        // An index past a trimmed tree falls back to the first leaf, so a
+        // stale session still produces a valid focus instead of panicking.
+        assert_eq!(tree.nth_leaf(99), tree.first_leaf());
+        assert_eq!(tree.first_leaf(), 1);
+        // Single-leaf tab: index 0 ↔ the lone pane.
+        let solo = Node::Leaf(7);
+        assert_eq!(solo.leaf_index_of(7), Some(0));
+        assert_eq!(solo.nth_leaf(0), 7);
+    }
 
     /// Cycle 678 drift guard. `compute_broadcast_targets` is the
     /// pure helper that maps a `BroadcastScope` + focused pane +

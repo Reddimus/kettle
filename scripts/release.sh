@@ -152,6 +152,22 @@ if [ -f flake.nix ]; then
     rm -f flake.nix.bak
 fi
 
+# Cycle 790 — durable lockstep for the user-facing install docs. README.md's
+# status banner and docs/INSTALL.md's "current latest" line + example
+# `KETTLE_VERSION=` / download URLs spell the version as `vX.Y.Z`, and kept
+# re-staling because nothing synced them to Cargo.toml (the manual cycle-783
+# bump went stale within two days — the audit's finding E2). Bump every
+# `vPREV` → `vVERSION` occurrence here, atomically with the Cargo/flake bumps.
+# These files only ever write `vX.Y.Z` as a release reference, so a global
+# replace is safe.
+for doc in README.md docs/INSTALL.md; do
+    if [ -f "$doc" ] && grep -q "v${PREV}" "$doc"; then
+        echo "bumping ${doc}: v${PREV} → v${VERSION}"
+        sed -i.bak "s/v${PREV_RE}/v${VERSION}/g" "$doc"
+        rm -f "${doc}.bak"
+    fi
+done
+
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
 #
@@ -207,6 +223,13 @@ ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
 if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)
 fi
+# Cycle 790: stage the install docs whose version strings were bumped above
+# (only if the bump actually changed them, so a clean tree stays clean).
+for doc in README.md docs/INSTALL.md; do
+    if [ -f "$doc" ] && ! git diff --quiet -- "$doc"; then
+        ADD_FILES+=("$doc")
+    fi
+done
 git add "${ADD_FILES[@]}"
 git commit -m "release: v${VERSION}
 

@@ -70,9 +70,19 @@ case "$(uname -m)" in
   x86_64 | amd64) ASSET="kettle-linux-x86_64.tar.gz" ;;
   aarch64 | arm64) ASSET="kettle-linux-aarch64.tar.gz" ;;
   *)
-    echo "kettle install-online.sh: unsupported arch '$(uname -m)'." >&2
-    echo "Prebuilt Linux binaries are x86_64 and aarch64. Build from source via:" >&2
+    # Cycle 793 (audit F1): name the supported arches and give 32-bit users a
+    # real path instead of a dead end. wgpu/glyphon have no tier-1 support on
+    # armv7l/i686, so a source build there is experimental — say so, and point
+    # at the support-tier matrix + a zero-build Nix sandbox to try first.
+    echo "kettle install-online.sh: no prebuilt binary for arch '$(uname -m)'." >&2
+    echo "Prebuilt Linux binaries are x86_64 (amd64) and aarch64 (arm64) only." >&2
+    echo "32-bit targets (armv7l / i686) are source-only and EXPERIMENTAL —" >&2
+    echo "wgpu/glyphon have no tier-1 support there; see the support-tier matrix" >&2
+    echo "in docs/INSTALL.md (section 'Supported platforms')." >&2
+    echo "Build from source:" >&2
     echo "  git clone https://github.com/${REPO} && cd kettle && ./scripts/install.sh" >&2
+    echo "Or try it sandboxed without building (needs Nix):" >&2
+    echo "  nix run github:${REPO}" >&2
     exit 1
     ;;
 esac

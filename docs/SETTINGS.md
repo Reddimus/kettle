@@ -26,7 +26,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window padding | `window-padding-x` | 0–40 px |
-| Cursor shape | `cursor-shape` | block · beam · underline |
+| Cursor shape | `cursor-style` | block · beam · underline |
 | Cursor blink | `cursor-blink` | on / off |
 | Show pane titlebars | `show-titlebar` | on / off |
 

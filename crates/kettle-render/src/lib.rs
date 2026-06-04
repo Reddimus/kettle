@@ -1397,13 +1397,16 @@ impl Renderer {
                 let g = pv.term.grid();
                 let top = g.history_size() as i64 - g.display_offset() as i64;
                 let nrows = g.screen_lines() as i64;
-                // Draw in ascending z so higher z-index images land on top.
-                let mut ordered: Vec<&kettle_core::Placement> = pv.images.iter().collect();
-                ordered.sort_by_key(|p| p.z);
-                for p in ordered {
+                // Cycle 791 (audit C1): most panes carry 0–1 image placements,
+                // so skip the per-frame `Vec` alloc + sort in that common case
+                // (z-order is meaningless for fewer than two) and iterate the
+                // slice directly; only collect + sort when 2+ placements
+                // actually need ordering. One closure keeps the body single-
+                // sourced across both paths.
+                let mut draw = |p: &kettle_core::Placement| {
                     let row = p.abs_line - top;
                     if row + p.cell_rows as i64 <= 0 || row >= nrows {
-                        continue;
+                        return;
                     }
                     live.insert(std::sync::Arc::as_ptr(&p.img.rgba) as usize);
                     img_items.push((
@@ -1416,6 +1419,18 @@ impl Renderer {
                         p.cell_rows as f32 * ch,
                         p.img.clone(),
                     ));
+                };
+                if pv.images.len() > 1 {
+                    // Draw in ascending z so higher z-index images land on top.
+                    let mut ordered: Vec<&kettle_core::Placement> = pv.images.iter().collect();
+                    ordered.sort_by_key(|p| p.z);
+                    for p in ordered {
+                        draw(p);
+                    }
+                } else {
+                    for p in &pv.images {
+                        draw(p);
+                    }
                 }
             }
 
@@ -1687,6 +1702,11 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.tab_buffers.push(b);
             }
+            // Cycle 788 (audit B4): shrink the pool when tabs close, matching
+            // `pane_buffers`/`settings_buffers` — otherwise it stuck at the
+            // peak tab count for the whole session (open 50, close to 5 → 50
+            // shaped-text buffers retained).
+            self.tab_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, w, _) = s.rect;
                 // chars that fit: segment minus the ✕ zone, ~cell_w each.
@@ -1781,6 +1801,11 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_buffers.push(b);
             }
+            // Cycle 788 (audit B2): shrink to the current row count so a small
+            // menu after a large one (common with dynamic Lua menus) doesn't
+            // keep the peak's worth of shaped-glyph buffers. The field doc
+            // promised this trim; the code never did it until now.
+            self.context_menu_buffers.truncate(menu.rows.len());
             // Approximate widest label so the panel fits without
             // wrapping; the renderer doesn't try to measure precisely
             // because the labels are short and we pad generously.
@@ -1853,6 +1878,10 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.hint_buffers.push(b);
             }
+            // Cycle 788 (audit B3): quick-select labels every visible link, so
+            // densities swing widely (50 → 5 → 100); shrink the pool to the
+            // current label count instead of pinning it at the peak.
+            self.hint_buffers.truncate(overlay.hint_labels.len());
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 let n = hint.label.chars().count().max(1) as f32;
                 let buf = &mut self.hint_buffers[i];
@@ -4387,6 +4416,60 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             src.contains("self.pane_titlebar_buffers.truncate(panes.len())"),
             "pane_titlebar_buffers must be truncated to panes.len() too"
+        );
+    }
+
+    /// Cycle 788 drift guard (audit B2/B3/B4). The overlay text-buffer pools
+    /// are grown with `while len < N` exactly like the pane pools and must be
+    /// truncated back down too, or each ratchets to its session high-water mark
+    /// (peak menu rows / hint labels / tab count) holding idle shaped-glyph
+    /// buffers. Pin all five truncate calls at the source level (a behavioral
+    /// test would need a full GPU `Renderer`).
+    #[test]
+    fn render_frame_truncates_overlay_buffer_pools_on_shrink() {
+        let src = include_str!("lib.rs");
+        for (call, what) in [
+            (
+                "self.tab_buffers.truncate(tabbar.segments.len())",
+                "tab_buffers",
+            ),
+            (
+                "self.context_menu_buffers.truncate(menu.rows.len())",
+                "context_menu_buffers",
+            ),
+            (
+                "self.hint_buffers.truncate(overlay.hint_labels.len())",
+                "hint_buffers",
+            ),
+            (
+                "self.settings_buffers.truncate(lines.len())",
+                "settings_buffers",
+            ),
+        ] {
+            assert!(
+                src.contains(call),
+                "{what} must be truncated each frame so the pool can't grow \
+                 unbounded across overlay open/close cycles (missing `{call}`)"
+            );
+        }
+    }
+
+    /// Cycle 791 drift guard (audit C1). Image-placement draw must keep the
+    /// `len > 1` fast-path so the common 0–1-image pane doesn't pay a per-frame
+    /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
+    /// land on top. A behavioral test needs a full GPU `Renderer`; pin both at
+    /// the source level (same shape as the buffer-truncate guards above).
+    #[test]
+    fn image_placement_draw_keeps_len_fastpath_and_z_sort() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("if pv.images.len() > 1"),
+            "image placement draw must fast-path the 0–1 case to skip the \
+             per-frame Vec alloc + sort"
+        );
+        assert!(
+            src.contains("ordered.sort_by_key(|p| p.z)"),
+            "2+ image placements must still be z-sorted so higher z lands on top"
         );
     }
 }

@@ -1586,6 +1586,14 @@ pub struct App {
     /// once. Guards against re-firing on subsequent resumed()
     /// invocations (winit may re-emit resumed on Wayland).
     lua_startup_fired: bool,
+    /// Cycle 785: the window is created hidden (`with_visible(false)`) so the
+    /// user never sees an unpainted / "not responding" rectangle during the
+    /// ~1.5s GPU adapter+device init that `Renderer::new` blocks on. This is
+    /// `false` until the first frame is composited, at which point `redraw`
+    /// calls `set_visible(true)` and flips it to `true`. `resumed` initializes
+    /// it to `true` for a configured `window_state = hidden`, so that case
+    /// stays hidden (no reveal).
+    window_shown: bool,
 }
 
 /// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
@@ -1978,6 +1986,7 @@ impl App {
             pending_pane_restarts: Vec::new(),
             lua_engine,
             lua_startup_fired: false,
+            window_shown: false,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -3882,6 +3891,18 @@ impl App {
             renderer.render_frame_with_status(&panes, &tabbar, &self.cfg, &overlay, &status)
         {
             log::warn!("render error: {e}");
+        }
+        // Cycle 785: now that the first frame is on the surface, reveal the
+        // window (created hidden to avoid the unpainted-window flash during GPU
+        // init). Runs after the render attempt — even on a render *error* we
+        // reveal, so the window can never get stuck invisible. No-op on every
+        // subsequent frame (and for a `window_state = hidden` window, which
+        // `resumed` already marked shown).
+        if !self.window_shown {
+            if let Some(w) = &self.window {
+                w.set_visible(true);
+            }
+            self.window_shown = true;
         }
     }
 
@@ -7364,6 +7385,27 @@ fn to_mods(m: ModifiersState) -> Mods {
     out
 }
 
+/// Cycle 785: whether to reveal the window after its first frame composites
+/// (the cycle-785 hide-until-painted startup), or keep it hidden. Only a
+/// configured `window_state = hidden` stays hidden; every visible state
+/// (Normal / Maximise / Fullscreen) is revealed once it has content.
+fn should_reveal_after_first_frame(state: kettle_config::WindowState) -> bool {
+    !matches!(state, kettle_config::WindowState::Hidden)
+}
+
+/// Cycle 786: should an open modal swallow a pointer event (mouse press /
+/// wheel) instead of letting it fall through to the tab bar, pane focus, or
+/// mouse-tracking *behind* the dialog? True whenever any modal is open —
+/// search / palette / ssh / settings / layout-picker / hint / confirm dialog /
+/// inline title-edit / vi copy-mode — *except* a lone context menu, which owns
+/// its own click/scroll paths above and is re-opened (relocated) by a
+/// right-click below, so gating it here would break that. Before this cycle a
+/// click switched tabs / focused a pane and a wheel zoomed the font or scrolled
+/// the pane while a dialog the user thought was capturing input sat on top.
+fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool {
+    any_modal_open && !context_menu_open
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -7467,6 +7509,15 @@ impl ApplicationHandler<UserEvent> for App {
                 .unwrap_or_else(|| "kettle".to_string());
             WindowAttributesExtX11::with_name(attrs, wm_class.clone(), wm_class)
         };
+        // Cycle 785: create the window hidden, then reveal it in `redraw` once
+        // the first frame is composited — so the user never sees an unpainted
+        // / "(Not Responding)" rectangle during the ~1.5s GPU adapter+device
+        // init that the `Renderer::new` `block_on` below stalls the event loop
+        // on. A configured `window_state = hidden` already set `with_visible
+        // (false)` above and must stay hidden, so `window_shown` starts `true`
+        // there (no reveal) and `false` for every visible state.
+        self.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
+        let attrs = attrs.with_visible(false);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -7720,6 +7771,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.drain_lua_hook_commands("startup hook");
             self.lua_startup_fired = true;
         }
+        // Cycle 785: paint the first frame *directly* here — not only via
+        // `request_redraw` — so the window (created `with_visible(false)` to
+        // avoid the unpainted-window flash during GPU init) is actually
+        // revealed. On Windows, `RedrawRequested` is NOT delivered to a window
+        // that has never been shown, so a purely redraw-driven reveal leaves
+        // the window stuck invisible (verified live). `redraw` renders the
+        // first frame and, via its reveal block, calls `set_visible(true)` and
+        // flips `window_shown`. The renderer is always `Some` by this point
+        // (init failure above `exit()`s and returns), so this never early-
+        // returns before revealing. The follow-up `request_redraw` schedules
+        // the next frame — now delivered normally, the window being visible.
+        self.redraw();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -7836,6 +7899,11 @@ impl ApplicationHandler<UserEvent> for App {
                     && !self.tab_drag_active
                     && !self.selecting
                     && !self.dragging_scrollbar
+                    // Cycle 786 (audit A4): don't let focus-follows-mouse
+                    // reassign pane focus while a modal is open — typing into
+                    // search/palette while the cursor drifts over another pane
+                    // would otherwise silently steal focus.
+                    && !self.any_modal_open()
                 {
                     let area = self.area();
                     let pre = self.focus_key();
@@ -8018,6 +8086,18 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
+                    return;
+                }
+                // Cycle 786 (audit A1, critical): with any *other* modal open
+                // (search / palette / ssh / settings / layout-picker / hint /
+                // confirm dialog / inline title-edit / vi copy-mode) the click
+                // must be consumed — otherwise it fell straight through to the
+                // tab-bar / pane-focus / mouse-tracking logic below, switching
+                // tabs and injecting mouse events into the terminal *behind* a
+                // dialog that looked like it had focus. The context menu is
+                // excluded (handled + returned above; a right-click below
+                // relocates it).
+                if modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
@@ -8304,6 +8384,15 @@ impl ApplicationHandler<UserEvent> for App {
                     // Wheel up = lines > 0 = scroll up = decrement
                     // offset; wheel down = lines < 0 = scroll down.
                     self.scroll_context_menu(-(lines as isize));
+                    return;
+                }
+                // Cycle 786 (audit A2): a non-context-menu modal swallows the
+                // wheel too — without this, Ctrl+wheel still zoomed the font
+                // and Shift/plain wheel still scrolled the pane / cycled tabs
+                // behind an open search / palette / settings / etc. The context
+                // menu already consumed its wheel above, so it is `None` here
+                // and `modal_swallows_pointer` reduces to "any modal open".
+                if modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
                     return;
                 }
                 // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
@@ -8806,10 +8895,43 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled, find_menu_row_y,
-        rank_layouts, selection_kind, typeahead_match,
+        modal_swallows_pointer, rank_layouts, selection_kind, should_reveal_after_first_frame,
+        typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    /// Cycle 785 drift guard: the hide-until-painted window (created with
+    /// `with_visible(false)`) is revealed after its first frame for every
+    /// visible startup state, and stays hidden only for `window_state =
+    /// hidden` — so the `set_visible(true)` in `redraw` matches user intent.
+    #[test]
+    fn window_revealed_for_visible_states_only() {
+        use kettle_config::WindowState;
+        assert!(should_reveal_after_first_frame(WindowState::Normal));
+        assert!(should_reveal_after_first_frame(WindowState::Maximise));
+        assert!(should_reveal_after_first_frame(WindowState::Fullscreen));
+        assert!(!should_reveal_after_first_frame(WindowState::Hidden));
+    }
+
+    /// Cycle 786 drift guard (audit A1/A2): a mouse press / wheel is swallowed
+    /// whenever a non-context-menu modal is open, so it can't fall through to
+    /// the tab bar / pane focus / mouse-tracking behind the dialog. A lone
+    /// context menu is the one exception — it owns its click/scroll paths and a
+    /// right-click relocates it — and with nothing open the pointer passes
+    /// through as normal.
+    #[test]
+    fn modal_swallows_pointer_except_lone_context_menu() {
+        // A non-context-menu modal (e.g. search/palette/settings) is open.
+        assert!(modal_swallows_pointer(true, false));
+        // A lone context menu does NOT swallow — its own paths handle it.
+        assert!(!modal_swallows_pointer(true, true));
+        // Nothing open: the pointer falls through to tabs/panes normally.
+        assert!(!modal_swallows_pointer(false, false));
+        // Defensive: even if both were somehow set, the context-menu
+        // exclusion wins (its dedicated handling ran first).
+        assert!(!modal_swallows_pointer(true, true));
+    }
 
     fn item(label: &'static str, enabled: bool) -> ContextMenuItem {
         // Any concrete Action works — the filter only looks at the

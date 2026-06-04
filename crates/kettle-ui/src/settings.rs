@@ -137,8 +137,14 @@ pub fn categories() -> Vec<Category> {
                 number("Background opacity", "background-opacity", 20, 100, 5, "%"),
                 number("Window padding", "window-padding-x", 0, 40, 2, "px"),
                 choice(
+                    // Cycle 790 (audit E3): use the canonical `cursor-style`
+                    // key (CONFIG.md's authoritative spelling) rather than the
+                    // `cursor-shape` back-compat alias, so the overlay persists
+                    // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
+                    // agree. `beam` stays as the user-facing value (accepted as
+                    // the Alacritty alias for `bar`).
                     "Cursor shape",
-                    "cursor-shape",
+                    "cursor-style",
                     &["block", "beam", "underline"],
                     &["block", "beam (bar)", "underline"],
                 ),
@@ -317,7 +323,9 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             BellMode::Both => "both",
         }
         .to_string(),
-        "cursor-shape" => match cfg.cursor_style {
+        // Cycle 790 (audit E3): keyed on the canonical `cursor-style` to match
+        // the catalogue field + CONFIG.md (was the `cursor-shape` alias).
+        "cursor-style" => match cfg.cursor_style {
             CursorStyle::Block => "block",
             CursorStyle::Bar => "beam",
             CursorStyle::Underline => "underline",
@@ -380,6 +388,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Cycle 789 drift guard (audit D3). `keybind_action` extracts the
+    /// canonical action token the settings overlay routes into chord-capture
+    /// (Enter on a keybind row). A refactor that renamed `FieldKind::Keybind`'s
+    /// `action` field — or returned the token for the wrong variant — would
+    /// silently break keybind editing; only the interactive overlay exercised
+    /// it before. Pin Some(action) for keybind fields and None for every other
+    /// field kind.
+    #[test]
+    fn keybind_action_extracts_token_for_keybind_fields_only() {
+        assert_eq!(
+            keybind_action(&keybind("Split right", "split_right")),
+            Some("split_right")
+        );
+        // Empty-token boundary: still Some, just empty (the catalogue never
+        // ships one, but the accessor must not special-case it to None).
+        assert_eq!(keybind_action(&keybind("Weird", "")), Some(""));
+        // Non-keybind kinds yield None.
+        assert_eq!(
+            keybind_action(&toggle("Cursor blink", "cursor-blink")),
+            None
+        );
+        assert_eq!(
+            keybind_action(&choice("Scrollbar", "scrollbar", &["auto"], &["auto"])),
+            None
+        );
+        assert_eq!(
+            keybind_action(&number("Font size", "font-size", 6, 72, 1, "pt")),
+            None
+        );
+        // is_keybind agrees with keybind_action on the discriminant.
+        assert!(is_keybind(&keybind("X", "copy")));
+        assert!(!is_keybind(&toggle("Y", "cursor-blink")));
     }
 
     #[test]

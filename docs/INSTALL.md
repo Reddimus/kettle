@@ -1,5 +1,18 @@
 # Install
 
+## Supported platforms
+
+| Platform | Arch | Support |
+|---|---|---|
+| Linux | x86_64, aarch64 | **Tier 1** — prebuilt binary + one-line installer |
+| macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
+| Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
+| Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
+
+Tier-1 targets are built and SHA-256-signed in CI for every release. Tier-2
+targets have no prebuilt binary; `scripts/install-online.sh` points you at a
+source build (or `nix run github:Reddimus/kettle` to try it in a sandbox first).
+
 ## Linux — easy desktop install (Ubuntu / Fedora / Arch / GNOME / KDE)
 
 ### One-line installer (recommended)
@@ -15,7 +28,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v2.3.2 sh
+  | KETTLE_VERSION=v2.4.1 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -117,6 +130,15 @@ GitHub runners for every platform:
   Uninstall later via Add/Remove Programs (`appwiz.cpl`), or
   `.\install.ps1 -Uninstall` from the install dir.
 
+  > **No `winget` / `scoop` recipe yet.** `winget install kettle` and
+  > `scoop install kettle` don't resolve — kettle isn't in the winget-pkgs
+  > repo or a scoop bucket. If you'd like to maintain one, the SHA-256
+  > sidecars shipped with every release satisfy both ecosystems' integrity
+  > checks, and `packaging/homebrew/kettle.rb` + `packaging/arch/PKGBUILD`
+  > are ready-made templates for the manifest shape. Until then, use
+  > `install.ps1` above (it covers PATH + Start-menu + auto-uninstall, the
+  > same integration a package manager would give you).
+
 ## First run
 
 After install, launch `kettle` from any shell. A few one-liners worth
@@ -153,14 +175,14 @@ palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.3.2)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.4.1)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.3.2/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.3.2/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.4.1/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.4.1/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```

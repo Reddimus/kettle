@@ -43,6 +43,30 @@ pub struct Session {
     pub theme: Option<String>,
 }
 
+/// Cycle 291 / 789 (audit D1): sanitize a user-supplied layout name (from
+/// `kettle --layout <NAME>`) to `[A-Za-z0-9._-]`, replacing every other byte —
+/// crucially path separators `/` and `\`, plus the Windows drive `:` — with
+/// `_`. This is the only guard stopping `--layout ../../etc/passwd` from
+/// reading an arbitrary file: after sanitizing it becomes the in-`layouts/`
+/// filename `.._.._etc_passwd.json`, with no separator to traverse on. Chars
+/// are *replaced*, never dropped, so a non-empty name always yields a
+/// non-empty, separator-free result; only an empty name returns `None`. The
+/// `.json` suffix appended by the caller also defuses a bare `..` (→ `...json`,
+/// a regular filename, not a parent-dir reference).
+fn sanitize_layout_name(name: &str) -> Option<String> {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() { None } else { Some(safe) }
+}
+
 impl Session {
     pub fn path() -> Option<PathBuf> {
         kettle_config::Config::default_path()
@@ -55,19 +79,7 @@ impl Session {
     /// layouts directory via `--layout ../../etc/passwd`. Returns
     /// `None` if the config dir isn't resolvable.
     pub fn path_for_layout(name: &str) -> Option<PathBuf> {
-        let safe: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if safe.is_empty() {
-            return None;
-        }
+        let safe = sanitize_layout_name(name)?;
         kettle_config::Config::default_path().and_then(|p| {
             p.parent()
                 .map(|d| d.join("layouts").join(format!("{safe}.json")))
@@ -274,6 +286,51 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cycle 789 drift guard (audit D1, security). `sanitize_layout_name` is
+    /// the sole barrier between an untrusted `--layout <NAME>` CLI argument and
+    /// the filesystem; a regression that stopped replacing path separators
+    /// would reopen `--layout ../../etc/passwd` as an arbitrary-file read.
+    #[test]
+    fn sanitize_layout_name_blocks_path_traversal() {
+        // Benign names round-trip byte-for-byte.
+        assert_eq!(
+            sanitize_layout_name("my-layout").as_deref(),
+            Some("my-layout")
+        );
+        assert_eq!(
+            sanitize_layout_name("test.json").as_deref(),
+            Some("test.json")
+        );
+        assert_eq!(sanitize_layout_name("a_b.1-2").as_deref(), Some("a_b.1-2"));
+        // No separator (forward, back, or Windows drive colon) and no NUL /
+        // control byte survives — the whole point of the guard.
+        for hostile in [
+            "../../etc/passwd",
+            "..\\..\\windows\\system32",
+            "a/../b",
+            "/abs/path",
+            "C:\\evil",
+            "a\0b\nc\td",
+        ] {
+            let s = sanitize_layout_name(hostile).expect("non-empty input stays Some");
+            assert!(!s.contains('/'), "`{hostile}` left a forward slash: {s}");
+            assert!(!s.contains('\\'), "`{hostile}` left a backslash: {s}");
+            assert!(!s.contains(':'), "`{hostile}` left a drive colon: {s}");
+            assert!(!s.contains('\0'), "`{hostile}` left a NUL: {s}");
+        }
+        // Exact shape of the canonical traversal attempt: dots survive,
+        // separators collapse to `_`, so it lands inside `layouts/`.
+        assert_eq!(
+            sanitize_layout_name("../../etc/passwd").as_deref(),
+            Some(".._.._etc_passwd")
+        );
+        // Chars are *replaced*, never dropped: only an empty name → None
+        // (so the "all-special → None" intuition is wrong, and that matters —
+        // a separator-only name must still produce a safe in-dir filename).
+        assert_eq!(sanitize_layout_name(""), None);
+        assert_eq!(sanitize_layout_name("/\\:").as_deref(), Some("___"));
+    }
 
     fn tmp_dir(label: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
