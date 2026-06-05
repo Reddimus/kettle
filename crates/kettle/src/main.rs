@@ -96,6 +96,15 @@ struct Cli {
     #[arg(long, verbatim_doc_comment)]
     print_default_config: bool,
 
+    /// Write the documented default config to your config path, creating the
+    /// parent directory if needed, then exit. Unlike the
+    /// `--print-default-config > FILE` redirect (which fails on a fresh
+    /// install when the directory doesn't exist yet, and on PowerShell 5.1
+    /// writes an unreadable UTF-16 file), this creates everything for you and
+    /// refuses to overwrite an existing config. Honors `--config` / `--profile`.
+    #[arg(long, verbatim_doc_comment)]
+    write_default_config: bool,
+
     /// Print the OSC 133 shell-integration snippet for SHELL (one of
     /// `bash`, `zsh`, `fish`, `powershell` — also `pwsh` / `ps1`) and
     /// exit. Append to your shell rc file to enable `Ctrl+Up` /
@@ -486,7 +495,11 @@ fn main() -> anyhow::Result<()> {
     // Omitting `--config` (relying on the default path) still
     // silently falls back to defaults; that's the intended
     // "kettle works out of the box" behavior.
-    if let Some(p) = &cli.config
+    // Cycle 801: skip the must-already-exist check when `--write-default-config`
+    // is set — there `--config PATH` names the file to *create*, so a missing
+    // path is the expected, valid case rather than a typo to reject.
+    if !cli.write_default_config
+        && let Some(p) = &cli.config
         && let Some(reason) = config_path_problem(p)
     {
         return Err(anyhow::anyhow!("--config {}: {reason}", p.display()));
@@ -532,6 +545,38 @@ fn main() -> anyhow::Result<()> {
         // `cargo install kettle` users get the correct content
         // even if the source tree is gone.
         print!("{}", include_str!("../../../docs/kettle.example.config"));
+        return Ok(());
+    }
+    if cli.write_default_config {
+        // Cycle 801: the robust bootstrap. `--print-default-config > FILE`
+        // (the documented one-liner) fails confusingly on a fresh install
+        // because the shell can't redirect into a directory that doesn't
+        // exist yet (`~/.config/kettle/` / `%APPDATA%\kettle\`), and on
+        // PowerShell 5.1 the `>` writes an unreadable UTF-16 file. This
+        // resolves the same path kettle loads from, creates the parent
+        // directory, and writes the embedded default — refusing to clobber an
+        // existing config so a non-technical user can't accidentally wipe
+        // their settings.
+        let path = resolve_config_path(&cli).ok_or_else(|| {
+            anyhow::anyhow!("could not resolve a config path (no HOME / XDG / APPDATA?)")
+        })?;
+        if path.exists() {
+            println!(
+                "config already exists at {} — leaving it untouched.",
+                path.display()
+            );
+            println!("Delete it first if you want a fresh default, or edit it directly.");
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
+            })?;
+        }
+        std::fs::write(&path, include_str!("../../../docs/kettle.example.config"))
+            .map_err(|e| anyhow::anyhow!("could not write config {}: {e}", path.display()))?;
+        println!("Wrote a default config to {}.", path.display());
+        println!("Everything is commented out — uncomment what you want, then relaunch kettle.");
         return Ok(());
     }
     if let Some(shell) = cli.print_completions.as_deref() {

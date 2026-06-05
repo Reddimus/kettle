@@ -159,10 +159,14 @@ To bootstrap a commented starter config in the right spot for your OS:
 # macOS          — ~/.config/kettle/config (kettle uses XDG paths, not ~/Library)
 # Windows        — ~/.config/kettle/config if HOME is set, else %APPDATA%\kettle\config
 # (always run `kettle --config-path` to see the exact resolved location)
+# Easiest + cross-platform safe — creates the directory, writes the file,
+# won't overwrite an existing config:
+kettle --write-default-config
+# Or redirect it yourself (note: PowerShell 5.1's `>` writes UTF-16, which
+# kettle now reads, but `--write-default-config` avoids the encoding/dir
+# pitfalls entirely):
 kettle --print-default-config > "$(kettle --config-path)"
 ```
-
-(On Windows PowerShell: `kettle --print-default-config | Out-File -Encoding utf8 (kettle --config-path)`.)
 
 Inside kettle: **right-click anywhere in a pane** for the context menu —
 Copy / Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled

@@ -176,14 +176,16 @@ three platforms.
    tab with `Ctrl+Shift+T`.
 4. **Search** the screen with `Ctrl+Shift+F` (regex, smart-case), or open
    the **command palette** with `Ctrl+Shift+K` to fuzzy-find any action.
-5. **Configure** it:
-   `kettle --print-default-config > ~/.config/kettle/config` (Windows:
-   `%APPDATA%\kettle\config`) — edits live-reload the moment you save.
+5. **Configure** it: run `kettle --write-default-config` to drop a fully
+   commented starter config at the right path (it creates the folder for you
+   and won't overwrite an existing config) — edits live-reload the moment you
+   save. Run `kettle --config-path` to see where it landed.
 
 ## CLI quick reference
 
 ```sh
-kettle --print-default-config > ~/.config/kettle/config   # bootstrap a commented starter config
+kettle --write-default-config                             # bootstrap a commented starter config (creates the dir, won't clobber)
+kettle --print-default-config > ~/.config/kettle/config   # or print it to stdout to redirect yourself
 kettle --shell-integration bash >> ~/.bashrc              # OSC 133 jump-to-prompt (zsh/fish also supported)
 kettle --print-completions bash >> ~/.bashrc              # tab-complete every kettle flag
 kettle --list-themes        # list every bundled theme (~512)

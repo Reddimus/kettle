@@ -1630,6 +1630,33 @@ impl Default for Config {
     }
 }
 
+/// Cycle 801: decode raw config-file bytes into text, honoring a leading
+/// byte-order mark. PowerShell 5.1's `>` redirect writes UTF-16 LE with a
+/// BOM, which plain UTF-8 reads reject — so a config created via the
+/// documented `kettle --print-default-config > config` one-liner in 5.1 was
+/// silently ignored. Detects the UTF-16 LE/BE BOMs and decodes them; UTF-8
+/// (with or without a BOM) is decoded lossily so one stray byte can't drop
+/// the whole file. A UTF-8 BOM is left in place for `parse()` to strip.
+fn decode_config_text(bytes: &[u8]) -> String {
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => {
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        [0xFE, 0xFF, rest @ ..] => {
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
 impl Config {
     /// Font family to use for a given style, falling back to `font_family`.
     pub fn family_for(&self, bold: bool, italic: bool) -> &str {
@@ -1818,8 +1845,18 @@ impl Config {
             );
             return (Config::default(), Vec::new(), Vec::new());
         }
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
+        // Cycle 801: read bytes and decode by BOM rather than `read_to_string`,
+        // which hard-fails on a non-UTF-8 file. A Windows user who runs the
+        // documented `kettle --print-default-config > config` in **PowerShell
+        // 5.1** gets a UTF-16-LE-with-BOM file (5.1's `>` default encoding);
+        // `read_to_string` rejected it as invalid UTF-8, so the config was
+        // silently dropped and the user's settings just "didn't apply" with no
+        // visible reason. `decode_config_text` honors the UTF-16 LE/BE BOMs and
+        // otherwise decodes UTF-8 lossily (more forgiving than the old hard
+        // fail on a single stray byte).
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let text = decode_config_text(&bytes);
                 let (cfg, unknown) = Self::parse_collect(&text);
                 let malformed = Self::detect_malformed_values(&text);
                 (cfg, unknown, malformed)
@@ -3173,6 +3210,34 @@ impl Config {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn decode_config_text_handles_utf16_and_utf8_boms() {
+        // PowerShell 5.1's `>` writes UTF-16 LE with a BOM. Build that for a
+        // one-line config and confirm it decodes (and then parses) correctly,
+        // rather than being rejected as invalid UTF-8 and silently dropped.
+        let line = "update-check = false\n";
+        let mut le = vec![0xFFu8, 0xFE];
+        for u in line.encode_utf16() {
+            le.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_config_text(&le), line);
+        assert!(!Config::parse_text(&decode_config_text(&le)).update_check);
+
+        // UTF-16 BE (FE FF) also decodes.
+        let mut be = vec![0xFEu8, 0xFF];
+        for u in line.encode_utf16() {
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        assert_eq!(decode_config_text(&be), line);
+
+        // Plain UTF-8 is unchanged; a UTF-8 BOM is preserved for parse() to
+        // strip (so a Notepad-saved file still works as before).
+        assert_eq!(decode_config_text(line.as_bytes()), line);
+        let utf8_bom = [&[0xEFu8, 0xBB, 0xBF], line.as_bytes()].concat();
+        assert_eq!(decode_config_text(&utf8_bom), format!("\u{feff}{line}"));
+        assert!(!Config::parse_text(&decode_config_text(&utf8_bom)).update_check);
+    }
 
     #[test]
     fn example_config_in_docs_uncommented_parses_with_zero_diagnostics() {

@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Config bootstrap robustness (cycle 801) — Windows/PowerShell config no
+    longer silently ignored.** Two fixes for the documented
+    `kettle --print-default-config > config` setup flow:
+    - **UTF-16 config files now load.** PowerShell **5.1**'s `>` redirect
+      writes UTF-16-LE-with-BOM. kettle read the config with `read_to_string`,
+      which hard-fails on non-UTF-8 — so the file was silently dropped and the
+      user's settings just "didn't apply" with no visible reason. kettle now
+      reads bytes and decodes by BOM (UTF-16 LE/BE → decoded; UTF-8 with/without
+      BOM → lossy, so one stray byte can't drop the whole file). Unit-tested.
+    - **New `--write-default-config`.** The `>` one-liner also fails on a fresh
+      install because the shell can't redirect into a not-yet-existing config
+      directory — a confusing dead end for a non-technical user. The new flag
+      resolves the config path (honoring `--config`/`--profile`), creates the
+      parent directory, and writes the embedded default, **refusing to
+      overwrite** an existing config.
+
   - **WSL fix (cycle 799) — `COLORTERM` now propagates into WSL.** kettle sets
     `COLORTERM=truecolor` / `TERM_PROGRAM=kettle` on the child process, but
     WSL only forwards Windows env vars listed in `WSLENV` — so inside an
