@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **UI feedback fixes (cycle 802).** Two confirmed audit findings where an
+    action gave no visible result:
+    - **PTY-spawn failures are no longer swallowed.** `Action::NewTab`,
+      `SplitRight`/`SplitDown`, the new-window in-process fallback, and the
+      tab-bar `+` button each discarded the spawn `Result` with `let _ =`,
+      while the `-e` launch path logged it — so a failed shell spawn (bad
+      `command`, exhausted PTYs/FDs) made the keybind/click read as "does
+      nothing." They now log the error; `NewTab` additionally only fires the
+      `TabAdd` plugin event when a tab was actually created (it previously
+      announced a tab that failed to open).
+    - **Focus-follows-mouse repaints immediately.** With `focus = sloppy`, a
+      pane gaining focus under the cursor didn't request a redraw, so the
+      focused-pane border and cursor solid/hollow state stayed stale until an
+      unrelated event triggered a repaint. `note_focus_change` now requests a
+      redraw on every real focus change (centralizing the fix for all
+      focus-change paths).
+
   - **Config bootstrap robustness (cycle 801) — Windows/PowerShell config no
     longer silently ignored.** Two fixes for the documented
     `kettle --print-default-config > config` setup flow:

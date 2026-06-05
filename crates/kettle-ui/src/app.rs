@@ -3986,6 +3986,14 @@ impl App {
     fn note_focus_change(&mut self, pre: (usize, Option<u64>)) {
         if self.focus_key() != pre {
             self.reset_blink_phase();
+            // Cycle 802 (audit): repaint immediately so the focused-pane
+            // border and the cursor's solid/hollow state track the new pane.
+            // Without this, a focus-follows-mouse (`focus = sloppy`) change
+            // left a stale focus border until some *other* event happened to
+            // trigger a redraw — the pane under the cursor looked unfocused.
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -4926,8 +4934,14 @@ impl App {
                 // with the new active tab index after Mux::new_tab.
                 // Cycle 426 collapsed the inline event/drain into the
                 // shared fire_tab_add_event helper.
-                let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
-                self.fire_tab_add_event();
+                // Cycle 802 (audit): surface a PTY-spawn failure instead of
+                // swallowing it with `let _ =` (the `-e` launch path already
+                // logs), and only fire TabAdd when a tab was actually created
+                // — firing it on failure announced a tab that doesn't exist.
+                match self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                    Ok(()) => self.fire_tab_add_event(),
+                    Err(e) => log::warn!("could not open a new tab (shell spawn failed?): {e}"),
+                }
             }
             Action::NewWindow => {
                 // Spawn a *separate* kettle process so the user gets a real
@@ -4959,23 +4973,37 @@ impl App {
                     })
                     .is_some();
                 if !spawned {
-                    let _ = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker);
                     // Cycle 425: NewWindow's fallback path creates a
                     // tab in this process when current_exe isn't
                     // resolvable. Plugins listening for tab_add
                     // should see this just like Action::NewTab.
-                    self.fire_tab_add_event();
+                    // Cycle 802 (audit): log + gate the event on success.
+                    match self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                        Ok(()) => self.fire_tab_add_event(),
+                        Err(e) => {
+                            log::warn!("new-window fallback: could not open a tab: {e}")
+                        }
+                    }
                 }
             }
             Action::SplitRight => {
-                let _ = self
-                    .mux
-                    .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker);
+                // Cycle 802 (audit): log a split's PTY-spawn failure instead
+                // of swallowing it — a silently-missing split read as "the
+                // keybind does nothing."
+                if let Err(e) =
+                    self.mux
+                        .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker)
+                {
+                    log::warn!("could not split pane (right): {e}");
+                }
             }
             Action::SplitDown | Action::SplitAuto => {
-                let _ = self
+                if let Err(e) = self
                     .mux
-                    .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker);
+                    .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker)
+                {
+                    log::warn!("could not split pane (down): {e}");
+                }
             }
             Action::ClosePane => {
                 // Cycle 662 (confirm-dialog sub-cycle 6): per-pane
@@ -8178,9 +8206,14 @@ impl ApplicationHandler<UserEvent> for App {
                         let area = self.area();
                         let (cols, rows) = self.grid_of(area);
                         let (cw, ch) = self.cell_px();
-                        let _ = self
-                            .mux
-                            .new_tab(&self.cfg, cols, rows, cw, ch, self.waker());
+                        // Cycle 802 (audit): log a `+`-button new-tab spawn
+                        // failure rather than swallowing it.
+                        if let Err(e) =
+                            self.mux
+                                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
+                        {
+                            log::warn!("could not open a new tab (+ button): {e}");
+                        }
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
