@@ -33,6 +33,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **UX (cycle 821) — tab drag-to-reorder reaches the last slot again.** The
+    cycle-805 `▾` dropdown widened the trailing button area to a `▾ +` pair, but
+    the drag handler still subtracted only the `+` width, so its strip was one
+    button too wide and the reorder target lagged the cursor near the right edge.
+    The drag and `tab_bar()`'s segment layout now share one
+    `tab_segment_strip_width` helper.
+
   - **Correctness (cycle 820) — vi-mode visual selection highlights the full
     pane width.** Intermediate rows of a multi-row visual selection were
     highlighted only to a hardcoded column 256, so on a pane wider than 256

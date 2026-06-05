@@ -1241,6 +1241,20 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
     raw.clamp(0, n as isize - 1) as usize
 }
 
+/// Width of the strip that horizontal tab segments tile across, given the
+/// surface width and the trailing new-tab button geometry.
+///
+/// Shared by `tab_bar()` (segment layout) and the cycle-249 drag-to-reorder
+/// handler so the drag target can't drift from the rendered segments. Cycle 821
+/// (audit): the drag had subtracted only `plus_w`, ignoring the cycle-805 `▾`
+/// arrow, so the strip was one button too wide and the reorder target lagged the
+/// cursor near the right edge. `arrow_w` is `0.0` when the dropdown is absent
+/// (vertical bars). Floored at `plus_w` so a very narrow bar still reserves room
+/// for the `+` button.
+fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
+    (surface_w - plus_w - arrow_w).max(plus_w)
+}
+
 /// Cycle 708 (Terminator parity, `layoutlauncher.py`): rank saved
 /// layouts against the user-typed query. Empty query returns
 /// every layout in original (alphabetical) order; non-empty query
@@ -2495,7 +2509,9 @@ impl App {
         let plus_w = height;
         let arrow_w = height;
         let button_w = plus_w + arrow_w;
-        let strip = (sw - button_w).max(plus_w);
+        // Cycle 821: the drag-to-reorder handler derives its strip width from
+        // the same helper, so the two can't disagree on where segments end.
+        let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
         let cell_w = self
@@ -8395,6 +8411,15 @@ impl ApplicationHandler<UserEvent> for App {
                     let bar = self.tab_bar();
                     if bar.height > 0.0 && !bar.segments.is_empty() {
                         let (_, _, nw, _) = bar.new_tab;
+                        // Cycle 821 (audit): the trailing button area is the
+                        // cycle-805 `▾ +` PAIR, not just `+`. Subtract both so
+                        // the drag strip matches the width `tab_bar()` actually
+                        // tiles segments across (`(sw - plus_w - arrow_w)
+                        // .max(plus_w)`); using `sw - plus_w` left the strip one
+                        // button too wide, so the reorder target lagged the
+                        // cursor near the right edge (`arrow_w` is 0 when the
+                        // dropdown is absent, so this is still correct there).
+                        let (_, _, aw, _) = bar.new_tab_menu;
                         let (sw, _) = self
                             .renderer
                             .as_ref()
@@ -8403,7 +8428,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 (w as f32, h as f32)
                             })
                             .unwrap_or((800.0, 600.0));
-                        let strip_w = (sw - nw).max(1.0);
+                        let strip_w = tab_segment_strip_width(sw, nw, aw);
                         let target = tab_drag_target_index(
                             self.cursor.x as f32,
                             bar.segments.len(),
@@ -10319,6 +10344,20 @@ mod tests {
         // Empty bar or zero strip → 0 (defensive no-op).
         assert_eq!(tab_drag_target_index(50.0, 0, 300.0), 0);
         assert_eq!(tab_drag_target_index(50.0, 3, 0.0), 0);
+    }
+
+    /// Cycle 821 drift guard: the drag strip and `tab_bar()`'s segment layout
+    /// share this width, so a tab can be dragged all the way to the last slot.
+    #[test]
+    fn tab_segment_strip_width_excludes_both_buttons() {
+        use super::tab_segment_strip_width;
+        // plus_w = arrow_w = height = 24, surface 800 → strip excludes BOTH
+        // buttons (the `▾ +` pair), 800 - 48 = 752 (was 776 before the fix).
+        assert_eq!(tab_segment_strip_width(800.0, 24.0, 24.0), 752.0);
+        // No dropdown (vertical bar): arrow_w = 0 → only `+` excluded.
+        assert_eq!(tab_segment_strip_width(800.0, 24.0, 0.0), 776.0);
+        // Degenerate narrow bar floors at plus_w so `+` always has room.
+        assert_eq!(tab_segment_strip_width(20.0, 24.0, 24.0), 24.0);
     }
 
     #[test]
