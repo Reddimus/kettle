@@ -10,7 +10,11 @@ const MAX_IMAGE_DIM: u32 = 8192;
 /// Cycle 576 decompression-bomb defense: max total bytes the `image`
 /// crate may allocate while decoding. 8192² × 4 RGBA bytes = 256 MiB,
 /// the natural upper bound paired with `MAX_IMAGE_DIM`.
-const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+///
+/// Cycle 814: `pub(crate)` so the kitty decoder can bound its zlib (`o=z`)
+/// inflate to this same envelope — a legal 8192² RGBA image is exactly this
+/// many bytes, so nothing valid is rejected.
+pub(crate) const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// A decoded image plus placement metadata (kitty image id + z-index;
 /// Sixel/iTerm2 use `id = None`, `z = 0`).

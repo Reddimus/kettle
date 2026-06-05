@@ -739,16 +739,28 @@ fn parse_control(s: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Inflate a zlib (`o=z`) kitty payload, never allocating more than `cap`
+/// bytes. A decompression bomb — a tiny compressed stream that inflates to
+/// gigabytes — returns `None` instead of OOMing/aborting the process. Cycle
+/// 814 (audit): `.take(cap + 1)` bounds the read; reading past `cap` proves the
+/// stream is over-budget, so we reject it rather than silently truncate.
+fn inflate_bounded(compressed: &[u8], cap: u64) -> Option<Vec<u8>> {
+    let mut d = flate2::read::ZlibDecoder::new(compressed).take(cap + 1);
+    let mut out = Vec::new();
+    d.read_to_end(&mut out).ok()?;
+    if out.len() as u64 > cap {
+        return None;
+    }
+    Some(out)
+}
+
 fn decode(control: &str, b64: &str) -> Option<ImageData> {
     let kv = parse_control(control);
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .ok()?;
     let raw = if kv.get("o").map(|s| s == "z").unwrap_or(false) {
-        let mut d = flate2::read::ZlibDecoder::new(&raw[..]);
-        let mut out = Vec::new();
-        d.read_to_end(&mut out).ok()?;
-        out
+        inflate_bounded(&raw, crate::image::MAX_IMAGE_BYTES)?
     } else {
         raw
     };
@@ -778,6 +790,31 @@ mod tests {
 
     // One opaque RGBA pixel (f=32,s=1,v=1): bytes [1,2,3,4].
     const PX: &str = "AQIDBA==";
+
+    /// Cycle 814 (audit) drift guard for the kitty `o=z` decompression-bomb
+    /// defense. A few dozen bytes of zlib inflate to 64 KiB of zeros; under a
+    /// generous cap it decodes, under a tiny cap it's rejected (None) WITHOUT
+    /// allocating the full output. This pins the `.take(cap+1)` bound so a
+    /// future refactor can't re-introduce the unbounded `read_to_end`.
+    #[test]
+    fn inflate_bounded_rejects_a_decompression_bomb() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&vec![0u8; 64 * 1024]).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert!(
+            compressed.len() < 1024,
+            "zero-run should compress tiny (got {})",
+            compressed.len()
+        );
+        // Generous cap → inflates to the full 64 KiB.
+        let ok = super::inflate_bounded(&compressed, 64 * 1024).expect("fits under cap");
+        assert_eq!(ok.len(), 64 * 1024);
+        // Tiny cap (1 KiB) → rejected without materializing the 64 KiB output.
+        assert!(super::inflate_bounded(&compressed, 1024).is_none());
+    }
 
     #[test]
     fn transmit_and_display_virtual_placement() {
