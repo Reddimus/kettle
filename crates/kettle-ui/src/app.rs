@@ -1388,6 +1388,14 @@ fn clamp_context_menu_anchor(
     (x, y)
 }
 
+/// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
+type FocusKey = (usize, Option<u64>);
+/// Cycle 803 cache key for the search re-scan: `(query, focus, tab last-output)`.
+type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
+/// Cycle 803 cache key for the viewport link re-scan: `(focus, tab last-output,
+/// scroll display_offset)`.
+type LinksScanKey = (FocusKey, Option<std::time::Instant>, Option<usize>);
+
 pub struct App {
     cfg: Config,
     window: Option<Arc<Window>>,
@@ -1407,6 +1415,20 @@ pub struct App {
     /// `(query, index)` last scrolled-to, so the viewport follows search
     /// matches into scrollback without re-scrolling every frame.
     search_revealed: Option<(String, usize)>,
+    /// Cycle 803: cache key for the last completed search scan —
+    /// `(query, focused-pane, that tab's last-output instant)`. `update_search`
+    /// runs every frame while the overlay is open; without this it re-ran the
+    /// full-scrollback regex scan (O(history) per match attempt) ~60×/s even
+    /// when nothing changed. We re-scan only when the query, the focused pane,
+    /// or the tab's output (new text could create/remove matches) changed.
+    search_scan_key: Option<SearchScanKey>,
+    /// Cycle 803: cache key for the last viewport link-autodetect scan —
+    /// `(focused-pane, that tab's last-output instant, scroll display_offset)`.
+    /// `update_links` ran `kettle_core::links` (a full-viewport URL regex pass)
+    /// every frame; the viewport's link set only changes on output, scroll, or
+    /// a focus switch, so we re-scan only then (the cheap part — reading the
+    /// scroll offset — still runs per frame to detect the change).
+    links_scan_key: Option<LinksScanKey>,
     mouse_btn: Option<u8>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
@@ -1959,6 +1981,8 @@ impl App {
             selecting: false,
             dragging_scrollbar: false,
             search_revealed: None,
+            search_scan_key: None,
+            links_scan_key: None,
             mouse_btn: None,
             links: Vec::new(),
             ssh_input: None,
@@ -3233,31 +3257,48 @@ impl App {
 
     fn update_search(&mut self) {
         if !self.mux.search.open {
+            // Clear the scan cache so the next open re-scans from scratch.
+            self.search_scan_key = None;
             return;
         }
         let query = self.mux.search.query.clone();
-        let matches = if let Some(p) = self.mux.focused() {
-            p.term
-                .term
-                .lock()
-                .ok()
-                .map(|t| {
-                    kettle_core::search_with(
-                        &t,
-                        &query,
-                        map_case_sensitivity(self.cfg.search_case_sensitive),
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        {
+        // Cycle 803: re-run the (potentially full-scrollback) regex scan only
+        // when something that affects the match set changed — the query, the
+        // focused pane, or that tab's last-output instant (new text could add
+        // or remove matches). Match *navigation* (n/N changes `index`) and the
+        // follow-to-match scroll below still run every call, so only the
+        // expensive scan is skipped on an idle frame.
+        let scan_key = (
+            query.clone(),
+            self.focus_key(),
+            self.mux
+                .tabs
+                .get(self.mux.active)
+                .and_then(|t| t.last_output_at),
+        );
+        if self.search_scan_key.as_ref() != Some(&scan_key) {
+            let matches = if let Some(p) = self.mux.focused() {
+                p.term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|t| {
+                        kettle_core::search_with(
+                            &t,
+                            &query,
+                            map_case_sensitivity(self.cfg.search_case_sensitive),
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let s = &mut self.mux.search;
             s.matches = matches;
             if s.index >= s.matches.len() {
                 s.index = 0;
             }
+            self.search_scan_key = Some(scan_key);
         }
         // Follow the active match into scrollback when it (or the query)
         // changed — once, so the user can still wheel-scroll freely.
@@ -3687,11 +3728,31 @@ impl App {
     }
 
     fn update_links(&mut self) {
+        // Cycle 803: build a cheap key (focus + tab output instant + scroll
+        // offset) and skip the viewport URL re-scan when the visible content
+        // can't have changed. The brief lock to read display_offset is cheap;
+        // the avoided work is `kettle_core::links`' per-cell regex pass.
+        let key = {
+            let out_at = self
+                .mux
+                .tabs
+                .get(self.mux.active)
+                .and_then(|t| t.last_output_at);
+            let off = self
+                .mux
+                .focused()
+                .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
+            (self.focus_key(), out_at, off)
+        };
+        if self.links_scan_key.as_ref() == Some(&key) {
+            return;
+        }
         self.links = self
             .mux
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| kettle_core::links(&t)))
             .unwrap_or_default();
+        self.links_scan_key = Some(key);
     }
 
     fn redraw(&mut self) {

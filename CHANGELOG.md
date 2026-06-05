@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Per-frame work elimination (cycle 803) — search + link re-scans now
+    cached.** While the search overlay is open, `update_search` re-ran a full
+    scrollback regex scan (`kettle_core::search_with`) on **every frame**
+    (~60×/s) even when nothing changed; likewise `update_links` re-ran the
+    viewport URL autodetect (`kettle_core::links`) every frame. Both now cache
+    by a cheap key — search by `(query, focused pane, that tab's last-output
+    instant)`, links by `(focus, last-output, scroll offset)` — and re-scan
+    only when an input that affects the result actually changes. Match
+    navigation (n/N) and the follow-to-match scroll still run every call, so
+    only the expensive scan is skipped on an idle frame. O(history)/O(viewport)
+    per-frame → O(1) when idle.
+
   - **UI feedback fixes (cycle 802).** Two confirmed audit findings where an
     action gave no visible result:
     - **PTY-spawn failures are no longer swallowed.** `Action::NewTab`,
