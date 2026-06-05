@@ -3300,6 +3300,33 @@ mod config_tests {
     }
 
     #[test]
+    fn update_checker_is_documented_for_users() {
+        // Cycle 811 (audit): the update checker (cycle 794) is a shipped,
+        // on-by-default feature that phones home once a day. Users need to be
+        // able to find the `--check-update` on-demand flag and the
+        // `update-check` opt-out, so pin that the README + example config
+        // actually document them — a future doc drift (or feature removal that
+        // forgets the docs) then fails here instead of silently leaving the
+        // privacy control undiscoverable.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = std::fs::read_to_string(manifest.join("../../README.md")).expect("README");
+        assert!(
+            readme.contains("--check-update"),
+            "README must document the --check-update flag"
+        );
+        assert!(
+            readme.contains("update-check"),
+            "README must document the update-check opt-out"
+        );
+        let example = std::fs::read_to_string(manifest.join("../../docs/kettle.example.config"))
+            .expect("example config");
+        assert!(
+            example.contains("update-check"),
+            "example config must document the update-check key"
+        );
+    }
+
+    #[test]
     fn user_facing_docs_have_no_internal_cycle_refs() {
         // Cycle 168 caught the audit-trail-in-doc-string issue on the
         // clap CLI surface (`kettle --help` was emitting "(cycle 103)"

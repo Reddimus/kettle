@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Docs (cycle 811, audit) — document the update checker + fix accuracy
+    nits.** The on-by-default update checker (a feature that contacts GitHub
+    once a day) had **no user-facing docs**; the README and
+    `docs/kettle.example.config` now describe `--check-update`, the
+    `update-check` opt-out, and the `KETTLE_PACKAGED` build-time suppression, so
+    the privacy control is discoverable (guarded by a new drift test). Also:
+    corrected the stale "~500 themes" in the README to ~512 (matching the rest
+    of the doc and `--list-themes`); noted Back/Forward mouse support; added the
+    `-ExecutionPolicy Bypass` fallback to the Windows install steps in
+    `docs/INSTALL.md`; and refreshed the macOS Gatekeeper guidance for macOS 15
+    (System Settings → Open Anyway / `xattr -dr com.apple.quarantine`, since
+    right-click → Open no longer bypasses Gatekeeper there).
+
   - **Fix (cycle 810, audit) — forward the side mouse buttons (Back/Forward) to
     mouse-tracking apps.** The press/release handlers dropped every button past
     right-click (`_ => return`), so a 5-button mouse's Back / Forward never

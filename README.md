@@ -47,7 +47,7 @@ and **WezTerm** into one tool.
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
-- **Every Ghostty theme bundled** (~500, from iTerm2-Color-Schemes), default
+- **Every Ghostty theme bundled** (~512, from iTerm2-Color-Schemes), default
   **TokyoNight Night**. Ghostty-compatible `key = value` config with live
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
@@ -61,7 +61,8 @@ and **WezTerm** into one tool.
 - **Shell integration** — OSC 133 prompt marks; jump between prompts with
   `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
 - **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
-  works (X10 + SGR 1006); focus-event reporting (DEC ?1004) too.
+  works (X10 + SGR 1006), including the side **Back/Forward** buttons;
+  focus-event reporting (DEC ?1004) too.
 - **Configurable bell** — visual flash and/or window-attention
   (taskbar/dock urgency); `bell = off|visual|attention|both`.
 - **Polished input** — safe bracketed paste (newline-normalized,
@@ -83,6 +84,12 @@ and **WezTerm** into one tool.
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
 - **Live theme switching** — cycle the ~512 bundled themes at runtime
   (palette: "Next/Previous theme", or `next_theme`/`prev_theme` binds).
+- **Update check** — on by default, a quiet once-a-day check against GitHub
+  releases shows a dismissable in-app banner when a newer version ships (it
+  never auto-downloads anything). Run `kettle --check-update` to check on
+  demand, or set `update-check = false` to turn it off. Builds compiled with
+  `KETTLE_PACKAGED` set (distro/Homebrew/AUR packages) never check at all, so
+  package-managed installs don't phone home.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

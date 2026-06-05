@@ -100,8 +100,18 @@ GitHub runners for every platform:
   [`packaging/nix/README.md`](../packaging/nix/README.md) for
   `nix profile install` + dev-shell + home-manager usage.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Unzip and
-  drag `kettle.app` to `/Applications`. First launch: right-click → Open
-  (unsigned build). A ready-to-use Homebrew formula lives at
+  drag `kettle.app` to `/Applications`. It's an unsigned build, so the first
+  launch needs a one-time Gatekeeper approval:
+  - **macOS 14 (Sonoma) and earlier:** right-click `kettle.app` → **Open** →
+    **Open** in the dialog.
+  - **macOS 15 (Sequoia) and later:** double-click once (it'll be blocked),
+    then go to **System Settings → Privacy & Security**, scroll to the
+    *"kettle was blocked"* notice, and click **Open Anyway** (right-click →
+    Open no longer bypasses Gatekeeper for unsigned apps on 15+).
+  - From a terminal you can instead clear the quarantine flag directly:
+    `xattr -dr com.apple.quarantine /Applications/kettle.app`.
+
+  A ready-to-use Homebrew formula lives at
   [`packaging/homebrew/kettle.rb`](../packaging/homebrew/kettle.rb);
   see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)
   for the one-time tap-repo setup that lets users install with
@@ -113,6 +123,14 @@ GitHub runners for every platform:
   ```powershell
   # From the extracted folder:
   .\install.ps1
+  ```
+
+  If PowerShell refuses with *"running scripts is disabled on this system"*
+  (a Restricted/AllSigned execution policy), run it without changing your
+  machine's policy:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\install.ps1
   ```
 
   The installer copies kettle into `%LOCALAPPDATA%\Programs\kettle`,
