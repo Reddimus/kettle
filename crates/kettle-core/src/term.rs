@@ -226,6 +226,27 @@ fn is_wsl_launcher(prog: &str) -> bool {
     last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
 }
 
+/// Cycle 799: build the `WSLENV` value that propagates kettle's
+/// terminal-identity env vars into a WSL distro. WSL only forwards Windows
+/// env vars listed in `WSLENV`; each is suffixed `/u` ("pass Windows→WSL
+/// only"). Preserves `existing` (the user's own WSLENV) verbatim and skips
+/// any `var` already present (matching on the name before any `/flags`), so
+/// re-launches don't accumulate duplicates. Pure — unit-tested.
+fn augment_wslenv(existing: &str, vars: &[&str]) -> String {
+    let mut out = existing.to_string();
+    for &var in vars {
+        let present = out.split(':').any(|e| e.split('/').next() == Some(var));
+        if !present {
+            if !out.is_empty() {
+                out.push(':');
+            }
+            out.push_str(var);
+            out.push_str("/u");
+        }
+    }
+    out
+}
+
 /// One axis of a `PtySize`, computed without overflow. `cell` is the
 /// per-cell pixel extent (1 when computing the row/column count itself);
 /// `count` is the grid dimension in cells. The product is evaluated in
@@ -427,6 +448,23 @@ impl Terminal {
         // time so a bumped `kettle/Cargo.toml` flows through with no
         // separate version string to keep in sync.
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        // Cycle 799 (audit): env vars set on the child's *Windows* process do
+        // NOT cross into a WSL distro unless listed in `WSLENV`. Without this,
+        // `COLORTERM` is silently dropped at the WSL boundary, so a program
+        // inside WSL (Ubuntu) that decides truecolor support from `$COLORTERM`
+        // — rather than force-enabling it — falls back to 256-color and
+        // renders washed-out, mis-mapped colors. Append our terminal-identity
+        // vars to WSLENV (preserving any the user already set) with the `/u`
+        // flag, i.e. "pass Windows→WSL only". `cmd.env` set them on the
+        // Windows side just above, so WSLENV can reference them. Harmless when
+        // the child isn't `wsl.exe` — it's just an extra, ignored env var.
+        cmd.env(
+            "WSLENV",
+            augment_wslenv(
+                &std::env::var("WSLENV").unwrap_or_default(),
+                &["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"],
+            ),
+        );
         match cwd {
             Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
             _ => {
@@ -1351,6 +1389,33 @@ fn place_image(
 /// uses (alacritty_terminal + vte) over a battery of escape sequences and
 /// asserts the resulting grid/cursor/mode. This is the automatable,
 /// regression-proof core of a `vttest` sweep.
+#[cfg(test)]
+mod wslenv_tests {
+    use super::augment_wslenv;
+
+    #[test]
+    fn appends_with_u_flag_preserves_existing_and_dedups() {
+        let vars = ["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+        // Empty existing → just our vars, each `/u`.
+        assert_eq!(
+            augment_wslenv("", &vars),
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u"
+        );
+        // The user's existing WSLENV is preserved verbatim, ours appended.
+        assert_eq!(
+            augment_wslenv("FOO/p:BAR", &["COLORTERM"]),
+            "FOO/p:BAR:COLORTERM/u"
+        );
+        // An entry the user already has (even with a different flag) is not
+        // duplicated; matching is on the name before the `/flags`.
+        assert_eq!(
+            augment_wslenv("COLORTERM/up:X", &["COLORTERM", "TERM_PROGRAM"]),
+            "COLORTERM/up:X:TERM_PROGRAM/u"
+        );
+        assert_eq!(augment_wslenv("COLORTERM", &["COLORTERM"]), "COLORTERM");
+    }
+}
+
 #[cfg(test)]
 mod home_dir_tests {
     use super::home_dir_fallback;

@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **WSL fix (cycle 799) — `COLORTERM` now propagates into WSL.** kettle sets
+    `COLORTERM=truecolor` / `TERM_PROGRAM=kettle` on the child process, but
+    WSL only forwards Windows env vars listed in `WSLENV` — so inside an
+    Ubuntu/WSL shell `$COLORTERM` was **empty**, and a program that decides
+    truecolor support from it (rather than force-enabling `termguicolors`)
+    fell back to 256-color and rendered mis-mapped colors. kettle now appends
+    `COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` to `WSLENV` with the
+    `/u` (Windows→WSL) flag, preserving any `WSLENV` the user already set and
+    not duplicating entries (pure `augment_wslenv`, unit-tested). Harmless for
+    non-WSL children.
+
+  - **Test coverage (cycle 800) — update-check persistence.** Added a serde
+    round-trip + partial-file test for the cycle-794 `UpdateCache` (on-disk
+    throttle + anti-nag state): it confirms the struct round-trips and that an
+    older/partial `update-check.json` (missing fields) still loads via serde
+    defaults rather than failing — so a future schema field can't brick the
+    stored throttle/dismissal state.
+
   - **Audit-hardening batch (cycle 798).** Several confirmed findings from
     the multi-agent production audit:
     - **kitty keyboard protocol no longer falsely advertised (critical).**

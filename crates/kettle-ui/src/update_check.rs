@@ -340,4 +340,31 @@ mod tests {
         // Clock skew (last_check in the future) must not over/underflow.
         assert!(!is_due(1_000, 5_000, day));
     }
+
+    #[test]
+    fn update_cache_serde_round_trips_and_tolerates_partial_files() {
+        use super::UpdateCache;
+        let cache = UpdateCache {
+            last_check: 1_700_000_000,
+            latest_tag: Some("v2.7.0".to_string()),
+            dismissed_version: Some("v2.7.0".to_string()),
+        };
+        let json = serde_json::to_string(&cache).expect("serialize");
+        let back: UpdateCache = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.last_check, cache.last_check);
+        assert_eq!(back.latest_tag, cache.latest_tag);
+        assert_eq!(back.dismissed_version, cache.dismissed_version);
+
+        // Forward/back compatibility: a partial or older cache file (missing
+        // fields) must load via serde defaults rather than failing — a future
+        // schema field can't brick the throttle / anti-nag state on disk.
+        let partial: UpdateCache =
+            serde_json::from_str(r#"{"last_check":42}"#).expect("partial loads");
+        assert_eq!(partial.last_check, 42);
+        assert_eq!(partial.latest_tag, None);
+        assert_eq!(partial.dismissed_version, None);
+        let empty: UpdateCache = serde_json::from_str("{}").expect("empty object loads");
+        assert_eq!(empty.last_check, 0);
+        assert_eq!(empty.dismissed_version, None);
+    }
 }
