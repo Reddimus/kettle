@@ -133,10 +133,45 @@ pub fn is_safe_url(uri: &str) -> bool {
     };
     match scheme.to_ascii_lowercase().as_str() {
         "http" | "https" | "ftp" | "ftps" | "mailto" => !rest.is_empty(),
-        // Allow local files but never a traversal payload.
-        "file" => uri.starts_with("file://") && !uri.contains(".."),
+        // Allow LOCAL files only (cycle 815) — never a remote authority.
+        "file" => is_local_file_url(uri),
         _ => false,
     }
+}
+
+/// Whether a `file://` URI points at the local machine with no traversal.
+///
+/// Cycle 815 (audit): the old check was `starts_with("file://") && !contains("..")`
+/// — it blocked traversal but not a remote authority. `file://evil.example.com/share`
+/// passed, and on Windows `file://host/path` maps to the UNC `\\host\path`, so the
+/// OS opener transparently connects to `host` over SMB/WebDAV and leaks the user's
+/// NTLMv2 hash (forced authentication / pass-the-hash) plus SSRF to an arbitrary
+/// host — all reachable from untrusted PTY output (autodetected link or OSC 8).
+/// Accept only an empty authority (`file:///path`) or an explicit loopback host,
+/// and reject any backslash / `file:////` / percent-encoded traversal that could
+/// smuggle an authority back in.
+fn is_local_file_url(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return false;
+    };
+    let lowered = uri.to_ascii_lowercase();
+    if uri.contains("..")
+        || lowered.contains("%2e%2e")
+        || uri.contains('\\')
+        || lowered.contains("%5c")
+        // `file:////host/...` leaves an empty authority but a `//host` path that
+        // some openers still treat as a UNC share — reject the double slash.
+        || rest.starts_with("//")
+    {
+        return false;
+    }
+    // The authority is everything before the first '/'. Empty (`file:///...`)
+    // or an explicit loopback host is local; anything else is remote.
+    let authority = rest.split('/').next().unwrap_or("");
+    matches!(
+        authority.to_ascii_lowercase().as_str(),
+        "" | "localhost" | "127.0.0.1" | "[::1]"
+    )
 }
 
 #[cfg(test)]
@@ -164,5 +199,27 @@ mod tests {
         assert!(!is_safe_url("file://../../etc/passwd"));
         assert!(!is_safe_url(&format!("https://{}", "a".repeat(5000))));
         assert!(!is_safe_url("https:"), "scheme with empty target");
+    }
+
+    /// Cycle 815 (audit) drift guard: `file://` must be local-only — a remote
+    /// authority is a Windows NTLM-hash leak / SSRF vector from PTY output.
+    #[test]
+    fn file_url_is_local_only() {
+        // Local forms stay allowed.
+        assert!(is_safe_url("file:///etc/hostname"));
+        assert!(is_safe_url("file:///C:/Users/me/notes.txt"));
+        assert!(is_safe_url("file://localhost/etc/hostname"));
+        assert!(is_safe_url("file://127.0.0.1/x"));
+        // Remote authority → rejected (the NTLM/SSRF case).
+        assert!(!is_safe_url("file://evil.example.com/share/x"));
+        assert!(!is_safe_url("file://host/share"));
+        assert!(!is_safe_url("file://10.0.0.5/x"));
+        // Authority smuggling / UNC re-entry → rejected.
+        assert!(!is_safe_url("file:////evil/share"));
+        assert!(!is_safe_url("file://localhost:8080/x"));
+        assert!(!is_safe_url("file://user@host/x"));
+        // Percent-encoded / backslash traversal → rejected.
+        assert!(!is_safe_url("file:///x/%2e%2e/etc/passwd"));
+        assert!(!is_safe_url("file://\\\\evil\\share"));
     }
 }
