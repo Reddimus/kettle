@@ -33,6 +33,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Correctness (cycle 819) — `rgb:` config colors scale by digit width.**
+    The X11/xterm `rgb:<r>/<g>/<b>` parser sliced the first two hex digits of
+    each component instead of scaling by digit count, so `rgb:f/8/0` (full red in
+    X11) parsed as near-black `(15, 8, 0)` and 3-digit forms dropped a nibble. It
+    now scales 1–4 digit components correctly (`f`→`0xff`, `fff`→`0xff`,
+    `ffff`→`0xff`), keeping the existing multibyte-safety.
+
   - **Correctness (cycle 818) — Ctrl+Space sends NUL (0x00), not a space.** The
     space bar arrives as `NamedKey::Space`, which returned a literal space before
     any modifier was checked, so Ctrl+Space silently inserted 0x20 — breaking

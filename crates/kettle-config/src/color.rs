@@ -19,17 +19,11 @@ impl Rgb {
         if let Some(rest) = s.strip_prefix("rgb:") {
             let parts: Vec<&str> = rest.split('/').collect();
             if parts.len() == 3 {
-                // Slice the *bytes* (never the &str): a component that
-                // starts with a multibyte char (e.g. `rgb:€/00/00`) would
-                // otherwise make `&h[..2]` land on a non-char-boundary and
-                // panic (a hard crash under panic=abort). from_utf8 rejects
-                // a mid-char byte pair, yielding None instead.
-                let c = |h: &str| {
-                    let hb = h.as_bytes();
-                    let s = std::str::from_utf8(&hb[..2.min(hb.len())]).ok()?;
-                    u8::from_str_radix(s, 16).ok()
-                };
-                return Some(Rgb::new(c(parts[0])?, c(parts[1])?, c(parts[2])?));
+                return Some(Rgb::new(
+                    parse_x11_rgb_component(parts[0])?,
+                    parse_x11_rgb_component(parts[1])?,
+                    parse_x11_rgb_component(parts[2])?,
+                ));
             }
         }
         let hex = s
@@ -63,6 +57,34 @@ impl Rgb {
             self.b as f32 / 255.0,
         ]
     }
+}
+
+/// Parse one component of an X11/xterm `rgb:<r>/<g>/<b>` color into 8-bit.
+///
+/// The spec allows **1–4 hex digits** per component, scaled by digit width so
+/// the value fills the channel range: `f` → `0xff`, `ff` → `0xff`, `fff` →
+/// `0xff`, `ffff` → `0xff`. Cycle 819 (audit): the old parser sliced the first
+/// two bytes and read them as the whole value, so `rgb:f/8/0` (full red in X11)
+/// came out near-black `(15, 8, 0)` and 3-digit forms silently dropped a nibble.
+///
+/// Validating each **byte** as an ASCII hex digit first keeps the multibyte
+/// safety the previous code had (a component like `rgb:€/00/00` is rejected as
+/// `None`, never a non-char-boundary slice that would panic under panic=abort).
+fn parse_x11_rgb_component(h: &str) -> Option<u8> {
+    let hb = h.as_bytes();
+    if hb.is_empty() || hb.len() > 4 || !hb.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    // All bytes are ASCII hex digits, so this slice is valid UTF-8 and fits u32.
+    let v = u32::from_str_radix(std::str::from_utf8(hb).ok()?, 16).ok()?;
+    let scaled = match hb.len() {
+        1 => v * 0x11,           // 0..=0xf   → 0..=0xff
+        2 => v,                  // 0..=0xff
+        3 => (v * 0xff) / 0xfff, // 0..=0xfff → 0..=0xff
+        4 => v >> 8,             // 0..=0xffff → high byte
+        _ => unreachable!("length bounded to 1..=4 above"),
+    };
+    Some(scaled as u8)
 }
 
 fn x11_name(name: &str) -> Option<Rgb> {
@@ -100,6 +122,27 @@ mod tests {
         // X11 names (case-insensitive).
         assert_eq!(Rgb::parse("Red"), Some(Rgb::new(255, 0, 0)));
         assert_eq!(Rgb::parse("grey"), Some(Rgb::new(190, 190, 190)));
+    }
+
+    /// Cycle 819 (audit): X11/xterm `rgb:` components scale by digit width
+    /// (1–4 hex digits), they aren't first-two-digits-truncated.
+    #[test]
+    fn rgb_components_scale_by_digit_width() {
+        // 1-digit: f → 0xff (was the near-black bug: 15,8,0).
+        assert_eq!(Rgb::parse("rgb:f/8/0"), Some(Rgb::new(255, 136, 0)));
+        // 2-digit: unchanged.
+        assert_eq!(Rgb::parse("rgb:ff/88/00"), Some(Rgb::new(255, 136, 0)));
+        // 3-digit: fff → 0xff; f00 → (0xf00*0xff)/0xfff = 239.
+        assert_eq!(Rgb::parse("rgb:fff/000/800"), Some(Rgb::new(255, 0, 127)));
+        // 4-digit: ffff → 0xff (high byte); 8000 → 0x80.
+        assert_eq!(
+            Rgb::parse("rgb:ffff/8000/0000"),
+            Some(Rgb::new(255, 128, 0))
+        );
+        // Mixed widths across components are allowed by the spec.
+        assert_eq!(Rgb::parse("rgb:f/00/ffff"), Some(Rgb::new(255, 0, 255)));
+        // Over-long (5 digits) is rejected.
+        assert_eq!(Rgb::parse("rgb:fffff/0/0"), None);
     }
 
     #[test]
