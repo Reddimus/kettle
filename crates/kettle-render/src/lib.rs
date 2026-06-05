@@ -2901,16 +2901,7 @@ impl Renderer {
             // sweeps cells row by row.
             let mut r = start.0;
             while r <= end.0 {
-                let first = if r == start.0 { start.1 } else { 0 };
-                let last = if r == end.0 {
-                    end.1
-                } else {
-                    // No clean way to get cols from here without an
-                    // extra param; use a generous bound — extra cells
-                    // get clipped by the pane rect at draw time.
-                    256
-                };
-                if last >= first {
+                if let Some((first, last)) = vi_selection_row_span(r, start, end, cols) {
                     let bx = ox + first as f32 * cw;
                     let by = oy + r as f32 * ch;
                     let bw = (last - first + 1) as f32 * cw;
@@ -3001,6 +2992,31 @@ fn font_features(cfg: &Config) -> FontFeatures {
         ff.set(FeatureTag::new(&f.tag), f.value);
     }
     ff
+}
+
+/// The inclusive `(first_col, last_col)` the vi-mode visual selection
+/// highlights on grid row `r`, given the normalized `(start, end)` endpoints and
+/// the pane's column count, or `None` when the row's span is empty.
+///
+/// Cycle 820 (audit): an intermediate (non-end) row now extends to the pane's
+/// real last column (`cols - 1`), not a hardcoded `256`. On a pane wider than
+/// 256 columns — common on 4K/ultrawide with a small font (a 3840-px pane at a
+/// ~7-px cell is ~548 cols) — the middle rows of a multi-row visual selection
+/// used to highlight only to column 256 while the selection still yanked the
+/// full rows, a visible highlight/behavior mismatch.
+fn vi_selection_row_span(
+    r: usize,
+    start: (usize, usize),
+    end: (usize, usize),
+    cols: usize,
+) -> Option<(usize, usize)> {
+    let first = if r == start.0 { start.1 } else { 0 };
+    let last = if r == end.0 {
+        end.1
+    } else {
+        cols.saturating_sub(1)
+    };
+    (last >= first).then_some((first, last))
 }
 
 /// Build a pane's rich-text runs as `(&str, Attrs)` pairs, **borrowing** each
@@ -4877,6 +4893,32 @@ mod update_banner_top_tests {
         assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
         // Both at the bottom → banner clears the stack of both.
         assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
+    }
+}
+
+#[cfg(test)]
+mod vi_selection_row_span_tests {
+    use super::vi_selection_row_span;
+
+    /// Cycle 820 drift guard: middle rows of a multi-row vi visual selection
+    /// extend to the real last column, not a hardcoded 256.
+    #[test]
+    fn middle_rows_use_real_width_not_256() {
+        let (start, end) = ((10, 5), (12, 8));
+        let cols = 600; // wider than the old 256 bound
+        // First row: from the anchor column to the real last column.
+        assert_eq!(vi_selection_row_span(10, start, end, cols), Some((5, 599)));
+        // Middle row: full width [0, cols-1] — was [0, 256] before the fix.
+        assert_eq!(vi_selection_row_span(11, start, end, cols), Some((0, 599)));
+        // Last row: from 0 to the cursor column.
+        assert_eq!(vi_selection_row_span(12, start, end, cols), Some((0, 8)));
+        // Single-row selection stays within its endpoints.
+        assert_eq!(
+            vi_selection_row_span(10, (10, 3), (10, 7), cols),
+            Some((3, 7))
+        );
+        // Empty span → None (guards the draw against a zero/negative width).
+        assert_eq!(vi_selection_row_span(10, (10, 9), (10, 3), cols), None);
     }
 }
 

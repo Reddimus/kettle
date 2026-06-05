@@ -33,6 +33,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Correctness (cycle 820) — vi-mode visual selection highlights the full
+    pane width.** Intermediate rows of a multi-row visual selection were
+    highlighted only to a hardcoded column 256, so on a pane wider than 256
+    columns (4K/ultrawide with a small font) the right portion stayed
+    un-highlighted while the selection still yanked the full rows. It now extends
+    to the pane's real last column.
+
   - **Correctness (cycle 819) — `rgb:` config colors scale by digit width.**
     The X11/xterm `rgb:<r>/<g>/<b>` parser sliced the first two hex digits of
     each component instead of scaling by digit count, so `rgb:f/8/0` (full red in
