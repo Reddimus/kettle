@@ -62,37 +62,121 @@ fn hls_to_rgb(h: f32, l: f32, s: f32) -> Rgb {
     )
 }
 
+/// Geometric capacity growth: the smallest power-of-two multiple of `cur`
+/// (floored at 1) that is `>= needed`, never exceeding `MAX_DIM` (callers
+/// guarantee `needed <= MAX_DIM`). Cycle 824 (audit): doubling the allocation
+/// makes total re-layout work across a decode amortized **O(W·H)** instead of
+/// the old exact-fit regrow's **O(W²·H)**.
+fn grow_cap(cur: usize, needed: usize) -> usize {
+    let mut c = cur.max(1);
+    while c < needed {
+        c *= 2;
+    }
+    c.min(MAX_DIM).max(needed)
+}
+
+/// A Sixel raster being decoded. The **allocated** stride/rows (`cap_w`/`cap_h`)
+/// are decoupled from the **logical** extent (`width`/`height`): capacity grows
+/// geometrically (cheap, rare), while the extent tracks the last pixel touched.
+///
+/// Cycle 824 (audit): the previous decoder reallocated to the EXACT new size and
+/// full-copied every existing row on each growth — and a spec-legal sixel that
+/// omits the raster-attribute size hint grows its width one pixel at a time, so
+/// that was O(W) reallocations of O(W·H) each = O(W²·H), seconds-to-minutes of
+/// single-threaded work blocking the render/PTY loop on one small escape.
+struct SixelCanvas {
+    buf: Vec<u8>,
+    cap_w: usize,
+    cap_h: usize,
+    width: usize,
+    height: usize,
+}
+
+impl SixelCanvas {
+    fn new() -> Self {
+        SixelCanvas {
+            buf: Vec::new(),
+            cap_w: 0,
+            cap_h: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// Make room for a pixel at column `nx-1`, row `ny-1`. Grows capacity
+    /// geometrically when needed (re-laying-out existing data at the new
+    /// stride). Returns `false` if the logical extent would exceed `MAX_DIM`.
+    fn ensure(&mut self, nx: usize, ny: usize) -> bool {
+        let new_w = self.width.max(nx);
+        let new_h = self.height.max(ny);
+        if new_w > MAX_DIM || new_h > MAX_DIM {
+            return false;
+        }
+        if new_w <= self.cap_w && new_h <= self.cap_h {
+            self.width = new_w;
+            self.height = new_h;
+            return true;
+        }
+        let ncw = grow_cap(self.cap_w, new_w);
+        let nch = grow_cap(self.cap_h, new_h);
+        let mut nb = vec![0u8; ncw * nch * 4];
+        // Copy only the rows/cols that hold data (the old logical extent), at
+        // the old stride → new stride. The rest of `nb` stays zero.
+        let row_bytes = self.width * 4;
+        for row in 0..self.height {
+            let src = row * self.cap_w * 4;
+            let dst = row * ncw * 4;
+            nb[dst..dst + row_bytes].copy_from_slice(&self.buf[src..src + row_bytes]);
+        }
+        self.buf = nb;
+        self.cap_w = ncw;
+        self.cap_h = nch;
+        self.width = new_w;
+        self.height = new_h;
+        true
+    }
+
+    /// Paint one 6-pixel sixel column at `(x, band_y)` using the ALLOCATED
+    /// stride (`cap_w`), not the logical width.
+    fn put(&mut self, x: usize, band_y: usize, bits: u8, c: Rgb) {
+        for r in 0..6 {
+            if bits & (1 << r) != 0 {
+                let y = band_y + r;
+                let idx = (y * self.cap_w + x) * 4;
+                if idx + 4 <= self.buf.len() {
+                    self.buf[idx] = c.0;
+                    self.buf[idx + 1] = c.1;
+                    self.buf[idx + 2] = c.2;
+                    self.buf[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// Compact the used `width × height` region (stride `cap_w`) into a tight
+    /// `width × height` RGBA buffer and build the image. One final O(W·H) pass.
+    fn into_image(self) -> Option<ImageData> {
+        if self.cap_w == self.width && self.cap_h == self.height {
+            return ImageData::new(self.width as u32, self.height as u32, self.buf);
+        }
+        let mut tight = vec![0u8; self.width.saturating_mul(self.height).saturating_mul(4)];
+        let row_bytes = self.width * 4;
+        for row in 0..self.height {
+            let src = row * self.cap_w * 4;
+            let dst = row * self.width * 4;
+            tight[dst..dst + row_bytes].copy_from_slice(&self.buf[src..src + row_bytes]);
+        }
+        ImageData::new(self.width as u32, self.height as u32, tight)
+    }
+}
+
 /// Decode the body of a Sixel DCS (the bytes after the `q`, before `ST`).
 pub fn decode(data: &[u8]) -> Option<ImageData> {
     let mut palette = default_palette();
     let mut color = 1usize;
     let mut x = 0usize;
     let mut band_y = 0usize;
-    let mut width = 0usize;
-    let mut height = 0usize;
-    // RGBA, grown on demand.
-    let mut buf: Vec<u8> = Vec::new();
-
-    let ensure = |buf: &mut Vec<u8>, w: &mut usize, h: &mut usize, nx: usize, ny: usize| -> bool {
-        let nw = (*w).max(nx);
-        let nh = (*h).max(ny);
-        if nw > MAX_DIM || nh > MAX_DIM {
-            return false;
-        }
-        if nw == *w && nh == *h {
-            return true;
-        }
-        let mut nb = vec![0u8; nw * nh * 4];
-        for row in 0..*h {
-            let src = row * *w * 4;
-            let dst = row * nw * 4;
-            nb[dst..dst + *w * 4].copy_from_slice(&buf[src..src + *w * 4]);
-        }
-        *buf = nb;
-        *w = nw;
-        *h = nh;
-        true
-    };
+    let mut canvas = SixelCanvas::new();
 
     let mut i = 0;
     let n = data.len();
@@ -141,10 +225,10 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
                     if (0x3f..=0x7e).contains(&s) {
                         let bits = s - 0x3f;
                         for _ in 0..cnt.max(1) {
-                            if !ensure(&mut buf, &mut width, &mut height, x + 1, band_y + 6) {
+                            if !canvas.ensure(x + 1, band_y + 6) {
                                 return None;
                             }
-                            put(&mut buf, width, x, band_y, bits, palette[color]);
+                            canvas.put(x, band_y, bits, palette[color]);
                             x += 1;
                         }
                     }
@@ -165,13 +249,9 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
                     }
                 }
                 if vals[2] > 0 && vals[3] > 0 {
-                    ensure(
-                        &mut buf,
-                        &mut width,
-                        &mut height,
-                        vals[3] as usize,
-                        vals[2] as usize,
-                    );
+                    // Raster-attribute size hint (Pw, Ph): pre-grow once so the
+                    // common (hinted) case allocates a single time.
+                    canvas.ensure(vals[3] as usize, vals[2] as usize);
                 }
             }
             b'$' => {
@@ -185,10 +265,10 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
             }
             0x3f..=0x7e => {
                 let bits = b - 0x3f;
-                if !ensure(&mut buf, &mut width, &mut height, x + 1, band_y + 6) {
+                if !canvas.ensure(x + 1, band_y + 6) {
                     return None;
                 }
-                put(&mut buf, width, x, band_y, bits, palette[color]);
+                canvas.put(x, band_y, bits, palette[color]);
                 x += 1;
                 i += 1;
             }
@@ -197,22 +277,7 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
             }
         }
     }
-    ImageData::new(width as u32, height as u32, buf)
-}
-
-fn put(buf: &mut [u8], width: usize, x: usize, band_y: usize, bits: u8, c: Rgb) {
-    for r in 0..6 {
-        if bits & (1 << r) != 0 {
-            let y = band_y + r;
-            let idx = (y * width + x) * 4;
-            if idx + 4 <= buf.len() {
-                buf[idx] = c.0;
-                buf[idx + 1] = c.1;
-                buf[idx + 2] = c.2;
-                buf[idx + 3] = 255;
-            }
-        }
-    }
+    canvas.into_image()
 }
 
 fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
@@ -228,7 +293,37 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DIM, decode};
+    use super::{MAX_DIM, decode, grow_cap};
+
+    /// Cycle 824 (audit) drift guard: capacity grows GEOMETRICALLY (doubling),
+    /// which is what turns the decoder's total re-layout work from O(W²·H) into
+    /// amortized O(W·H). If a refactor reverts to exact-fit growth (`grow_cap`
+    /// returning `needed`), the doubling assertions below fail.
+    #[test]
+    fn grow_cap_doubles_and_caps_at_max_dim() {
+        assert_eq!(grow_cap(0, 1), 1);
+        assert_eq!(grow_cap(1, 1), 1);
+        assert_eq!(grow_cap(1, 100), 128); // 1→2→…→128, NOT 100 (exact)
+        assert_eq!(grow_cap(128, 200), 256);
+        assert_eq!(grow_cap(0, 5000), 8192); // smallest pow2 ≥ 5000
+        assert_eq!(grow_cap(8192, 8192), 8192);
+        assert!(grow_cap(0, MAX_DIM) >= MAX_DIM);
+    }
+
+    /// Cycle 824 (audit): a wide raster-attribute-LESS sixel (width grows one
+    /// pixel at a time) was the O(W²·H) DoS trigger. It must still decode to the
+    /// correct dimensions — and now does so in O(W·H) (instant rather than the
+    /// seconds-to-minutes the old exact-fit regrow took).
+    #[test]
+    fn wide_unhinted_sixel_decodes_correctly() {
+        // `!2000~` = repeat the full-column sixel (~, all 6 bits) 2000× in band
+        // 0, no `"`-raster hint → 2000 one-pixel width growths.
+        let img = decode(b"!2000~").expect("wide sixel decodes");
+        assert_eq!((img.width, img.height), (2000, 6));
+        // Spot-check the last column is painted (extent tracked correctly).
+        let last = ((5 * 2000 + 1999) * 4) as usize;
+        assert_eq!(img.rgba[last + 3], 255, "last column, bottom row opaque");
+    }
 
     // One sixel char encodes a 6-pixel-tall column; bits = byte - 0x3f.
     // `@` (0x40) → bits 0b1 → only the top pixel of the band is lit.

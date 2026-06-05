@@ -33,6 +33,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Perf/DoS (cycle 824) — Sixel decode is O(W·H), not O(W²·H).** A spec-legal
+    sixel that omits the raster-attribute size hint grows its width one pixel at
+    a time, and the decoder reallocated to the exact new size and full-copied
+    every existing row on each growth — O(W) reallocations of O(W·H) each, i.e.
+    seconds-to-minutes of single-threaded work blocking the render/PTY loop on
+    one small escape. The decoder now decouples allocated capacity from the
+    logical extent and grows capacity geometrically (capped at `MAX_DIM`, so peak
+    memory is unchanged), compacting once at the end — amortized O(W·H).
+
   - **Cross-platform (cycle 823) — remote-session detection works on Windows.**
     The SSH/container detectors derived `argv[0]`'s basename with `split('/')`
     and an exact-name compare, so on Windows (`C:\…\OpenSSH\ssh.exe`,
