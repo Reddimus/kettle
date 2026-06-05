@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  Post-v2.7.0 hardening from a fresh multi-agent production audit (each finding
+  3-lens adversarially verified; cycles 813+, accumulating toward v2.7.1):
+
+  - **Security/panic-safety (cycle 813) — kitty graphics can't abort kettle via
+    an oversized texture.** The kitty `f=32`/`f=24` raw-pixel branches built an
+    image straight from the untrusted `s=`/`v=` dimensions; `f=32,s=10000,v=1`
+    (40 KB) produced a 10000×1 image that hit wgpu `create_texture` above the
+    8192 limit — a validation error that panics (= whole-process abort under
+    panic=abort), a remote DoS from any PTY writer. Now `ImageData::new` caps
+    per-axis dims (the one chokepoint), `solid` guards its pre-alloc, and
+    `ensure_texture` skips any image past the device limit (last-line defense for
+    constructions that bypass `new`).
+  - **Security (cycle 814) — kitty zlib (`o=z`) decompression is bounded.** An
+    unbounded `read_to_end` let a few hundred KB of `o=z` payload inflate to
+    multiple GiB (zlib ~1000:1 on zero runs) → OOM/abort. The inflate is now
+    capped to the 256 MiB envelope a legal 8192² image occupies; an over-cap
+    stream is rejected.
+  - **Security (cycle 815) — remote-authority `file://` URLs are rejected.**
+    `is_safe_url` blocked traversal but not a remote authority, so
+    `file://evil.example.com/share` (a Windows UNC `\\host\path` → SMB/NTLM-hash
+    leak / SSRF) opened from untrusted PTY output. `file://` is now local-only
+    (empty or loopback authority; no backslash / `file:////` / encoded
+    traversal).
+  - **Security (cycle 816) — `OpenCwdInFileManager` refuses a non-local OSC 7
+    cwd** before building a `file://` URL from it (defense-in-depth on cycle
+    815; a pure string check, since `Path::is_dir` on a `//host` path would
+    itself route over SMB).
+  - **Correctness (cycle 817) — split-pane mouse + PTY sizing account for the
+    per-pane titlebar.** In the default config, splitting a pane left every
+    pointer ~1 row too high (selection, link targeting, and the mouse-tracking
+    row reported to vim/tmux/htop) and sized the PTY one row too tall (bottom row
+    clipped under the chrome). The hit-test and per-pane PTY sizing now apply the
+    same titlebar inset the renderer draws with.
+
 ## [2.7.0] — 2026-06-05
 
   - **Fix (cycle 812, audit) — GPU init can't hang kettle on an invisible
