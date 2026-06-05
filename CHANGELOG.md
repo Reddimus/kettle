@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fix (cycle 810, audit) — forward the side mouse buttons (Back/Forward) to
+    mouse-tracking apps.** The press/release handlers dropped every button past
+    right-click (`_ => return`), so a 5-button mouse's Back / Forward never
+    reached a TUI that maps them (tmux/vim bindings, pagers). They're now
+    encoded as SGR buttons 128 / 129 (xterm's 8–11 range; winit `Back` =
+    XBUTTON1, `Forward` = XBUTTON2) and forwarded when mouse tracking is on —
+    no-op otherwise, since they have no local UI meaning. The mapping and SGR
+    encoding are unit-tested.
+
   - **UX (cycle 809, audit) — keyboard access to the update banner + honest
     docs.** The cycle-794 "update available" banner was mouse-only, yet an
     internal doc claimed it opened "on Enter" — and grabbing a bare Enter/Esc

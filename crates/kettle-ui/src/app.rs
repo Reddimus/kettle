@@ -642,6 +642,23 @@ pub(crate) fn pane_titlebar_hit(
     None
 }
 
+/// SGR mouse base code for the extra "side" mouse buttons, or `None` for any
+/// button kettle handles locally (left/middle/right) or doesn't forward.
+///
+/// Cycle 810 (audit): the press/release handlers used to drop every button
+/// past right-click (`_ => return`), so a 5-button mouse's Back / Forward
+/// never reached a mouse-tracking TUI (tmux/vim bindings, pagers). xterm
+/// encodes buttons 8–11 as `128 + (button - 8)`; winit's `Back` is XBUTTON1
+/// (button 8 → 128) and `Forward` is XBUTTON2 (button 9 → 129). These have no
+/// local UI meaning, so they only do anything while mouse tracking is on.
+fn extra_mouse_sgr(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Back => Some(128),
+        MouseButton::Forward => Some(129),
+        _ => None,
+    }
+}
+
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
     if bar_h <= 0.0 {
         return false;
@@ -8249,6 +8266,13 @@ impl ApplicationHandler<UserEvent> for App {
                 button,
                 ..
             } => {
+                // Cycle 810 (audit): forward Back / Forward (buttons 8 / 9) to
+                // a mouse-tracking app rather than dropping them. No local UI
+                // meaning, so they no-op when tracking is off.
+                if let Some(sgr) = extra_mouse_sgr(button) {
+                    self.send_mouse(sgr, true, false);
+                    return;
+                }
                 let bcode = match button {
                     MouseButton::Left => 0,
                     MouseButton::Middle => 1,
@@ -8683,6 +8707,12 @@ impl ApplicationHandler<UserEvent> for App {
                 button,
                 ..
             } => {
+                // Cycle 810 (audit): release report for the side buttons, so a
+                // tracking app sees the matching button-up after the press.
+                if let Some(sgr) = extra_mouse_sgr(button) {
+                    self.send_mouse(sgr, false, false);
+                    return;
+                }
                 let bcode = match button {
                     MouseButton::Left => 0,
                     MouseButton::Middle => 1,
@@ -9813,6 +9843,21 @@ mod tests {
         assert_eq!(pane_titlebar_hit(50.0, 12.0, &rects, true, 24.0), None);
         // Click in cell content with title_at_bottom=true → no hit.
         assert_eq!(pane_titlebar_hit(50.0, 300.0, &rects, true, 24.0), None);
+    }
+
+    #[test]
+    fn extra_mouse_sgr_maps_side_buttons() {
+        use super::extra_mouse_sgr;
+        use winit::event::MouseButton;
+        // Cycle 810 drift guard. Back = XBUTTON1 = SGR 128, Forward =
+        // XBUTTON2 = SGR 129; the primary three + anything else are handled
+        // locally (or dropped), so they return None here.
+        assert_eq!(extra_mouse_sgr(MouseButton::Back), Some(128));
+        assert_eq!(extra_mouse_sgr(MouseButton::Forward), Some(129));
+        assert_eq!(extra_mouse_sgr(MouseButton::Left), None);
+        assert_eq!(extra_mouse_sgr(MouseButton::Middle), None);
+        assert_eq!(extra_mouse_sgr(MouseButton::Right), None);
+        assert_eq!(extra_mouse_sgr(MouseButton::Other(5)), None);
     }
 
     #[test]

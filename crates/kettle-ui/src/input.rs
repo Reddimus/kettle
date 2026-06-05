@@ -528,6 +528,17 @@ mod tests {
             mouse_encode(true, 64, true, false, 0, 0, none),
             b"\x1b[<64;1;1M"
         );
+        // Cycle 810: side buttons. Back = SGR 128, Forward = 129 — press 'M'
+        // at grid (0,0), release 'm'. Pins the xterm 8–11 button encoding the
+        // app forwards for XBUTTON1/2.
+        assert_eq!(
+            mouse_encode(true, 128, true, false, 0, 0, none),
+            b"\x1b[<128;1;1M"
+        );
+        assert_eq!(
+            mouse_encode(true, 129, false, false, 0, 0, none),
+            b"\x1b[<129;1;1m"
+        );
         // Legacy X10: ESC [ M then (32+btn)(32+col+1)(32+row+1).
         assert_eq!(
             mouse_encode(false, 0, true, false, 0, 0, none),
