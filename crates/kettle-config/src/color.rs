@@ -19,7 +19,16 @@ impl Rgb {
         if let Some(rest) = s.strip_prefix("rgb:") {
             let parts: Vec<&str> = rest.split('/').collect();
             if parts.len() == 3 {
-                let c = |h: &str| u8::from_str_radix(&h[..2.min(h.len())], 16).ok();
+                // Slice the *bytes* (never the &str): a component that
+                // starts with a multibyte char (e.g. `rgb:€/00/00`) would
+                // otherwise make `&h[..2]` land on a non-char-boundary and
+                // panic (a hard crash under panic=abort). from_utf8 rejects
+                // a mid-char byte pair, yielding None instead.
+                let c = |h: &str| {
+                    let hb = h.as_bytes();
+                    let s = std::str::from_utf8(&hb[..2.min(hb.len())]).ok()?;
+                    u8::from_str_radix(s, 16).ok()
+                };
                 return Some(Rgb::new(c(parts[0])?, c(parts[1])?, c(parts[2])?));
             }
         }
@@ -69,4 +78,51 @@ fn x11_name(name: &str) -> Option<Rgb> {
         "gray" | "grey" => Rgb::new(190, 190, 190),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_every_supported_form() {
+        // #rrggbb / rrggbb (bare) / 0xRRGGBB / 0X.
+        assert_eq!(Rgb::parse("#ff8800"), Some(Rgb::new(255, 136, 0)));
+        assert_eq!(Rgb::parse("ff8800"), Some(Rgb::new(255, 136, 0)));
+        assert_eq!(Rgb::parse("0xFF8800"), Some(Rgb::new(255, 136, 0)));
+        assert_eq!(Rgb::parse("0XfF8800"), Some(Rgb::new(255, 136, 0)));
+        // #rgb shorthand expands each nibble (f -> ff = 255).
+        assert_eq!(Rgb::parse("#f80"), Some(Rgb::new(255, 136, 0)));
+        // rgb:rr/gg/bb (X11/xterm form).
+        assert_eq!(Rgb::parse("rgb:ff/88/00"), Some(Rgb::new(255, 136, 0)));
+        // Leading/trailing whitespace is trimmed.
+        assert_eq!(Rgb::parse("  #000000 "), Some(Rgb::new(0, 0, 0)));
+        // X11 names (case-insensitive).
+        assert_eq!(Rgb::parse("Red"), Some(Rgb::new(255, 0, 0)));
+        assert_eq!(Rgb::parse("grey"), Some(Rgb::new(190, 190, 190)));
+    }
+
+    #[test]
+    fn rejects_invalid_without_panicking() {
+        assert_eq!(Rgb::parse(""), None);
+        assert_eq!(Rgb::parse("#12"), None); // wrong digit count
+        assert_eq!(Rgb::parse("nonsense"), None);
+        assert_eq!(Rgb::parse("rgb:zz/00/00"), None); // non-hex component
+        assert_eq!(Rgb::parse("rgb:00/00"), None); // too few parts
+    }
+
+    #[test]
+    fn rgb_form_with_multibyte_component_does_not_panic() {
+        // Regression: `rgb:` component slicing used `&h[..2.min(h.len())]`
+        // on the &str, so a component starting with a multibyte char made
+        // the slice land on a non-char-boundary and panic — a hard crash
+        // under panic=abort, reachable from theme/OSC color parsing. The
+        // fix slices the *bytes* and validates via from_utf8, yielding None.
+        assert_eq!(Rgb::parse("rgb:€/00/00"), None);
+        assert_eq!(Rgb::parse("rgb:e€/00/00"), None);
+        assert_eq!(Rgb::parse("rgb:00/00/日本"), None);
+        // A bare multibyte string also must not panic.
+        assert_eq!(Rgb::parse("€€€"), None);
+        assert_eq!(Rgb::parse("#€€€"), None);
+    }
 }

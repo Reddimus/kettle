@@ -472,7 +472,14 @@ fn parse_osc7(s: &str) -> Option<String> {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
-            && let Ok(c) = u8::from_str_radix(&path[i + 1..i + 3], 16)
+            // Slice the *bytes* (never the &str): a `%` immediately
+            // followed by a multibyte UTF-8 char would otherwise make
+            // `&path[i+1..i+3]` land on a non-char-boundary and panic
+            // (a hard crash under panic=abort) before from_str_radix
+            // could reject it. from_utf8 rejects a mid-char byte pair,
+            // so the `%` falls through and is pushed as a literal byte.
+            && let Ok(hex) = std::str::from_utf8(&b[i + 1..i + 3])
+            && let Ok(c) = u8::from_str_radix(hex, 16)
         {
             bytes.push(c);
             i += 3;

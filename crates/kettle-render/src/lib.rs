@@ -4188,12 +4188,165 @@ pub fn offscreen_selftest() -> anyhow::Result<bool> {
 
 #[cfg(test)]
 mod gpu_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     #[test]
     fn gpu_pipelines_compile_and_render_offscreen() {
         match super::offscreen_selftest() {
             Ok(true) => {}
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
+        }
+    }
+
+    /// Render one solid quad of a known *dark* sRGB color (#1a1b23) covering
+    /// an sRGB target and read pixel (0,0) back. `Ok(None)` on a GPU-less host.
+    fn srgb_quad_roundtrip_sample() -> Result<Option<[u8; 3]>> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = match request_adapter_or_fallback(
+                &instance,
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::None,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                },
+                "srgb_quad_roundtrip",
+            )
+            .await
+            {
+                Ok(a) => a,
+                Err(_) => return Ok(None),
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-srgb-test"),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!("device: {e:?}"))?;
+
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let mut quads = QuadPipeline::new(&device, format);
+            quads.upload(
+                &device,
+                &queue,
+                [8.0, 8.0],
+                &[QuadInstance {
+                    pos: [0.0, 0.0],
+                    size: [8.0, 8.0],
+                    color: [26.0 / 255.0, 27.0 / 255.0, 35.0 / 255.0, 1.0],
+                }],
+            );
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("kettle-srgb-target"),
+                size: wgpu::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded = (8u32 * 4).div_ceil(align) * align;
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kettle-srgb-readback"),
+                size: (padded * 8) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut enc =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("kettle-srgb-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                quads.draw(&mut pass);
+            }
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(8),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit(std::iter::once(enc.finish()));
+
+            let slice = staging.slice(..);
+            let done = Arc::new(AtomicBool::new(false));
+            let done_set = done.clone();
+            slice.map_async(wgpu::MapMode::Read, move |_| {
+                done_set.store(true, Ordering::SeqCst);
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            if !done.load(Ordering::SeqCst) {
+                return Err(anyhow!("srgb readback timed out"));
+            }
+            let mapped = slice.get_mapped_range();
+            let px = [mapped[0], mapped[1], mapped[2]];
+            drop(mapped);
+            staging.unmap();
+            Ok(Some(px))
+        })
+    }
+
+    /// Cycle 797 drift guard. A dark sRGB quad (#1a1b23) drawn to an sRGB
+    /// target must read back ≈ #1a1b23, NOT the gamma-lifted ~#5a5f68 that the
+    /// missing sRGB→linear decode in the quad shader produced (full-screen
+    /// TUIs like AstroNvim set an explicit bg on every cell, so the lift
+    /// washed out the whole screen). Allows a few units per channel for the
+    /// linear↔sRGB round-trip + 8-bit quantization.
+    #[test]
+    fn quad_pipeline_does_not_gamma_lift_on_srgb_target() {
+        match srgb_quad_roundtrip_sample() {
+            Ok(None) => eprintln!("no GPU adapter on this host; skipped"),
+            Ok(Some([r, g, b])) => {
+                assert!(
+                    r < 40 && g < 40 && b < 48,
+                    "quad gamma-lifted: got #{r:02x}{g:02x}{b:02x}, expected ≈ #1a1b23 \
+                     (regression: the sRGB→linear decode in quad.rs's shader was removed)"
+                );
+                assert!(
+                    r > 10 && b > 20,
+                    "quad crushed too dark: #{r:02x}{g:02x}{b:02x}"
+                );
+            }
+            Err(e) => panic!("srgb round-trip render failed: {e}"),
         }
     }
 }

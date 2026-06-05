@@ -55,9 +55,26 @@ fn vs(
     return out;
 }
 
+// sRGB → linear, matching the CPU-side `srgb()` (lib.rs) used for the
+// render-pass *clear* color. The render target is an sRGB surface
+// (Bgra8UnormSrgb live / Rgba8UnormSrgb offscreen), so the hardware
+// sRGB-ENCODES whatever the fragment shader writes. Quad colors arrive
+// as plain sRGB components (0..1); without this decode they'd be encoded
+// a second time and every solid rect (cell backgrounds, cursor, dims,
+// chrome) would render gamma-lifted — e.g. a dark editor bg #1a1b23
+// surfaced as a washed-out grey #5a5f68. Decoding here cancels the
+// surface's encode so a quad lands on its intended color, consistent
+// with the (already-linearized) clear color and the glyph pass.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    return select(lo, hi, c > vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb * in.color.a, in.color.a);
+    let lin = srgb_to_linear(in.color.rgb);
+    return vec4<f32>(lin * in.color.a, in.color.a);
 }
 "#;
 

@@ -164,6 +164,33 @@ mod tests {
     }
 
     #[test]
+    fn osc7_percent_followed_by_multibyte_char_does_not_panic() {
+        // Regression: the percent-decoder sliced the &str (`&path[i+1..i+3]`)
+        // when it saw `%`. A `%` immediately followed by a multibyte UTF-8
+        // char (here `€`, 3 bytes) made the slice land on a non-char-boundary
+        // and panic — a hard crash under panic=abort, triggerable by any
+        // program writing an OSC 7 report to the PTY. The fix slices the
+        // *bytes* and validates via from_utf8, so the stray `%` is kept
+        // literally and decoding continues.
+        let mut e = Extractor::new();
+        let chunks = e.feed("\x1b]7;file://host/p/%€x\x1b\\".as_bytes());
+        let cwd = chunks.iter().find_map(|c| match c {
+            Chunk::Cwd(p) => Some(p.clone()),
+            _ => None,
+        });
+        // No panic; the malformed `%` survives as a literal and the rest of
+        // the path is intact.
+        assert_eq!(cwd.as_deref(), Some("/p/%€x"));
+
+        // `%` with one trailing byte then EOF, and `%` followed by a
+        // non-hex multibyte char, also must not panic.
+        let mut e2 = Extractor::new();
+        let _ = e2.feed("\x1b]7;file://h/a%é\x1b\\".as_bytes());
+        let mut e3 = Extractor::new();
+        let _ = e3.feed(b"\x1b]7;file://h/trailing%\x1b\\");
+    }
+
+    #[test]
     fn osc7_and_osc133_are_consumed() {
         let mut e = Extractor::new();
         let chunks = e.feed(b"x\x1b]7;file://host/tmp/work%20dir\x1b\\y\x1b]133;A\x1b\\z");

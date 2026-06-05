@@ -4,6 +4,58 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  - **Render fix (cycle 797) — sRGB gamma double-encode on solid-color
+    quads (washed-out backgrounds).** Every solid rectangle the renderer
+    draws — cell backgrounds, the cursor, selection/search highlights, the
+    unfocused-pane dim, and all tab-bar/menu/banner chrome — went through a
+    quad shader that wrote its color straight to the **sRGB** surface
+    (`Bgra8UnormSrgb` live / `Rgba8UnormSrgb` offscreen). The hardware then
+    sRGB-*encodes* on store, so a color that was already sRGB got encoded a
+    second time and lifted: a dark editor background `#1a1b23` surfaced as a
+    washed-out grey `#5a5f68` (verified exactly: sRGB-encode(26/255 as
+    linear) = 90 = 0x5a). The render-pass *clear* color was already
+    linearized via `srgb()`, so it was correct — only the quad path wasn't.
+    This was **invisible in shells** (cells mostly use the default bg, which
+    is the clear, not a quad) but hit **every full-screen TUI that sets an
+    explicit background on every cell** — AstroNvim/Neovim, which is why
+    "the whole screen looks lighter" only showed up there. It also collapsed
+    the active-vs-inactive **tab-bar** contrast (active tab is the dark
+    `default_bg`, inactive tabs are the lighter `palette[8]`), making tab
+    switches hard to perceive. The fix decodes sRGB→linear in the quad
+    fragment shader (same math as the CPU-side clear), so a quad lands on
+    its intended color after the surface's encode. Guarded by a new GPU
+    pixel-readback test (`quad_pipeline_does_not_gamma_lift_on_srgb_target`)
+    that draws `#1a1b23` and asserts it reads back ≈ `#1a1b23`, not the
+    lifted grey.
+
+  - **Panic fix (cycle 796) — two parsers panicked on a multibyte UTF-8
+    byte after a `%`/component prefix.** `parse_osc7` (OSC 7 cwd report,
+    `kettle-vt`) percent-decoded by slicing the `&str` (`&path[i+1..i+3]`),
+    and `Rgb::parse`'s `rgb:rr/gg/bb` form (`kettle-config`) sliced
+    `&h[..2]` — both on indices that can land inside a multibyte char,
+    panicking on a non-char-boundary. Under `panic = "abort"` that is a
+    hard crash, reachable from the live PTY (a program emitting
+    `ESC ] 7 ; …/%€ …`) or from theme/OSC color parsing (`rgb:€/00/00`).
+    Both now slice the *bytes* and validate via `from_utf8`, so a mid-char
+    pair safely yields a literal/`None` instead of crashing. New drift
+    tests in both crates, plus a first `color.rs` test module covering the
+    full `#rgb` / `rrggbb` / `0x` / `rgb:` / X11-name parser surface.
+
+  - **Tooling (cycle 795) — `just install-local` for one-command local
+    re-sync.** `just install` installs whatever is already in
+    `target/release/` (which can be stale or absent); the new
+    `install-local` recipe depends on `release` then `install`, so it
+    rebuilds the binary *then* reinstalls in one step — closing the
+    "built but forgot to reinstall" gap that let the Start-menu /
+    Windows-Search "kettle" launcher drift behind the repo (it was found
+    pinned at v2.0.0 while the repo was v2.6.0, because the install is a
+    *copy* in `%LOCALAPPDATA%\Programs\kettle`, not a live link). The
+    installer already refreshes the binary, icon, docs, shell-integration,
+    and the Add/Remove-Programs `DisplayVersion`, so `just install-local`
+    fully syncs the installed app to the current build.
+
 ## [2.6.0] — 2026-06-04
 
   - **Feature (cycle 794) — in-app update checker (notify-only).** kettle now
