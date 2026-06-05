@@ -677,6 +677,52 @@ fn cwd_is_local(cwd: &str) -> bool {
     !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
 }
 
+/// Pure pointer → (col, line) math for a pane, shared by `px_to_point` so the
+/// per-pane-titlebar inset is drift-tested.
+///
+/// Cycle 817 (audit): the renderer draws a multi-pane tab's cell content at
+/// `oy = ry + padding_y + titlebar_h` (the per-pane titlebar reserves
+/// `titlebar_h` at the top), but the hit-test used to map from `ry + padding_y`
+/// — so in the DEFAULT config the moment you split a pane, every pointer landed
+/// ~1 row too high: selection, link targeting, and the mouse-tracking row
+/// reported to vim/tmux/htop were all off by one. Subtracting the same
+/// `titlebar_h` here realigns the hit-test with what's drawn. Col/line clamp
+/// to ≥ 0 so a click in the chrome/padding doesn't underflow.
+fn px_to_cell(
+    px: f32,
+    py: f32,
+    rect: Rect,
+    cell: (f32, f32),
+    pad: (f32, f32),
+    titlebar_h: f32,
+) -> (usize, i32) {
+    let (rx, ry, _, _) = rect;
+    let (cw, ch) = cell;
+    let (pad_x, pad_y) = pad;
+    let col = ((px - rx - pad_x) / cw).floor().max(0.0) as usize;
+    let line = ((py - ry - pad_y - titlebar_h) / ch).floor().max(0.0) as i32;
+    (col, line)
+}
+
+/// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. Cycle 817
+/// (audit): a multi-pane tab's per-pane titlebar steals `titlebar_h` of height,
+/// so the PTY must be sized for the rows that actually fit *below* it — without
+/// this, `grid_of` over-reported rows by ~1 and the bottom row was drawn under
+/// the chrome / clipped. `max(1)` keeps a degenerate tiny pane at ≥ 1×1.
+fn grid_dims_px(
+    size: (f32, f32),
+    cell: (f32, f32),
+    pad: (f32, f32),
+    titlebar_h: f32,
+) -> (usize, usize) {
+    let (w, h) = size;
+    let (cw, ch) = cell;
+    let (pad_x, pad_y) = pad;
+    let cols = ((w - pad_x * 2.0) / cw).floor().max(1.0) as usize;
+    let rows = ((h - pad_y * 2.0 - titlebar_h) / ch).floor().max(1.0) as usize;
+    (cols, rows)
+}
+
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
     if bar_h <= 0.0 {
         return false;
@@ -2626,16 +2672,41 @@ impl App {
         }
     }
 
+    /// Height the per-pane titlebar reserves at the top of each pane in a tab
+    /// with `pane_count` panes, matching the renderer's `pane_titlebar_h`
+    /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the cycle-389
+    /// titlebar hit-test. `0.0` (no inset) for a single-pane tab or when
+    /// titlebars are off. Cycle 817 (audit).
+    fn pane_titlebar_inset(&self, pane_count: usize) -> f32 {
+        if self.cfg.show_titlebar && pane_count > 1 {
+            self.renderer
+                .as_ref()
+                .map(|r| r.cell_h + 6.0)
+                .unwrap_or(20.0)
+        } else {
+            0.0
+        }
+    }
+
     fn grid_of(&self, rect: Rect) -> (usize, usize) {
+        // Full-area / single-pane sizing: no titlebar inset. Per-pane sizing in
+        // a split tab goes through `grid_of_inset` (cycle 817).
+        self.grid_of_inset(rect, 0.0)
+    }
+
+    fn grid_of_inset(&self, rect: Rect, titlebar_h: f32) -> (usize, usize) {
         let (cw, ch) = self
             .renderer
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0));
         let (_, _, w, h) = rect;
-        let cols = ((w - self.cfg.padding_x * 2.0) / cw).floor().max(1.0) as usize;
-        let rows = ((h - self.cfg.padding_y * 2.0) / ch).floor().max(1.0) as usize;
-        (cols, rows)
+        grid_dims_px(
+            (w, h),
+            (cw, ch),
+            (self.cfg.padding_x, self.cfg.padding_y),
+            titlebar_h,
+        )
     }
 
     fn focused_rect(&self, area: Rect) -> Option<Rect> {
@@ -2696,9 +2767,20 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0));
-        let (rx, ry, _, _) = rect;
-        let col = ((px - rx - self.cfg.padding_x) / cw).floor().max(0.0) as usize;
-        let line = ((py - ry - self.cfg.padding_y) / ch).floor().max(0.0) as i32;
+        // Cycle 817 (audit): apply the same per-pane-titlebar inset the renderer
+        // draws content with, or a split pane's pointer maps ~1 row too high.
+        // The focused pane lives in the active tab, so its inset depends on the
+        // active tab's pane count.
+        let titlebar_h =
+            self.pane_titlebar_inset(self.mux.layout(self.mux.active, self.area()).len());
+        let (col, line) = px_to_cell(
+            px,
+            py,
+            rect,
+            (cw, ch),
+            (self.cfg.padding_x, self.cfg.padding_y),
+            titlebar_h,
+        );
         kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col))
     }
 
@@ -3039,8 +3121,14 @@ impl App {
         let area = self.area();
         let mut plan: Vec<(u64, usize, usize)> = Vec::new();
         for ti in 0..self.mux.tabs.len() {
-            for (id, r) in self.mux.layout(ti, area) {
-                let (cols, rows) = self.grid_of(r);
+            // Cycle 817 (audit): a split tab's panes each lose `titlebar_h` of
+            // height to their per-pane titlebar, so size each PTY for the rows
+            // that fit below it (per-tab, since the inset depends on that tab's
+            // own pane count).
+            let panes = self.mux.layout(ti, area);
+            let titlebar_h = self.pane_titlebar_inset(panes.len());
+            for (id, r) in panes {
+                let (cols, rows) = self.grid_of_inset(r, titlebar_h);
                 plan.push((id, cols, rows));
             }
         }
@@ -9961,6 +10049,41 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_millis(10)
         ));
+    }
+
+    #[test]
+    fn titlebar_inset_realigns_hit_test_and_grid() {
+        use super::{grid_dims_px, px_to_cell};
+        let rect = (10.0, 20.0, 800.0, 600.0);
+        let (cw, ch, pad) = (8.0_f32, 16.0_f32, 4.0_f32);
+        let tb = ch + 6.0; // renderer's pane_titlebar_h
+
+        // No titlebar (single-pane tab): content origin = ry + pad = 24.
+        let (_, line0) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(line0, 0, "py at content origin → row 0 (no titlebar)");
+
+        // With a titlebar: content origin shifts down by `tb` to 24 + 22 = 46.
+        let (_, line_origin) = px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb);
+        assert_eq!(
+            line_origin, 0,
+            "py at the titlebar'd content origin → row 0"
+        );
+        // One cell below the titlebar'd origin → row 1 (was ~row 2 before the
+        // fix: that off-by-one is exactly what the audit caught).
+        let (_, line1) = px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb);
+        assert_eq!(line1, 1);
+        // A click up in the titlebar band clamps to row 0 (never negative).
+        let (_, clamped) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb);
+        assert_eq!(clamped, 0);
+
+        // grid_of: the titlebar steals height, so fewer rows are reported.
+        let (cols_no, rows_no) = grid_dims_px((800.0, 600.0), (cw, ch), (pad, pad), 0.0);
+        let (cols_tb, rows_tb) = grid_dims_px((800.0, 600.0), (cw, ch), (pad, pad), tb);
+        assert_eq!(cols_no, cols_tb, "titlebar doesn't change column count");
+        assert!(
+            rows_tb < rows_no,
+            "titlebar must reduce reported rows ({rows_tb} < {rows_no})"
+        );
     }
 
     #[test]
