@@ -40,6 +40,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Copy on select | `copy-on-select` | on / off |
 | Hide mouse while typing | `mouse-hide-while-typing` | on / off |
 | Focus mode | `focus` | click · follows-mouse · system |
+| Check for updates | `update-check` | on / off |
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new

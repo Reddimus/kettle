@@ -2315,11 +2315,21 @@ impl Renderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Outdated => {
+            // Cycle 798 (audit): ANY non-success state — Outdated (resize /
+            // format change), **Lost** (GPU device reset, laptop sleep/wake,
+            // monitor hot-swap, driver TDR), Timeout — reconfigures the
+            // surface and skips this frame; the next redraw paints on the
+            // fresh surface. Pre-798 only `Outdated` reconfigured and `Lost`
+            // fell into a bare `return Ok(())`, so after a device-lost the
+            // surface was never recovered: every subsequent frame returned
+            // Lost again and the window froze permanently. Reconfiguring on
+            // the catch-all is the standard wgpu recovery and is harmless for
+            // the rarer fatal states (a fresh configure simply fails the same
+            // way next frame rather than wedging).
+            _ => {
                 self.surface.configure(&self.device, &self.config);
                 return Ok(());
             }
-            _ => return Ok(()),
         };
         let view = frame
             .texture

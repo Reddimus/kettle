@@ -113,7 +113,7 @@ per-key audit against Terminator's source.
 | `show-titlebar` | bool | `true` | Per-pane titlebar; renders only when a tab has >1 pane (a single-pane tab uses the OS window title instead) |
 | `title-at-bottom` | bool | `false` | Per-pane titlebar position |
 | `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
-| `icon-bell` | bool | `false` | Render a bell glyph in the titlebar when the pane ringed BEL |
+| `icon-bell` | bool | `true` | Render a bell glyph in the titlebar when the pane ringed BEL |
 | `title-transmit-bg-color` / `-fg-color` | color | `#c80003` / `#ffffff` | Focused-pane (broadcast-source) titlebar colors |
 | `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
 | `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |

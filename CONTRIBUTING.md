@@ -268,4 +268,5 @@ Patch vs minor vs major: kettle follows semver loosely — a new
 config key or CLI flag is a minor (e.g., v1.7 → v1.8). A bug fix
 without API surface change is a patch (v1.7.1 → v1.7.2). A
 breaking change to the config schema or library surface is a
-major (v1.x → v2.0), though kettle has yet to make one.
+major (v1.x → v2.0). kettle has shipped one major to date —
+v2.0.0 (the Windows 11 / PowerShell 7 release).

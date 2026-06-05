@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Audit-hardening batch (cycle 798).** Several confirmed findings from
+    the multi-agent production audit:
+    - **kitty keyboard protocol no longer falsely advertised (critical).**
+      `kettle-core` set `kitty_keyboard: true`, so the engine replied to the
+      `CSI ? u` progressive-enhancement query and honored `CSI > flags u` —
+      telling programs kettle encodes keys in the kitty CSI-u format. But the
+      key encoder (`kettle-ui/src/input.rs`) only implements the legacy xterm
+      encoding and never emits CSI-u, so an app that enabled the protocol
+      (e.g. Neovim's kitty keyboard mode) would mis-read the legacy bytes it
+      actually got — broken/ambiguous key input. Until a real CSI-u encoder
+      lands, kettle no longer advertises the protocol; programs fall back to
+      the legacy encoding, which is correct and unambiguous.
+    - **GPU surface `Lost` now recovers instead of freezing.** The
+      `get_current_texture` match reconfigured the surface only on `Outdated`;
+      `Lost` (GPU device reset, laptop sleep/wake, monitor hot-swap, driver
+      TDR) fell into a bare `return Ok(())`, so the surface was never
+      recovered and every later frame returned `Lost` again — the window
+      froze permanently. The catch-all arm now reconfigures, the standard
+      wgpu recovery, so the next redraw paints on a fresh surface.
+    - **Doc drift fixes:** `docs/CONFIG.md` listed `icon-bell`'s default as
+      `false` (code + test pin it `true`); `CONTRIBUTING.md` claimed kettle
+      had "yet to make" a major release (v2.0.0 shipped); `docs/SETTINGS.md`
+      Behavior table omitted the `update-check` ("Check for updates") toggle
+      that the cycle-794 settings overlay exposes.
+
   - **Render fix (cycle 797) — sRGB gamma double-encode on solid-color
     quads (washed-out backgrounds).** Every solid rectangle the renderer
     draws — cell backgrounds, the cursor, selection/search highlights, the

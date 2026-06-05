@@ -479,7 +479,21 @@ impl Terminal {
         };
         let mut tconf = TermConfig {
             scrolling_history: scrollback,
-            kitty_keyboard: true,
+            // Cycle 798 (audit A2, critical): do NOT advertise the kitty
+            // keyboard protocol. With this `true`, alacritty_terminal replies
+            // to the `CSI ? u` progressive-enhancement query and honors
+            // `CSI > flags u` (setting DISAMBIGUATE_ESC_CODES / REPORT_*
+            // TermMode bits) — i.e. it tells programs "I encode keys in the
+            // kitty CSI-u format." But kettle's key encoder
+            // (`kettle-ui/src/input.rs::encode`) ONLY implements the legacy
+            // xterm encoding and never emits CSI-u. So an app that enabled the
+            // protocol (e.g. Neovim's kitty keyboard mode) would push its flags,
+            // think kettle speaks CSI-u, and then mis-read the legacy bytes it
+            // actually receives — broken/ambiguous key input. Until a real
+            // CSI-u encoder lands, the robust answer is to not advertise it:
+            // programs fall back to the legacy encoding `encode()` implements
+            // and tests, which is correct and unambiguous for the common keys.
+            kitty_keyboard: false,
             default_cursor_style,
             ..TermConfig::default()
         };
