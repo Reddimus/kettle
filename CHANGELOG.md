@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fix (cycle 807, audit) — image cache no longer mis-binds a recycled
+    buffer address.** The GPU texture cache for Sixel/kitty/iTerm2 images keyed
+    entries by the rgba `Arc`'s raw pointer but didn't keep that `Arc` alive, so
+    an ABA hazard was possible: image A caches at heap address `P`, A is dropped
+    (freeing `P`), and a *different* image B's pixel buffer reallocates at `P`
+    before the per-frame `gc` evicts A — making the next lookup hit A's stale
+    entry and draw A's pixels for B. The cache now holds an `Arc` clone
+    alongside each texture, pinning the keyed address for as long as the entry
+    lives (a refcount bump only — the buffer is already shared with the VT
+    layer; `gc` releases it the first frame the image isn't drawn). Guarded by a
+    source-level invariant test plus a pure `Arc`-semantics test.
+
   - **Perf (cycle 806, audit) — no per-frame `String` churn in the text hot
     path.** Building a pane's rich-text runs cloned every style run's text into
     an owned `String` (and allocated a fresh `"\n"` per wrapped row) on **every

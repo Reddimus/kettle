@@ -56,6 +56,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// A cached GPU texture for one decoded image, plus a clone of the `Arc`
+/// whose pointer is the cache key.
+///
+/// Cycle 807 (audit, ABA fix): the cache key is `Arc::as_ptr(&img.rgba)` —
+/// the heap address of the pixel buffer. Holding an `Arc` clone here **pins
+/// that address** for exactly as long as the entry lives in the cache, so a
+/// dropped-then-reallocated image can't land on a still-cached key and bind
+/// the wrong texture. Without this, image A could cache at address `P`, A
+/// gets dropped freeing `P`, and a *different* image B's buffer reallocates
+/// at `P` before [`ImagePipeline::gc`] evicts A — making `ensure_texture(B)`
+/// hit A's stale entry and draw A's pixels for B. The clone is just an
+/// `Arc` refcount bump (the buffer is already shared with the VT layer), and
+/// `gc` releases it the first frame the image isn't drawn.
+struct CachedTexture {
+    /// Keeps the keyed pixel-buffer address alive while cached (see above).
+    _rgba: std::sync::Arc<Vec<u8>>,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct ImagePipeline {
     pipeline: wgpu::RenderPipeline,
     tex_bgl: wgpu::BindGroupLayout,
@@ -64,7 +83,7 @@ pub struct ImagePipeline {
     sampler: wgpu::Sampler,
     instances: wgpu::Buffer,
     cap: usize,
-    cache: HashMap<usize, wgpu::BindGroup>,
+    cache: HashMap<usize, CachedTexture>,
     draws: Vec<(usize, u32)>, // (cache key, instance index)
 }
 
@@ -243,7 +262,16 @@ impl ImagePipeline {
                 },
             ],
         });
-        self.cache.insert(key, bg);
+        // Store an `Arc` clone alongside the bind group so the keyed buffer
+        // address stays pinned while cached (cycle 807 ABA guard — see
+        // `CachedTexture`).
+        self.cache.insert(
+            key,
+            CachedTexture {
+                _rgba: img.rgba.clone(),
+                bind_group: bg,
+            },
+        );
         key
     }
 
@@ -296,8 +324,8 @@ impl ImagePipeline {
         pass.set_bind_group(0, &self.screen_bg, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         for (key, idx) in &self.draws {
-            if let Some(bg) = self.cache.get(key) {
-                pass.set_bind_group(1, bg, &[]);
+            if let Some(cached) = self.cache.get(key) {
+                pass.set_bind_group(1, &cached.bind_group, &[]);
                 pass.draw(0..4, *idx..*idx + 1);
             }
         }
@@ -306,5 +334,49 @@ impl ImagePipeline {
     /// Forget textures no longer referenced this frame.
     pub fn gc(&mut self, live: &std::collections::HashSet<usize>) {
         self.cache.retain(|k, _| live.contains(k));
+    }
+}
+
+#[cfg(test)]
+mod aba_guard_tests {
+    /// Cycle 807 drift guard (audit, ABA fix). The image cache keys textures
+    /// by the rgba `Arc`'s raw pointer; it MUST hold an `Arc` clone
+    /// (`CachedTexture._rgba`) to pin that address while the entry is cached,
+    /// or a dropped-then-reallocated image can collide on a stale key and draw
+    /// the wrong texture. The field is `_`-prefixed (never read), so a future
+    /// "remove the unused field" cleanup would silently reintroduce the
+    /// hazard — exercising the cache needs a real GPU device, so pin the
+    /// invariant at the source level (same approach as the pane-buffer
+    /// lifecycle guards in `lib.rs`).
+    #[test]
+    fn cache_pins_arc_to_prevent_address_reuse() {
+        let src = include_str!("imgpipe.rs");
+        assert!(
+            src.contains("_rgba: std::sync::Arc<Vec<u8>>"),
+            "CachedTexture must keep an Arc clone to pin the cache-key address"
+        );
+        assert!(
+            src.contains("_rgba: img.rgba.clone()"),
+            "ensure_texture must store the Arc clone so the keyed address stays pinned"
+        );
+    }
+
+    /// The property the pin relies on, as pure `Arc` semantics (no GPU): a
+    /// clone shares the pointer used as the cache key and keeps the buffer —
+    /// and therefore that exact address — alive after the VT layer drops its
+    /// own reference, so nothing else can allocate at the still-cached key.
+    #[test]
+    fn arc_clone_shares_pointer_and_keeps_address_alive() {
+        use std::sync::Arc;
+        let rgba: Arc<Vec<u8>> = Arc::new(vec![1, 2, 3, 4]);
+        let key = Arc::as_ptr(&rgba) as usize;
+        let pinned = rgba.clone(); // stands in for CachedTexture._rgba
+        assert_eq!(Arc::as_ptr(&pinned) as usize, key);
+        assert_eq!(Arc::strong_count(&rgba), 2);
+        // VT layer drops its reference; the pin keeps the buffer (and its
+        // address) alive, so `key` cannot be reused while cached.
+        drop(rgba);
+        assert_eq!(Arc::strong_count(&pinned), 1);
+        assert_eq!(Arc::as_ptr(&pinned) as usize, key);
     }
 }
