@@ -33,6 +33,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Correctness (cycle 818) — Ctrl+Space sends NUL (0x00), not a space.** The
+    space bar arrives as `NamedKey::Space`, which returned a literal space before
+    any modifier was checked, so Ctrl+Space silently inserted 0x20 — breaking
+    emacs/readline set-mark and tmux/vim `C-SPC` bindings. It now emits NUL for
+    Ctrl+Space and ESC+space for Alt+Space (xterm parity).
+
   - **Correctness (cycle 817) — split-pane mouse + PTY sizing account for the
     per-pane titlebar.** In the default config, splitting a pane left every
     pointer ~1 row too high (selection, link targeting, and the mouse-tracking

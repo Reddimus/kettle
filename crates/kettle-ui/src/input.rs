@@ -172,7 +172,22 @@ pub fn encode(
                 });
             }
             NamedKey::Escape => return Some(vec![0x1b]),
-            NamedKey::Space => return Some(vec![b' ']),
+            // Cycle 818 (audit): the space bar arrives as NamedKey::Space, which
+            // returned a literal space BEFORE any modifier was inspected — so
+            // Ctrl+Space emitted 0x20 instead of NUL (0x00), silently breaking
+            // emacs/readline set-mark and tmux/vim C-SPC bindings. (The
+            // `' ' => 0x00` entry in the Ctrl table below is in the
+            // Key::Character arm, which the space key never reaches.) xterm
+            // emits NUL for Ctrl+Space and ESC+space for Alt+Space.
+            NamedKey::Space => {
+                return Some(if ctrl && !alt {
+                    vec![0x00]
+                } else if alt {
+                    vec![0x1b, b' ']
+                } else {
+                    vec![b' ']
+                });
+            }
             NamedKey::ArrowUp => return csi('A'),
             NamedKey::ArrowDown => return csi('B'),
             NamedKey::ArrowRight => return csi('C'),
@@ -381,6 +396,31 @@ mod tests {
         );
         assert_eq!(enc("_"), Some(vec![0x1F]), "Ctrl+_ = US");
         assert_eq!(enc("/"), Some(vec![0x1F]), "Ctrl+/ = US (tmux/nano undo)");
+    }
+
+    /// Cycle 818 (audit): the space bar comes through as NamedKey::Space, so the
+    /// Ctrl+@/Ctrl+Space → NUL rule has to be handled there, not only in the
+    /// Ctrl-punctuation table (which Space never reaches).
+    #[test]
+    fn ctrl_space_emits_nul() {
+        use winit::keyboard::{Key, NamedKey};
+        let mode = TermMode::empty();
+        let sp = || Key::Named(NamedKey::Space);
+        // Plain space → 0x20.
+        assert_eq!(
+            encode(&sp(), None, ModifiersState::empty(), mode),
+            Some(vec![b' '])
+        );
+        // Ctrl+Space → NUL (emacs/readline set-mark, tmux/vim C-SPC).
+        assert_eq!(
+            encode(&sp(), None, ModifiersState::CONTROL, mode),
+            Some(vec![0x00])
+        );
+        // Alt+Space → ESC + space (xterm meta convention).
+        assert_eq!(
+            encode(&sp(), None, ModifiersState::ALT, mode),
+            Some(vec![0x1b, b' '])
+        );
     }
 
     #[test]
