@@ -354,6 +354,11 @@ pub struct TabBar {
     pub segments: Vec<TabSeg>,
     /// The trailing "new tab" (+) button rect.
     pub new_tab: Rect4,
+    /// Cycle 805: the `▾` dropdown-arrow rect, immediately LEFT of `new_tab`.
+    /// Clicking it opens the new-tab shell chooser. Zero-area `(0,0,0,0)` when
+    /// the dropdown is disabled (vertical tab bars) — the renderer then draws a
+    /// plain `+` and the hit-test skips the arrow branch.
+    pub new_tab_menu: Rect4,
     /// Cycle 178: visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -384,6 +389,7 @@ impl TabBar {
             y: 0.0,
             segments: Vec::new(),
             new_tab: (0.0, 0.0, 0.0, 0.0),
+            new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
@@ -449,6 +455,10 @@ pub struct Renderer {
     /// context-menu pool.
     settings_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
+    /// Cycle 805: the `▾` new-tab dropdown-arrow glyph, in its own buffer
+    /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
+    /// stays put in `new_tab`. Unused when the dropdown is disabled.
+    new_tab_arrow_buffer: TextBuffer,
     /// Single shared `✕` glyph buffer reused for every tab's close
     /// button. Rendered separately from the title text so we can:
     /// 1. Color it independently (dim at rest, bright red on hover).
@@ -635,6 +645,7 @@ impl Renderer {
         let metrics = metrics_for(font_size, scale);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let search_buffer = TextBuffer::new(&mut font_system, metrics);
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -672,6 +683,7 @@ impl Renderer {
             context_menu_buffers: Vec::new(),
             settings_buffers: Vec::new(),
             tabbar_buffer,
+            new_tab_arrow_buffer,
             tab_close_buffer,
             search_buffer,
             status_bar_buffer,
@@ -1250,8 +1262,13 @@ impl Renderer {
             // New-tab (+) button background. Cycle 672: use the
             // new_tab rect's own y/h (which cycle-668 set to the
             // strip-bottom row for vertical layouts).
+            // Cycle 805: paint the union of [▾ | +] when the dropdown arrow is
+            // present so there's no unpainted gap behind it; otherwise just the
+            // `+` button.
             let (nx, ny, nw, nh) = tabbar.new_tab;
-            quads.push(rect(nx, ny, nw, nh, theme.palette[8], 1.0));
+            let (mx, _, mw, _) = tabbar.new_tab_menu;
+            let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
+            quads.push(rect(bx, ny, bw, nh, theme.palette[8], 1.0));
             // Cycle 255: drag-in-progress ghost. While the user holds a
             // left button down on the tab bar (cycle 249), paint a
             // translucent overlay copy of the active segment centered
@@ -1811,6 +1828,26 @@ impl Renderer {
             );
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+            // Cycle 805: the `▾` dropdown arrow, shaped in its own buffer so it
+            // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
+            if tabbar.new_tab_menu.2 > 0.0 {
+                self.new_tab_arrow_buffer
+                    .set_metrics(&mut self.font_system, metrics);
+                self.new_tab_arrow_buffer.set_size(
+                    &mut self.font_system,
+                    Some(tabbar.new_tab_menu.2),
+                    Some(tabbar.height),
+                );
+                self.new_tab_arrow_buffer.set_text(
+                    &mut self.font_system,
+                    " ▾",
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.new_tab_arrow_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         // Cycle 296: upload status-bar text. Single buffer, single
@@ -2109,6 +2146,25 @@ impl Renderer {
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
             });
+            // Cycle 805: the `▾` dropdown arrow glyph, at `new_tab_menu` (left
+            // of `+`). Only present when the dropdown is enabled.
+            if tabbar.new_tab_menu.2 > 0.0 {
+                let (ax, _, aw, _) = tabbar.new_tab_menu;
+                areas.push(TextArea {
+                    buffer: &self.new_tab_arrow_buffer,
+                    left: ax + 4.0,
+                    top: tabbar.y + 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: ty,
+                        right: (ax + aw) as i32,
+                        bottom: tb,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
         }
         if have_search {
             let bar_h = ch + 10.0;

@@ -477,6 +477,20 @@ fn compute_tab_segment_widths<'a>(
     }
 }
 
+/// Cycle 805: split the trailing new-tab button into `(arrow_left, plus_right)`
+/// hit-rects — the `▾` dropdown on the LEFT, the `+` on the RIGHT. `arrow_w` is
+/// clamped to the button width so a degenerate (tiny) button can't yield a
+/// negative `+` width. Pure → unit-tested and shared by the renderer geometry
+/// + the click hit-test (single source of truth).
+fn split_new_tab_button(
+    button: kettle_render::Rect4,
+    arrow_w: f32,
+) -> (kettle_render::Rect4, kettle_render::Rect4) {
+    let (x, y, w, h) = button;
+    let aw = arrow_w.clamp(0.0, w);
+    ((x, y, aw, h), (x + aw, y, (w - aw).max(0.0), h))
+}
+
 /// Cycle 618 (Terminator parity, key_next_profile / key_previous_profile):
 /// pick the next profile name after `current`, wrapping at the end.
 /// If `current` isn't in the list (e.g. user launched without `--profile`,
@@ -898,6 +912,10 @@ enum ContextMenuClick {
     /// the current items onto `drill_stack` + replaces them
     /// with the submenu's items.
     DrillIntoSubmenu(usize),
+    /// Cycle 805: open a new tab running an explicit argv (a shell picked from
+    /// the new-tab `▾` dropdown). Dispatch calls `Mux::new_tab_with` with the
+    /// focused tab's current working directory.
+    NewTabWithArgv(Vec<String>),
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -978,6 +996,13 @@ enum ContextMenuItem {
     ProfileChoice {
         label: String,
         profile: String,
+    },
+    /// Cycle 805: a shell-choice leaf in the new-tab `▾` dropdown. Clicking
+    /// dispatches `ContextMenuClick::NewTabWithArgv(argv)` to open a tab
+    /// running that shell.
+    NewTabShell {
+        label: String,
+        argv: Vec<String>,
     },
 }
 
@@ -1163,6 +1188,7 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
             ContextMenuItem::Submenu { label, .. } => label.as_str(),
             ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
+            ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::Separator => "",
         })
         .collect();
@@ -1210,7 +1236,8 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         | ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::Submenu { label, .. }
         | ContextMenuItem::ThemeChoice { label, .. }
-        | ContextMenuItem::ProfileChoice { label, .. } => {
+        | ContextMenuItem::ProfileChoice { label, .. }
+        | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
         }
         _ => false,
@@ -1350,6 +1377,9 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // will open the flyout once sub-cycle 3 lands. For now
             // the click no-ops with an info log.
             | ContextMenuItem::Submenu { .. }
+            // Cycle 805: new-tab ▾ shell choices are always clickable + keyboard-
+            // navigable.
+            | ContextMenuItem::NewTabShell { .. }
     )
 }
 
@@ -2374,9 +2404,16 @@ impl App {
         };
         let titles = self.mux.tab_titles();
         let n = titles.len().max(1);
-        // Trailing square "+" button.
+        // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
+        // each `height` wide. Cycle 805: the strip must reserve the WHOLE
+        // button (arrow + plus), not just `plus_w`, or the last tab segment
+        // overlaps it.
         let plus_w = height;
-        let strip = (sw - plus_w).max(plus_w);
+        let arrow_w = height;
+        let button_w = plus_w + arrow_w;
+        let strip = (sw - button_w).max(plus_w);
+        let (arrow_rect, plus_rect) =
+            split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
         let cell_w = self
             .renderer
             .as_ref()
@@ -2453,7 +2490,8 @@ impl App {
             height,
             y,
             segments,
-            new_tab: (sw - plus_w, y, plus_w, height),
+            new_tab: plus_rect,
+            new_tab_menu: arrow_rect,
             // Cycle 178: broadcast indicator on the active tab.
             broadcast: self.mux.is_broadcast_on(),
             // Hover-on-✕ chip: renderer paints a red highlight behind
@@ -2535,6 +2573,9 @@ impl App {
             y: 0.0,
             segments,
             new_tab: (strip_x, plus_y, strip_w, height),
+            // Cycle 805: no dropdown arrow on vertical bars — the bottom-of-
+            // strip full-width `+` has nowhere sensible for a left-side arrow.
+            new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             broadcast: self.mux.is_broadcast_on(),
             hovered_close_idx: self.hovered_close_idx,
             // Drag-cursor preview is x-only in v1; vertical drag
@@ -4527,13 +4568,17 @@ impl App {
         // Cycle 717 (Preferences submenu, C8): runtime-mutable
         // settings + the Advanced… escape hatch.
         self.append_preferences_submenu_items(&mut items);
-        // Cycle 713 (Terminator menu UX, C4): drop disabled rows
-        // entirely and collapse the separators that would orphan
-        // around them. Matches Terminator/GNOME's "only show what
-        // you can actually click" convention; every visible row is
-        // actionable.
+        self.show_context_menu(items, px, py);
+    }
+
+    /// Cycle 805: shared tail of context-menu opening — drop disabled rows +
+    /// collapse orphaned separators, compute panel geometry, clamp the anchor
+    /// on-screen, and install the `ContextMenuState`. Used by both the
+    /// right-click menu and the new-tab `▾` dropdown so they render
+    /// pixel-identically.
+    fn show_context_menu(&mut self, items: Vec<ContextMenuItem>, px: f32, py: f32) {
+        // Cycle 713 (Terminator menu UX, C4): every visible row is actionable.
         let items = filter_disabled(items);
-        // Highlight the first enabled non-separator item.
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.cell_px();
         let (cw, ch) = (cw as f32, ch as f32);
@@ -4549,7 +4594,8 @@ impl App {
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::ThemeChoice { .. }
-                | ContextMenuItem::ProfileChoice { .. } => row_h,
+                | ContextMenuItem::ProfileChoice { .. }
+                | ContextMenuItem::NewTabShell { .. } => row_h,
             })
             .sum();
         let max_chars = items
@@ -4558,15 +4604,13 @@ impl App {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
                 // Cycle 684: submenu rows show "label ▸" so the
                 // max-width budget needs +2 for the suffix.
                 ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
-                // Cycle 685: ThemeChoice surfaces only inside an
-                // open submenu flyout (sub-cycle 3); the parent
-                // menu's width budget shouldn't grow for choices
-                // the user can't directly see.
+                // Cycle 685/686: Theme/Profile choices surface only inside an
+                // open flyout; the parent menu's width budget shouldn't grow.
                 ContextMenuItem::ThemeChoice { .. } => None,
-                // Cycle 686: same for ProfileChoice (flyout-only).
                 ContextMenuItem::ProfileChoice { .. } => None,
                 _ => None,
             })
@@ -4594,6 +4638,52 @@ impl App {
         });
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Cycle 805: open the new-tab `▾` shell-chooser dropdown at `(px, py)`.
+    /// Auto-detects available shells; if none are detected (shouldn't happen —
+    /// `detect_shells` always returns ≥1), falls back to opening a default tab
+    /// so the click is never a dead no-op.
+    fn open_new_tab_menu(&mut self, px: f32, py: f32) {
+        self.close_all_modals();
+        let shells = kettle_core::term::detect_shells();
+        if shells.is_empty() {
+            let area = self.area();
+            let (cols, rows) = self.grid_of(area);
+            let (cw, ch) = self.cell_px();
+            match self
+                .mux
+                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
+            {
+                Ok(()) => self.fire_tab_add_event(),
+                Err(e) => log::warn!("could not open a new tab (▾ fallback): {e}"),
+            }
+            return;
+        }
+        let items = shells
+            .into_iter()
+            .map(|(label, argv)| ContextMenuItem::NewTabShell { label, argv })
+            .collect();
+        self.show_context_menu(items, px, py);
+    }
+
+    /// Cycle 805: open a new tab running `argv`, inheriting the focused tab's
+    /// current working directory. Shared by the new-tab `▾` dropdown's mouse +
+    /// keyboard dispatch. Mirrors the cycle-802 NewTab pattern: log on failure,
+    /// fire the `TabAdd` plugin event only when a tab was actually created.
+    fn open_tab_with_argv(&mut self, argv: &[String]) {
+        let area = self.area();
+        let (cols, rows) = self.grid_of(area);
+        let (cw, ch) = self.cell_px();
+        let waker = self.waker();
+        let cwd = self.mux.focused().and_then(|p| p.term.current_dir());
+        match self
+            .mux
+            .new_tab_with(&self.cfg, cols, rows, cw, ch, waker, argv, cwd.as_deref())
+        {
+            Ok(()) => self.fire_tab_add_event(),
+            Err(e) => log::warn!("could not open shell tab ({argv:?}): {e}"),
         }
     }
 
@@ -4758,7 +4848,8 @@ impl App {
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::ThemeChoice { .. }
-                | ContextMenuItem::ProfileChoice { .. } => row_h,
+                | ContextMenuItem::ProfileChoice { .. }
+                | ContextMenuItem::NewTabShell { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 match item {
@@ -4792,6 +4883,10 @@ impl App {
                     ContextMenuItem::ProfileChoice { profile, .. } => {
                         // Cycle 686: same shape as ThemeChoice.
                         return Some(ContextMenuClick::SetProfile(profile.clone()));
+                    }
+                    ContextMenuItem::NewTabShell { argv, .. } => {
+                        // Cycle 805: a shell choice in the new-tab ▾ dropdown.
+                        return Some(ContextMenuClick::NewTabWithArgv(argv.clone()));
                     }
                     _ => return None,
                 }
@@ -4842,6 +4937,9 @@ impl App {
                 ContextMenuItem::DynamicItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
+                // Cycle 805: count shell-dropdown labels so this hit-test width
+                // matches the panel `show_context_menu` actually rendered.
+                ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -4908,6 +5006,12 @@ impl App {
                     enabled: true,
                 },
                 ContextMenuItem::ProfileChoice { label, .. } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: true,
+                },
+                // Cycle 805: new-tab ▾ shell choice — a normal clickable row.
+                ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
@@ -7352,6 +7456,12 @@ impl App {
                             }
                             return;
                         }
+                        // Cycle 805: keyboard-activate a new-tab ▾ shell choice.
+                        Some(ContextMenuClick::NewTabWithArgv(argv)) => {
+                            self.context_menu = None;
+                            self.open_tab_with_argv(&argv);
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -8203,6 +8313,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                         }
+                        // Cycle 805: a shell picked from the new-tab ▾ dropdown
+                        // — open a tab running that argv, inheriting the focused
+                        // tab's cwd.
+                        ContextMenuClick::NewTabWithArgv(argv) => {
+                            self.open_tab_with_argv(&argv);
+                        }
                     }
                     return;
                 }
@@ -8263,7 +8379,13 @@ impl ApplicationHandler<UserEvent> for App {
                     && py < bar.y + bar.height
                     && (bcode == 0 || bcode == 1)
                 {
-                    if bcode == 0 && in_bar(bar.new_tab, px, py) {
+                    if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
+                        // Cycle 805: the `▾` dropdown — open the shell chooser
+                        // anchored at the arrow's bottom-left. Checked BEFORE the
+                        // `+` so the arrow region isn't swallowed by the button.
+                        let (ax, ay, _, ah) = bar.new_tab_menu;
+                        self.open_new_tab_menu(ax, ay + ah);
+                    } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
                         let area = self.area();
                         let (cols, rows) = self.grid_of(area);
                         let (cw, ch) = self.cell_px();
@@ -10416,6 +10538,26 @@ mod tests {
         let widths: Vec<f32> =
             compute_tab_segment_widths(std::iter::empty::<&str>(), 100.0, cell_w, tab_h, true);
         assert_eq!(widths, vec![100.0]);
+    }
+
+    /// Cycle 805 drift guard. `split_new_tab_button` splits the trailing
+    /// button into the `▾` arrow (left) and `+` (right) hit-rects; they must
+    /// abut with no gap/overlap, and a degenerate `arrow_w` can't yield a
+    /// negative `+` width.
+    #[test]
+    fn split_new_tab_button_places_arrow_left_of_plus() {
+        use super::split_new_tab_button;
+        // button at x=200, 52 wide (two 26-px halves), arrow 26 wide.
+        let (arrow, plus) = split_new_tab_button((200.0, 0.0, 52.0, 26.0), 26.0);
+        assert_eq!(arrow, (200.0, 0.0, 26.0, 26.0)); // arrow on the LEFT
+        assert_eq!(plus, (226.0, 0.0, 26.0, 26.0)); // plus on the RIGHT
+        // They abut exactly (no gap, no overlap).
+        assert_eq!(arrow.0 + arrow.2, plus.0);
+        // Degenerate: arrow wider than the button → clamped, plus width >= 0.
+        let (a2, p2) = split_new_tab_button((0.0, 0.0, 20.0, 10.0), 999.0);
+        assert_eq!(a2.2, 20.0);
+        assert_eq!(p2.2, 0.0);
+        assert!(p2.2 >= 0.0);
     }
 
     /// Cycle 618 drift guard. `pick_next_profile` is the pure

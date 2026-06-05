@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Feature (cycle 805) — new-tab `▾` dropdown to pick a shell (Windows 11
+    Terminal-style).** A small `▾` arrow now sits to the **left** of the tab-bar
+    `+`. Clicking `+` opens the default tab as before; clicking `▾` opens a menu
+    of **auto-detected shells** and opens the chosen one in a new tab that
+    **inherits the focused tab's working directory**. Detection (cheap, only on
+    the `▾` click): Windows lists Command Prompt, Windows PowerShell, and
+    PowerShell 7 (each only if found on `PATH`) plus one entry per installed WSL
+    distro (`wsl -l -q`, UTF-16-decoded); other platforms list `$SHELL` then
+    bash/zsh/fish found on `PATH` (de-duped). The menu reuses the existing
+    context-menu chrome/dispatch (mouse + keyboard + typeahead). Horizontal tab
+    bars only (vertical bars keep a plain `+`). Detection, the WSL parser, and
+    the arrow/`+` hit-rect split are unit-tested.
+
   - **UX (cycle 804) — tab titles show in full when there's room.** The
     per-tab title was capped at **24 characters regardless of how wide the tab
     was**, so a single wide tab still showed `1: C:\Program Files\Window…`

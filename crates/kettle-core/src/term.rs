@@ -247,6 +247,129 @@ fn augment_wslenv(existing: &str, vars: &[&str]) -> String {
     out
 }
 
+/// Cycle 805: a shell choice for the new-tab `▾` dropdown — a display label and
+/// the argv to spawn for it.
+pub type ShellChoice = (String, Vec<String>);
+
+/// Cycle 805: auto-detect the shells to offer in the new-tab dropdown,
+/// Windows-Terminal style. Always returns at least one entry.
+/// - Windows: Command Prompt, Windows PowerShell, PowerShell 7 (each only when
+///   found on `PATH`), then one entry per installed WSL distro.
+/// - Other platforms: `$SHELL` first, then bash/zsh/fish found on `PATH`
+///   (de-duped by basename).
+///
+/// Detection is injected into the inner helpers so they are unit-testable
+/// without depending on what is installed on the host.
+pub fn detect_shells() -> Vec<ShellChoice> {
+    #[cfg(windows)]
+    {
+        detect_shells_windows(|e| find_on_path(e).is_some(), list_wsl_distros)
+    }
+    #[cfg(not(windows))]
+    {
+        detect_shells_unix(std::env::var("SHELL").ok(), unix_on_path)
+    }
+}
+
+#[cfg(windows)]
+fn detect_shells_windows(
+    available: impl Fn(&str) -> bool,
+    distros: impl Fn() -> Vec<String>,
+) -> Vec<ShellChoice> {
+    let mut out: Vec<ShellChoice> = Vec::new();
+    for (label, exe) in [
+        ("Command Prompt", "cmd.exe"),
+        ("Windows PowerShell", "powershell.exe"),
+        ("PowerShell 7", "pwsh.exe"),
+    ] {
+        if available(exe) {
+            out.push((label.to_string(), vec![exe.to_string()]));
+        }
+    }
+    if available("wsl.exe") {
+        for d in distros() {
+            out.push((
+                format!("WSL: {d}"),
+                vec!["wsl.exe".to_string(), "-d".to_string(), d],
+            ));
+        }
+    }
+    // Never hand back an empty menu — the `▾` click must always do something.
+    if out.is_empty() {
+        out.push(("Command Prompt".to_string(), vec!["cmd.exe".to_string()]));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn unix_on_path(exe: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                std::fs::metadata(dir.join(exe))
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn detect_shells_unix(
+    shell_env: Option<String>,
+    available: impl Fn(&str) -> bool,
+) -> Vec<ShellChoice> {
+    let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    let mut out: Vec<ShellChoice> = Vec::new();
+    if let Some(s) = shell_env.filter(|s| !s.is_empty()) {
+        out.push((basename(&s), vec![s]));
+    }
+    for sh in ["bash", "zsh", "fish"] {
+        if available(sh) && !out.iter().any(|(_, argv)| basename(&argv[0]) == sh) {
+            out.push((sh.to_string(), vec![sh.to_string()]));
+        }
+    }
+    if out.is_empty() {
+        out.push(("Shell".to_string(), vec!["/bin/sh".to_string()]));
+    }
+    out
+}
+
+/// Cycle 805: parse distro names from `wsl.exe -l -q` output — one per line,
+/// stripping a UTF-16 BOM artifact, surrounding whitespace, and trailing NULs,
+/// dropping blanks. Pure → unit-testable without wsl.exe (built in test or on
+/// Windows where `list_wsl_distros` calls it).
+#[cfg(any(windows, test))]
+fn parse_wsl_distros(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\u{0}'))
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Cycle 805: installed WSL distros via `wsl.exe -l -q` (bare names, no header).
+/// Output is UTF-16-LE; decode then parse. Empty on any spawn/exit failure so a
+/// host without WSL simply offers no WSL entries.
+#[cfg(windows)]
+fn list_wsl_distros() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let units: Vec<u16> = out
+        .stdout
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    parse_wsl_distros(&String::from_utf16_lossy(&units))
+}
+
 /// One axis of a `PtySize`, computed without overflow. `cell` is the
 /// per-cell pixel extent (1 when computing the row/column count itself);
 /// `count` is the grid dimension in cells. The product is evaluated in
@@ -1389,6 +1512,74 @@ fn place_image(
 /// uses (alacritty_terminal + vte) over a battery of escape sequences and
 /// asserts the resulting grid/cursor/mode. This is the automatable,
 /// regression-proof core of a `vttest` sweep.
+#[cfg(test)]
+mod detect_shells_tests {
+
+    #[test]
+    fn parse_wsl_distros_strips_bom_nul_blanks_crlf() {
+        // Simulated `wsl -l -q` decoded text: a leading UTF-16 BOM, CRLF line
+        // endings, a blank line, and a trailing-NUL artifact.
+        let text = "\u{feff}Ubuntu\r\nDebian\r\n\r\nkali-linux\u{0}\r\n";
+        assert_eq!(
+            super::parse_wsl_distros(text),
+            vec!["Ubuntu", "Debian", "kali-linux"]
+        );
+        assert!(super::parse_wsl_distros("").is_empty());
+        assert!(super::parse_wsl_distros("\u{feff}\r\n  \r\n").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detect_shells_windows_lists_available_plus_distros() {
+        let avail = |e: &str| matches!(e, "cmd.exe" | "pwsh.exe" | "wsl.exe");
+        let distros = || vec!["Ubuntu".to_string()];
+        let got = super::detect_shells_windows(avail, distros);
+        assert!(
+            got.iter()
+                .any(|(l, a)| l == "Command Prompt" && a.as_slice() == ["cmd.exe"])
+        );
+        assert!(got.iter().any(|(l, _)| l == "PowerShell 7"));
+        // powershell.exe was NOT "available" → Windows PowerShell is absent.
+        assert!(!got.iter().any(|(l, _)| l == "Windows PowerShell"));
+        assert!(
+            got.iter()
+                .any(|(l, a)| l == "WSL: Ubuntu" && a.as_slice() == ["wsl.exe", "-d", "Ubuntu"])
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detect_shells_windows_never_empty() {
+        let got = super::detect_shells_windows(|_| false, Vec::new);
+        assert_eq!(
+            got,
+            vec![("Command Prompt".to_string(), vec!["cmd.exe".to_string()])]
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shells_unix_shell_env_first_and_dedupes() {
+        let avail = |e: &str| matches!(e, "bash" | "zsh" | "fish");
+        let got = super::detect_shells_unix(Some("/bin/zsh".to_string()), avail);
+        // $SHELL=zsh is first (label = basename); the detected `zsh` isn't a dup.
+        assert_eq!(got[0], ("zsh".to_string(), vec!["/bin/zsh".to_string()]));
+        assert_eq!(got.iter().filter(|(_, a)| a[0].ends_with("zsh")).count(), 1);
+        assert!(got.iter().any(|(l, _)| l == "bash"));
+        assert!(got.iter().any(|(l, _)| l == "fish"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shells_unix_never_empty() {
+        let got = super::detect_shells_unix(None, |_| false);
+        assert_eq!(
+            got,
+            vec![("Shell".to_string(), vec!["/bin/sh".to_string()])]
+        );
+    }
+}
+
 #[cfg(test)]
 mod wslenv_tests {
     use super::augment_wslenv;
