@@ -33,6 +33,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Perf (cycle 827) — pane text spans reuse their buffers across frames.**
+    `build_pane` allocated the style-run `Vec` and a fresh `String` per run from
+    empty on every frame, so a busy colored pane (`ls --color`, a TUI) churned
+    dozens–hundreds of `String` allocations on the 60 fps hot path even when
+    nothing changed. The run scratch (Vec + per-run `String` buffers) is now
+    pooled on the renderer and reused by index, like the per-pane text buffers.
+
   - **Error-handling (cycle 826) — `--check-config` catches bool/enum typos.**
     The malformed-value diagnostic validated only 8 of ~100 boolean keys (and
     skipped several enum keys), so `borderless = treu`, `login-shell = yse`,

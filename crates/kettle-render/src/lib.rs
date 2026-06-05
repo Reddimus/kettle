@@ -439,6 +439,15 @@ pub struct Renderer {
     viewport: Viewport,
     text_renderer: TextRenderer,
     pane_buffers: Vec<TextBuffer>,
+    /// Cycle 827 (audit): pooled scratch for `build_pane`'s per-cell style runs,
+    /// reused across frames. Both the Vec backing store AND each run's `String`
+    /// buffer are recycled (the builder writes into slots by index rather than
+    /// pushing fresh `String`s), so a busy colored pane no longer mints dozens–
+    /// hundreds of `String` allocations on the 60 fps render hot path. Same
+    /// high-water-mark pooling as `pane_buffers`.
+    span_scratch: Vec<(String, Rgb, bool, bool)>,
+    /// Cycle 827: pooled scratch for `build_pane`'s line-break indices.
+    span_breaks_scratch: Vec<usize>,
     /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 3): one TextBuffer per pane for the title text
     /// drawn in the cycle-379 titlebar quad. Reused across redraws
@@ -677,6 +686,8 @@ impl Renderer {
             viewport,
             text_renderer,
             pane_buffers: Vec::new(),
+            span_scratch: Vec::new(),
+            span_breaks_scratch: Vec::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
@@ -2686,10 +2697,19 @@ impl Renderer {
             .map(|c| Rgb::new(c.r, c.g, c.b))
             .unwrap_or(theme.background);
 
-        let mut spans: Vec<(String, Rgb, bool, bool)> = Vec::new();
-        let mut span_line_breaks: Vec<usize> = Vec::new();
+        // Cycle 827 (audit): take the pooled scratch (with last frame's String
+        // buffers) instead of allocating fresh. `n` is the LOGICAL run count;
+        // `spans` may hold extra slots from a busier prior frame, which we reuse
+        // (clear + refill) before falling back to a push. Stored back to `self`
+        // at the end of this method so the capacity recycles next frame.
+        let mut spans = std::mem::take(&mut self.span_scratch);
+        let mut span_line_breaks = std::mem::take(&mut self.span_breaks_scratch);
+        span_line_breaks.clear();
+        let mut n = 0usize;
         let mut cur_row = 0i32;
-        let mut cur: Option<(String, Rgb, bool, bool)> = None;
+        // The style of the run currently being appended to (`spans[n - 1]`), or
+        // `None` when the next char must open a new run.
+        let mut cur: Option<(Rgb, bool, bool)> = None;
 
         for indexed in content.display_iter {
             let point = indexed.point;
@@ -2697,11 +2717,9 @@ impl Renderer {
             let row = point.line.0;
             let col = point.column.0;
             if row != cur_row {
-                if let Some(s) = cur.take() {
-                    spans.push(s);
-                }
+                cur = None; // runs never span a line break
                 for _ in cur_row..row {
-                    span_line_breaks.push(spans.len());
+                    span_line_breaks.push(n);
                 }
                 cur_row = row;
             }
@@ -2800,18 +2818,30 @@ impl Renderer {
                 ));
             }
             let dc = if hidden { ' ' } else { cell.c };
-            match &mut cur {
-                Some((t, f, cb, ci)) if *f == fg && *cb == bold && *ci == italic => t.push(dc),
+            match cur {
+                Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
+                    // Same style — extend the current run (the last live span).
+                    spans[n - 1].0.push(dc);
+                }
                 _ => {
-                    if let Some(s) = cur.take() {
-                        spans.push(s);
+                    // New run: reuse the pooled slot's String if one exists
+                    // (clearing keeps its capacity), else push a fresh entry.
+                    if n < spans.len() {
+                        let slot = &mut spans[n];
+                        slot.0.clear();
+                        slot.0.push(dc);
+                        slot.1 = fg;
+                        slot.2 = bold;
+                        slot.3 = italic;
+                    } else {
+                        let mut s = String::new();
+                        s.push(dc);
+                        spans.push((s, fg, bold, italic));
                     }
-                    cur = Some((dc.to_string(), fg, bold, italic));
+                    n += 1;
+                    cur = Some((fg, bold, italic));
                 }
             }
-        }
-        if let Some(s) = cur.take() {
-            spans.push(s);
         }
 
         // Selection.
@@ -2967,7 +2997,9 @@ impl Renderer {
         // per wrapped row) every single frame. The `Vec<(&str, Attrs)>` type
         // also makes a future re-introduction of `text.clone()` a compile
         // error rather than a silent regression.
-        let rich = build_rich_spans(&spans, &span_line_breaks, cfg, &ff, &default_attrs);
+        // Only the first `n` slots are live this frame (the pool may carry more
+        // from a busier prior frame); `set_rich_text` sees exactly those.
+        let rich = build_rich_spans(&spans[..n], &span_line_breaks, cfg, &ff, &default_attrs);
         // Advanced shaping applies OpenType features (ligatures, ss##,
         // cv##, …). Drop to Basic only when ligatures are off *and* there
         // are no explicit features to honor — the fast path with no shaping.
@@ -2982,6 +3014,10 @@ impl Renderer {
         // a.clone()))` adapter used to make.
         buf.set_rich_text(&mut self.font_system, rich, &default_attrs, shaping, None);
         buf.shape_until_scroll(&mut self.font_system, false);
+        // Return the scratch (with its grown String buffers) to the pool for the
+        // next frame/pane. `rich` is already consumed, so `spans` is free.
+        self.span_scratch = spans;
+        self.span_breaks_scratch = span_line_breaks;
     }
 }
 
@@ -4824,6 +4860,29 @@ mod pane_buffer_lifecycle_tests {
                  unbounded across overlay open/close cycles (missing `{call}`)"
             );
         }
+    }
+
+    /// Cycle 827 drift guard (audit). `build_pane`'s per-cell style-run scratch
+    /// must be POOLED on `self` (taken + returned) and reuse each run's `String`
+    /// buffer by index (clear + refill), not `Vec::new()` + `to_string()` per
+    /// frame — otherwise a busy colored pane mints dozens–hundreds of `String`
+    /// allocations on the 60 fps hot path. A behavioral test needs a full GPU
+    /// `Renderer`; pin the pattern at the source level.
+    #[test]
+    fn build_pane_pools_the_span_scratch() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("std::mem::take(&mut self.span_scratch)"),
+            "span scratch must be taken from the self-pool, not allocated fresh"
+        );
+        assert!(
+            src.contains("self.span_scratch = spans;"),
+            "span scratch must be returned to the pool for the next frame"
+        );
+        assert!(
+            src.contains("slot.0.clear();"),
+            "per-run String slots must be cleared + reused, not freshly allocated"
+        );
     }
 
     /// Cycle 791 drift guard (audit C1). Image-placement draw must keep the
