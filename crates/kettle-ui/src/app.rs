@@ -659,6 +659,24 @@ fn extra_mouse_sgr(button: MouseButton) -> Option<u8> {
     }
 }
 
+/// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
+/// hand to the OS opener.
+///
+/// Cycle 816 (audit): the cwd comes from untrusted PTY output (`parse_osc7`
+/// stores whatever a program reports), and a crafted `file://x//evil.host/share`
+/// yields a stored cwd of `//evil.host/share`. Building `file://{cwd}` from that
+/// produces a UNC-style URL that, when opened on Windows, connects to the
+/// attacker over SMB and leaks the user's NTLM hash. The cycle-815
+/// `is_safe_url` locality check already rejects the resulting URL, but this is
+/// the one call site that *constructs* `file://` from raw untrusted input, so
+/// it gets an explicit local-only guard too (defense-in-depth). Crucially this
+/// check does NO filesystem stat — `Path::is_dir` on a `//host` path would
+/// itself route over SMB — it's a pure string check: reject UNC/authority
+/// (`//`, leading `\`) and traversal.
+fn cwd_is_local(cwd: &str) -> bool {
+    !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
+}
+
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
     if bar_h <= 0.0 {
         return false;
@@ -6285,18 +6303,25 @@ impl App {
             // shape to clicking a `file://...` hyperlink in pane
             // output — re-uses the safety policy for free.
             Action::OpenCwdInFileManager => {
-                if let Some(cwd) = self
-                    .mux
-                    .focused()
-                    .and_then(|p| p.term.current_dir())
-                    .filter(|s| !s.is_empty())
-                {
-                    self.open_url(&format!("file://{cwd}"));
-                } else {
-                    log::info!(
-                        "Action::OpenCwdInFileManager: focused pane has no OSC 7 cwd \
-                         — set up shell integration with `kettle --shell-integration bash`"
-                    );
+                match self.mux.focused().and_then(|p| p.term.current_dir()) {
+                    // Cycle 816 (audit): refuse a non-local OSC 7 cwd before
+                    // building/opening the URL (it's untrusted PTY input — a
+                    // UNC path would trigger an SMB/NTLM leak on Windows).
+                    Some(cwd) if cwd_is_local(&cwd) => {
+                        self.open_url(&format!("file://{cwd}"));
+                    }
+                    Some(_) => {
+                        log::warn!(
+                            "Action::OpenCwdInFileManager: refusing a non-local cwd \
+                             reported via OSC 7 (possible UNC/SSRF payload)"
+                        );
+                    }
+                    None => {
+                        log::info!(
+                            "Action::OpenCwdInFileManager: focused pane has no OSC 7 cwd \
+                             — set up shell integration with `kettle --shell-integration bash`"
+                        );
+                    }
                 }
             }
             // Cycle 345: half-page scroll. Same shape as cycle-X's
@@ -9936,6 +9961,20 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_millis(10)
         ));
+    }
+
+    #[test]
+    fn cwd_is_local_rejects_unc_and_traversal() {
+        use super::cwd_is_local;
+        // Cycle 816 drift guard. Ordinary absolute cwds (the OSC 7 path form,
+        // which uses forward slashes even on Windows: /C:/Users/x) are fine.
+        assert!(cwd_is_local("/home/user"));
+        assert!(cwd_is_local("/C:/Users/me/Repos"));
+        // UNC / authority forms and traversal are refused (the SMB/NTLM vector).
+        assert!(!cwd_is_local("//evil.host/share"));
+        assert!(!cwd_is_local("\\\\evil\\share"));
+        assert!(!cwd_is_local("/x/../../etc/passwd"));
+        assert!(!cwd_is_local(""));
     }
 
     #[test]
