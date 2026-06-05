@@ -1039,7 +1039,7 @@ impl Renderer {
                 let img_h = data.height as f32;
                 live.insert(std::sync::Arc::as_ptr(&data.rgba) as usize);
                 match cfg.background_image_mode.as_str() {
-                    "tile" => {
+                    "tile" if bg_tiles_within_cap(sw, sh, img_w, img_h) => {
                         // Tile starts from (0, 0); rows go top-to-bottom.
                         let mut y = 0.0;
                         while y < sh {
@@ -1052,6 +1052,14 @@ impl Renderer {
                             }
                             y += img_h;
                         }
+                    }
+                    "tile" => {
+                        // Cycle 825 (audit): a tiny source image (e.g. a 1×1
+                        // pixel) tiles into a huge number of CPU quads + Arc
+                        // clones EVERY frame — ~8.3M on a 4K surface — hanging
+                        // the render thread. Past `MAX_BG_TILES`, fall back to a
+                        // single stretched quad instead of melting the renderer.
+                        img_items.push((0.0, 0.0, sw, sh, data.clone()));
                     }
                     "center" => {
                         // Cycle 391: align_horiz/vert nudge the
@@ -2981,6 +2989,22 @@ impl Renderer {
 /// expressed as `liga/clig/calt/dlig = 0` when off, then the user's explicit
 /// `font-feature` overrides applied on top (so they can re-enable or tune
 /// individual features). Cited: Ghostty `font-feature`, kitty `font_features`.
+/// Upper bound on tiles a `tile` background may emit per frame before falling
+/// back to a single stretched quad. ~60-px tiles on a 4K surface (3840×2160 →
+/// 64×34 ≈ 2176) stay under it; only pathologically small source images
+/// (≤ ~30 px) trip the cap. Cycle 825 (audit).
+const MAX_BG_TILES: f32 = 4096.0;
+
+/// Whether a `tile` background's source image yields a sane number of tiles for
+/// the surface, or so many (a tiny source image) that the per-frame quad +
+/// Arc-clone storm would hang the renderer and it should stretch instead. Zero
+/// dims are treated as 1 px so we never divide by zero. Cycle 825 (audit).
+fn bg_tiles_within_cap(surface_w: f32, surface_h: f32, img_w: f32, img_h: f32) -> bool {
+    let tiles_x = (surface_w / img_w.max(1.0)).ceil().max(1.0);
+    let tiles_y = (surface_h / img_h.max(1.0)).ceil().max(1.0);
+    tiles_x * tiles_y <= MAX_BG_TILES
+}
+
 fn font_features(cfg: &Config) -> FontFeatures {
     let mut ff = FontFeatures::new();
     if !cfg.font_ligatures {
@@ -4893,6 +4917,27 @@ mod update_banner_top_tests {
         assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
         // Both at the bottom → banner clears the stack of both.
         assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
+    }
+}
+
+#[cfg(test)]
+mod bg_tile_cap_tests {
+    use super::bg_tiles_within_cap;
+
+    /// Cycle 825 drift guard: a small source image must NOT tile into a
+    /// per-frame quad storm — past the cap it falls back to a stretched quad.
+    #[test]
+    fn tiny_source_image_falls_back_to_stretch() {
+        // A reasonable 64×64 tile on 4K (≈2176 tiles) still tiles.
+        assert!(bg_tiles_within_cap(3840.0, 2160.0, 64.0, 64.0));
+        // A 1×1 tile on 4K (~8.3M tiles) trips the cap.
+        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 1.0, 1.0));
+        // A 16×16 tile on 4K (~32k tiles) also trips it.
+        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 16.0, 16.0));
+        // Degenerate zero dims are treated as 1 px (no divide-by-zero) → cap.
+        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 0.0, 0.0));
+        // A source as large as the surface is a single tile.
+        assert!(bg_tiles_within_cap(1920.0, 1080.0, 1920.0, 1080.0));
     }
 }
 

@@ -33,6 +33,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Perf (cycle 825) — a tiny `tile` background no longer hangs the renderer.**
+    The `background-image-mode = tile` path emitted one CPU quad (+ `Arc` clone)
+    per tile every frame straight from the source image's pixel size with no
+    floor — a 1×1 source on a 4K surface is ~8.3M quads/frame, freezing the
+    window. Tile counts above a cap (~4096; ~60-px tiles on 4K still tile) now
+    fall back to a single stretched quad.
+
   - **Perf/DoS (cycle 824) — Sixel decode is O(W·H), not O(W²·H).** A spec-legal
     sixel that omits the raster-attribute size hint grows its width one pixel at
     a time, and the decoder reallocated to the exact new size and full-copied
