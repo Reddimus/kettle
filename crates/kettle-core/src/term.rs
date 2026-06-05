@@ -226,6 +226,15 @@ fn is_wsl_launcher(prog: &str) -> bool {
     last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
 }
 
+/// Whether the platform's default shell (`default_prog`) accepts the POSIX `-l`
+/// login switch. Cycle 822 (audit): `false` on Windows, where `default_prog`
+/// resolves to pwsh/powershell/cmd — none of which treat `-l` as a login flag —
+/// so `login-shell = true` must not inject it there. `true` everywhere else,
+/// where the default shell is a POSIX shell that honors `-l`.
+const fn default_shell_accepts_login_flag() -> bool {
+    cfg!(not(windows))
+}
+
 /// Cycle 799: build the `WSLENV` value that propagates kettle's
 /// terminal-identity env vars into a WSL distro. WSL only forwards Windows
 /// env vars listed in `WSLENV`; each is suffixed `/u` ("pass Windows→WSL
@@ -537,7 +546,15 @@ impl Terminal {
             }
             None => {
                 let mut c = default_prog();
-                if login_shell {
+                // Cycle 822 (audit): `-l` is the POSIX login-shell switch. On
+                // Windows `default_prog()` resolves to pwsh/powershell/cmd, none
+                // of which accept it (powershell.exe errors on an unknown arg,
+                // pwsh's `-Login` is reserved/no-op on Windows, cmd ignores it),
+                // so `login-shell = true` with no explicit `command` produced a
+                // broken/empty pane. The explicit-argv arm already guards the
+                // analogous `wsl.exe` footgun; guard the default-shell arm for
+                // Windows-native shells via `default_shell_accepts_login_flag`.
+                if login_shell && default_shell_accepts_login_flag() {
                     c.arg("-l");
                 }
                 c
@@ -2923,6 +2940,29 @@ mod teardown_tests {
             !body.contains(".join("),
             "Terminal::Drop must NOT join the PTY reader — joining on the UI \
              thread deadlocks on a blocked ConPTY read (cycle 742)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod login_flag_tests {
+    use super::default_shell_accepts_login_flag;
+
+    /// Cycle 822 (audit) drift guard. The spawn path gates the default-shell
+    /// `-l` injection on this fn, so pinning its value pins the behavior: `-l`
+    /// is POSIX-only and must never reach the Windows default shell.
+    #[test]
+    fn default_shell_login_flag_is_posix_only() {
+        assert_eq!(default_shell_accepts_login_flag(), !cfg!(windows));
+        #[cfg(windows)]
+        assert!(
+            !default_shell_accepts_login_flag(),
+            "Windows default shell (pwsh/powershell/cmd) must not get -l"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            default_shell_accepts_login_flag(),
+            "POSIX default shell honors -l when login-shell=true"
         );
     }
 }

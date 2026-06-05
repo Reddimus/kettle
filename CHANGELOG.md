@@ -33,6 +33,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Cross-platform (cycle 822) — no POSIX `-l` on the Windows default shell.**
+    With `login-shell = true` and no explicit `command`, kettle appended `-l` to
+    the default shell on every platform — but on Windows that's pwsh/powershell/
+    cmd, which reject it (a broken/empty pane). The default-shell arm now only
+    injects `-l` off Windows (the explicit-argv arm already guarded `wsl.exe`).
+
   - **UX (cycle 821) — tab drag-to-reorder reaches the last slot again.** The
     cycle-805 `▾` dropdown widened the trailing button area to a `▾ +` pair, but
     the drag handler still subtracted only the `+` width, so its strip was one
