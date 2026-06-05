@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **UX (cycle 809, audit) — keyboard access to the update banner + honest
+    docs.** The cycle-794 "update available" banner was mouse-only, yet an
+    internal doc claimed it opened "on Enter" — and grabbing a bare Enter/Esc
+    would wrongly steal those keys from the terminal (the banner is non-modal).
+    Added two bindable actions, **`open_update`** (open the release page +
+    dismiss) and **`dismiss_update`** (dismiss only), each a no-op (debug-
+    logged) when no banner is showing, so a bound chord is harmless the rest of
+    the time. Both are unbound by default and documented in
+    `docs/kettle.example.config`; the mouse handler and the actions now share
+    one `act_on_update_banner` path. The stale "on Enter" doc is corrected.
+
   - **Fix (cycle 808, audit) — update banner no longer covers or steals clicks
     from a bottom tab/status bar.** The passive "update available" banner always
     painted flush at the window bottom, and its click handler treated the whole

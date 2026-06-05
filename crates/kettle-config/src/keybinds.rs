@@ -445,6 +445,18 @@ pub enum Action {
     /// right-side split of itself. Same logic as `DuplicateTab` but
     /// the new program lives in the same tab.
     DuplicatePane,
+    /// Cycle 809 (audit): open the release page for the pending update
+    /// banner (cycle 794) and dismiss it — the keyboard equivalent of
+    /// left-clicking the banner. No-op (debug-logged) when no banner is
+    /// showing. Unbound by default: the banner is non-modal so grabbing a
+    /// bare key (Enter/Esc) would steal it from the terminal, so keyboard
+    /// access is opt-in via this bindable action instead.
+    OpenUpdate,
+    /// Cycle 809 (audit): dismiss the pending update banner without opening
+    /// the release page — the keyboard equivalent of right-clicking the
+    /// banner. No-op (debug-logged) when no banner is showing. Unbound by
+    /// default (see `OpenUpdate`).
+    DismissUpdate,
     GotoTab(u8),
 }
 
@@ -658,6 +670,11 @@ pub fn action_names() -> Vec<&'static str> {
         "prev_theme",
         "previous_theme",
         "reload_config",
+        // Cycle 809 (audit) — keyboard access to the update banner.
+        "open_update",
+        "open-update",
+        "dismiss_update",
+        "dismiss-update",
     ];
     v.sort_unstable();
     v
@@ -844,6 +861,9 @@ impl Action {
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,
+            // Cycle 809 (audit): keyboard access to the cycle-794 update banner.
+            "open_update" | "open-update" => OpenUpdate,
+            "dismiss_update" | "dismiss-update" => DismissUpdate,
             // `goto_tab:N` where N is 1-based (Terminator / kitty syntax —
             // "Alt+1 = first tab" is the user mental model). Internally we
             // store the zero-based index so the handler can clamp against
@@ -1245,6 +1265,12 @@ mod tests {
         assert_eq!(Action::from_name("  paste  "), Some(Paste));
         // Real typos still return None.
         assert!(Action::from_name("Cpy").is_none());
+        // Cycle 809 (audit): the update-banner actions resolve from both the
+        // underscore and hyphen spellings, case-insensitively.
+        assert_eq!(Action::from_name("open_update"), Some(OpenUpdate));
+        assert_eq!(Action::from_name("OPEN-UPDATE"), Some(OpenUpdate));
+        assert_eq!(Action::from_name("dismiss_update"), Some(DismissUpdate));
+        assert_eq!(Action::from_name("Dismiss-Update"), Some(DismissUpdate));
     }
 
     #[test]

@@ -32,7 +32,10 @@ pub enum UserEvent {
     RemoteCommand,
     /// Cycle 794: the background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
-    /// UI can show a dismissable banner + open it on Enter.
+    /// UI can show a passive bottom banner. The banner is mouse-driven
+    /// (left-click opens the release page + dismisses, right-click dismisses);
+    /// keyboard users can bind the `open_update` / `dismiss_update` actions
+    /// (cycle 809) — it stays non-modal so it never steals the terminal's keys.
     UpdateAvailable {
         tag: String,
         url: String,
@@ -5082,6 +5085,27 @@ impl App {
         }
     }
 
+    /// Act on the cycle-794 update banner: dismiss it (recording the tag so it
+    /// won't re-nag) and, when `open` is true, open the release page first.
+    /// Returns `false` when no banner is showing (the caller decides whether
+    /// that's a no-op or worth a debug log). Shared by the banner mouse
+    /// handler and the cycle-809 `OpenUpdate` / `DismissUpdate` keyboard
+    /// actions so all three paths stay in lockstep.
+    fn act_on_update_banner(&mut self, open: bool) -> bool {
+        let Some((tag, url)) = self.update_available.clone() else {
+            return false;
+        };
+        if open {
+            self.open_url(&url);
+        }
+        crate::update_check::record_dismissed(&tag);
+        self.update_available = None;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         let area = self.area();
         let (cols, rows) = self.grid_of(area);
@@ -5963,6 +5987,20 @@ impl App {
                 if i < self.mux.tabs.len() {
                     self.mux.active = i;
                     self.mux.touch_active_tab_seen();
+                }
+            }
+            // Cycle 809 (audit): keyboard equivalents of clicking the cycle-794
+            // update banner — `OpenUpdate` opens the release page + dismisses,
+            // `DismissUpdate` just dismisses. Both no-op (debug-logged) when no
+            // banner is showing, so a bound key is harmless the rest of the time.
+            Action::OpenUpdate => {
+                if !self.act_on_update_banner(true) {
+                    log::debug!("open_update: no update banner is showing");
+                }
+            }
+            Action::DismissUpdate => {
+                if !self.act_on_update_banner(false) {
+                    log::debug!("dismiss_update: no update banner is showing");
                 }
             }
             // Cycle 345 Terminator-parity behavior wiring (continued
@@ -8352,7 +8390,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // it won't re-nag); right-click dismisses without opening. Only
                 // reachable with no modal open (the gate above returned for
                 // those) — exactly when the banner is actually on screen.
-                if let Some((tag, url)) = self.update_available.clone() {
+                if self.update_available.is_some() {
                     let sh = self
                         .window
                         .as_ref()
@@ -8387,14 +8425,10 @@ impl ApplicationHandler<UserEvent> for App {
                         && py < banner_top + banner_h
                         && (bcode == 0 || bcode == 2)
                     {
-                        if bcode == 0 {
-                            self.open_url(&url);
-                        }
-                        crate::update_check::record_dismissed(&tag);
-                        self.update_available = None;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                        // Left-click opens + dismisses; right-click only
+                        // dismisses. Shared with the keyboard `OpenUpdate` /
+                        // `DismissUpdate` actions (cycle 809).
+                        self.act_on_update_banner(bcode == 0);
                         return;
                     }
                 }

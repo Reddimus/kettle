@@ -179,6 +179,12 @@ mod tests {
             InsertPanePadded,
             InsertPaneName,
             OpenCwdInFileManager,
+            // Cycle 809 (audit): the update-banner actions only do anything
+            // while the cycle-794 banner is on screen (a no-op + debug log
+            // otherwise), so they'd be dead rows in the palette most of the
+            // time. They stay bindable for keyboard access to the banner.
+            OpenUpdate,
+            DismissUpdate,
         ];
         // Enumerate every Action variant explicitly via this exhaustive
         // list; if a future variant is added the match below fails to
@@ -286,6 +292,8 @@ mod tests {
             MoveTabToNewWindow,
             EditPaneGroup,
             OpenSettings,
+            OpenUpdate,
+            DismissUpdate,
             GotoTab(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
@@ -394,6 +402,8 @@ mod tests {
                 | MoveTabToNewWindow
                 | EditPaneGroup
                 | OpenSettings
+                | OpenUpdate
+                | DismissUpdate
                 | GotoTab(_) => {}
             }
         }
