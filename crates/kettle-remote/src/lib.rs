@@ -243,6 +243,22 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
     None
 }
 
+/// Cross-platform basename of an `argv[0]` for matching against bare command
+/// names: drop any `/`- or `\`-separated path, a trailing (case-insensitive)
+/// `.exe`, and lowercase the rest.
+///
+/// Cycle 823 (audit): the detectors split only on `/` and kept `.exe`, so on
+/// Windows `argv[0]` is a backslash path with extension
+/// (`C:\Windows\System32\OpenSSH\ssh.exe`) — `split('/')` returned the whole
+/// path, and even a bare `ssh.exe` failed the `== "ssh"` check. The entire
+/// Terminator-parity remote feature (pane-title `ssh box`, right-click
+/// Reconnect / Re-attach) was silently dead on Windows 11, a primary target.
+fn argv0_basename(prog: &str) -> String {
+    let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
+    let lower = base.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
 /// Cycle 644 (sub-cycle 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
 /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): SSH-session
 /// detector. Takes a process's argv (as the sysinfo walk in
@@ -266,15 +282,13 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
 /// Pure — takes a `&[String]` slice; unit-testable without spawning
 /// anything.
 pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
-    let exe = argv.first()?.split('/').next_back().unwrap_or("");
+    let exe = argv0_basename(argv.first()?);
     if exe != "ssh" && exe != "sshpass" {
         return None;
     }
     // sshpass wraps ssh — find the `ssh` inside its argv.
     let inner_start = if exe == "sshpass" {
-        argv.iter()
-            .position(|a| a == "ssh" || a.ends_with("/ssh"))?
-            + 1
+        argv.iter().position(|a| argv0_basename(a) == "ssh")? + 1
     } else {
         1
     };
@@ -332,8 +346,8 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
 ///
 /// Pure — argv-in, `Option<RemoteContext>`-out. Unit-testable.
 pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
-    let exe = argv.first()?.split('/').next_back().unwrap_or("");
-    let runtime = match exe {
+    let exe = argv0_basename(argv.first()?);
+    let runtime = match exe.as_str() {
         "docker" => ContainerRuntime::Docker,
         "podman" => ContainerRuntime::Podman,
         "kubectl" => ContainerRuntime::Kubectl,
@@ -779,6 +793,61 @@ mod tests {
         assert!(detect_ssh(&argv(&[])).is_none());
         // ssh with no target (just flags) → None.
         assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
+    }
+
+    /// Cycle 823 (audit) drift guard: argv[0] in the Windows shape — a
+    /// backslash path WITH a `.exe` extension — must still be recognized. The
+    /// detectors split only on `/` and kept `.exe`, so the whole remote feature
+    /// was silently dead on Windows 11.
+    #[test]
+    fn detect_recognizes_windows_argv0_shape() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Windows OpenSSH: backslash path + .exe (+ a capitalized .EXE variant).
+        assert_eq!(
+            detect_ssh(&argv(&[
+                r"C:\Windows\System32\OpenSSH\ssh.exe",
+                "alice@host"
+            ])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: Some("alice".into()),
+            })
+        );
+        assert_eq!(
+            detect_ssh(&argv(&["ssh.EXE", "box"])),
+            Some(RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+            })
+        );
+        // Docker Desktop on Windows: backslash path + .exe.
+        assert_eq!(
+            detect_container(&argv(&[
+                r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+                "exec",
+                "-it",
+                "alpine",
+                "sh"
+            ])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "alpine".into(),
+            })
+        );
+        // sshpass wrapping a Windows-path ssh.exe still finds the inner ssh.
+        assert_eq!(
+            detect_ssh(&argv(&[
+                "sshpass",
+                "-p",
+                "secret",
+                r"C:\OpenSSH\ssh.exe",
+                "carol@h"
+            ])),
+            Some(RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("carol".into()),
+            })
+        );
     }
 
     // === Cycle 730: ProcessTree fixture + mocked BFS tests =========
