@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **UX (cycle 804) — tab titles show in full when there's room.** The
+    per-tab title was capped at **24 characters regardless of how wide the tab
+    was**, so a single wide tab still showed `1: C:\Program Files\Window…`
+    with most of the bar empty. The budget now tracks the actual segment width
+    (reserving room for the `"{n}: "` prefix so the whole label fits), showing
+    the full title and ellipsizing only on genuine overflow. With many tabs
+    each still ellipsizes inside its own narrower segment. Guarded by
+    `truncate_honors_budgets_beyond_24_columns`.
+
   - **Per-frame work elimination (cycle 803) — search + link re-scans now
     cached.** While the search overlay is open, `update_search` re-ran a full
     scrollback regex scan (`kettle_core::search_with`) on **every frame**

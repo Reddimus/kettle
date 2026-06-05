@@ -1741,10 +1741,22 @@ impl Renderer {
                 // `max(0.0)` so a segment narrower than the ✕ zone can't go
                 // negative, and `cw.max(1.0)` guards a degenerate cell width
                 // — both keep the `as usize` cast in its defined range
-                // rather than relying on float→int saturation. `.clamp` then
-                // bounds it to a sane 3..=24 chars.
-                let maxc = (((w - tabbar.height).max(0.0) / cw.max(1.0)) as usize).clamp(3, 24);
+                // rather than relying on float→int saturation.
+                //
+                // Cycle 804: the budget now tracks the *actual* segment width
+                // instead of a hard 24-char cap, so a wide tab shows its full
+                // title (and only ellipsizes when the title genuinely doesn't
+                // fit). We reserve `fixed_w` for the non-title part of the
+                // format (the leading space + e.g. "{n}: ") so the title
+                // ellipsizes to keep the WHOLE label inside the segment rather
+                // than letting the prefix push it past the right edge.
                 let n = (s.idx + 1).to_string();
+                let avail = ((w - tabbar.height).max(0.0) / cw.max(1.0)) as usize;
+                let fixed_w =
+                    1 + kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")])
+                        .chars()
+                        .count();
+                let maxc = avail.saturating_sub(fixed_w).max(3);
                 let title = truncate(&s.title, maxc);
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
@@ -4692,6 +4704,29 @@ mod truncate_tests {
         assert_eq!(truncate("a", 0), "…");
         // Total-equals-limit: no ellipsis (everything fits exactly).
         assert_eq!(truncate("中", 2), "中");
+    }
+
+    #[test]
+    fn truncate_honors_budgets_beyond_24_columns() {
+        // Cycle 804: the tab-title budget used to be hard-capped at 24 chars
+        // regardless of how wide the tab was. `truncate` itself never had that
+        // cap, so these guard that a wide budget shows the full title and only
+        // ellipsizes on genuine overflow — i.e. that a future re-clamp to 24
+        // would be caught.
+        let long = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
+        let long_len = long.chars().count(); // all ASCII → 1 col each
+        // A budget wider than the title returns it verbatim (no 24 cap).
+        assert_eq!(truncate(long, 200), long);
+        assert_eq!(truncate(long, long_len), long);
+        // A 30-col title at budget 30 is unchanged (would fail under a 24 cap).
+        let t30 = "abcdefghijklmnopqrstuvwxyz0123"; // 30 ASCII cols
+        assert_eq!(t30.chars().count(), 30);
+        assert_eq!(truncate(t30, 30), t30);
+        // Still ellipsizes when the title actually exceeds the (large) budget.
+        let t40 = "0123456789012345678901234567890123456789"; // 40 cols
+        let cut = truncate(t40, 30);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), 30);
     }
 }
 
