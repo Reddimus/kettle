@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fix (cycle 812, audit) — GPU init can't hang kettle on an invisible
+    window forever.** Startup block_on's wgpu's adapter+device requests on the
+    event-loop thread; a wedged graphics driver or GPU reset can make those
+    never return, and since the window stays hidden until the first paint
+    (cycle 785) the user just sees nothing — indistinguishable from a crash. A
+    watchdog thread (which only touches an `AtomicBool`, so there's no
+    Send/thread-affinity hazard with the GPU objects) now bounds init to 30s
+    and, on a true hang, logs an actionable diagnostic (update the driver; try
+    `LIBGL_ALWAYS_SOFTWARE=1` / `WGPU_BACKEND=gl`) and exits cleanly instead of
+    hanging. The 30s budget is far above real init (~1.5s), and the watchdog
+    stands down the instant init returns — success or a quick failure — so a
+    working GPU is never affected. Timeout logic is unit-tested.
+
   - **Docs (cycle 811, audit) — document the update checker + fix accuracy
     nits.** The on-by-default update checker (a feature that contacts GitHub
     once a day) had **no user-facing docs**; the README and

@@ -7662,6 +7662,36 @@ fn should_reveal_after_first_frame(state: kettle_config::WindowState) -> bool {
     !matches!(state, kettle_config::WindowState::Hidden)
 }
 
+/// Cycle 812 (audit #10): how long to let the synchronous GPU adapter+device
+/// init run before treating it as a hung graphics driver. Real init is ~1.5s;
+/// this is deliberately generous so a slow-but-working GPU is never killed,
+/// while still bounding the worst case (a wedged driver that never returns)
+/// to a clean diagnostic exit instead of an infinite invisible-window hang.
+const GPU_INIT_TIMEOUT_SECS: u64 = 30;
+
+/// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
+/// until `timeout` elapses. Returns `true` if the timeout was reached without
+/// `done` ever being observed set — i.e. the caller should treat the init as
+/// hung — and `false` if `done` was seen in time (init finished, watchdog
+/// stands down). Pulled out as a pure-ish helper so the timeout logic is
+/// unit-testable without standing up a GPU or calling `process::exit`.
+fn gpu_init_timed_out(
+    done: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+    step: std::time::Duration,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut waited = std::time::Duration::ZERO;
+    while waited < timeout {
+        if done.load(Ordering::Acquire) {
+            return false;
+        }
+        std::thread::sleep(step);
+        waited += step;
+    }
+    !done.load(Ordering::Acquire)
+}
+
 /// Cycle 786: should an open modal swallow a pointer event (mouse press /
 /// wheel) instead of letting it fall through to the tab bar, pane focus, or
 /// mouse-tracking *behind* the dialog? True whenever any modal is open —
@@ -7828,13 +7858,52 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let renderer = match pollster::block_on(Renderer::new(
+        // Cycle 812 (audit #10): guard the synchronous GPU init against a hung
+        // graphics driver. `Renderer::new` block_on's wgpu's adapter+device
+        // requests on this (event-loop) thread; a wedged driver or GPU reset
+        // can make those never return, leaving kettle stuck on an invisible
+        // window (cycle 785 keeps it hidden until the first paint) with no
+        // diagnostic — indistinguishable from a crash. A watchdog thread (which
+        // only ever touches an `AtomicBool`, so there's no Send/thread-affinity
+        // hazard with the GPU objects) turns that infinite hang into a clean,
+        // actionable exit. `done` is set the instant init returns — success OR
+        // a quick failure — so only a true never-returns hang trips it.
+        let gpu_init_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let gpu_init_done = gpu_init_done.clone();
+            // If the watchdog thread can't be spawned we simply proceed without
+            // it (back to the pre-cycle-812 behavior) rather than failing init.
+            let _ = std::thread::Builder::new()
+                .name("kettle-gpu-init-watchdog".into())
+                .spawn(move || {
+                    if gpu_init_timed_out(
+                        &gpu_init_done,
+                        std::time::Duration::from_secs(GPU_INIT_TIMEOUT_SECS),
+                        std::time::Duration::from_millis(100),
+                    ) {
+                        log::error!(
+                            "GPU initialization did not finish within {GPU_INIT_TIMEOUT_SECS}s — \
+                             your graphics driver may be hung or unresponsive. Try updating the \
+                             GPU driver; on Linux you can force software rendering with \
+                             `LIBGL_ALWAYS_SOFTWARE=1` or pick another backend via \
+                             `WGPU_BACKEND=gl`. Exiting so kettle doesn't hang invisibly."
+                        );
+                        std::process::exit(1);
+                    }
+                });
+        }
+        let init_result = pollster::block_on(Renderer::new(
             window.clone(),
             size.width.max(1),
             size.height.max(1),
             scale,
             &self.cfg,
-        )) {
+        ));
+        // Disarm the watchdog the moment init returns, on BOTH the success and
+        // the quick-failure path, so a clean renderer-init error below never
+        // gets a spurious "timed out" report behind it.
+        gpu_init_done.store(true, std::sync::atomic::Ordering::Release);
+        let renderer = match init_result {
             Ok(r) => r,
             Err(e) => {
                 log::error!("renderer init failed: {e}");
@@ -9843,6 +9912,30 @@ mod tests {
         assert_eq!(pane_titlebar_hit(50.0, 12.0, &rects, true, 24.0), None);
         // Click in cell content with title_at_bottom=true → no hit.
         assert_eq!(pane_titlebar_hit(50.0, 300.0, &rects, true, 24.0), None);
+    }
+
+    #[test]
+    fn gpu_init_watchdog_fires_only_on_a_real_hang() {
+        use super::gpu_init_timed_out;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        // Cycle 812 drift guard. `done` never set within the window → reports a
+        // hang (true), so the real watchdog would log + exit.
+        let stuck = AtomicBool::new(false);
+        assert!(gpu_init_timed_out(
+            &stuck,
+            Duration::from_millis(60),
+            Duration::from_millis(10)
+        ));
+        // `done` already set (init finished) → stands down immediately (false),
+        // even with a long nominal timeout, so a fast init/failure is never
+        // killed.
+        let finished = AtomicBool::new(true);
+        assert!(!gpu_init_timed_out(
+            &finished,
+            Duration::from_secs(30),
+            Duration::from_millis(10)
+        ));
     }
 
     #[test]
