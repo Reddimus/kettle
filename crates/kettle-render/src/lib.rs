@@ -1552,6 +1552,13 @@ impl Renderer {
 
         // Search bar overlay.
         let mut have_search = false;
+        // Cycle 808 (audit): how far ABOVE the surface bottom the shared
+        // bottom-bar text sits. Stays 0 for the modal bottom bars (search /
+        // confirm / broadcast), which intentionally cover any bottom chrome
+        // while they hold focus; the passive update banner sets it so it
+        // stacks above a bottom-anchored tab / status bar instead of clobbering
+        // it. See `update_banner_top`.
+        let mut bottom_bar_offset = 0.0_f32;
         if let Some(q) = &overlay.search_query {
             have_search = true;
             let bar_h = ch + 10.0;
@@ -1721,7 +1728,23 @@ impl Renderer {
             // when they close. Green accent (palette[2]) = good news.
             have_search = true;
             let bar_h = ch + 10.0;
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[2], 0.96));
+            // Cycle 808 (audit): stack above a bottom-anchored tab / status bar
+            // so the passive banner doesn't paint over (or, with the App's
+            // matching hit-test, steal clicks from) it. `status.y > 0` marks a
+            // bottom status bar (top sits at y == 0).
+            let bottom_tabbar_h = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Bottom) {
+                tabbar.height
+            } else {
+                0.0
+            };
+            let bottom_status_h = if status.height > 0.0 && status.y > 0.0 {
+                status.height
+            } else {
+                0.0
+            };
+            bottom_bar_offset = bottom_tabbar_h + bottom_status_h;
+            let bar_y = update_banner_top(sh, bar_h, bottom_tabbar_h, bottom_status_h);
+            quads.push(rect(0.0, bar_y, sw, bar_h, theme.palette[2], 0.96));
             let label = format!(
                 "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
             );
@@ -2171,7 +2194,10 @@ impl Renderer {
             areas.push(TextArea {
                 buffer: &self.search_buffer,
                 left: 0.0,
-                top: sh - bar_h + 5.0,
+                // Cycle 808: `bottom_bar_offset` lifts the passive update
+                // banner's text above any bottom-anchored chrome (0 for the
+                // modal bars, which keep the flush-bottom position).
+                top: sh - bar_h - bottom_bar_offset + 5.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
@@ -3474,6 +3500,27 @@ pub enum DebugScene {
     /// fixed position so the resulting PNG is byte-deterministic
     /// across runs.
     ContextMenu,
+}
+
+/// Top edge (px from the surface top) of the passive "update available"
+/// banner, given the surface height, the banner's own height, and the heights
+/// of any **bottom-anchored** tab / status bars it must stack above.
+///
+/// Cycle 808 (audit): the banner is a non-modal bottom strip. When the user
+/// puts the tab bar or status bar at the bottom (`tab-bar-pos = bottom` /
+/// `status-bar = bottom`), drawing the banner flush at `surface_h - banner_h`
+/// painted *over* that bar and — paired with the click handler that treated
+/// the whole bottom band as the banner — stole its clicks (you couldn't switch
+/// tabs while the banner showed). Stacking the banner above the bottom chrome
+/// fixes both. Pure + shared so the renderer's draw and the App's hit-test
+/// agree to the pixel; pass `0.0` for chrome that isn't bottom-anchored.
+pub fn update_banner_top(
+    surface_h: f32,
+    banner_h: f32,
+    bottom_tabbar_h: f32,
+    bottom_status_h: f32,
+) -> f32 {
+    surface_h - banner_h - bottom_tabbar_h - bottom_status_h
 }
 
 /// Back-compat wrapper for the cycle-168 `capture_png` callers (the CLI
@@ -4809,6 +4856,27 @@ mod truncate_tests {
         let cut = truncate(t40, 30);
         assert!(cut.ends_with('…'));
         assert_eq!(cut.chars().count(), 30);
+    }
+}
+
+#[cfg(test)]
+mod update_banner_top_tests {
+    use super::update_banner_top;
+
+    /// Cycle 808 drift guard (audit). The passive update banner must stack
+    /// above any BOTTOM-anchored tab / status bar so it neither paints over
+    /// nor steals clicks from it. The renderer (draw) and the App (hit-test)
+    /// share this pure helper, so they can't drift apart.
+    #[test]
+    fn stacks_above_bottom_chrome() {
+        // No bottom chrome → flush at the surface bottom (1000 - 30).
+        assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 0.0), 970.0);
+        // Bottom tab bar (28) → banner clears it.
+        assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 0.0), 942.0);
+        // Bottom status bar (20) → banner clears it.
+        assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
+        // Both at the bottom → banner clears the stack of both.
+        assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
     }
 }
 

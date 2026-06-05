@@ -8359,7 +8359,34 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|w| w.inner_size().height as f32)
                         .unwrap_or(0.0);
                     let banner_h = self.cell_px().1 as f32 + 10.0;
-                    if sh > 0.0 && py >= sh - banner_h && (bcode == 0 || bcode == 2) {
+                    // Cycle 808 (audit): the banner stacks ABOVE a bottom-
+                    // anchored tab / status bar (matching the renderer through
+                    // the shared `update_banner_top`), so hit-test its ACTUAL
+                    // rect rather than the whole bottom band — otherwise a
+                    // click meant for a bottom tab / status bar got swallowed
+                    // by the banner.
+                    let bottom_tabbar_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Bottom) {
+                        bar.height
+                    } else {
+                        0.0
+                    };
+                    let bottom_status_h =
+                        if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
+                            self.status_bar_h()
+                        } else {
+                            0.0
+                        };
+                    let banner_top = kettle_render::update_banner_top(
+                        sh,
+                        banner_h,
+                        bottom_tabbar_h,
+                        bottom_status_h,
+                    );
+                    if sh > 0.0
+                        && py >= banner_top
+                        && py < banner_top + banner_h
+                        && (bcode == 0 || bcode == 2)
+                    {
                         if bcode == 0 {
                             self.open_url(&url);
                         }

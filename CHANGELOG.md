@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Fix (cycle 808, audit) — update banner no longer covers or steals clicks
+    from a bottom tab/status bar.** The passive "update available" banner always
+    painted flush at the window bottom, and its click handler treated the whole
+    bottom band as the banner. With `tab-bar-pos = bottom` or `status-bar =
+    bottom` that meant the banner sat *on top of* the bar and swallowed its
+    clicks — you couldn't switch tabs (or click the status bar) while an update
+    was pending. The banner now **stacks above** any bottom-anchored chrome, and
+    the renderer's draw + the App's hit-test share one pure `update_banner_top`
+    helper so they line up to the pixel. Top/right/left/off layouts (the
+    defaults) are unaffected. Drift-guarded by a unit test.
+
   - **Fix (cycle 807, audit) — image cache no longer mis-binds a recycled
     buffer address.** The GPU texture cache for Sixel/kitty/iTerm2 images keyed
     entries by the rgba `Arc`'s raw pointer but didn't keep that `Arc` alive, so
