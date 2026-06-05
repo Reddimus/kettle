@@ -1880,6 +1880,115 @@ impl Config {
     /// --check-config` so the user sees the typo. Keeps the scan
     /// independent of the apply loop so adding a new validated key is
     /// one line here, not a touch on every parse arm.
+    /// Every boolean config key (both kebab- and snake-case spellings) that
+    /// `parse_collect` routes through `parse_bool`. Cycle 826 (audit): the
+    /// `--check-config` diagnostic used to validate only 8 of these, so a typo
+    /// in any of the other ~90 (`borderless = treu`, `login-shell = yse`)
+    /// passed validation and then silently kept the default at runtime. Kept in
+    /// lockstep with `parse_collect` by `bool_keys_round_trip_through_diagnostic`.
+    const BOOL_KEYS: &'static [&'static str] = &[
+        "allow-bold",
+        "allow_bold",
+        "always-on-top",
+        "always-split-with-profile",
+        "always_on_top",
+        "always_split_with_profile",
+        "audible-bell",
+        "audible_bell",
+        "autoclean-groups",
+        "autoclean_groups",
+        "background-blur",
+        "background_blur",
+        "bold-is-bright",
+        "bold_is_bright",
+        "borderless",
+        "check-for-updates",
+        "clear-select-on-copy",
+        "clear_select_on_copy",
+        "close-button-on-tab",
+        "close_button_on_tab",
+        "copy-on-select",
+        "copy-on-selection",
+        "copy_on_select",
+        "copy_on_selection",
+        "cursor-blink",
+        "cursor-color-default",
+        "cursor-style-blink",
+        "cursor_blink",
+        "cursor_color_default",
+        "detachable-tabs",
+        "detachable_tabs",
+        "disable-mouse-paste",
+        "disable-mousewheel-zoom",
+        "disable_mouse_paste",
+        "disable_mousewheel_zoom",
+        "extra-styling",
+        "extra_styling",
+        "force-no-bell",
+        "force_no_bell",
+        "full-screen",
+        "full_screen",
+        "geometry-hinting",
+        "geometry_hinting",
+        "hide-from-taskbar",
+        "hide-on-lose-focus",
+        "hide_from_taskbar",
+        "hide_on_lose_focus",
+        "homogeneous-tabbar",
+        "homogeneous_tabbar",
+        "icon-bell",
+        "icon_bell",
+        "invert-search",
+        "invert_search",
+        "link-single-click",
+        "link_single_click",
+        "log-strip-ansi",
+        "log_strip_ansi",
+        "login-shell",
+        "login_shell",
+        "mouse-autohide",
+        "mouse-hide",
+        "mouse-hide-while-typing",
+        "mouse_autohide",
+        "new-tab-after-current-tab",
+        "new_tab_after_current_tab",
+        "putty-paste-style",
+        "putty-paste-style-source-clipboard",
+        "putty_paste_style",
+        "putty_paste_style_source_clipboard",
+        "scroll-on-input",
+        "scroll-on-keystroke",
+        "scroll-on-output",
+        "scroll-tabbar",
+        "scroll_tabbar",
+        "show-titlebar",
+        "show_titlebar",
+        "smart-copy",
+        "smart_copy",
+        "split-to-group",
+        "split_to_group",
+        "sticky",
+        "title-at-bottom",
+        "title-hide-sizetext",
+        "title-use-system-font",
+        "title_at_bottom",
+        "title_hide_sizetext",
+        "title_use_system_font",
+        "update-check",
+        "urgent-bell",
+        "urgent_bell",
+        "use-custom-command",
+        "use-custom-url-handler",
+        "use-system-font",
+        "use-theme-colors",
+        "use_custom_command",
+        "use_custom_url_handler",
+        "use_system_font",
+        "use_theme_colors",
+        "visible-bell",
+        "visible_bell",
+    ];
+
     pub fn detect_malformed_values(text: &str) -> Vec<String> {
         let mut bad = Vec::new();
         // Strip the leading UTF-8 BOM (cycle 155 fixed it in
@@ -2039,16 +2148,28 @@ impl Config {
                 // recognizes (cycle 138). Pre-cycle, any non-"false"
                 // string silently meant "true", so typos like
                 // `cursor-style-blink = no` quietly enabled the blink.
-                // Surface unrecognized values now so the user sees
-                // their typo in --check-config.
-                "cursor-style-blink"
-                | "copy-on-select"
-                | "update-check"
-                | "scroll-on-keystroke"
-                | "scroll-on-input"
-                | "scroll-on-output"
-                | "mouse-hide-while-typing"
-                | "mouse-hide" => parse_bool(v).is_some(),
+                // Cycle 826 (audit): validate the WHOLE bool-key set (was only
+                // 8 of ~100), so `borderless = treu` etc. are caught too.
+                k if Self::BOOL_KEYS.contains(&k) => parse_bool(v).is_some(),
+                // Cycle 826: enum keys that previously fell through to
+                // `_ => true` (silently kept their default on a typo).
+                "focus" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "sloppy" | "system" | "click"
+                ),
+                "window-state" | "window_state" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "maximise" | "maximize" | "fullscreen" | "hidden" | "normal"
+                ),
+                "search-case-sensitive"
+                | "search_case_sensitive"
+                | "case-sensitive"
+                | "case_sensitive" => {
+                    matches!(
+                        v.to_ascii_lowercase().as_str(),
+                        "smart" | "auto" | "always" | "sensitive" | "never" | "insensitive"
+                    ) || parse_bool(v).is_some()
+                }
                 "tab-bar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "false" | "auto" | "always"
@@ -4710,6 +4831,53 @@ mod config_tests {
         // intentionally returns empty for them so the two lists don't
         // duplicate.
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
+    }
+
+    /// Cycle 826 (audit): the bool-key diagnostic must cover the WHOLE
+    /// bool-key set, not just 8 of ~100. Round-trip every `BOOL_KEYS` entry
+    /// (each must flag a bad value) so the list stays correctly wired, and
+    /// spot-check the keys the audit named plus the newly-validated enum keys.
+    #[test]
+    fn bool_and_enum_typos_are_all_flagged() {
+        // Every listed bool key flags a non-bool value, and accepts a good one.
+        for &k in Config::BOOL_KEYS {
+            let bad = Config::detect_malformed_values(&format!("{k} = notabool\n"));
+            assert!(
+                bad.iter().any(|m| m.contains(k)),
+                "bool key {k:?} not flagged on a bad value"
+            );
+            let ok = Config::detect_malformed_values(&format!("{k} = true\n"));
+            assert!(
+                ok.is_empty(),
+                "bool key {k:?} rejected a valid `true`: {ok:?}"
+            );
+        }
+        // The keys the audit named (previously silently swallowed).
+        for line in [
+            "borderless = treu",
+            "login-shell = yse",
+            "sticky = nope",
+            "always-on-top = 1ish",
+            "geometry-hinting = maybe",
+        ] {
+            let bad = Config::detect_malformed_values(&format!("{line}\n"));
+            assert_eq!(bad.len(), 1, "{line:?} should be flagged once: {bad:?}");
+        }
+        // Enum keys that used to fall through to `_ => true`.
+        assert_eq!(Config::detect_malformed_values("focus = sloopy\n").len(), 1);
+        assert!(Config::detect_malformed_values("focus = sloppy\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("window-state = maximze\n").len(),
+            1
+        );
+        assert!(Config::detect_malformed_values("window-state = maximize\n").is_empty());
+        // case-sensitive accepts named modes AND the Terminator bool form.
+        assert!(Config::detect_malformed_values("case-sensitive = smart\n").is_empty());
+        assert!(Config::detect_malformed_values("case-sensitive = true\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("case-sensitive = ya\n").len(),
+            1
+        );
     }
 
     #[test]

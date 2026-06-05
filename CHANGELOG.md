@@ -33,6 +33,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Error-handling (cycle 826) — `--check-config` catches bool/enum typos.**
+    The malformed-value diagnostic validated only 8 of ~100 boolean keys (and
+    skipped several enum keys), so `borderless = treu`, `login-shell = yse`,
+    `focus = sloopy`, `window-state = maximze` passed `--check-config` cleanly
+    then silently kept the default at runtime. It now validates the whole
+    `BOOL_KEYS` set plus `focus` / `window-state` / `case-sensitive`, round-trip
+    drift-tested so the list can't fall behind `parse_collect`. This also
+    surfaced that `docs/kettle.example.config`'s Terminator-parity section used
+    inline `# comments` after values (which kettle parses as part of the value),
+    so those were converted to copy-pasteable full-line-comment form.
+
   - **Perf (cycle 825) — a tiny `tile` background no longer hangs the renderer.**
     The `background-image-mode = tile` path emitted one CPU quad (+ `Arc` clone)
     per tile every frame straight from the source image's pixel size with no
