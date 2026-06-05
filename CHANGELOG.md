@@ -33,6 +33,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cwd** before building a `file://` URL from it (defense-in-depth on cycle
     815; a pure string check, since `Path::is_dir` on a `//host` path would
     itself route over SMB).
+  - **Correctness (cycle 828) — application-keypad mode (DECKPAM) is honored.**
+    `TermMode::APP_KEYPAD` was set/cleared by `DECKPAM`/`DECKPNM` but the key
+    encoder only consulted `APP_CURSOR`, so the numpad always sent plain ASCII
+    even when an app requested keypad mode — a silent xterm divergence affecting
+    curses apps, gnuplot, BBS/serial clients, and TUI calculators. Unmodified
+    numpad keys now emit the SS3 keypad sequences (`ESC O p`..`y` for 0–9,
+    `ESC O M` for keypad-Enter, etc.) when the mode is set, using the key event's
+    numpad location.
+
   - **Perf (cycle 827) — pane text spans reuse their buffers across frames.**
     `build_pane` allocated the style-run `Vec` and a fresh `String` per run from
     empty on every frame, so a busy colored pane (`ls --color`, a TUI) churned

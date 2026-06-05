@@ -9303,7 +9303,15 @@ impl ApplicationHandler<UserEvent> for App {
                     .focused()
                     .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
                     .unwrap_or(kettle_core::TermMode::empty());
-                if let Some(mut bytes) = input::encode(&event.logical_key, text, self.mods, mode) {
+                // Cycle 828 (audit): application-keypad mode (DECKPAM) — an
+                // unmodified numpad key emits its SS3 sequence when the focused
+                // app set it. Tried before the normal encoder, which is
+                // location-agnostic. `event.location` distinguishes the numpad
+                // from the main keyboard row.
+                let encoded =
+                    input::encode_app_keypad(&event.logical_key, event.location, self.mods, mode)
+                        .or_else(|| input::encode(&event.logical_key, text, self.mods, mode));
+                if let Some(mut bytes) = encoded {
                     // Cycle 352 (Terminator parity, terminatorlib/config.py:107-108
                     // `backspace_binding` + `delete_binding`): remap the
                     // encoded bytes when the user picked a non-default

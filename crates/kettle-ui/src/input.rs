@@ -2,7 +2,7 @@
 //! (xterm-compatible, honoring application-cursor-key and mouse modes).
 
 use kettle_core::TermMode;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 /// Which mouse-tracking mode the application has requested.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +89,56 @@ pub fn xterm_modifier(mods: ModifiersState) -> u32 {
         m += 8;
     }
     m
+}
+
+/// Application-keypad (DECKPAM) encoding for a **numpad** key, or `None` when it
+/// doesn't apply (mode off, not a numpad key, or a Ctrl/Alt modifier is held).
+///
+/// Cycle 828 (audit): `TermMode::APP_KEYPAD` is set/cleared by DECKPAM (`ESC =`)
+/// / DECKPNM (`ESC >`) in the engine, but the key encoder only ever consulted
+/// `APP_CURSOR` — so under application-keypad mode the numpad still sent plain
+/// ASCII instead of the xterm SS3 keypad sequences (`ESC O p`..`ESC O y` for
+/// 0–9, `ESC O M` for keypad-Enter, `k`/`m`/`j`/`o`/`n`/`X` for `+ - * / . =`).
+/// curses apps, gnuplot, BBS/serial clients, and TUI calculators rely on these.
+/// `event.location` is what distinguishes the numpad from the main number row;
+/// the main encoder is location-agnostic, so this runs first.
+pub fn encode_app_keypad(
+    key: &Key,
+    location: KeyLocation,
+    mods: ModifiersState,
+    mode: TermMode,
+) -> Option<Vec<u8>> {
+    if !mode.contains(TermMode::APP_KEYPAD)
+        || location != KeyLocation::Numpad
+        || mods.control_key()
+        || mods.alt_key()
+    {
+        return None;
+    }
+    let c = match key {
+        Key::Named(NamedKey::Enter) => b'M',
+        Key::Character(s) => match s.chars().next()? {
+            '0' => b'p',
+            '1' => b'q',
+            '2' => b'r',
+            '3' => b's',
+            '4' => b't',
+            '5' => b'u',
+            '6' => b'v',
+            '7' => b'w',
+            '8' => b'x',
+            '9' => b'y',
+            '.' => b'n',
+            '+' => b'k',
+            '-' => b'm',
+            '*' => b'j',
+            '/' => b'o',
+            '=' => b'X',
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(vec![0x1b, b'O', c])
 }
 
 /// Encode a key press to the bytes that should be written to the PTY.
@@ -396,6 +446,69 @@ mod tests {
         );
         assert_eq!(enc("_"), Some(vec![0x1F]), "Ctrl+_ = US");
         assert_eq!(enc("/"), Some(vec![0x1F]), "Ctrl+/ = US (tmux/nano undo)");
+    }
+
+    /// Cycle 828 (audit): application-keypad mode (DECKPAM) makes unmodified
+    /// numpad keys emit SS3 sequences; without it (and off the numpad) they send
+    /// plain ASCII via the normal encoder.
+    #[test]
+    fn app_keypad_emits_ss3_for_numpad() {
+        use winit::keyboard::{Key, KeyLocation, NamedKey, SmolStr};
+        let app = TermMode::APP_KEYPAD;
+        let none = ModifiersState::empty();
+        let np = KeyLocation::Numpad;
+        let ch = |c: &str| Key::Character(SmolStr::new(c));
+
+        // Digits 0–9 → ESC O p..y; operators/decimal/enter → their SS3 letters.
+        assert_eq!(
+            encode_app_keypad(&ch("0"), np, none, app),
+            Some(b"\x1bOp".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("9"), np, none, app),
+            Some(b"\x1bOy".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("."), np, none, app),
+            Some(b"\x1bOn".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("+"), np, none, app),
+            Some(b"\x1bOk".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("-"), np, none, app),
+            Some(b"\x1bOm".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("*"), np, none, app),
+            Some(b"\x1bOj".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("/"), np, none, app),
+            Some(b"\x1bOo".to_vec())
+        );
+        assert_eq!(
+            encode_app_keypad(&Key::Named(NamedKey::Enter), np, none, app),
+            Some(b"\x1bOM".to_vec())
+        );
+
+        // Not applicable: mode off, not on the numpad, or a Ctrl/Alt modifier.
+        assert_eq!(
+            encode_app_keypad(&ch("5"), np, none, TermMode::empty()),
+            None
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("5"), KeyLocation::Standard, none, app),
+            None
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("5"), np, ModifiersState::CONTROL, app),
+            None
+        );
+        // The plain number row (Standard location) still goes through `encode`.
+        let mode = TermMode::empty();
+        assert_eq!(encode(&ch("5"), Some("5"), none, mode), Some(b"5".to_vec()));
     }
 
     /// Cycle 818 (audit): the space bar comes through as NamedKey::Space, so the
