@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-06-05
+
   - **Fix (cycle 812, audit) — GPU init can't hang kettle on an invisible
     window forever.** Startup block_on's wgpu's adapter+device requests on the
     event-loop thread; a wedged graphics driver or GPU reset can make those
