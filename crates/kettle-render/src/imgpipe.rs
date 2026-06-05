@@ -209,10 +209,27 @@ impl ImagePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         img: &ImageData,
-    ) -> usize {
+    ) -> Option<usize> {
+        // Cycle 813 (audit) defense-in-depth: never hand wgpu a texture larger
+        // than the device supports — that's a validation error wgpu's default
+        // (no error-scope) handler turns into a panic, and panic=abort makes it
+        // a whole-process abort. `ImageData::new` already caps dims at
+        // MAX_IMAGE_DIM (8192) for every decode path, but a struct-literal
+        // construction (e.g. the background-image decode in lib.rs) bypasses
+        // `new`, so this is the last guard before `create_texture`. Skipping the
+        // draw is strictly better than aborting the renderer.
+        let max = device.limits().max_texture_dimension_2d;
+        if img.width > max || img.height > max {
+            log::warn!(
+                "skipping {}x{} image: exceeds GPU max_texture_dimension_2d {max}",
+                img.width,
+                img.height
+            );
+            return None;
+        }
         let key = std::sync::Arc::as_ptr(&img.rgba) as usize;
         if self.cache.contains_key(&key) {
-            return key;
+            return Some(key);
         }
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kettle-image"),
@@ -272,7 +289,7 @@ impl ImagePipeline {
                 bind_group: bg,
             },
         );
-        key
+        Some(key)
     }
 
     /// `items`: `(x, y, w, h, image)` in physical pixels.
@@ -306,12 +323,17 @@ impl ImagePipeline {
         }
         let mut insts = Vec::with_capacity(items.len());
         for (i, (x, y, w, h, img)) in items.iter().enumerate() {
-            let key = self.ensure_texture(device, queue, img);
+            // Push the instance for every item so buffer slot `i` stays aligned
+            // with the enumerate index stored in `draws`; only record a draw for
+            // images that produced a texture (cycle 813: an oversized image is
+            // skipped rather than aborting the renderer).
             insts.push(Inst {
                 pos: [*x, *y],
                 size: [*w, *h],
             });
-            self.draws.push((key, i as u32));
+            if let Some(key) = self.ensure_texture(device, queue, img) {
+                self.draws.push((key, i as u32));
+            }
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
     }

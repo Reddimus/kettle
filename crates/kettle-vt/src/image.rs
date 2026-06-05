@@ -56,6 +56,20 @@ impl ImageData {
         if width == 0 || height == 0 {
             return None;
         }
+        // Cycle 813 (audit): cap per-axis dimensions at the same `MAX_IMAGE_DIM`
+        // the `from_encoded` decoder already enforces — but here, at the single
+        // chokepoint every constructor funnels through (`new`/`crop`/`solid`/
+        // `from_encoded`). The kitty `f=32`/`f=24` raw-pixel branches parse
+        // width/height straight from the untrusted `s=`/`v=` control words; a
+        // payload like `f=32,s=10000,v=1` (40 KB of pixels — trivially under the
+        // payload caps) used to yield a 10000×1 `ImageData` that reached
+        // `wgpu::Device::create_texture` with width > the 8192 `max_texture_
+        // dimension_2d` limit, a validation error wgpu's default handler turns
+        // into a panic = (panic=abort) a whole-process abort killing every tab.
+        // Rejecting oversized dims here closes that remote DoS for every caller.
+        if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
+            return None;
+        }
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|wh| wh.checked_mul(4))?;
@@ -111,6 +125,13 @@ impl ImageData {
     /// background). Returns `None` for zero dimensions.
     pub fn solid(w: u32, h: u32, color: [u8; 4]) -> Option<ImageData> {
         if w == 0 || h == 0 {
+            return None;
+        }
+        // Cycle 813 (audit): bound dims BEFORE the fill allocation — `new`
+        // would reject oversized dims, but `solid` pre-allocates `w*h*4` first,
+        // so an attacker-influenced kitty animation background (`Y=` with huge
+        // base dims) could OOM here before the check. Reject up front.
+        if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
             return None;
         }
         let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
@@ -224,6 +245,26 @@ mod tests {
         assert!(ImageData::new(u32::MAX, 1, vec![]).is_none());
         // Sanity: a sane construction still works.
         assert!(ImageData::new(2, 2, vec![0; 16]).is_some());
+    }
+
+    /// Cycle 813 (audit) drift guard. `ImageData::new` must reject per-axis
+    /// dimensions above `MAX_IMAGE_DIM` so the kitty `f=32`/`f=24` raw-pixel
+    /// decoders (which parse width/height straight from the untrusted `s=`/`v=`
+    /// control words) can never produce an image that overflows the GPU's
+    /// 8192-px `max_texture_dimension_2d` and aborts the renderer. The byte
+    /// buffer is sized to the claimed dims so we test the dim cap specifically,
+    /// not the size-mismatch path.
+    #[test]
+    fn new_rejects_dims_above_max_image_dim() {
+        // One row at the cap is fine.
+        assert!(ImageData::new(MAX_IMAGE_DIM, 1, vec![0; MAX_IMAGE_DIM as usize * 4]).is_some());
+        // One past the cap (the `f=32,s=8193,v=1` shape) is rejected, even
+        // though the byte buffer matches the claimed size exactly.
+        let w = MAX_IMAGE_DIM + 1;
+        assert!(ImageData::new(w, 1, vec![0; w as usize * 4]).is_none());
+        assert!(ImageData::new(1, w, vec![0; w as usize * 4]).is_none());
+        // `solid` guards its pre-fill allocation the same way.
+        assert!(ImageData::solid(MAX_IMAGE_DIM + 1, 1, [0; 4]).is_none());
     }
 
     /// Cycle 576 drift guard for the decompression-bomb defense in
