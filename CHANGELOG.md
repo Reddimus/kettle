@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Perf (cycle 806, audit) — no per-frame `String` churn in the text hot
+    path.** Building a pane's rich-text runs cloned every style run's text into
+    an owned `String` (and allocated a fresh `"\n"` per wrapped row) on **every
+    frame** — a busy 120×50 pane of colored output minted dozens–hundreds of
+    throwaway `String`s per frame, then immediately re-borrowed them as `&str`.
+    The runs now **borrow** the span text (`Vec<(&str, Attrs)>`) and the vec is
+    handed to `set_rich_text` by value, which also drops the per-run `Attrs`
+    clone the old `.iter().map(…)` adapter made. The `&str` element type makes a
+    future re-introduction of `text.clone()` a compile error, and a pointer-
+    identity drift test pins the zero-copy property. No visual change.
+
   - **Feature (cycle 805) — new-tab `▾` dropdown to pick a shell (Windows 11
     Terminal-style).** A small `▾` arrow now sits to the **left** of the tab-bar
     `+`. Clicking `+` opens the default tab as before; clicking `▾` opens a menu

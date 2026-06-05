@@ -2933,28 +2933,16 @@ impl Renderer {
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
-        // Cycle 761: pre-size for the spans + interleaved line-break markers
-        // so a 120×50 pane doesn't realloc this vec several times per frame.
-        let mut rich: Vec<(String, Attrs)> =
-            Vec::with_capacity(spans.len() + span_line_breaks.len());
-        let mut nb = 0usize;
-        for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
-            while nb < span_line_breaks.len() && span_line_breaks[nb] == i {
-                rich.push(("\n".to_string(), default_attrs.clone()));
-                nb += 1;
-            }
-            let mut a = Attrs::new()
-                .family(Family::Name(cfg.family_for(*bold, *italic)))
-                .font_features(ff.clone())
-                .color(GColor::rgb(fg.r, fg.g, fg.b));
-            if *bold {
-                a = a.weight(Weight::BOLD);
-            }
-            if *italic {
-                a = a.style(Style::Italic);
-            }
-            rich.push((text.clone(), a));
-        }
+        // Cycle 806 (audit perf): borrow each span's text as `&str` into the
+        // rich-text vec instead of cloning it to an owned `String`. `spans` is
+        // built above and not touched again, so it outlives this
+        // `set_rich_text` call and the slices stay valid. This drops one heap
+        // allocation per style run per pane per frame — a busy 120×50 pane of
+        // colored output churned dozens–hundreds of `String`s (plus a `"\n"`
+        // per wrapped row) every single frame. The `Vec<(&str, Attrs)>` type
+        // also makes a future re-introduction of `text.clone()` a compile
+        // error rather than a silent regression.
+        let rich = build_rich_spans(&spans, &span_line_breaks, cfg, &ff, &default_attrs);
         // Advanced shaping applies OpenType features (ligatures, ss##,
         // cv##, …). Drop to Basic only when ligatures are off *and* there
         // are no explicit features to honor — the fast path with no shaping.
@@ -2963,13 +2951,11 @@ impl Renderer {
         } else {
             Shaping::Basic
         };
-        buf.set_rich_text(
-            &mut self.font_system,
-            rich.iter().map(|(s, a)| (s.as_str(), a.clone())),
-            &default_attrs,
-            shaping,
-            None,
-        );
+        // Hand the vec to `set_rich_text` by value: it takes an
+        // `IntoIterator<Item = (&str, Attrs)>`, so consuming `rich` also drops
+        // the per-run `Attrs` clone the old `.iter().map(|(s, a)| (s.as_str(),
+        // a.clone()))` adapter used to make.
+        buf.set_rich_text(&mut self.font_system, rich, &default_attrs, shaping, None);
         buf.shape_until_scroll(&mut self.font_system, false);
     }
 }
@@ -2989,6 +2975,46 @@ fn font_features(cfg: &Config) -> FontFeatures {
         ff.set(FeatureTag::new(&f.tag), f.value);
     }
     ff
+}
+
+/// Build a pane's rich-text runs as `(&str, Attrs)` pairs, **borrowing** each
+/// span's text from `spans` rather than cloning it (cycle 806 hot-path
+/// allocation fix). `"\n"` line-break markers are interleaved at the recorded
+/// `line_breaks` indices, each carrying `default_attrs` (the row breaks
+/// inherit the pane's default styling, exactly as before).
+///
+/// The returned `&'a str` slices are tied to `spans`, which every caller keeps
+/// alive until after the `Buffer::set_rich_text` call consumes the vec — so
+/// the per-frame allocation count stays flat no matter how many colored style
+/// runs a pane has. Pre-sized to `spans.len() + line_breaks.len()` so it never
+/// reallocs mid-build (cycle 761).
+fn build_rich_spans<'a>(
+    spans: &'a [(String, Rgb, bool, bool)],
+    line_breaks: &[usize],
+    cfg: &'a Config,
+    ff: &'a FontFeatures,
+    default_attrs: &Attrs<'a>,
+) -> Vec<(&'a str, Attrs<'a>)> {
+    let mut rich: Vec<(&'a str, Attrs<'a>)> = Vec::with_capacity(spans.len() + line_breaks.len());
+    let mut nb = 0usize;
+    for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
+        while nb < line_breaks.len() && line_breaks[nb] == i {
+            rich.push(("\n", default_attrs.clone()));
+            nb += 1;
+        }
+        let mut a = Attrs::new()
+            .family(Family::Name(cfg.family_for(*bold, *italic)))
+            .font_features(ff.clone())
+            .color(GColor::rgb(fg.r, fg.g, fg.b));
+        if *bold {
+            a = a.weight(Weight::BOLD);
+        }
+        if *italic {
+            a = a.style(Style::Italic);
+        }
+        rich.push((text.as_str(), a));
+    }
+    rich
 }
 
 /// Truncate `s` to at most `n` **display columns** (not chars), adding `…`
@@ -4783,6 +4809,66 @@ mod truncate_tests {
         let cut = truncate(t40, 30);
         assert!(cut.ends_with('…'));
         assert_eq!(cut.chars().count(), 30);
+    }
+}
+
+#[cfg(test)]
+mod build_rich_spans_tests {
+    use super::{Attrs, Family, Rgb, build_rich_spans, font_features};
+    use kettle_config::Config;
+
+    /// Cycle 806 drift guard (audit perf): the per-pane rich-text builder must
+    /// **borrow** each span's text (`&str`) rather than clone it into an owned
+    /// `String`. A clone allocates once per style run per pane per frame; this
+    /// pins the zero-copy property via pointer identity (a clone would land at
+    /// a different heap address) and confirms the `"\n"` row markers stay
+    /// interleaved at the recorded break indices.
+    #[test]
+    fn build_rich_spans_borrows_text_and_interleaves_breaks() {
+        let cfg = Config::default();
+        let ff = font_features(&cfg);
+        let default_attrs = Attrs::new()
+            .family(Family::Name("TestFamily"))
+            .font_features(ff.clone());
+        let spans = vec![
+            ("alpha".to_string(), Rgb::new(10, 20, 30), false, false),
+            ("beta".to_string(), Rgb::new(40, 50, 60), true, true),
+        ];
+        // One line break recorded before span index 1 → "alpha","\n","beta".
+        let line_breaks = vec![1usize];
+        let rich = build_rich_spans(&spans, &line_breaks, &cfg, &ff, &default_attrs);
+
+        let texts: Vec<&str> = rich.iter().map(|(s, _)| *s).collect();
+        assert_eq!(texts, vec!["alpha", "\n", "beta"]);
+        // Zero-copy: span entries point at the SAME heap buffer as the source
+        // `String`s. If this ever fails, someone re-introduced a `text.clone()`.
+        assert_eq!(rich[0].0.as_ptr(), spans[0].0.as_ptr());
+        assert_eq!(rich[2].0.as_ptr(), spans[1].0.as_ptr());
+    }
+
+    /// A leading break (index 0) and no spans-after edge cases: the marker is
+    /// emitted before the first span, and a run with zero breaks is verbatim.
+    #[test]
+    fn build_rich_spans_handles_leading_break_and_no_breaks() {
+        let cfg = Config::default();
+        let ff = font_features(&cfg);
+        let default_attrs = Attrs::new()
+            .family(Family::Name("TestFamily"))
+            .font_features(ff.clone());
+        let spans = vec![("only".to_string(), Rgb::new(1, 2, 3), false, false)];
+
+        let lead = build_rich_spans(&spans, &[0usize], &cfg, &ff, &default_attrs);
+        assert_eq!(
+            lead.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec!["\n", "only"]
+        );
+
+        let none = build_rich_spans(&spans, &[], &cfg, &ff, &default_attrs);
+        assert_eq!(
+            none.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec!["only"]
+        );
+        assert_eq!(none[0].0.as_ptr(), spans[0].0.as_ptr());
     }
 }
 
