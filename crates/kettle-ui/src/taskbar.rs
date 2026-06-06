@@ -37,6 +37,15 @@ impl Taskbar {
         self.last = progress;
         self.inner.set(window, progress);
     }
+
+    /// Clear any outstanding OS attention request (the taskbar-button flash)
+    /// on `window`. Cycle 869: winit's `request_user_attention(None)` does not
+    /// reliably stop the Windows 11 taskbar flash once it's started, so on
+    /// Windows this issues `FlashWindowEx(FLASHW_STOP)` directly. No-op on
+    /// other platforms (the winit clear handles those). Best-effort.
+    pub fn clear_attention(&self, window: &Window) {
+        self.inner.clear_attention(window);
+    }
 }
 
 impl Default for Taskbar {
@@ -54,6 +63,7 @@ mod imp {
         ITaskbarList3, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
         TaskbarList,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{FLASHW_STOP, FLASHWINFO, FlashWindowEx};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     pub struct Inner {
@@ -125,12 +135,56 @@ mod imp {
                 Err(e) => log::debug!("taskbar: ITaskbarList3 call failed: {e}"),
             }
         }
+
+        pub fn clear_attention(&self, window: &Window) {
+            let Some(hwnd) = hwnd_of(window) else {
+                return;
+            };
+            // SAFETY: `hwnd` is this process's live top-level window;
+            // FlashWindowEx with FLASHW_STOP only stops the taskbar-button
+            // flash. Best-effort — any failure is harmless and ignored.
+            unsafe {
+                let _ = FlashWindowEx(&stop_flash(hwnd));
+            }
+        }
+    }
+
+    /// Build a `FLASHWINFO` that STOPS any taskbar-button flash for `hwnd`.
+    /// `cbSize` MUST equal `size_of::<FLASHWINFO>()` or `FlashWindowEx`
+    /// silently no-ops — exactly what the unit test below guards against.
+    fn stop_flash(hwnd: HWND) -> FLASHWINFO {
+        FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_STOP,
+            uCount: 0,
+            dwTimeout: 0,
+        }
     }
 
     fn hwnd_of(window: &Window) -> Option<HWND> {
         match window.window_handle().ok()?.as_raw() {
             RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut core::ffi::c_void)),
             _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{FLASHW_STOP, FLASHWINFO, HWND, stop_flash};
+
+        #[test]
+        fn stop_flash_has_correct_size_and_stop_flag() {
+            let info = stop_flash(HWND(std::ptr::null_mut()));
+            assert_eq!(
+                info.cbSize as usize,
+                std::mem::size_of::<FLASHWINFO>(),
+                "FLASHWINFO.cbSize must equal the struct size or FlashWindowEx \
+                 silently no-ops"
+            );
+            assert_eq!(info.dwFlags, FLASHW_STOP, "the clear must use FLASHW_STOP");
+            assert_eq!(info.uCount, 0);
+            assert_eq!(info.dwTimeout, 0);
         }
     }
 }
@@ -149,5 +203,9 @@ mod imp {
         /// No taskbar-progress API is wired up off Windows yet (a macOS dock
         /// badge could be added via objc2 in a later cycle).
         pub fn set(&mut self, _window: &Window, _progress: Option<Progress>) {}
+
+        /// No taskbar attention API off Windows; the winit
+        /// `request_user_attention(None)` path handles those platforms.
+        pub fn clear_attention(&self, _window: &Window) {}
     }
 }

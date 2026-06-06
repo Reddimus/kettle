@@ -77,9 +77,13 @@ libc = "0.2"
 # button). The `windows` crate gives safe COM wrappers; 0.62 is already in
 # the workspace lockfile, and the feature set is narrow + Windows-only, so
 # Linux/macOS builds are unaffected.
+# Cycle 869: `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
+# FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
+# taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
     "Win32_Foundation",
 ] }

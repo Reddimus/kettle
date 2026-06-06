@@ -1542,6 +1542,11 @@ pub struct App {
     /// Cycle 745: OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     taskbar: crate::taskbar::Taskbar,
+    /// Cycle 869: true while an OS attention request (taskbar flash / dock
+    /// bounce) is outstanding. winit's `request_user_attention(None)` doesn't
+    /// reliably stop the Win11 taskbar flash, so we track outstanding requests
+    /// and clear them directly via `Taskbar::clear_attention` on focus-gain.
+    attention_active: bool,
     renderer: Option<Renderer>,
     mux: Mux,
     mods: ModifiersState,
@@ -2101,6 +2106,7 @@ impl App {
             cfg: initial_cfg,
             window: None,
             taskbar: crate::taskbar::Taskbar::new(),
+            attention_active: false,
             renderer: None,
             mux: {
                 let mut m = Mux::new();
@@ -3399,6 +3405,7 @@ impl App {
                 && let Some(w) = &self.window
             {
                 w.request_user_attention(Some(UserAttentionType::Informational));
+                self.attention_active = true;
             }
         }
         // Cycle 246: latch any per-pane bells onto their tab's
@@ -7099,6 +7106,7 @@ impl App {
                         if let Some(w) = &self.window {
                             use winit::window::UserAttentionType;
                             w.request_user_attention(Some(UserAttentionType::Critical));
+                            self.attention_active = true;
                         }
                     }
                     kettle_config::TriggerAction::RunCommand(argv) => {
@@ -8417,6 +8425,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.window {
                     w.request_user_attention(Some(UserAttentionType::Informational));
                     w.request_redraw();
+                    self.attention_active = true;
                 }
             }
         }
@@ -9276,8 +9285,17 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
                 }
-                if f && let Some(w) = &self.window {
-                    w.request_user_attention(None); // clear urgency on focus
+                // Cycle 869: winit's `request_user_attention(None)` alone does
+                // not reliably stop the Win11 taskbar flash once started, so
+                // when an attention request is outstanding, clear it directly
+                // (FlashWindowEx FLASHW_STOP via Taskbar) on focus-gain and
+                // reset the tracker.
+                if f && self.attention_active {
+                    self.attention_active = false;
+                    if let Some(w) = &self.window {
+                        w.request_user_attention(None);
+                        self.taskbar.clear_attention(w);
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();

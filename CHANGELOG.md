@@ -19,6 +19,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     (`kettle --flag | grep`, `… >> $PROFILE`) is never clobbered. The drift test
     now guards the GUI-subsystem attribute + the conditional-attach guard.
 
+  - **Windows (cycle 869) — the taskbar notification now clears when you focus
+    kettle.** An attention request (a bell when `bell` includes `attention`, a
+    `urgency` trigger match, or the available-update banner) flashes the taskbar
+    button while kettle is unfocused — but winit's `request_user_attention(None)`
+    alone does not reliably stop the Windows 11 flash on focus-gain, so it kept
+    pulsing after you clicked back in. kettle now tracks the outstanding request
+    and, on focus, clears it directly via `FlashWindowEx(FLASHW_STOP)` (alongside
+    the cross-platform winit clear). Unit-tested (FLASHWINFO `cbSize` + flag).
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
