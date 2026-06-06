@@ -14,7 +14,16 @@ pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
     if pattern.is_empty() {
         return Some(0);
     }
-    let pat: Vec<char> = pattern.chars().flat_map(|c| c.to_lowercase()).collect();
+    // Cycle 857 (audit): fold the pattern one char→one char, exactly as the
+    // candidate side does below (`cc.to_lowercase().next()`). The old
+    // `flat_map(to_lowercase)` expanded a multi-codepoint fold (e.g. `İ`→`i̇`,
+    // `ß` stays) into several pattern chars while the candidate kept one per
+    // position, so such characters never matched. Symmetric single-char folding
+    // keeps the positional walk consistent.
+    let pat: Vec<char> = pattern
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
     let cand: Vec<char> = candidate.chars().collect();
 
     let mut pi = 0usize;
@@ -74,6 +83,18 @@ pub fn best<'a, T>(pattern: &str, items: &'a [T], key: impl Fn(&T) -> &str) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cycle 857: a char whose `to_lowercase()` expands to multiple
+    /// codepoints (`İ` → `i` + combining dot) must still fuzzy-match itself.
+    /// The old asymmetric folding (multi-char pattern vs single-char candidate)
+    /// made it never match.
+    #[test]
+    fn score_matches_multi_codepoint_case_fold() {
+        assert!(score("İ", "İ").is_some(), "a char must fuzzy-match itself");
+        // Ordinary case-insensitive matching is unaffected.
+        assert!(score("GP", "gpu-box").is_some());
+        assert!(score("gp", "GPU-BOX").is_some());
+    }
 
     #[test]
     fn subsequence_matching() {

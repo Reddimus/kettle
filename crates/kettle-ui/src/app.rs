@@ -7137,7 +7137,13 @@ impl App {
                 self.mux.search.query.pop();
             }
             _ => {
-                if let Some(t) = text {
+                // Cycle 857 (audit): filter control chars like the sibling
+                // title / SSH-input handlers do — a stray control byte
+                // (Tab, embedded ESC from a paste, etc.) must not land in the
+                // search query and corrupt the match.
+                if let Some(t) = text
+                    && !t.chars().any(|c| c.is_control())
+                {
                     self.mux.search.query.push_str(t);
                 }
             }
@@ -9698,6 +9704,26 @@ mod tests {
         assert!(
             !arm.contains("self.cfg.font_size * 1.5"),
             "ScaledZoom must not scale from the (stale) config font size"
+        );
+    }
+
+    /// Cycle 857 (audit) drift guard. `search_key` must filter control chars
+    /// before appending to the query (like the title / SSH-input handlers), so a
+    /// stray control byte can't corrupt the search. The handler needs full App
+    /// state; pin the filter at the source.
+    #[test]
+    fn search_key_filters_control_chars() {
+        let src = include_str!("app.rs");
+        // The filtered push lives in search_key's catch-all arm.
+        let arm = src
+            .split("fn search_key(")
+            .nth(1)
+            .and_then(|s| s.split("fn ").next())
+            .expect("search_key present");
+        assert!(
+            arm.contains("!t.chars().any(|c| c.is_control())")
+                && arm.contains("self.mux.search.query.push_str(t)"),
+            "search_key must filter control chars before appending to the query"
         );
     }
 

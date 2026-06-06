@@ -898,8 +898,14 @@ fn parse_key(s: &str) -> Option<Key> {
         "minus" => Key::Char('-'),
         "equal" => Key::Char('='),
         _ => {
+            // Cycle 857 (audit): only F1..=F12 are real. The winit→Key bridge
+            // (app.rs) maps F1..F12 only; F0 and F13+ can never arrive, so a
+            // binding to them was silently dead. Reject out-of-range so the
+            // user's typo surfaces instead of binding to nothing. (`f13` then
+            // falls through and fails the single-char arm → None.)
             if let Some(n) = l.strip_prefix('f')
                 && let Ok(num) = n.parse::<u8>()
+                && (1..=12).contains(&num)
             {
                 return Some(Key::F(num));
             }
@@ -1134,6 +1140,18 @@ pub(crate) fn is_unbind_token(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cycle 857: only F1..=F12 are real keys (the winit→Key bridge maps no
+    /// others), so `parse_key` must reject F0 and F13+ rather than accept a
+    /// binding that can never fire.
+    #[test]
+    fn parse_key_rejects_out_of_range_fkeys() {
+        assert_eq!(parse_key("f1"), Some(Key::F(1)));
+        assert_eq!(parse_key("f12"), Some(Key::F(12)));
+        assert_eq!(parse_key("f0"), None, "F0 is not a real key");
+        assert_eq!(parse_key("f13"), None, "F13+ never arrives from winit");
+        assert_eq!(parse_key("f255"), None);
+    }
 
     /// Cycle 766: `Trigger::label()` must round-trip through `parse_trigger`
     /// for every `Key` variant — the interactive keybind editor uses `label()`

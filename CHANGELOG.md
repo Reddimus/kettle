@@ -9,6 +9,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Input correctness (cycle 857, audit) — three small fixes.** (1) The search
+    overlay now filters control characters before appending to the query (like
+    the title / SSH-input handlers already did), so a stray control byte can't
+    corrupt a search. (2) The fuzzy matcher folds the pattern one char per
+    position, matching the candidate side — a character whose lowercase expands
+    to multiple codepoints (e.g. `İ`) used to never match. (3) `parse_key` now
+    rejects `F0` and `F13`+ (the winit→key bridge only maps `F1`–`F12`, so those
+    bound to nothing); a typo'd F-key surfaces instead of silently dead. All
+    unit-/drift-tested.
+
   - **Settings (cycle 856, audit) — "Window padding" sets both axes.** The
     single Settings "Window padding" control persisted only `window-padding-x`,
     leaving `window-padding-y` at its default — so nudging it produced visibly
