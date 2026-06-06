@@ -201,11 +201,15 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
                         ci += 1;
                     }
                     let rgb = if pu == 2 {
-                        Rgb(
-                            (comps[0] * 255 / 100) as u8,
-                            (comps[1] * 255 / 100) as u8,
-                            (comps[2] * 255 / 100) as u8,
-                        )
+                        // Cycle 860 (audit): clamp each percentage to 0..=100
+                        // BEFORE scaling. `read_num` saturates a long digit run
+                        // at `i64::MAX` (cycle 830), and `i64::MAX * 255` then
+                        // overflows — a process-abort under `panic = "abort"`
+                        // with overflow checks (debug/test), garbage in release —
+                        // reachable from any untrusted Sixel DCS. Clamping is
+                        // spec-correct (color components are 0..=100 percent).
+                        let pct = |v: i64| (v.clamp(0, 100) * 255 / 100) as u8;
+                        Rgb(pct(comps[0]), pct(comps[1]), pct(comps[2]))
                     } else {
                         hls_to_rgb(comps[0] as f32, comps[1] as f32, comps[2] as f32)
                     };
@@ -330,6 +334,19 @@ mod tests {
         // The same in a raster attribute (dimension param).
         let body2 = format!("\"{};1;1;1@", "9".repeat(25));
         let _ = decode(body2.as_bytes()); // must not panic (result either way ok)
+    }
+
+    /// Cycle 860 (audit): a `#Pc;2;Pr;Pg;Pb` RGB palette entry with an absurd
+    /// (saturated) component must not overflow the `* 255 / 100` scaling. Before
+    /// the clamp, `i64::MAX * 255` aborted the process under overflow checks.
+    #[test]
+    fn rgb_palette_component_does_not_overflow() {
+        // 19-digit component saturates read_num to i64::MAX; then a pixel + ST.
+        let body = format!("#0;2;{};1;1#0~", "9".repeat(19));
+        // Must not panic; an image (1 painted pixel) decodes either way.
+        let _ = decode(body.as_bytes());
+        // A normal in-range RGB still works.
+        assert!(decode(b"#0;2;100;0;0#0~").is_some());
     }
 
     /// Cycle 824 (audit): a wide raster-attribute-LESS sixel (width grows one
