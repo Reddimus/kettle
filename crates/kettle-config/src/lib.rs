@@ -2159,9 +2159,25 @@ impl Config {
                 // `Theme::by_name`'s resolution. (Empty value is
                 // pre-filtered by cycle 158's global skip above.)
                 "theme" => {
-                    let want = v.trim().to_ascii_lowercase();
-                    Theme::list().iter().any(|n| n.to_ascii_lowercase() == want)
+                    // Cycle 862 (audit): `find_name` compares with
+                    // `eq_ignore_ascii_case` — no per-name `to_ascii_lowercase`
+                    // String alloc over the ~512 bundled themes (the sibling
+                    // light/dark arm already does this; cycle 843's alloc sweep
+                    // missed this mirror).
+                    Theme::find_name(v.trim()).is_some()
                 }
+                // Cycle 862 (audit): a malformed `theme-schedule` (bad HH:MM, bad
+                // mode word, missing comma) makes `parse_theme_schedule` return
+                // None and the schedule is silently unset — but the lat/long
+                // sub-keys WERE diagnosed, so omitting the schedule string itself
+                // was inconsistent.
+                "theme-schedule" | "theme_schedule" => parse_theme_schedule(v).is_some(),
+                // Cycle 862 (audit): `ask-before-closing` typo silently fell back
+                // to the default with no warning.
+                "ask-before-closing" | "ask_before_closing" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "always" | "never" | "multiple" | "multiple-terminals" | "multiple_terminals"
+                ),
                 // Cycle 837 (audit): light/dark-theme must name a real bundled
                 // theme (cycle-616 auto-theme); a typo silently kept the prior.
                 "light-theme" | "light_theme" | "dark-theme" | "dark_theme" => {
@@ -2538,13 +2554,22 @@ impl Config {
                         cfg.scrollback = n.min(INFINITE_SCROLLBACK);
                     }
                 }
-                "window-padding-x" => {
-                    if let Ok(v) = e.value.parse() {
+                // Cycle 862 (audit): accept the bare `padding-x`/`-y` spellings
+                // as aliases. The malformed-value diagnostic already listed them
+                // as valid keys, so without these aliases a bare `padding-x`
+                // both passed `--check-config` AND warned "unrecognized key"
+                // while doing nothing — a contradictory diagnostic.
+                "window-padding-x" | "padding-x" | "padding_x" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.padding_x = v;
                     }
                 }
-                "window-padding-y" => {
-                    if let Ok(v) = e.value.parse() {
+                "window-padding-y" | "padding-y" | "padding_y" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.padding_y = v;
                     }
                 }
@@ -2765,6 +2790,12 @@ impl Config {
                     cfg.ask_before_closing = match e.value.to_ascii_lowercase().as_str() {
                         "always" => AskBeforeClosing::Always,
                         "never" => AskBeforeClosing::Never,
+                        // Explicit so `--check-config` can tell a real value from
+                        // a typo (cycle 862, audit) instead of silently mapping
+                        // everything to the default.
+                        "multiple" | "multiple-terminals" | "multiple_terminals" => {
+                            AskBeforeClosing::MultipleTerminals
+                        }
                         _ => AskBeforeClosing::MultipleTerminals,
                     };
                 }
@@ -4922,6 +4953,20 @@ mod config_tests {
         assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
     }
 
+    /// Cycle 862 (audit): the bare `padding-x`/`-y` spellings the diagnostic
+    /// already accepted must actually apply (and not warn as unknown) — they
+    /// were drift: passed `--check-config` yet did nothing + warned "unknown".
+    #[test]
+    fn bare_padding_aliases_apply_and_are_known() {
+        let (cfg, unknown) = Config::parse_collect("padding-x = 12\npadding-y = 5\n");
+        assert_eq!(cfg.padding_x, 12.0);
+        assert_eq!(cfg.padding_y, 5.0);
+        assert!(
+            unknown.is_empty(),
+            "bare padding aliases must not be reported as unknown: {unknown:?}"
+        );
+    }
+
     #[test]
     fn detect_malformed_values_catches_typos_silently_swallowed_by_parse() {
         // Each of these was silently falling through to the default
@@ -5014,6 +5059,12 @@ mod config_tests {
             ("background-type = image", "background-type = imag"),
             ("lua-sandbox = trusted", "lua-sandbox = trused"),
             ("status-bar = bottom", "status-bar = botom"),
+            // Cycle 862: theme-schedule + ask-before-closing diagnostic gaps.
+            ("ask-before-closing = always", "ask-before-closing = alwyas"),
+            (
+                "theme-schedule = 18:00 dark, 06:00 light",
+                "theme-schedule = 18:00 drak, 06:00 light",
+            ),
         ] {
             assert!(
                 Config::detect_malformed_values(&format!("{good}\n")).is_empty(),

@@ -17,6 +17,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **Diagnostics (cycle 862, audit) — three more `--check-config` gaps closed.**
+    A malformed `theme-schedule` (bad `HH:MM` / mode word) and a typo'd
+    `ask-before-closing` both silently fell back to a default without being
+    flagged (the `theme-schedule-lat/long` sub-keys *were* flagged, making the
+    omissions inconsistent) — both now validate. The bare `padding-x`/`-y`
+    spellings, which the diagnostic already accepted, are now honored by the
+    parser too (they previously passed the malformed scan yet did nothing *and*
+    warned "unknown key" — a contradictory diagnostic). The `theme` diagnostic
+    arm dropped its per-name `to_ascii_lowercase` alloc for `find_name`
+    (`eq_ignore_ascii_case`), matching its sibling arms. Unit-tested.
+
   - **UX/data-loss (cycle 861, audit) — confirm-dialog Enter respects button
     focus.** The close-pane/tab/window confirmation dialogs open focused on (and
     visually highlight) the **Cancel** button as the safe default, but Enter
