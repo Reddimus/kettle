@@ -2154,6 +2154,36 @@ mod conformance {
         );
     }
 
+    /// Cycle 870: synchronized output (DEC private mode 2026 / BSU·ESU). While a
+    /// sync block is open the engine MUST buffer mutations so a renderer that
+    /// locks the grid never samples a half-drawn frame; the buffered changes
+    /// apply atomically on close. This is the property that lets well-behaved
+    /// TUIs avoid the transient mid-repaint tearing a terminal would otherwise
+    /// show. kettle drives the same `Processor` alacritty does, so this guards
+    /// that kettle's feed path keeps the behavior (e.g. a future Extractor
+    /// change must not swallow the `?2026` toggles).
+    #[test]
+    fn synchronized_update_defers_grid_mutation_until_close() {
+        let (mut t, mut p) = harness(6, 2);
+        feed(&mut t, &mut p, b"A");
+        assert_eq!(t.grid()[Point::new(Line(0), Column(0))].c, 'A');
+        // Open a synchronized update, return to col 0 and overwrite with 'B',
+        // but DO NOT close the block yet.
+        feed(&mut t, &mut p, b"\x1b[?2026h\rB");
+        assert_eq!(
+            t.grid()[Point::new(Line(0), Column(0))].c,
+            'A',
+            "grid mutated mid-synchronized-update (mode 2026 not honored)"
+        );
+        // Close the block — the buffered write now applies atomically.
+        feed(&mut t, &mut p, b"\x1b[?2026l");
+        assert_eq!(
+            t.grid()[Point::new(Line(0), Column(0))].c,
+            'B',
+            "synchronized update not flushed on close"
+        );
+    }
+
     #[test]
     fn su_sd_scroll_up_and_down() {
         let (mut t, mut p) = harness(4, 3);

@@ -2999,9 +2999,12 @@ impl Renderer {
             quads.push(rect(bx, by, cw, ch, vi_color, 0.20));
         }
 
-        // Lay out the text buffer.
+        // Lay out the text buffer. Cycle 870: advance lines by the grid's
+        // `cell_h` (which includes the cfg.cell_height multiplier) so the text
+        // rows stay locked to the cursor/quad row step — see `pane_metrics`.
+        let pm = pane_metrics(self.metrics.font_size, self.cell_h);
         let buf = &mut self.pane_buffers[idx];
-        buf.set_metrics(&mut self.font_system, self.metrics);
+        buf.set_metrics(&mut self.font_system, pm);
         buf.set_size(
             &mut self.font_system,
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
@@ -3230,6 +3233,18 @@ pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
     };
     let px = font_size * s;
     Metrics::new(px, px * 1.25)
+}
+
+/// Cycle 870: metrics for a terminal PANE's text buffer. The glyph size stays
+/// `font_size` (the DPI-scaled px from `metrics_for`), but the LINE HEIGHT is
+/// the grid's actual row height `cell_h` — which already folds in the 1.25
+/// line-height ratio AND any `cfg.cell_height` multiplier (cycle 636). The
+/// cursor and selection/vi quads step by `cell_h` per row (`by = oy + line *
+/// ch`), so the text must advance by the same `cell_h`; laying it out at the
+/// unscaled `metrics.line_height` instead drifts a fraction of a row per line —
+/// a full row off near the bottom of a tall window whenever `cell_height != 1`.
+pub fn pane_metrics(font_size: f32, cell_h: f32) -> Metrics {
+    Metrics::new(font_size, cell_h)
 }
 
 /// Cycle 753: request a GPU adapter, preferring real hardware but transparently
@@ -4814,8 +4829,28 @@ mod clamp_font_size_tests {
 
 #[cfg(test)]
 mod hidpi_scale_tests {
-    use super::{measure_cell, metrics_for};
+    use super::{measure_cell, metrics_for, pane_metrics};
     use glyphon::{Buffer as TextBuffer, FontSystem};
+
+    /// Cycle 870: the pane text buffer must advance lines by the grid's `cell_h`
+    /// (which includes the `cfg.cell_height` multiplier) so the cursor and
+    /// selection/vi quads — which step by `cell_h` per row — stay locked to the
+    /// text. Laying out at the unscaled `metrics.line_height` drifts a fraction
+    /// of a row per line, a full row off near the bottom when cell_height != 1.
+    #[test]
+    fn pane_metrics_line_height_tracks_cell_h_not_font_line_height() {
+        let base = metrics_for(16.0, 1.0); // line_height = 20.0
+        let cell_h = base.line_height * 1.4; // e.g. cfg.cell_height = 1.4
+        let pm = pane_metrics(base.font_size, cell_h);
+        assert_eq!(pm.line_height, cell_h, "text line step must equal cell_h");
+        assert_eq!(
+            pm.font_size, base.font_size,
+            "glyph size must NOT be scaled by cell_height"
+        );
+        // At cell_height == 1.0 the pane line height equals the base metric.
+        let pm1 = pane_metrics(base.font_size, base.line_height);
+        assert_eq!(pm1.line_height, base.line_height);
+    }
 
     /// Cycle 747 core invariant: a logical font size renders at
     /// `font_size × scale` physical pixels. This is the bug that made text

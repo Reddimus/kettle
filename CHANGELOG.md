@@ -28,6 +28,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     and, on focus, clears it directly via `FlashWindowEx(FLASHW_STOP)` (alongside
     the cross-platform winit clear). Unit-tested (FLASHWINFO `cbSize` + flag).
 
+  - **Rendering (cycle 870) — cursor/text vertical alignment under a non-default
+    `cell-height`, plus a synchronized-output guard.** Two related fixes after
+    investigating a transient "cursor one row above the prompt" report:
+    - The pane text buffer now lays out lines at the grid's actual row height
+      `cell_h` (which folds in the `cfg.cell_height` multiplier, cycle 636), not
+      the unscaled font `line_height`. Previously the cursor and selection/vi
+      quads stepped by `cell_h` per row while glyphon flowed text by
+      `font_size × 1.25`, so with `cell-height != 1.0` the cursor drifted a
+      fraction of a row per line — a full row off near the bottom of a tall
+      window. Unit-tested.
+    - The reported transient glitch itself was *not* a kettle geometry bug (at
+      the default cell height the cursor and text share an origin and per-row
+      step): it was a host TUI repainting non-atomically under heavy load.
+      kettle already renders apps that use synchronized output (DEC private mode
+      2026) as atomic frames — the engine buffers a sync block so the renderer
+      only ever locks a consistent grid — now pinned by a regression test so a
+      future change to the byte-extraction path can't silently break it.
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
