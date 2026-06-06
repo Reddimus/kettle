@@ -508,7 +508,13 @@ pub struct Renderer {
     /// + re-decoded when the config path changes.
     bg_image_cache: Option<(String, kettle_core::ImageData)>,
 
-    font_family: String,
+    /// `Arc<str>` so `render_frame_with_status`'s per-frame
+    /// `self.font_family.clone()` (needed to satisfy the borrow checker while
+    /// `&mut self.font_system` is held alongside ~20 `Family::Name(&family)`
+    /// reads) is a refcount bump, not a heap alloc + memcpy at 60fps. `Arc<str>`
+    /// derefs to `str`, so every `Family::Name(&family)` site is unchanged
+    /// (cycle 845, audit).
+    font_family: Arc<str>,
     font_size: f32,
     metrics: Metrics,
     pub cell_w: f32,
@@ -704,7 +710,7 @@ impl Renderer {
             menu_text_renderer,
             imgs,
             bg_image_cache: None,
-            font_family: cfg.font_family.clone(),
+            font_family: cfg.font_family.as_str().into(),
             font_size,
             metrics,
             cell_w,
@@ -798,10 +804,10 @@ impl Renderer {
     /// part of a reload was visible (silent partial-apply, same family as
     /// the cycle-44+ "reload doesn't re-flow downstream caches" gap).
     pub fn set_font_family(&mut self, family: String) {
-        if self.font_family == family {
+        if self.font_family.as_ref() == family.as_str() {
             return;
         }
-        self.font_family = family;
+        self.font_family = family.into();
         self.remeasure_cell();
     }
 
@@ -4901,6 +4907,30 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             src.contains("ordered.sort_by_key(|p| p.z)"),
             "2+ image placements must still be z-sorted so higher z lands on top"
+        );
+    }
+
+    /// Cycle 845 drift guard (audit). `render_frame_with_status` clones
+    /// `self.font_family` every frame (to hold an owned handle while
+    /// `&mut self.font_system` is borrowed across ~20 `Family::Name(&family)`
+    /// reads). The field must stay `Arc<str>` so that clone is a refcount bump,
+    /// not a per-frame heap alloc + memcpy at 60fps. A behavioral test needs a
+    /// GPU `Renderer`; pin the field type at the source level.
+    #[test]
+    fn font_family_is_arc_str_not_string() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("font_family: Arc<str>,"),
+            "Renderer.font_family must be Arc<str> so the per-frame clone is a \
+             refcount bump, not a heap alloc"
+        );
+        // Build the needle at runtime so this very assertion isn't a false
+        // positive (the literal would otherwise appear in `src`).
+        let reverted = format!("font_family: {}", "String,");
+        assert!(
+            !src.contains(&reverted),
+            "Renderer.font_family must not revert to String (per-frame alloc on \
+             the 60fps render path)"
         );
     }
 }

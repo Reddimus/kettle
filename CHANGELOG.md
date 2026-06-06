@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 845, audit) — the renderer stops heap-allocating the
+    font family every frame.** `render_frame_with_status` cloned
+    `self.font_family` (a `String`) once per frame — a heap alloc + memcpy at
+    60fps — purely to hold an owned handle while `&mut self.font_system` is
+    borrowed across ~20 `Family::Name(&family)` reads. The field is now
+    `Arc<str>`, so the per-frame clone (and the one in `remeasure_cell`) is a
+    refcount bump. `Arc<str>` derefs to `str`, so every `Family::Name` site is
+    unchanged. Drift-guarded against a revert to `String`.
+
   - **Performance (cycle 844, audit) — image-escape extraction stops allocating
     on every non-image OSC/APC.** The OSC branch of the image extractor built a
     full owned `String` from every sequence — titles, colors, OSC 8 hyperlinks,
