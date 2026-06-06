@@ -125,6 +125,14 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+# Cycle 838 (audit): strip symbols from the shipped binary. Cross-platform and
+# toolchain-native — ELF/Mach-O have their symbol tables removed in place
+# (~several MB smaller; the release artifacts were unstripped), and on MSVC
+# debuginfo already lives in a separate (unshipped) `.pdb`, so this is a no-op
+# there. panic=abort means no backtraces are expected in release anyway. If
+# post-mortem symbolication is ever wanted, switch to `strip = "debuginfo"` +
+# `split-debuginfo = "packed"` and archive the sidecar.
+strip = "symbols"
 
 [profile.dev]
 opt-level = 1

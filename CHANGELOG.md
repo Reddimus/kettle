@@ -9,6 +9,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Build/CI (cycle 838, audit) — smaller release binaries + per-leg release
+    cache.** The release profile now sets `strip = "symbols"`, so the shipped
+    ELF/Mach-O binaries drop their (unused, `panic=abort`) symbol tables and
+    shrink several MB (MSVC keeps debuginfo in a separate unshipped `.pdb`, so
+    it's a no-op there). The two `ubuntu-latest` release legs (x86_64 + aarch64)
+    now get a per-artifact `shared-key` so they stop thrashing one shared cache.
+    Also corrected the stale `crates/kettle/Cargo.toml` comment that described
+    the abandoned `AttachConsole`/`windows_subsystem` console approach instead of
+    the cycle-740 `GetConsoleProcessList`/`ShowWindow` one the code uses.
+
   - **Error-handling (cycle 837, audit) — `--check-config` flags enum + color
     typos too.** The cycle-826 diagnostic sweep covered bool keys but left enum
     keys (`status-bar`, `exit-action`, `backspace-/delete-binding`,
