@@ -49,14 +49,6 @@ impl Rgb {
         }
         x11_name(&s.to_ascii_lowercase())
     }
-
-    pub fn to_array_f32(self) -> [f32; 3] {
-        [
-            self.r as f32 / 255.0,
-            self.g as f32 / 255.0,
-            self.b as f32 / 255.0,
-        ]
-    }
 }
 
 /// Parse one component of an X11/xterm `rgb:<r>/<g>/<b>` color into 8-bit.

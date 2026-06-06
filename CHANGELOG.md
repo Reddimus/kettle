@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Correctness/cleanup (cycle 858, audit) — four small fixes.** (1) Config
+    float values now reject `NaN`/`inf` before clamping (`clamp(NaN)` returns
+    `NaN`, which would have poisoned opacity/cell-size/darkness etc.); a
+    non-finite value keeps the finite default. (2) The tmux control-mode `%output`
+    octal decoder rejects values `400`–`777` (256–511) instead of truncating
+    them to a wrong byte. (3) Removed a dead, non-gamma-correct `Rgb::to_array_f32`
+    helper (misuse risk). (4) Removed a dead duplicate match arm in the
+    placeholder column-inheritance logic. Unit-tested.
+
   - **Input correctness (cycle 857, audit) — three small fixes.** (1) The search
     overlay now filters control characters before appending to the query (like
     the title / SSH-input handlers already did), so a stray control byte can't

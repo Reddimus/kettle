@@ -2413,7 +2413,9 @@ impl Config {
                     // diagnostics. Cycle-131 surfaces out-of-range as
                     // a warning; cycle 139 makes the stored value
                     // match reality too. Parse-fail keeps the default.
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.font_size = v.clamp(5.0, 72.0);
                     }
                 }
@@ -2556,7 +2558,9 @@ impl Config {
                     // already-clamped siblings (`unfocused-split-
                     // opacity`, `scroll-multiplier`, `minimum-contrast`,
                     // `cursor-blink-interval`).
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.background_opacity = v.clamp(0.0, 1.0);
                     }
                 }
@@ -2850,12 +2854,16 @@ impl Config {
                 // config doesn't trigger `--check-config` warnings.
                 "enabled-plugins" | "enabled_plugins" => {}
                 "inactive-color-offset" | "inactive_color_offset" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.inactive_color_offset = v.clamp(0.0, 1.0);
                     }
                 }
                 "inactive-bg-color-offset" | "inactive_bg_color_offset" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.inactive_bg_color_offset = v.clamp(0.0, 1.0);
                     }
                 }
@@ -3003,7 +3011,9 @@ impl Config {
                 }
                 "tab-bar-width" | "tab_bar_width" => {
                     // Cycle 673 (vertical-tabs sub-cycle 7).
-                    if let Ok(v) = e.value.trim().parse::<f32>() {
+                    if let Ok(v) = e.value.trim().parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.tab_bar_width = v.clamp(40.0, 600.0);
                     }
                 }
@@ -3117,17 +3127,23 @@ impl Config {
                     }
                 }
                 "background-darkness" | "background_darkness" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.background_darkness = v.clamp(0.0, 1.0);
                     }
                 }
                 "cell-height" | "cell_height" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.cell_height = v.clamp(0.5, 3.0);
                     }
                 }
                 "cell-width" | "cell_width" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.cell_width = v.clamp(0.5, 3.0);
                     }
                 }
@@ -3148,17 +3164,23 @@ impl Config {
                     };
                 }
                 "unfocused-split-opacity" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.unfocused_split_opacity = v.clamp(0.1, 1.0);
                     }
                 }
                 "scroll-multiplier" | "mouse-scroll-multiplier" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.scroll_multiplier = v.clamp(0.1, 50.0);
                     }
                 }
                 "minimum-contrast" => {
-                    if let Ok(v) = e.value.parse::<f32>() {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
                         cfg.minimum_contrast = v.clamp(0.0, 21.0);
                     }
                 }
@@ -5885,6 +5907,24 @@ mod config_tests {
         assert_eq!(cfg.command_notify_threshold_ms, 0);
         let cfg = Config::parse_text("command-notify-threshold-ms = 999999999\n");
         assert_eq!(cfg.command_notify_threshold_ms, 86_400_000);
+    }
+
+    /// Cycle 858 (audit): `nan`/`inf` parse as valid `f32`, and `clamp(NaN)`
+    /// returns NaN — defeating the clamp's "keep the runtime safe" purpose. A
+    /// non-finite value must be rejected, leaving the field at its finite
+    /// default rather than poisoning rendering with NaN.
+    #[test]
+    fn non_finite_floats_are_rejected_keeping_default() {
+        let def = Config::default();
+        let cfg = Config::parse_text("background-opacity = nan\n");
+        assert_eq!(cfg.background_opacity, def.background_opacity);
+        assert!(cfg.background_opacity.is_finite());
+        let cfg = Config::parse_text("cell-height = inf\ncell-width = -inf\n");
+        assert_eq!(cfg.cell_height, def.cell_height);
+        assert_eq!(cfg.cell_width, def.cell_width);
+        let cfg = Config::parse_text("background-darkness = NaN\ntab-bar-width = inf\n");
+        assert_eq!(cfg.background_darkness, def.background_darkness);
+        assert_eq!(cfg.tab_bar_width, def.tab_bar_width);
     }
 
     /// Cycle 613 drift guard. `force-no-bell = true` overrides the

@@ -138,9 +138,9 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
         };
         let col = match c.diacritics.col {
             Some(cc) => cc,
-            None if same_neighbor && c.diacritics.row.is_none() => {
-                left.map(|l| l.col + 1).unwrap_or(0)
-            }
+            // Cycle 858 (audit): the previous `same_neighbor && row.is_none()`
+            // arm produced the same `left.col + 1` as the plain `same_neighbor`
+            // arm below, so it was a dead duplicate — merged.
             None if same_neighbor => left.map(|l| l.col + 1).unwrap_or(0),
             None => 0,
         };

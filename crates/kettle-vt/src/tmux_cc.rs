@@ -249,7 +249,11 @@ fn parse_output(rest: &str) -> Option<TmuxEvent> {
             let d1 = chars.next()?.to_digit(8)?;
             let d2 = chars.next()?.to_digit(8)?;
             let d3 = chars.next()?.to_digit(8)?;
-            let byte = (d1 * 64 + d2 * 8 + d3) as u8;
+            // Cycle 858 (audit): octal 400..777 (= 256..511) exceeds a byte.
+            // tmux only emits 000..377 for real bytes, so a larger value is
+            // malformed — reject the event rather than silently truncating it
+            // to a wrong byte with `as u8`.
+            let byte = u8::try_from(d1 * 64 + d2 * 8 + d3).ok()?;
             bytes.push(byte);
         } else {
             // tmux emits ASCII directly; UTF-8 multibyte glyphs in
@@ -320,6 +324,24 @@ mod tests {
                 assert_eq!(*pane_id, 3);
                 assert_eq!(data, b"hello\r\nworld");
             }
+            other => panic!("expected Output, got {other:?}"),
+        }
+    }
+
+    /// Cycle 858 (audit): octal 400..777 (256..511) exceeds a byte. tmux only
+    /// emits 000..377 for real bytes, so a larger value is malformed — the
+    /// event is dropped rather than silently truncated to a wrong byte.
+    #[test]
+    fn output_rejects_octal_byte_overflow() {
+        assert!(
+            drain(b"%output %1 x\\777\n").is_empty(),
+            "octal > 377 must be rejected, not truncated"
+        );
+        // \377 = 255 is the maximum valid byte and still decodes.
+        let evs = drain(b"%output %1 \\377\n");
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            TmuxEvent::Output { data, .. } => assert_eq!(data, &[255u8]),
             other => panic!("expected Output, got {other:?}"),
         }
     }
