@@ -9,6 +9,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 831, audit) — side mouse buttons no longer leak behind a
+    modal.** The cycle-810 Back/Forward forwarding ran *above* the modal-input
+    gate, so with any dialog open (search/palette/settings/ssh/…) over a
+    mouse-tracking TUI, a side-button press/release injected SGR bytes into the
+    app behind the dialog — the exact leak cycle 786 closed for the other
+    buttons. The forward is now gated by `modal_swallows_pointer` (a lone context
+    menu still passes). Source drift guard added.
+
   - **Fix (cycle 830, audit) — Sixel numeric parsing can't overflow-abort.**
     `read_num` accumulated `v * 10 + d` over an attacker-controlled digit run (up
     to a 64 MiB DCS body) with no overflow guard — a ~20-digit count/dimension

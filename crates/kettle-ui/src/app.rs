@@ -8476,8 +8476,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // Cycle 810 (audit): forward Back / Forward (buttons 8 / 9) to
                 // a mouse-tracking app rather than dropping them. No local UI
                 // meaning, so they no-op when tracking is off.
+                // Cycle 831 (audit): gate behind an open modal — this forward
+                // sat ABOVE the modal check below, so a side-button press leaked
+                // SGR into a tracking TUI *behind* a search/palette/settings/…
+                // dialog (the exact leak cycle 786 closed for L/M/R + wheel). A
+                // lone context menu isn't a modal here.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    self.send_mouse(sgr, true, false);
+                    if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
+                        self.send_mouse(sgr, true, false);
+                    }
                     return;
                 }
                 let bcode = match button {
@@ -8916,8 +8923,11 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 // Cycle 810 (audit): release report for the side buttons, so a
                 // tracking app sees the matching button-up after the press.
+                // Cycle 831 (audit): gated behind an open modal, matching Pressed.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    self.send_mouse(sgr, false, false);
+                    if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
+                        self.send_mouse(sgr, false, false);
+                    }
                     return;
                 }
                 let bcode = match button {
@@ -9515,6 +9525,24 @@ mod tests {
         // Defensive: even if both were somehow set, the context-menu
         // exclusion wins (its dedicated handling ran first).
         assert!(!modal_swallows_pointer(true, true));
+    }
+
+    /// Cycle 831 (audit) drift guard. The cycle-810 side-button (Back/Forward)
+    /// forward must be gated behind the modal check — it once sat above it and
+    /// leaked SGR into a tracking TUI behind a dialog. A behavioral test needs a
+    /// modal + tracking PTY; pin the gated shape at the source level. Both the
+    /// Pressed and Released arms must guard `send_mouse(sgr, …)` with
+    /// `!modal_swallows_pointer(…)` inside the `extra_mouse_sgr` block.
+    #[test]
+    fn side_button_forward_is_modal_gated() {
+        let src = include_str!("app.rs");
+        let gated = src
+            .matches("if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {\n                        self.send_mouse(sgr,")
+            .count();
+        assert!(
+            gated >= 2,
+            "both Pressed and Released side-button forwards must be modal-gated (found {gated})"
+        );
     }
 
     fn item(label: &'static str, enabled: bool) -> ContextMenuItem {
