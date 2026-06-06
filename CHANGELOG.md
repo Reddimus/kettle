@@ -17,6 +17,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **Docs/packaging (cycle 864, audit) — accuracy fixes from the fresh review.**
+    The man page listed `~/Library/Application Support` as the macOS config path,
+    but the resolver is `XDG_CONFIG_HOME` → `$HOME/.config` → `%APPDATA%` with no
+    `~/Library` branch — so macOS actually reads `~/.config/kettle/config` (a
+    macOS user following `man kettle` was editing a file kettle never reads).
+    Vi-mode (a shipped, default-bound feature) is now documented in CONFIG.md's
+    action list. The INSTALL.md support table no longer overstates Linux aarch64
+    as flat "Tier 1" — its CI build is `continue-on-error`, so it's labelled
+    Tier 1.5 (best-effort prebuilt). The Homebrew formula and AUR PKGBUILD were
+    bumped from a 2-major-stale `v1.42.0` to the current `v2.7.1` with refreshed
+    SHA-256s. The README's "Eight CI workflows" headline (it then listed nine
+    checks, several of them stages within `ci.yml`) was reworded to drop the
+    inaccurate count.
+
   - **Hardening (cycle 863, audit) — six small robustness fixes from the fresh
     review.** (1) The SSH-host input now filters control characters like its
     sibling handlers (a cycle-857 comment had wrongly claimed it already did).

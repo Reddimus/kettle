@@ -439,9 +439,15 @@ Copy / Paste / Split Right / Split Down / Close Pane / New Tab.
 .SH CONFIGURATION
 Configuration lives at
 .IR ~/.config/kettle/config
-(Linux),
-.IR ~/Library/Application\ Support/kettle/config
-(macOS), or
+(Linux and macOS \(em the resolver is
+.B XDG_CONFIG_HOME
+\(->
+.IR $HOME/.config ,
+so macOS uses the same
+.I ~/.config
+path, not
+.IR ~/Library ),
+or
 .IR %APPDATA%\\kettle\\config
 (Windows). Format is Ghostty-style
 .RI """ key " = " value """

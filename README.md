@@ -29,7 +29,7 @@ and **WezTerm** into one tool.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
-> Eight CI workflows gate every push: build/test on all three OSes →
+> CI gates every push with these checks: build/test on all three OSes →
 > `cargo doc -D warnings` → headless GPU smoke → `--screenshot-menu`
 > visual regression → MSRV (Rust 1.89) verify → `cargo audit` →
 > `cargo deny` (licenses + sources + bans) → `cargo machete` (unused

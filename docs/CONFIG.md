@@ -274,6 +274,11 @@ scrollback only; keep the visible screen unlike `reset`).
 but bindable to a keyboard trigger if you want the menu opened at the
 cursor position).
 
+**Vi-mode**: `toggle_vi_mode` (`vi_mode` / `vi`) — enter keyboard-driven
+copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
+`0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `y` yanks it to
+the clipboard, `Esc` exits. See `man kettle` for the full keymap.
+
 **Misc**: `reset` (RIS — full terminal reset including engine state),
 `reload_config`.
 

@@ -4,12 +4,15 @@
 
 | Platform | Arch | Support |
 |---|---|---|
-| Linux | x86_64, aarch64 | **Tier 1** — prebuilt binary + one-line installer |
+| Linux | x86_64 | **Tier 1** — prebuilt binary + one-line installer |
+| Linux | aarch64 | **Tier 1.5** — prebuilt binary + one-line installer, but the CI build is *best-effort* (`continue-on-error`); an occasional release may ship without the ARM tarball (the installer then falls back to a source build) |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
-Tier-1 targets are built and SHA-256-signed in CI for every release. Tier-2
+Tier-1 targets are built and SHA-256-signed in CI for every release (the
+Tier-1.5 aarch64 leg is too, but its CI build is non-blocking, so its presence
+in any given release isn't guaranteed). Tier-2
 targets have no prebuilt binary; `scripts/install-online.sh` points you at a
 source build (or `nix run github:Reddimus/kettle` to try it in a sandbox first).
 
