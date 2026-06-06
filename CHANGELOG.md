@@ -9,6 +9,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 832, audit) — the `=` key can be rebound.** `keybind`
+    parsing split the trigger/action on the *first* `=`, but the `=` key is a
+    shipped default trigger, so `keybind = ctrl+==increase_font_size` parsed as
+    trigger `ctrl+` (rejected) and was silently dropped — and `--check-config`
+    flagged the reasonable line as malformed. Action names never contain `=`, so
+    it now splits on the *last* `=` (binder + validator agree). Regression-tested.
+
   - **Fix (cycle 831, audit) — side mouse buttons no longer leak behind a
     modal.** The cycle-810 Back/Forward forwarding ran *above* the modal-input
     gate, so with any dialog open (search/palette/settings/ssh/…) over a

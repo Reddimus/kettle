@@ -2089,7 +2089,10 @@ impl Config {
                 // The action half also accepts the unbind sentinels
                 // (`unbind`, `none`, `null`, `false`, empty) — those
                 // mean "remove this default trigger", not "malformed".
-                "keybind" => v.split_once('=').is_some_and(|(t, a)| {
+                // Cycle 832 (audit): split on the LAST `=` to agree with
+                // apply_keybind — else rebinding the `=` key (`ctrl+==…`) was
+                // both dropped AND flagged here as a false-positive "malformed".
+                "keybind" => v.rsplit_once('=').is_some_and(|(t, a)| {
                     let act = a.trim();
                     keybinds::parse_trigger(t.trim()).is_some()
                         && (keybinds::is_unbind_token(act) || Action::from_name(act).is_some())

@@ -1099,7 +1099,13 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     if value.is_empty() {
         return;
     }
-    let Some((trig, act)) = value.split_once('=') else {
+    // Cycle 832 (audit): split on the LAST `=`, not the first. The trigger can
+    // BE the `=` key (a shipped default binding), so `ctrl+==increase_font_size`
+    // must parse as trigger `ctrl+=` / action `increase_font_size`. Action names
+    // are `[a-z0-9_:-]` and never contain `=`, so the final `=` is unambiguously
+    // the separator. `split_once` cut at the first `=` → trigger `ctrl+` (a
+    // trailing-empty chord parse_trigger rejects), silently dropping the rebind.
+    let Some((trig, act)) = value.rsplit_once('=') else {
         return;
     };
     let Some(t) = parse_trigger(trig) else {
@@ -1619,6 +1625,28 @@ mod tests {
         apply_keybind(&mut mm, "ctrl+alt+§=unbind");
         assert_eq!(mm.len(), before, "unbinding a free trigger is a no-op");
         let _ = unused;
+    }
+
+    /// Cycle 832 (audit): the `=` key can itself be a trigger (a shipped
+    /// default), so a rebind line splits on the LAST `=`, not the first.
+    #[test]
+    fn apply_keybind_rebinds_the_equals_key() {
+        let mut m = defaults();
+        let eq = Trigger::new(Mods::CTRL, Key::Char('='));
+        // ctrl+= ships as IncreaseFontSize; rebind it to a different action.
+        apply_keybind(&mut m, "ctrl+==reset_font_size");
+        assert_eq!(
+            m.get(&eq),
+            Some(&Action::ResetFontSize),
+            "ctrl+==reset_font_size must split on the LAST = (trigger ctrl+=)"
+        );
+        // ctrl+shift+= too (multi-modifier chord ending in the = key).
+        apply_keybind(&mut m, "ctrl+shift+==decrease_font_size");
+        let eqs = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('='));
+        assert_eq!(m.get(&eqs), Some(&Action::DecreaseFontSize));
+        // And unbinding it works through the same split.
+        apply_keybind(&mut m, "ctrl+==unbind");
+        assert!(!m.contains_key(&eq));
     }
 
     #[test]
