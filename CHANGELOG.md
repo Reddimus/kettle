@@ -9,6 +9,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 850, audit) — background-image blur is O(W·H) with one
+    scratch buffer.** The startup Gaussian-approximation blur allocated a fresh
+    full-image `Vec` in each of its six sub-passes (up to 6 × 256 MB transient at
+    `MAX_BG_IMAGE_DIM`) and summed `2r+1` samples *per pixel* (O(W·H·R)). It now
+    reuses a single scratch buffer (swapped each pass) and a telescoping
+    sliding-window running sum (O(W·H) regardless of radius). The constant
+    `2r+1` divisor is preserved, so output is byte-identical — guarded by a test
+    that diffs the new blur against the old brute force across odd/even/degenerate
+    dimensions and a radius larger than the image.
+
   - **Performance (cycle 849, audit) — animated-image frame selection stops
     allocating per paint.** `current_frame` (kitty animation playback) collected
     a `Vec` of the displayable frames on every call — and it's invoked from

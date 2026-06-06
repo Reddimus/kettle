@@ -71,64 +71,77 @@ fn box_blur(img: &mut BgImage, radius: u32) {
         return;
     }
     let r = radius.min(16);
+    // Cycle 850 (audit): one scratch buffer reused across all six sub-passes
+    // (the old code allocated a fresh full-image Vec in each — up to 6 × 256 MB
+    // at MAX_BG_IMAGE_DIM). Each pass writes into `scratch` then swaps, so the
+    // result always lands back in `img.rgba`.
+    let mut scratch = vec![0u8; img.rgba.len()];
     for _ in 0..3 {
-        box_blur_horizontal(img, r);
-        box_blur_vertical(img, r);
+        box_blur_axis(img, r, true, &mut scratch);
+        box_blur_axis(img, r, false, &mut scratch);
     }
 }
 
-fn box_blur_horizontal(img: &mut BgImage, r: u32) {
-    let w = img.width as i32;
-    let h = img.height as i32;
-    let mut out = vec![0u8; img.rgba.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let mut sum = [0u32; 4];
-            let mut count = 0u32;
-            for dx in -(r as i32)..=(r as i32) {
-                let xx = (x + dx).clamp(0, w - 1);
-                let i = (y as usize * w as usize + xx as usize) * 4;
-                sum[0] += img.rgba[i] as u32;
-                sum[1] += img.rgba[i + 1] as u32;
-                sum[2] += img.rgba[i + 2] as u32;
-                sum[3] += img.rgba[i + 3] as u32;
-                count += 1;
+/// One separable box-blur pass along the horizontal (`horizontal == true`) or
+/// vertical axis, reading `img.rgba` and writing the blurred result back into
+/// it via `scratch`.
+///
+/// Cycle 850 (audit): a sliding-window running sum makes the pass O(W·H)
+/// regardless of radius (the old code summed `2r+1` samples *per pixel*,
+/// O(W·H·R)). The divisor stays a constant `2r+1` — like the old brute force,
+/// which counted every clamped sample — so the output is byte-identical. The
+/// telescoping `sum += entering − leaving` holds even under edge clamping
+/// because the clamp is applied per index consistently on both windows.
+fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<u8>) {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let r = r as usize;
+    let win = (2 * r + 1) as u32;
+    // `len` = number of pixels along the blur axis; `lines` = the other axis.
+    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
+    // Index of pixel `pos` on line `line`, mapped back to a flat rgba offset.
+    let offset = |line: usize, pos: usize| -> usize {
+        let (x, y) = if horizontal { (pos, line) } else { (line, pos) };
+        (y * w + x) * 4
+    };
+    let last = len as isize - 1;
+    let src = &img.rgba;
+    let dst = scratch.as_mut_slice();
+    for line in 0..lines {
+        // Initial window centered at pos 0 (the left/top side clamps to 0).
+        let mut sum = [0u32; 4];
+        for d in -(r as isize)..=(r as isize) {
+            let i = offset(line, d.clamp(0, last) as usize);
+            sum[0] += src[i] as u32;
+            sum[1] += src[i + 1] as u32;
+            sum[2] += src[i + 2] as u32;
+            sum[3] += src[i + 3] as u32;
+        }
+        for pos in 0..len {
+            let o = offset(line, pos);
+            dst[o] = (sum[0] / win) as u8;
+            dst[o + 1] = (sum[1] / win) as u8;
+            dst[o + 2] = (sum[2] / win) as u8;
+            dst[o + 3] = (sum[3] / win) as u8;
+            if pos + 1 < len {
+                // Slide to pos+1: add entering (pos+1+r), drop leaving (pos−r),
+                // both clamped — keeps the constant `win` divisor.
+                let entering = offset(
+                    line,
+                    (pos as isize + 1 + r as isize).clamp(0, last) as usize,
+                );
+                let leaving = offset(line, (pos as isize - r as isize).clamp(0, last) as usize);
+                sum[0] = sum[0] + src[entering] as u32 - src[leaving] as u32;
+                sum[1] = sum[1] + src[entering + 1] as u32 - src[leaving + 1] as u32;
+                sum[2] = sum[2] + src[entering + 2] as u32 - src[leaving + 2] as u32;
+                sum[3] = sum[3] + src[entering + 3] as u32 - src[leaving + 3] as u32;
             }
-            let o = (y as usize * w as usize + x as usize) * 4;
-            out[o] = (sum[0] / count) as u8;
-            out[o + 1] = (sum[1] / count) as u8;
-            out[o + 2] = (sum[2] / count) as u8;
-            out[o + 3] = (sum[3] / count) as u8;
         }
     }
-    img.rgba = out;
-}
-
-fn box_blur_vertical(img: &mut BgImage, r: u32) {
-    let w = img.width as i32;
-    let h = img.height as i32;
-    let mut out = vec![0u8; img.rgba.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let mut sum = [0u32; 4];
-            let mut count = 0u32;
-            for dy in -(r as i32)..=(r as i32) {
-                let yy = (y + dy).clamp(0, h - 1);
-                let i = (yy as usize * w as usize + x as usize) * 4;
-                sum[0] += img.rgba[i] as u32;
-                sum[1] += img.rgba[i + 1] as u32;
-                sum[2] += img.rgba[i + 2] as u32;
-                sum[3] += img.rgba[i + 3] as u32;
-                count += 1;
-            }
-            let o = (y as usize * w as usize + x as usize) * 4;
-            out[o] = (sum[0] / count) as u8;
-            out[o + 1] = (sum[1] / count) as u8;
-            out[o + 2] = (sum[2] / count) as u8;
-            out[o + 3] = (sum[3] / count) as u8;
-        }
-    }
-    img.rgba = out;
+    std::mem::swap(&mut img.rgba, scratch);
 }
 
 pub fn decode_bg_image(path: &str) -> Option<BgImage> {
@@ -213,6 +226,77 @@ pub fn decode_bg_image_with_blur(path: &str, blur_radius: u32) -> Option<BgImage
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pre-cycle-850 O(W·H·R) brute force, kept as a correctness oracle.
+    fn box_blur_reference(img: &mut BgImage, radius: u32) {
+        if radius == 0 || img.width == 0 || img.height == 0 {
+            return;
+        }
+        let r = (radius.min(16)) as i32;
+        let pass = |img: &mut BgImage, horizontal: bool| {
+            let w = img.width as i32;
+            let h = img.height as i32;
+            let mut out = vec![0u8; img.rgba.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = [0u32; 4];
+                    let mut count = 0u32;
+                    for d in -r..=r {
+                        let (xx, yy) = if horizontal {
+                            ((x + d).clamp(0, w - 1), y)
+                        } else {
+                            (x, (y + d).clamp(0, h - 1))
+                        };
+                        let i = (yy as usize * w as usize + xx as usize) * 4;
+                        sum[0] += img.rgba[i] as u32;
+                        sum[1] += img.rgba[i + 1] as u32;
+                        sum[2] += img.rgba[i + 2] as u32;
+                        sum[3] += img.rgba[i + 3] as u32;
+                        count += 1;
+                    }
+                    let o = (y as usize * w as usize + x as usize) * 4;
+                    out[o] = (sum[0] / count) as u8;
+                    out[o + 1] = (sum[1] / count) as u8;
+                    out[o + 2] = (sum[2] / count) as u8;
+                    out[o + 3] = (sum[3] / count) as u8;
+                }
+            }
+            img.rgba = out;
+        };
+        for _ in 0..3 {
+            pass(img, true);
+            pass(img, false);
+        }
+    }
+
+    /// Cycle 850 drift guard: the O(W·H) sliding-window blur must be
+    /// byte-identical to the O(W·H·R) brute force it replaced, across odd/even
+    /// dimensions, single-row/column degenerates, and a radius larger than the
+    /// image (the clamping edge case).
+    #[test]
+    fn box_blur_matches_reference_brute_force() {
+        for (w, h) in [(7usize, 5usize), (2, 2), (1, 9), (9, 1), (16, 16)] {
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    for c in 0..4 {
+                        rgba.push(((x * 31 + y * 17 + c * 7 + 13) % 256) as u8);
+                    }
+                }
+            }
+            for r in [1u32, 2, 3, 16] {
+                let mut a = BgImage {
+                    width: w as u32,
+                    height: h as u32,
+                    rgba: rgba.clone(),
+                };
+                let mut b = a.clone();
+                box_blur(&mut a, r);
+                box_blur_reference(&mut b, r);
+                assert_eq!(a.rgba, b.rgba, "blur mismatch at {w}x{h} r={r}");
+            }
+        }
+    }
 
     #[test]
     fn empty_path_is_none() {
