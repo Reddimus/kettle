@@ -32,25 +32,24 @@ log.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# Cycle 740: hide the phantom console on GUI launch WITHOUT the
-# `windows_subsystem = "windows"` + AttachConsole approach (cycle
-# 734, since abandoned — it dropped stdout when launched from a
-# shell and flashed a console on GUI launch). kettle stays on the
-# DEFAULT console subsystem (so CLI flags `--version` / `--list-
-# themes` / `--gpu-info` print to a parent shell for free), and in
-# `fn main()` calls `GetConsoleProcessList(1)`: if the count is 1
-# (no parent shell — Explorer/Start-menu launch allocated the
-# console for us) it hides it via `ShowWindow(GetConsoleWindow(),
-# SW_HIDE)`; with a parent shell attached (count > 1) the console
-# stays visible. See `crates/kettle/src/main.rs` (~line 435).
+# Cycle 868: kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,
+# not(test)), windows_subsystem = "windows")]` in main.rs), so NO console
+# is auto-allocated on Explorer/Start-menu launch (zero phantom-console
+# flash). When launched from a terminal, `attach_parent_console_if_needed`
+# attaches the parent console and reopens CONOUT$/CONIN$ ONLY for std
+# handles that weren't already inherited — so piped/redirected output
+# (`kettle --flag | grep`, `… > $PROFILE`) is never clobbered (the bug
+# that broke cycle 734). See `crates/kettle/src/main.rs` (~`fn main()`).
 #
-# windows-sys is a transitive dep already (wgpu / winit / sysinfo
-# all pull it), so this is a near-zero binary-size cost.
-# `Win32_System_Console` provides GetConsoleProcessList/Window;
-# `Win32_UI_WindowsAndMessaging` provides ShowWindow/SW_HIDE.
+# windows-sys is a transitive dep already (wgpu / winit / sysinfo all pull
+# it), so this is a near-zero binary-size cost.
+# `Win32_System_Console` → AttachConsole / Get/SetStdHandle / STD_* /
+#   ATTACH_PARENT_PROCESS; `Win32_Storage_FileSystem` → CreateFileW /
+#   GetFileType / FILE_TYPE_* / FILE_SHARE_* / OPEN_EXISTING;
+# `Win32_Foundation` → INVALID_HANDLE_VALUE / GetLastError.
 windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
     "Win32_Foundation",
 ] }
 

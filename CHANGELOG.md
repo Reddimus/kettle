@@ -4,6 +4,21 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  Windows 11 polish + new capabilities, bundled toward v2.9.0.
+
+  - **Windows (cycle 868) — no more phantom console window/flash on launch.**
+    kettle now builds as a Windows GUI-subsystem app, so Explorer / Start-menu
+    launches never auto-allocate a console (the brief console flash is gone).
+    When launched from a terminal it attaches the parent console so CLI
+    subcommands (`--version`, `--check-update`, `--print-completions`,
+    `--shell-integration`, …) still print — and, unlike the abandoned cycle-734
+    attempt, it reopens `CONOUT$` ONLY for std handles that aren't already
+    inherited (detected via `GetFileType`), so piped/redirected output
+    (`kettle --flag | grep`, `… >> $PROFILE`) is never clobbered. The drift test
+    now guards the GUI-subsystem attribute + the conditional-attach guard.
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
