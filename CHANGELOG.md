@@ -6,8 +6,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.7.1] — 2026-06-05
+
   Post-v2.7.0 hardening from a fresh multi-agent production audit (each finding
-  3-lens adversarially verified; cycles 813+, accumulating toward v2.7.1):
+  3-lens adversarially verified; cycles 813–828):
 
   - **Security/panic-safety (cycle 813) — kitty graphics can't abort kettle via
     an oversized texture.** The kitty `f=32`/`f=24` raw-pixel branches built an
