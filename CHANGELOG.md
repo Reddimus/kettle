@@ -17,6 +17,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **CI (cycle 866, audit) — PowerShell shell-integration is now smoked.** The
+    CLI smoke loops covered `bash`/`zsh`/`fish` but not `powershell` — the one
+    shell-integration target Windows users actually use (`install.ps1
+    -WithShellIntegration`). Both `--shell-integration powershell` and
+    `--print-completions powershell` are now exercised end-to-end in CI (verified
+    locally: 66-line OSC-133 snippet + a 10 KB completion script).
+
   - **Rendering/search (cycle 865, audit) — two small correctness fixes.** The
     cell-measurement probe sized its layout box at a fixed 1000×100px, but at a
     large font on a high-DPI display the 10-glyph probe (~1300px at 72pt×3)

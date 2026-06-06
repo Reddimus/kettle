@@ -363,7 +363,10 @@ jobs:
           # invariant in every snippet's header — if a maintainer
           # rewrites the script without that comment, this fails
           # and they have to touch this smoke step on purpose.
-          for sh in bash zsh fish; do
+          # Cycle 866 (audit): `powershell` is included — it's the one
+          # shell-integration target Windows users actually use
+          # (install.ps1 -WithShellIntegration), so it must be smoked too.
+          for sh in bash zsh fish powershell; do
             cargo run -q -p kettle -- --shell-integration "$sh" > "/tmp/k.${sh}"
             grep -q "OSC 133" "/tmp/k.${sh}"
             test "$(wc -l < /tmp/k.${sh})" -gt 8
@@ -379,7 +382,7 @@ jobs:
           # 'print_completions_emits_per_shell_scripts' is the
           # primary contract; this is the CLI-surface end-to-end
           # smoke for the wiring between Cli and clap_complete.
-          for sh in bash zsh fish; do
+          for sh in bash zsh fish powershell; do
             cargo run -q -p kettle -- --print-completions "$sh" > "/tmp/k.completions.${sh}"
             test "$(wc -c < /tmp/k.completions.${sh})" -gt 200
             grep -q "kettle" "/tmp/k.completions.${sh}"
