@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 835, audit) — a stray key in the keybind-capture overlay can't
+    soft-brick typing.** Settings → keybind capture bound whatever key was
+    pressed with no guard, so a modifier-less mis-press (a bare `a`) inserted
+    `Trigger { mods: empty, key: 'a' }` into the config — and the global key path
+    matched it before text encoding, so every future `a` fired the action across
+    all panes, persisted, with no in-overlay unbind. Capture now refuses a
+    modifier-less chord for text/essential keys (only F-keys may be unmodified)
+    and shows a "hold a modifier" hint instead of binding.
+
   - **Fix (cycle 834, audit) — the new-tab `▾` shell dropdown can't freeze the
     window.** Opening it ran `detect_shells()` synchronously on the UI thread,
     including a `wsl.exe -l -q` subprocess with no timeout — so a cold or wedged

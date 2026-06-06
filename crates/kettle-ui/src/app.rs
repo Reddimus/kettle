@@ -7337,10 +7337,22 @@ impl App {
                 return;
             }
             if let Some(kk) = to_kkey(key) {
+                let mods = to_mods(self.mods);
+                // Cycle 835 (audit): refuse a modifier-less binding to a
+                // text/essential key — it would shadow that key in normal typing
+                // everywhere, persisted, with no in-overlay unbind. Stay in
+                // capture mode and tell the user instead of soft-bricking.
+                if !keybind_chord_is_safe(mods, kk) {
+                    fire_notify(
+                        "kettle: keybind needs a modifier",
+                        "Hold Ctrl, Alt, or Shift with the key (or bind an F-key).",
+                    );
+                    return;
+                }
                 if let Some(action) = crate::settings::keybind_action(&cats[cat].fields[fld])
                     && let Some(act) = Action::from_name(action)
                 {
-                    let trig = Trigger::new(to_mods(self.mods), kk);
+                    let trig = Trigger::new(mods, kk);
                     let label = trig.label();
                     // Live: this chord now triggers the action.
                     self.cfg.keybinds.insert(trig, act);
@@ -7775,6 +7787,21 @@ fn to_kkey(key: &Key) -> Option<KKey> {
         },
         _ => return None,
     })
+}
+
+/// Whether a captured `(mods, key)` chord is safe to bind from the settings
+/// keybind-capture overlay.
+///
+/// Cycle 835 (audit): a modifier-LESS chord is rejected unless the key is an
+/// F-key. Binding e.g. a bare `a` (a mis-press during capture) inserted
+/// `Trigger { mods: empty, key: Char('a') }` into the keybinds AND the config
+/// file; afterward the global key path matched it before text encoding, so
+/// every future `a` fired the action instead of typing — across all panes,
+/// persisted across restarts, with no in-overlay unbind. Enter/Tab/arrows are
+/// likewise essential unmodified, so only F-keys (which produce no text) may be
+/// bound without a modifier.
+fn keybind_chord_is_safe(mods: Mods, key: KKey) -> bool {
+    !mods.is_empty() || matches!(key, KKey::F(_))
 }
 
 fn to_mods(m: ModifiersState) -> Mods {
@@ -10156,6 +10183,23 @@ mod tests {
             rows_tb < rows_no,
             "titlebar must reduce reported rows ({rows_tb} < {rows_no})"
         );
+    }
+
+    #[test]
+    fn keybind_chord_is_safe_rejects_modless_text_keys() {
+        use super::keybind_chord_is_safe;
+        use kettle_config::{Key as KKey, Mods};
+        // Modifier-less text/essential keys are REFUSED (the soft-brick).
+        assert!(!keybind_chord_is_safe(Mods::empty(), KKey::Char('a')));
+        assert!(!keybind_chord_is_safe(Mods::empty(), KKey::Enter));
+        assert!(!keybind_chord_is_safe(Mods::empty(), KKey::Tab));
+        assert!(!keybind_chord_is_safe(Mods::empty(), KKey::Up));
+        // A modifier-less F-key is fine (produces no text — F1=help etc.).
+        assert!(keybind_chord_is_safe(Mods::empty(), KKey::F(1)));
+        // Any modifier makes the chord safe.
+        assert!(keybind_chord_is_safe(Mods::CTRL, KKey::Char('a')));
+        assert!(keybind_chord_is_safe(Mods::ALT, KKey::Enter));
+        assert!(keybind_chord_is_safe(Mods::SHIFT, KKey::Char('z')));
     }
 
     #[test]
