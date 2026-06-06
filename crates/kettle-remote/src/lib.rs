@@ -180,6 +180,51 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
     detect_in_tree(child_pid, sys)
 }
 
+/// Cycle 851 (audit): a shared process snapshot for multi-pane polling.
+///
+/// `detect_remote_with` refreshes the OS-wide process list **and** rebuilds the
+/// parent→children index on every call. The app's poll loop calls it once per
+/// pane, so an N-pane window did N full process walks + N map builds every
+/// 200 ms tick. `RemoteScanner` splits that: [`refresh`](Self::refresh) does the
+/// one OS walk + one index build per tick, then [`detect_root`](Self::detect_root)
+/// answers each pane from the shared index (a cheap BFS + cache-hit argv reads).
+///
+/// `detect_remote` / `detect_remote_with` are kept for one-shot callers and
+/// existing tests.
+pub struct RemoteScanner {
+    sys: sysinfo::System,
+    index: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+impl Default for RemoteScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RemoteScanner {
+    pub fn new() -> Self {
+        Self {
+            sys: sysinfo::System::new(),
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Refresh the process snapshot and rebuild the parent→children index.
+    /// Call once per poll tick, before querying panes.
+    pub fn refresh(&mut self) {
+        self.sys.refresh();
+        self.index = build_children_index(&self.sys);
+    }
+
+    /// Resolve the remote context for the pane rooted at `child_pid`, using the
+    /// index built by the last [`refresh`](Self::refresh). No OS walk, no map
+    /// rebuild — safe to call once per pane.
+    pub fn detect_root(&self, child_pid: u32) -> Option<RemoteContext> {
+        detect_root_in_index(child_pid, &self.sys, &self.index)
+    }
+}
+
 /// Cycle 730: generic BFS over any [`ProcessTree`]. Walks descendants
 /// of `child_pid` breadth-first; closest descendants checked first
 /// so a `bash → docker → ssh` tree resolves to the docker context
@@ -193,12 +238,20 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
 /// path. Tests use this directly with `MockProcessTree`.
 fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Option<RemoteContext> {
     tree.refresh();
+    let children_by_parent = build_children_index(tree);
+    detect_root_in_index(child_pid, tree, &children_by_parent)
+}
 
-    // Group children by parent so the BFS is O(N) snapshot + O(D)
-    // walk where D is the depth of descendants. The pre-729 sysinfo
-    // BFS used `sysinfo::Pid` keys; the trait abstraction is u32
-    // so the same map structure works for both `sysinfo::System`
-    // and `MockProcessTree`.
+/// Group every PID by its parent, so a BFS over descendants is O(N) to build
+/// the index plus O(D) to walk. The pre-729 sysinfo BFS used `sysinfo::Pid`
+/// keys; the trait abstraction is `u32` so the same map works for both
+/// `sysinfo::System` and `MockProcessTree`.
+///
+/// Cycle 851 (audit): extracted so a multi-pane poll can build this **once**
+/// per tick (via [`RemoteScanner`]) instead of once per pane.
+fn build_children_index<T: ProcessTree + ?Sized>(
+    tree: &T,
+) -> std::collections::HashMap<u32, Vec<u32>> {
     let pids = tree.all_pids();
     let mut children_by_parent: std::collections::HashMap<u32, Vec<u32>> =
         std::collections::HashMap::with_capacity(pids.len());
@@ -207,7 +260,20 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
             children_by_parent.entry(parent).or_default().push(*pid);
         }
     }
+    children_by_parent
+}
 
+/// BFS from `child_pid` over a **prebuilt** parent→children index, resolving
+/// the closest descendant whose argv matches a known remote client. Does no
+/// refresh and no map build — cheap enough to call per pane against a shared
+/// index (cycle 851, audit). `argv_of` lookups still go to `tree`, but those
+/// hit sysinfo's already-refreshed cache (no OS walk).
+fn detect_root_in_index<T: ProcessTree + ?Sized>(
+    child_pid: u32,
+    tree: &T,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+) -> Option<RemoteContext> {
+    let pids_len = children_by_parent.len();
     // BFS from child_pid; closer descendants checked first. Loop
     // bound: each pid is enqueued ≤ 1 time (a Pid only has one
     // parent), so termination is guaranteed even on a cyclic
@@ -215,7 +281,7 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
     // protects against a future fixture bug).
     let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
     let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::with_capacity(pids.len());
+        std::collections::HashSet::with_capacity(pids_len);
     if let Some(initial) = children_by_parent.get(&child_pid) {
         for &pid in initial {
             if visited.insert(pid) {
@@ -1030,6 +1096,45 @@ mod tests {
                 host: "server.example.com".into(),
                 user: Some("alice".into()),
             })
+        );
+    }
+
+    /// Cycle 851 drift guard: the shared-index path (`build_children_index`
+    /// once + per-root `detect_root_in_index`) — how `RemoteScanner` amortizes a
+    /// multi-pane poll — must answer each root identically to the one-shot
+    /// `detect_in_tree`, and one index build must serve several distinct roots.
+    #[test]
+    fn shared_index_matches_per_pane_detect() {
+        let mut tree = MockProcessTree::new();
+        // Three independent pane shells: ssh, docker, and a plain local shell.
+        tree.add(100, None, &["bash"]);
+        tree.add(200, Some(100), &["ssh", "alice@a.example"]);
+        tree.add(300, None, &["zsh"]);
+        tree.add(400, Some(300), &["docker", "exec", "-it", "web", "sh"]);
+        tree.add(500, None, &["fish"]);
+
+        tree.refresh();
+        let idx = build_children_index(&tree);
+        for root in [100u32, 300, 500] {
+            assert_eq!(
+                detect_root_in_index(root, &tree, &idx),
+                detect_in_tree(root, &mut tree),
+                "shared-index result must match one-shot for root {root}"
+            );
+        }
+        // One index build answers all three distinctly.
+        assert!(
+            detect_root_in_index(100, &tree, &idx).is_some(),
+            "ssh root detected"
+        );
+        assert!(
+            detect_root_in_index(300, &tree, &idx).is_some(),
+            "docker root detected"
+        );
+        assert_eq!(
+            detect_root_in_index(500, &tree, &idx),
+            None,
+            "plain local shell → no remote context"
         );
     }
 

@@ -1652,7 +1652,10 @@ pub struct App {
     /// refresh amortizes (sysinfo's internal cache survives between
     /// `refresh_processes_specifics` calls). Used by the
     /// per-pane remote-session detector.
-    remote_sysinfo: kettle_remote::SysinfoSystem,
+    /// Cycle 851 (audit): a shared snapshot scanner — refreshes the OS process
+    /// list + parent→children index once per poll tick, then answers every
+    /// pane from it (was one OS walk + map build *per pane*).
+    remote_scanner: kettle_remote::RemoteScanner,
     /// Cycle 656: throttle the remote-detect poll to ~5 Hz. The
     /// process-list refresh is fast on Linux (<1 ms) but no need
     /// to walk every tick — SSH/Docker sessions don't fire-up
@@ -2140,7 +2143,7 @@ impl App {
             vi_mode: None,
             compiled_triggers: initial_triggers,
             last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
-            remote_sysinfo: kettle_remote::SysinfoSystem::new(),
+            remote_scanner: kettle_remote::RemoteScanner::new(),
             last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
             last_schedule_decision: None,
             scaled_zoom_prev_font_size: None,
@@ -6867,6 +6870,9 @@ impl App {
         }
         self.last_remote_poll = std::time::Instant::now();
         let pane_ids: Vec<u64> = self.mux.panes.keys().copied().collect();
+        // Cycle 851: refresh the OS process snapshot + parent→children index
+        // ONCE per tick, then query every pane against the shared index.
+        self.remote_scanner.refresh();
         for id in pane_ids {
             let Some(pane) = self.mux.panes.get(&id) else {
                 continue;
@@ -6874,7 +6880,7 @@ impl App {
             let Some(pid) = pane.term.child_pid() else {
                 continue;
             };
-            let detected = kettle_remote::detect_remote_with(pid, &mut self.remote_sysinfo);
+            let detected = self.remote_scanner.detect_root(pid);
             if let Some(pane) = self.mux.panes.get_mut(&id)
                 && detected != pane.remote_context
             {

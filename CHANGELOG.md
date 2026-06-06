@@ -9,6 +9,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 851, audit) — remote-context polling refreshes the
+    process snapshot once per tick, not once per pane.** `detect_remote_with`
+    refreshes the OS-wide process list *and* rebuilds the parent→children index
+    on every call, and the poll loop called it once per pane — so an N-pane
+    window did N full process walks + N map builds every 200 ms. A new
+    `RemoteScanner` splits the work: `refresh()` does the single OS walk + index
+    build per tick, and `detect_root()` answers each pane from the shared index
+    (a cheap BFS + cache-hit argv reads). One-shot `detect_remote`/
+    `detect_remote_with` are preserved. The shared-index path is unit-tested to
+    match the one-shot result.
+
   - **Performance (cycle 850, audit) — background-image blur is O(W·H) with one
     scratch buffer.** The startup Gaussian-approximation blur allocated a fresh
     full-image `Vec` in each of its six sub-passes (up to 6 × 256 MB transient at
