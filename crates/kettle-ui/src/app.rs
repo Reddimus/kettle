@@ -267,7 +267,19 @@ fn confirm_dialog_keypress(
     }
     match key {
         ConfirmKey::Escape => ConfirmKeyResult::Cancel,
-        ConfirmKey::Enter => ConfirmKeyResult::Confirm,
+        // Cycle 861 (audit): Enter activates the FOCUSED button, not always
+        // Confirm. The close-confirm dialogs open focused on `Cancel` (index 0,
+        // the safe default the renderer highlights); firing the destructive
+        // action on Enter regardless of focus contradicted that highlight and
+        // was a data-loss footgun. Buttons are `[Cancel, Confirm]`, so only the
+        // last button confirms; any other focused button (Cancel) cancels.
+        ConfirmKey::Enter => {
+            if current_focus + 1 == num_buttons {
+                ConfirmKeyResult::Confirm
+            } else {
+                ConfirmKeyResult::Cancel
+            }
+        }
         ConfirmKey::Tab => ConfirmKeyResult::Move((current_focus + 1) % num_buttons),
         ConfirmKey::ShiftTab => {
             ConfirmKeyResult::Move((current_focus + num_buttons - 1) % num_buttons)
@@ -10952,10 +10964,19 @@ mod tests {
             confirm_dialog_keypress(1, 2, ConfirmKey::Escape),
             ConfirmKeyResult::Cancel
         );
-        // Enter always confirms.
+        // Cycle 861: Enter activates the FOCUSED button (buttons are
+        // `[Cancel, Confirm]`). Focused on Cancel (idx 0) → Cancel; focused on
+        // Confirm (idx 1, the last) → Confirm. This must match the highlighted
+        // button so Enter on the safe default doesn't fire the destructive action.
         assert_eq!(
             confirm_dialog_keypress(0, 2, ConfirmKey::Enter),
-            ConfirmKeyResult::Confirm
+            ConfirmKeyResult::Cancel,
+            "Enter on the highlighted Cancel button must cancel, not confirm"
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Enter),
+            ConfirmKeyResult::Confirm,
+            "Enter on the Confirm button confirms"
         );
         // Tab cycles forward with wrap.
         assert_eq!(

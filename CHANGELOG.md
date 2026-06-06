@@ -9,6 +9,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Security/stability (cycle 860, audit) — Sixel RGB palette no longer aborts
+    on a huge component.** A `#Pc;2;Pr;Pg;Pb` palette entry scaled each component
+    `comp * 255 / 100`, but `read_num` saturates a long digit run to `i64::MAX`,
+    so `i64::MAX * 255` overflowed — a process abort under `panic = "abort"` with
+    overflow checks (debug/test) and a garbage color in release, reachable from
+    any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
+    its spec-valid `0..=100` percentage before scaling. Regression-tested.
+
+  - **UX/data-loss (cycle 861, audit) — confirm-dialog Enter respects button
+    focus.** The close-pane/tab/window confirmation dialogs open focused on (and
+    visually highlight) the **Cancel** button as the safe default, but Enter
+    fired **Confirm** regardless of focus — so the reflexive "highlighted button
+    + Enter" destroyed the tab/pane/window instead of cancelling. Enter now
+    activates the focused button (Cancel cancels, Confirm confirms), matching the
+    highlight. The drift test that had enshrined the old behavior was corrected.
+
   - **Docs (cycle 859) — README hero / showcase screenshots refreshed + demo
     scene fixed.** The committed screenshots were stale (baked `v2.3.1`, old test
     count) and had two demo-scene bugs: the block cursor was hardcoded at column
