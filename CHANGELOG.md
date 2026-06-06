@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Zoom (cycle 846, audit) — `ScaledZoom` no longer discards a prior manual
+    font zoom.** `Action::IncreaseFontSize`/`DecreaseFontSize` step the renderer
+    size but never write `cfg.font_size`, so `ScaledZoom` — which saved
+    `cfg.font_size` as its restore baseline and scaled `cfg.font_size * 1.5` —
+    ignored any manual zoom: it scaled from the original config size and, on
+    exit, *restored* that, throwing away the user's manual change. It now
+    baselines off the live `r.font_size()` for both the 1.5× scale and the
+    restore. Drift-guarded.
+
   - **Performance (cycle 845, audit) — the renderer stops heap-allocating the
     font family every frame.** `render_frame_with_status` cloned
     `self.font_family` (a `String`) once per frame — a heap alloc + memcpy at

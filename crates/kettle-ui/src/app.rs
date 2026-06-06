@@ -5810,10 +5810,18 @@ impl App {
                 let now_zoomed = self.mux.is_zoomed();
                 if let Some(r) = self.renderer.as_mut() {
                     if now_zoomed {
+                        // Cycle 846 (audit): baseline off the LIVE renderer size,
+                        // not `self.cfg.font_size`. Increase/DecreaseFontSize
+                        // only call `r.set_font_size` (they never write
+                        // `cfg.font_size`), so a prior manual zoom left the
+                        // config value stale — ScaledZoom would otherwise scale
+                        // from the original config size and, on exit, *discard*
+                        // the user's manual zoom by restoring it.
+                        let cur = r.font_size();
                         if self.scaled_zoom_prev_font_size.is_none() {
-                            self.scaled_zoom_prev_font_size = Some(self.cfg.font_size);
+                            self.scaled_zoom_prev_font_size = Some(cur);
                         }
-                        let new_size = (self.cfg.font_size * 1.5).clamp(6.0, 96.0);
+                        let new_size = (cur * 1.5).clamp(6.0, 96.0);
                         r.set_font_size(new_size);
                     } else if let Some(prev) = self.scaled_zoom_prev_font_size.take() {
                         r.set_font_size(prev);
@@ -9637,6 +9645,29 @@ mod tests {
         assert!(App::motion_should_report(true, Some((4, 4)), (4, 5)));
         assert!(App::motion_should_report(true, None, (4, 4)));
         assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
+    }
+
+    /// Cycle 846 (audit) drift guard. `ScaledZoom` must baseline off the live
+    /// renderer size (`r.font_size()`), never `self.cfg.font_size` — the latter
+    /// is stale after any manual Increase/DecreaseFontSize (which only touch the
+    /// renderer), so scaling from it discards the user's manual zoom on exit.
+    /// A behavioral test needs a live renderer + mux; pin it at the source.
+    #[test]
+    fn scaled_zoom_baselines_off_live_font_size() {
+        let src = include_str!("app.rs");
+        let arm = src
+            .split("Action::ScaledZoom => {")
+            .nth(1)
+            .and_then(|s| s.split("Action::ToggleFullscreen").next())
+            .expect("ScaledZoom arm present");
+        assert!(
+            arm.contains("let cur = r.font_size();") && arm.contains("cur * 1.5"),
+            "ScaledZoom must scale from the live renderer size"
+        );
+        assert!(
+            !arm.contains("self.cfg.font_size * 1.5"),
+            "ScaledZoom must not scale from the (stale) config font size"
+        );
     }
 
     #[test]
