@@ -4,10 +4,15 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.8.0] — 2026-06-06
 
-  Substantive fixes from a third, whole-codebase systematic sweep (every file +
-  cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
+  Substantive fixes from a third whole-codebase systematic sweep (cycles
+  829–859) **plus a fresh 8-agent, file-by-file review of every crate + docs /
+  CI / packaging (cycles 860–867)** — the latter found two HIGH bugs the
+  findings-list sweep had missed: a Sixel RGB-palette integer overflow that
+  could abort the process from an untrusted PTY sequence, and a confirm-dialog
+  Enter key that fired the destructive close action even with the safe "Cancel"
+  button focused. Every fix below is drift-/unit-tested and `just gauntlet`-green:
 
   - **Security/stability (cycle 860, audit) — Sixel RGB palette no longer aborts
     on a huge component.** A `#Pc;2;Pr;Pg;Pb` palette entry scaled each component
