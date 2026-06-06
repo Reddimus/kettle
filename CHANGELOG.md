@@ -9,6 +9,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 844, audit) — image-escape extraction stops allocating
+    on every non-image OSC/APC.** The OSC branch of the image extractor built a
+    full owned `String` from every sequence — titles, colors, OSC 8 hyperlinks,
+    OSC 52, OSC 104 — only to test a 10-byte `1337;File=` prefix and discard it.
+    The prefix is now matched on the raw bytes; the `String` is built only on an
+    actual iTerm image. The sibling kitty-APC path drops its `.into_owned()`,
+    borrowing when the (almost always ASCII) payload is valid UTF-8.
+
+  - **Performance (cycle 843, audit) — theme lookups stop allocating per bundled
+    name.** `Theme::by_name`/`find_name`/`cycle` lower-cased every one of the
+    ~513 bundled theme names in-loop (a heap `String` each) on every theme
+    keypress, `ToggleLightDark`, and session restore. They now compare with
+    `eq_ignore_ascii_case` against the trimmed query — zero per-element allocs,
+    identical case-insensitive semantics — and `cycle` drops its intermediate
+    name `Vec`. Drift-guarded.
+
   - **Mouse tracking (cycle 842, audit) — coordinates clamp to the grid and
     drags coalesce to cell crossings.** Two fixes to the SGR mouse reports sent
     to TUIs (htop, vim, tmux). (1) A click in the right/bottom padding rounded

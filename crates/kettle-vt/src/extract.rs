@@ -302,7 +302,10 @@ impl Extractor {
             }
             Mode::Apc => {
                 if seq.first() == Some(&b'G') {
-                    let body = String::from_utf8_lossy(&seq[1..]).into_owned();
+                    // Borrow when the APC payload is valid UTF-8 (the common
+                    // case — kitty graphics keys are ASCII); only the lossy
+                    // fallback allocates (cycle 844, audit).
+                    let body = String::from_utf8_lossy(&seq[1..]);
                     match self.kitty.feed(&body) {
                         KittyOut::Place(p) => R::Img(p),
                         KittyOut::Delete { all, id } => R::Del { all, id },
@@ -369,9 +372,13 @@ impl Extractor {
                 }
             }
             Mode::Osc => {
-                let body = String::from_utf8_lossy(&seq).into_owned();
-                if body.starts_with("1337;File=") {
-                    iterm::decode(&body)
+                // Test the iTerm prefix on the raw bytes (byte-exact for an
+                // ASCII prefix) and only allocate the owned String on a match.
+                // Every other OSC — titles, colors, OSC 8 hyperlinks, OSC 52,
+                // OSC 104 — reaches this branch and would otherwise heap-alloc a
+                // full String just to fail `starts_with` (cycle 844, audit).
+                if seq.starts_with(b"1337;File=") {
+                    iterm::decode(&String::from_utf8_lossy(&seq))
                         .map(|i| R::Img(Placed::plain(i)))
                         .unwrap_or(R::None)
                 } else {
