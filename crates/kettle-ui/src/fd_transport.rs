@@ -23,11 +23,12 @@ use std::io;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 
-#[cfg(target_os = "linux")]
-const SCM_RIGHTS: i32 = 0x01;
-
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
-const SCM_RIGHTS: i32 = 0x01;
+// Cycle 848 (audit): use `libc::SCM_RIGHTS` directly rather than a hand-rolled
+// `0x01`. The literal was only `#[cfg]`'d for linux/macos/freebsd, so on
+// NetBSD/OpenBSD/DragonFly/illumos/Android the const was undefined and the
+// `#![cfg(unix)]` module failed to compile. `libc::SCM_RIGHTS` is correct for
+// every Unix target (matching the `libc::SOL_SOCKET` already used beside it).
+use libc::SCM_RIGHTS;
 
 /// Send `fds` over the Unix socket along with `payload`. The
 /// receiving end will get the duplicated fds via recv_fds.
@@ -115,7 +116,16 @@ pub fn recv_fds(
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_space as _;
-    let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
+    // Cycle 848 (audit): receive the fds close-on-exec where the platform
+    // offers atomic delivery (Linux/Android `MSG_CMSG_CLOEXEC`); macOS and
+    // others lack the flag and fall back to the `fcntl` below. Without CLOEXEC a
+    // received PTY-master fd would leak into any shell spawned between this
+    // `recvmsg` and adoption.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let recv_flags: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let recv_flags: libc::c_int = 0;
+    let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, recv_flags) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -133,6 +143,25 @@ pub fn recv_fds(
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
+    }
+    // Belt-and-suspenders CLOEXEC for platforms without the atomic flag (and a
+    // harmless no-op where the flag already set it). Best-effort: an fd that's
+    // valid enough to adopt is valid enough to keep even if this fails.
+    for &fd in &out {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    // `MSG_CTRUNC` means the sender's ancillary data didn't fit our control
+    // buffer, so the kernel dropped (and closed) the fds that overflowed. A
+    // partial fd set would adopt the wrong PTYs — close what we got and surface
+    // it rather than silently hand back a truncated handoff.
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        for &fd in &out {
+            unsafe { libc::close(fd) };
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recv_fds: ancillary data truncated (MSG_CTRUNC); some fds were dropped by the kernel",
+        ));
     }
     Ok((n as usize, out))
 }
@@ -166,5 +195,36 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = (&s2).read(&mut buf).expect("read");
         assert_eq!(&buf[..n], payload);
+    }
+
+    /// Cycle 848 (audit): a sent fd round-trips and is delivered close-on-exec
+    /// (atomic `MSG_CMSG_CLOEXEC` on Linux, `fcntl` fallback elsewhere), so a
+    /// handed-off PTY master can't leak into a later-spawned shell.
+    #[test]
+    fn recv_fds_round_trips_and_sets_cloexec() {
+        let (s1, s2) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        // A concrete fd to pass: the read end of a fresh pipe.
+        let mut pipe_fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0, "pipe");
+        let (rd, wr) = (pipe_fds[0], pipe_fds[1]);
+
+        let sent = send_fds(&s1, b"x", &[rd]).expect("send");
+        assert_eq!(sent, 1);
+
+        let mut buf = [0u8; 8];
+        let (n, got) = recv_fds(&s2, &mut buf, 4).expect("recv");
+        assert_eq!(n, 1, "payload byte received");
+        assert_eq!(got.len(), 1, "exactly one fd received");
+
+        let flags = unsafe { libc::fcntl(got[0], libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD on received fd");
+        assert!(
+            flags & libc::FD_CLOEXEC != 0,
+            "received fd must be close-on-exec"
+        );
+
+        for fd in [rd, wr, got[0]] {
+            unsafe { libc::close(fd) };
+        }
     }
 }

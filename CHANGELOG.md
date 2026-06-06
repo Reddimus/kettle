@@ -9,6 +9,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 849, audit) — animated-image frame selection stops
+    allocating per paint.** `current_frame` (kitty animation playback) collected
+    a `Vec` of the displayable frames on every call — and it's invoked from
+    `Terminal::placements()` on every paint while an animation plays, so a
+    running GIF churned a heap `Vec` per frame. It now does two cheap passes over
+    the gap slice (accumulate total dwell + last displayable index, then a
+    direct filtered modulo walk) with zero allocation. A trailing-gapless freeze
+    case was added to the timing test.
+
+  - **Portability/robustness (cycle 848, audit) — fd-passing compiles on every
+    Unix and delivers fds close-on-exec.** The `SCM_RIGHTS` tab-handoff transport
+    hard-coded the cmsg constant behind a `cfg` that only covered
+    Linux/macOS/FreeBSD, so the `#![cfg(unix)]` module *failed to compile* on
+    NetBSD/OpenBSD/DragonFly/illumos/Android; it now uses `libc::SCM_RIGHTS`
+    (correct on every target). `recv_fds` additionally (1) receives fds
+    close-on-exec — atomic `MSG_CMSG_CLOEXEC` on Linux/Android, an `fcntl`
+    fallback elsewhere — so a handed-off PTY master can't leak into a
+    later-spawned shell, and (2) checks `MSG_CTRUNC`: a truncated control buffer
+    now closes the partial fd set and errors instead of adopting the wrong PTYs.
+    Round-trip + CLOEXEC unit test added.
+
   - **Robustness (cycle 847, audit) — Lua callback registries are now bounded.**
     The side-effect command queue was already capped against a hostile
     `init.lua` (`MAX_PENDING_COMMANDS`), but `kettle.on`, `add_menu_item`, and
