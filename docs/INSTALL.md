@@ -245,7 +245,7 @@ system packages. Minimum supported Rust version is **1.89** (Cargo.toml
 ## Verifying your build
 
 ```sh
-cargo test --workspace      # 330+ tests incl. an offscreen GPU pipeline check
+cargo test --workspace      # 500+ tests incl. an offscreen GPU pipeline check
 cargo run -p kettle -- --list-themes | wc -l   # 512
 ```
 

@@ -36,7 +36,9 @@ panel. Use the keyboard:
 - **↑ / ↓** — move between options
 - **← / →** — change the highlighted option (font size, theme opacity,
   scrollbar, bell, cursor, …)
-- **Tab** — switch category (Appearance ↔ Behavior)
+- **Tab** — cycle category (Appearance → Behavior → Keybinds). The **Keybinds**
+  category is an interactive rebinder: pick an action, press a chord (with a
+  modifier) to bind it live, and it's written to your config.
 - **Esc** — close
 
 Changes apply **instantly** and are saved automatically — no restart, no file

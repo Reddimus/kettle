@@ -175,13 +175,12 @@ The handoff file is deleted after read (one-shot).
 Receive a tab handoff via SCM_RIGHTS over the named inherited
 file descriptor. Used by
 .B Action::MoveTabToNewWindow
-on Linux + macOS where SCM_RIGHTS is available — composes with
-the cycles 397-410 socket-pair + fork+exec source path. Unix-only.
+on Linux + macOS where SCM_RIGHTS is available. Unix-only.
 .TP
 .BI \-\-remote\-send \ TEXT
 Send
 .I TEXT
-to the running kettle's focused pane via cycle-302 file IPC.
+to the running kettle's focused pane via the file-based IPC.
 Cross-platform (no D-Bus needed). Pair with
 .B \-\-remote\-file
 to address a non-default kettle instance.
@@ -227,15 +226,33 @@ Load
 .I PATH
 as the init script instead of the default
 .IR ~/.config/kettle/init.lua .
-The script runs in the cycle-376 sandbox (
+The script runs in the
 .B lua-sandbox = safe
-by default).
+sandbox by default.
 .TP
-.BI \-\-annotate \ "ROW:COL:TEXT"
-Annotate the
+.BI \-\-annotate \ TEXT
+Overlay
+.I TEXT
+as a single caption along the bottom of the
 .B \-\-screenshot
-output with caption text anchored at the given grid cell.
-Repeatable: pass once per caption.
+/
+.B \-\-screenshot\-menu
+output (iTerm2 "annotated screenshot" parity). A single non-repeatable bottom
+caption \(em not a per-cell annotation.
+.TP
+.B \-\-write\-default\-config
+Write the embedded default configuration to the resolved config path, creating
+the parent directory, then exit. Refuses to overwrite an existing file. The
+easiest cross-platform way to bootstrap a config \(em preferred over a shell
+redirect on Windows PowerShell, whose
+.B >
+writes UTF-16.
+.TP
+.B \-\-check\-update
+Check the GitHub releases API once for a newer kettle version, print the result,
+and exit. Honors the
+.B update\-check = false
+opt-out and never runs on first launch.
 .
 .SH KEY BINDINGS
 Defaults (every binding remappable via

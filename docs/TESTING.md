@@ -14,7 +14,7 @@ cargo test --workspace
 
 ## What's covered (automated)
 
-**330+ tests across the workspace** — see
+**500+ tests across the workspace** — see
 [CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions
 (cycle-288 → 303 feature sweep, cycles 330-410 Terminator-parity
 sweep, cycles 411-438 production-polish run, cycles 576-587 resource-
@@ -73,7 +73,7 @@ discipline here.
   wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
   zero-width.
 
-- **kettle-render** (~10 unit tests + 1 visual integration test):
+- **kettle-render** (30+ unit tests + 1 visual integration test):
   truncate respects display columns (not chars), the
   `clamp_font_size` floor/ceiling/NaN/∞ contract (cycle 118), the
   `cap_axis_cells` GPU-texture safety guard (cycle 119), color
@@ -109,7 +109,7 @@ discipline here.
   + corruption-backup contracts; xterm modifier encoding + paste
   payload bracketing + injection-guard.
 
-- **kettle** (binary, ~9 tests): clap argv parsing for the cycle-30
+- **kettle** (binary, 15+ tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105
   `format_ssh_hosts` table renderer (sort + column alignment +
   empty fallback); the cycle-219

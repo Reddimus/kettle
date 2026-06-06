@@ -1655,6 +1655,49 @@ mod tests {
         }
     }
 
+    /// Cycle 839 (audit): the hand-written man page must document every
+    /// `--<long>` flag and must not leak internal `cycle N` refs. The pre-839
+    /// page was missing `--check-update` + `--write-default-config` and carried
+    /// cycle parentheticals precisely because the only man-page guard checked
+    /// keybinds, not flags. Walk the clap CLI and pin both.
+    #[test]
+    fn man_page_documents_every_flag_without_cycle_refs() {
+        use clap::CommandFactory;
+        let man = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux/kettle.1"),
+        )
+        .expect("kettle.1 present");
+        assert!(
+            !man.to_ascii_lowercase().contains("cycle "),
+            "internal `cycle N` ref leaked into the man page"
+        );
+        // Internal/handoff-only flags + ones documented by their short form
+        // (`--exec` is documented as `-e`) that the man page intentionally omits.
+        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
+        let cmd = Cli::command();
+        let missing: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .filter(|long| !allow_missing.contains(long))
+            .filter(|long| {
+                // troff escapes the leading `--` as `\-\-`; internal hyphens may
+                // be plain (`\-\-config-path`) or escaped (`\-\-write\-default\-
+                // config`). Accept either, plus the bare `--flag` used in examples.
+                let prefix_escaped = format!("\\-\\-{long}");
+                let all_escaped = format!("\\-\\-{}", long.replace('-', "\\-"));
+                let plain = format!("--{long}");
+                !man.contains(&prefix_escaped)
+                    && !man.contains(&all_escaped)
+                    && !man.contains(&plain)
+            })
+            .map(|l| format!("--{l}"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "man page (packaging/linux/kettle.1) is missing flags: {missing:?}"
+        );
+    }
+
     #[test]
     fn cli_help_preserves_indented_code_examples() {
         // A `#[arg(...)]` whose doc-comment contains an indented `  kettle …`

@@ -22,12 +22,11 @@ for each invocation.
 
 ### Linux baseline (v1.3.8 + cycle 277, commit `1026858`)
 
-> Pinned at this version because the Linux box wasn't available for a
-> re-bench at the cycle-730 cut. Most of these numbers should be in the
-> same ballpark at v1.46.0 (no major architectural change since cycle
-> 277), but if you're shopping kettle vs another terminal, treat the
-> numbers as "what we measured then" and run `scripts/bench.sh` for
-> a fresh data point. Tracked for re-bench by **v1.47**.
+> Captured at v1.3.8 (the Linux box wasn't available for a re-bench at later
+> cuts). There's been no major architectural change to the render/startup paths
+> since, so these should still be in the same ballpark on the current release
+> (v2.7.x) — but treat them as "what we measured then" and run
+> `scripts/bench.sh` for a fresh data point on your own machine.
 
 | Measurement | Value | Notes |
 |---|---:|---|
@@ -36,10 +35,12 @@ for each invocation.
 | `kettle --screenshot OUT.png` | ≈ 250–270 ms wall, 236 MB peak RSS | Includes wgpu adapter init, offscreen Vulkan device, font system load, full GPU text + quad pipelines |
 | `kettle --screenshot-menu OUT.png` | ≈ 240–250 ms wall, 236 MB peak RSS | Same as above + the second TextRenderer / menu_quads pass; identical memory footprint, ~10 ms faster on the GPU pipeline warmup pattern |
 
-### Windows 11 reference (v1.46.0 + cycle 730, this release)
+### Windows 11 reference (captured at v1.46.0 + cycle 730)
 
 > Captured on a Surface Book 3 (Intel Iris Plus Graphics, x64,
-> Windows 11 build 26200) the day the v1.46.0 release was cut. wgpu
+> Windows 11 build 26200) the day the v1.46.0 release was cut (a fixed data
+> point — the current release is v2.7.x; re-run `scripts/bench.ps1` for fresh
+> numbers). wgpu
 > picked the **Vulkan** backend (Intel driver, integrated GPU) — the
 > same selection a user with the same hardware would see. Wall-clock
 > via .NET `Process.ExitTime - StartTime`; peak working set sampled

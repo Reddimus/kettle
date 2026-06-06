@@ -14,10 +14,14 @@ Numeric keys with documented ranges
 `scroll-multiplier`, `minimum-contrast`, `cursor-blink-interval`) clamp at
 parse-time *and* flag out-of-range values via `--check-config`.
 
-Config path: `$XDG_CONFIG_HOME/kettle/config` (Linux), the `~/.config`
-fallback, or `%APPDATA%\kettle\config` on Windows. Run `kettle --config-path`
-to print it, or `kettle --check-config` to validate it (resolved settings +
-any unrecognized keys). The file is **watched and reloaded live**.
+Config path: kettle probes `$XDG_CONFIG_HOME/kettle/config`, then
+`~/.config/kettle/config` (whenever `HOME` is set — including on Windows under
+Git Bash / WSL-host / many dev setups), then `%APPDATA%\kettle\config` on Windows
+as the last fallback. So on a Windows box with `HOME` set the config lives at
+`~/.config/kettle/config`, not `%APPDATA%`. Always run `kettle --config-path` for
+the authoritative resolved location, or `kettle --check-config` to validate it
+(resolved settings + any unrecognized keys). The file is **watched and reloaded
+live**.
 
 ## Keys
 

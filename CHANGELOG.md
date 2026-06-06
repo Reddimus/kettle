@@ -9,6 +9,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Docs (cycle 839, audit) — man page + doc drift corrected.** The man page
+    (`kettle.1`) was missing **nine** `--<flag>` entries (incl. `--check-update`
+    and `--write-default-config`, the recommended Windows bootstrap),
+    mis-described `--annotate` as a repeatable `ROW:COL:TEXT` (it's a single
+    bottom caption), and leaked internal `cycle N` refs — all because the only
+    man-page guard checked keybinds, not flags. A new drift test now walks the
+    clap CLI and asserts every flag is documented with no cycle refs. Also
+    refreshed user-facing doc drift: the "330+ tests" headline (actually 500+)
+    and two 2–4× off per-crate figures, the Settings keybind-rebinder category
+    hidden from GETTING-STARTED, the false "this release" markers in
+    PERFORMANCE.md, and the Windows config-path in CONFIG.md (the resolver prefers
+    `~/.config` when `HOME` is set, not `%APPDATA%`).
+
   - **Build/CI (cycle 838, audit) — smaller release binaries + per-leg release
     cache.** The release profile now sets `strip = "symbols"`, so the shipped
     ELF/Mach-O binaries drop their (unused, `panic=abort`) symbol tables and
