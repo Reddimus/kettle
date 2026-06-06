@@ -9,6 +9,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 830, audit) — Sixel numeric parsing can't overflow-abort.**
+    `read_num` accumulated `v * 10 + d` over an attacker-controlled digit run (up
+    to a 64 MiB DCS body) with no overflow guard — a ~20-digit count/dimension
+    aborted the process under debug/test (`panic=abort`) and silently wrapped in
+    release. It's now saturating (total over any input); a 25-digit run decodes
+    to a clean `None` via the existing dimension caps.
+
   - **Fix (cycle 829, audit) — custom tab titles actually show now.** A title set
     via `EditTabTitle` was stored in `title_override` (and re-read into the edit
     dialog, so it "stuck" there) but `tab_titles()` — the source of truth for

@@ -284,7 +284,14 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
     let mut v: i64 = 0;
     let mut any = false;
     while i < data.len() && data[i].is_ascii_digit() {
-        v = v * 10 + (data[i] - b'0') as i64;
+        // Cycle 830 (audit): saturating, not `v * 10 + d`. Every numeric param
+        // (`!<n>` repeat, `#<n>` palette, `"<n>` raster) is attacker-controlled
+        // from a DCS body up to 64 MiB; a ~20-digit run overflowed the i64
+        // multiply — a hard process abort under debug/test (panic=abort), a
+        // silent wrap in release. Saturating makes it total; downstream already
+        // rejects over-large dims/indices, and the repeat loop bails via the
+        // MAX_DIM `ensure` cap, so no legal sixel is affected.
+        v = v.saturating_mul(10).saturating_add((data[i] - b'0') as i64);
         i += 1;
         any = true;
     }
@@ -308,6 +315,21 @@ mod tests {
         assert_eq!(grow_cap(0, 5000), 8192); // smallest pow2 ≥ 5000
         assert_eq!(grow_cap(8192, 8192), 8192);
         assert!(grow_cap(0, MAX_DIM) >= MAX_DIM);
+    }
+
+    /// Cycle 830 (audit): a long digit run in any numeric param must not
+    /// overflow `read_num`'s i64 accumulate (a debug/test panic=abort). A
+    /// 25-digit count decodes cleanly (saturates, then the dim/ensure caps
+    /// reject it) rather than aborting the process.
+    #[test]
+    fn long_digit_run_does_not_overflow() {
+        // 25 nines as a repeat count, then a sixel char — saturates, the ensure
+        // cap rejects the absurd width → clean None, never a panic.
+        let body = format!("!{}~", "9".repeat(25));
+        assert!(decode(body.as_bytes()).is_none());
+        // The same in a raster attribute (dimension param).
+        let body2 = format!("\"{};1;1;1@", "9".repeat(25));
+        let _ = decode(body2.as_bytes()); // must not panic (result either way ok)
     }
 
     /// Cycle 824 (audit): a wide raster-attribute-LESS sixel (width grows one
