@@ -3814,29 +3814,56 @@ pub fn capture_png_with_annotation(
         let mut q: Vec<QuadInstance> = Vec::new();
 
         // --- Tab bar (redesigned: active accent + per-tab ✕ + trailing +).
+        //
+        // Tab labels are defined once and reused for BOTH the chrome geometry
+        // and the text buffer below, so the highlighted segment + separators
+        // always line up with the glyphs. Cycle 859 (audit): the old fixed
+        // 240px segments were ~2× wider than the ~120px labels, so the second
+        // tab's text floated inside the first tab's highlight.
+        let tab0_label = " 1: zsh  ✕   ";
+        let tab1_label = "2: ssh prod  ✕";
+        let tabplus_label = "     +";
+        // Monospace: one cell == `cw`, so a label's pixel width is its char
+        // count × `cw`.
+        let tab_text_left = 8.0_f32;
+        let w0 = tab0_label.chars().count() as f32 * cw;
+        let w1 = tab1_label.chars().count() as f32 * cw;
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
-        let segw = 240.0_f32.min((wf - 44.0) / 2.0);
-        // Active tab 0: themed background + left accent bar.
-        // Cycle 293: cascade through accent-color so peacock works
-        // in --screenshot too (same code path the live renderer uses
-        // at line 572, but capture_png_with builds its own synthetic
-        // scene rather than calling render_frame, so the cascade has
-        // to be duplicated here).
+        // Active tab 0: themed background + left accent bar, sized to its label.
+        // Cycle 293: cascade through accent-color so peacock works in
+        // --screenshot too (same order the live renderer uses).
         let screenshot_accent = cfg.accent_color.unwrap_or(theme.palette[4]);
-        q.push(rect(0.0, 0.0, segw, tab_h, theme.background, 1.0));
-        q.push(rect(0.0, 0.0, 2.0, tab_h, screenshot_accent, 1.0));
-        // Per-segment separators.
-        q.push(rect(segw - 1.0, 0.0, 1.0, tab_h, theme.background, 0.5));
+        q.push(rect(tab_text_left, 0.0, w0, tab_h, theme.background, 1.0));
+        q.push(rect(tab_text_left, 0.0, 2.0, tab_h, screenshot_accent, 1.0));
+        // Inactive tab 1: a mostly-solid dark box (slight bar tint so it reads
+        // as "muted" vs the active tab) — without its own background the dim
+        // label would sit grey-on-grey against the `palette[8]` bar
+        // (cycle 859, audit).
         q.push(rect(
-            2.0 * segw - 1.0,
+            tab_text_left + w0,
+            0.0,
+            w1,
+            tab_h,
+            theme.background,
+            0.9,
+        ));
+        // Subtle separators at each tab's right edge.
+        q.push(rect(
+            tab_text_left + w0 - 1.0,
             0.0,
             1.0,
             tab_h,
-            theme.background,
-            0.5,
+            theme.palette[8],
+            0.7,
         ));
-        // Trailing new-tab (+) button.
-        q.push(rect(2.0 * segw, 0.0, 40.0, tab_h, theme.palette[8], 1.0));
+        q.push(rect(
+            tab_text_left + w0 + w1 - 1.0,
+            0.0,
+            1.0,
+            tab_h,
+            theme.palette[8],
+            0.7,
+        ));
 
         // --- Two-pane vertical split with focus border on the left pane.
         q.push(rect(
@@ -3860,10 +3887,16 @@ pub fn capture_png_with_annotation(
         q.push(rect(0.0, ly, 1.0, lh, foc, 1.0));
         q.push(rect(split_x - 1.0, ly, 1.0, lh, foc, 1.0));
 
-        // Block cursor on the left pane's active prompt line.
+        // Block cursor sitting at the end of the left pane's idle prompt
+        // (`kevim@kettle:~/Repos/kettle$ ` = 29 columns, so the cursor's empty
+        // input cell is column 29). Cycle 859 (audit): the prompt text was
+        // lengthened but this column wasn't, leaving the cursor stranded
+        // mid-path on the "e" of `~/Repos/kettle`. Keep `cur_col` in sync with
+        // the final prompt line in the `left` buffer below.
         let cur_row = 6.0;
+        let cur_col = 29.0;
         q.push(rect(
-            pad + 22.0 * cw,
+            pad + cur_col * cw,
             ly + pad + cur_row * ch,
             cw,
             ch,
@@ -3887,9 +3920,9 @@ pub fn capture_png_with_annotation(
         tab_buf.set_rich_text(
             &mut font_system,
             [
-                (" 1: zsh  ✕   ", fg.clone()),
-                ("2: ssh prod  ✕", dim.clone()),
-                ("     +", grn.clone()),
+                (tab0_label, fg.clone()),
+                (tab1_label, dim.clone()),
+                (tabplus_label, grn.clone()),
             ],
             &base,
             Shaping::Advanced,
@@ -3909,7 +3942,11 @@ pub fn capture_png_with_annotation(
                 ("kevim@kettle", grn.clone()),
                 (":", fg.clone()),
                 ("~/Repos/kettle", blu.clone()),
-                ("$ cargo test --workspace\n", fg.clone()),
+                // Keep this command short enough that it never wraps even in the
+                // narrow showcase split (~50-col left pane) — a wrap would push
+                // every line down one and strand the hardcoded `cur_row` cursor
+                // on a blank line (cycle 859, audit).
+                ("$ cargo test\n", fg.clone()),
                 ("   Compiling ", dim.clone()),
                 (compile_line.as_str(), dim.clone()),
                 ("    Finished ", grn.clone()),
@@ -3918,7 +3955,7 @@ pub fn capture_png_with_annotation(
                 ("unittests\n", fg.clone()),
                 ("test result: ", fg.clone()),
                 ("ok", grn.clone()),
-                (". 481 passed; 0 failed\n\n", fg.clone()),
+                (". 550 passed; 0 failed\n\n", fg.clone()),
                 ("kevim@kettle", grn.clone()),
                 (":", fg.clone()),
                 ("~/Repos/kettle", blu.clone()),

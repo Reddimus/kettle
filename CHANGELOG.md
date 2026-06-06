@@ -9,6 +9,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Docs (cycle 859) — README hero / showcase screenshots refreshed + demo
+    scene fixed.** The committed screenshots were stale (baked `v2.3.1`, old test
+    count) and had two demo-scene bugs: the block cursor was hardcoded at column
+    22 — stranded mid-path on the prompt's `~/Repos/kettle` instead of at the
+    line end — and the tab chrome used fixed 240px segments ~2× the label width,
+    so the inactive tab's text floated inside the active tab's highlight (and was
+    grey-on-grey-invisible once its background was sized correctly). The cursor
+    now anchors to the prompt's true end column, each tab's chrome is sized to
+    its label (shared label constants keep glyphs + chrome in sync), the inactive
+    tab gets a readable muted background, and the demo command is kept short
+    enough never to wrap in the narrow showcase split (which would otherwise
+    desync the cursor row). Both PNGs regenerated; version + test count now
+    current.
+
   - **Correctness/cleanup (cycle 858, audit) — four small fixes.** (1) Config
     float values now reject `NaN`/`inf` before clamping (`clamp(NaN)` returns
     `NaN`, which would have poisoned opacity/cell-size/darkness etc.); a
