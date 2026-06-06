@@ -83,9 +83,12 @@ impl Theme {
     /// Look up a bundled theme by name (case-insensitive). Returns the default
     /// (TokyoNight Night) if not found.
     pub fn by_name(name: &str) -> Theme {
-        let want = name.trim().to_ascii_lowercase();
+        // `eq_ignore_ascii_case` compares in place — no per-element
+        // `to_ascii_lowercase` String alloc (this runs on every theme keypress
+        // / session restore over ~513 bundled names). Cycle 843 (audit).
+        let want = name.trim();
         for (n, body) in BUNDLED_THEMES.iter() {
-            if n.to_ascii_lowercase() == want {
+            if n.eq_ignore_ascii_case(want) {
                 return Theme::parse(body);
             }
         }
@@ -102,10 +105,10 @@ impl Theme {
     /// back to the default, so `--check-config` showed a name the
     /// runtime wasn't actually using. Pure.
     pub fn find_name(name: &str) -> Option<&'static str> {
-        let want = name.trim().to_ascii_lowercase();
+        let want = name.trim();
         BUNDLED_THEMES
             .iter()
-            .find_map(|(n, _)| (n.to_ascii_lowercase() == want).then_some(*n))
+            .find_map(|(n, _)| n.eq_ignore_ascii_case(want).then_some(*n))
     }
 
     pub fn list() -> Vec<&'static str> {
@@ -116,24 +119,28 @@ impl Theme {
     /// wrapping around. If `current` isn't a bundled theme, returns the
     /// first one. Pure — used by runtime theme cycling.
     pub fn cycle(current: &str, forward: bool) -> &'static str {
-        let names: Vec<&'static str> = BUNDLED_THEMES.iter().map(|(n, _)| *n).collect();
-        if names.is_empty() {
+        let n = BUNDLED_THEMES.len();
+        if n == 0 {
             return "TokyoNight Night";
         }
-        let n = names.len();
         // Case-insensitive + trimmed, mirroring `by_name`, so a config
-        // like `theme = tokyonight night` still cycles from here.
-        let want = current.trim().to_ascii_lowercase();
-        match names.iter().position(|&x| x.to_ascii_lowercase() == want) {
+        // like `theme = tokyonight night` still cycles from here. Operate on
+        // BUNDLED_THEMES directly — no intermediate names Vec, no per-element
+        // lowercase alloc (cycle 843, audit).
+        let want = current.trim();
+        match BUNDLED_THEMES
+            .iter()
+            .position(|(x, _)| x.eq_ignore_ascii_case(want))
+        {
             // Unknown current → start at the first theme (don't skip it).
-            None => names[0],
+            None => BUNDLED_THEMES[0].0,
             Some(i) => {
                 let next = if forward {
                     (i + 1) % n
                 } else {
                     (i + n - 1) % n
                 };
-                names[next]
+                BUNDLED_THEMES[next].0
             }
         }
     }
@@ -174,5 +181,27 @@ mod tests {
             second,
             "differently-cased/padded current resolves correctly"
         );
+    }
+
+    /// Cycle 843: `by_name`/`find_name` dropped their per-element
+    /// `to_ascii_lowercase` for `eq_ignore_ascii_case`. Guard that
+    /// case/padding-insensitivity survives the rewrite.
+    #[test]
+    fn by_name_and_find_name_are_case_and_pad_insensitive() {
+        let first = Theme::list()[0];
+        let typed = format!("  {}  ", first.to_uppercase());
+        assert_eq!(
+            Theme::find_name(&typed),
+            Some(first),
+            "find_name resolves a differently-cased/padded name to the canonical one"
+        );
+        // by_name returns the parsed theme; a matched name must resolve to the
+        // same theme as the verbatim-name parse (Theme has no PartialEq — its
+        // Debug repr is a faithful structural fingerprint here).
+        assert_eq!(
+            format!("{:?}", Theme::by_name(&typed)),
+            format!("{:?}", Theme::by_name(first)),
+        );
+        assert_eq!(Theme::find_name("no such theme zzz"), None);
     }
 }
