@@ -8451,6 +8451,20 @@ impl ApplicationHandler<UserEvent> for App {
             // generates a fresh session_id for the future cross-process
             // IPC handshake); CursorEntered → DraggingInside (user
             // brought the cursor back; cancel the cross-window flow).
+            //
+            // Staging note (cycle 854 audit): the FSM's *entry* transitions
+            // (`on_mouse_down_on_tab` → ArmedInside, `on_mouse_move` →
+            // DraggingInside) are intentionally NOT yet wired into the tab-bar
+            // mouse handler — the cross-window tear-off needs the IPC
+            // handshake + drop sub-cycles (7-11) that aren't built, and is
+            // SCM_RIGHTS-based (Unix-only; `fd_transport` is `#![cfg(unix)]`).
+            // So `detach_drag` is always `Idle` here and these two arms are
+            // inert by design, NOT an accidental dead-wire. In-window tab
+            // drag-to-reorder is the separate cycle-249 `tab_drag_active`
+            // path; the working cross-window move today is the keyboard
+            // `Action::MoveTabToNewWindow` (cycle 384) +
+            // `try_move_tab_to_new_window_scm_rights`. Tracked for completion;
+            // a no-op transition on `Idle` is harmless until then.
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut self.detach_drag);
                 self.detach_drag = prev.on_cursor_leave_window(
