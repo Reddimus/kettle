@@ -9,6 +9,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Mouse tracking (cycle 842, audit) — coordinates clamp to the grid and
+    drags coalesce to cell crossings.** Two fixes to the SGR mouse reports sent
+    to TUIs (htop, vim, tmux). (1) A click in the right/bottom padding rounded
+    the reported cell up to `cols`/`rows` — one past the last valid cell — which
+    a tracking app mis-renders; the reported `(row, col)` now clamps to the
+    pane's grid. (2) A fast drag inside one cell emitted one SGR motion report
+    per pixel of travel; cell-motion modes (1002/1003) now report only when the
+    pointer crosses into a new cell, matching xterm. Press/release always
+    report. The coalescing rule is a pure, unit-tested helper.
+
   - **Cross-platform (cycle 841, audit) — minimizing no longer reflows every
     PTY to 1×1.** On Windows, minimizing delivers `Resized(0, 0)`; kettle
     reconfigured the surface and ran `resize_all` to a 0×0 area, collapsing every

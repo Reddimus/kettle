@@ -1558,6 +1558,11 @@ pub struct App {
     /// scroll offset — still runs per frame to detect the change).
     links_scan_key: Option<LinksScanKey>,
     mouse_btn: Option<u8>,
+    /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
+    /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
+    /// intra-cell moves; a fast drag would otherwise flood one SGR report
+    /// per pixel of travel (cycle 842, audit).
+    last_mouse_cell: Option<(usize, usize)>,
     links: Vec<kettle_core::Link>,
     ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
@@ -2116,6 +2121,7 @@ impl App {
             search_scan_key: None,
             links_scan_key: None,
             mouse_btn: None,
+            last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
@@ -3516,10 +3522,24 @@ impl App {
     }
 
     /// `(row, col)` of the mouse within the focused pane, if any.
+    ///
+    /// Clamped to the focused pane's live grid: a click in the right/bottom
+    /// padding (the rect rounds up past an exact cell multiple) must report the
+    /// LAST cell, never one past the edge. A mouse-tracking app that sees
+    /// `col == cols` or `row == rows` mis-renders (cycle 842, audit) — xterm
+    /// itself clamps the reported coordinate to the window.
     fn cursor_cell(&self) -> Option<(usize, usize)> {
         let rect = self.focused_rect(self.area())?;
         let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
-        Some((p.line.0.max(0) as usize, p.column.0))
+        let (row, col) = (p.line.0.max(0) as usize, p.column.0);
+        // Clamp to the pane's geometric grid (same cell size `px_to_point`
+        // used): a click in the right/bottom padding rounds up to `cols`/`rows`,
+        // one past the edge, which a mouse-tracking app mis-renders.
+        let (cols, rows) = self.grid_of(rect);
+        Some((
+            row.min(rows.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        ))
     }
 
     /// Scan the focused pane's visible grid for quick-select targets and
@@ -3575,6 +3595,18 @@ impl App {
 
     /// Forward a mouse event to the app via the active tracking protocol.
     /// Returns `true` when it was consumed (so kettle skips local handling).
+    /// Whether a mouse event at `cur` should be reported to a tracking app,
+    /// given the `last` reported cell. Motion (1002/1003) coalesces to cell
+    /// crossings; a press/release (`motion == false`) always reports. Pure so
+    /// the coalescing rule is unit-tested without a live PTY (cycle 842).
+    fn motion_should_report(
+        motion: bool,
+        last: Option<(usize, usize)>,
+        cur: (usize, usize),
+    ) -> bool {
+        !(motion && last == Some(cur))
+    }
+
     fn send_mouse(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
         // Shift held = "bypass mouse tracking, let kettle handle this
         // locally" — the xterm convention every modern terminal honors.
@@ -3597,10 +3629,20 @@ impl App {
         let Some((row, col)) = self.cursor_cell() else {
             return false;
         };
+        // Cell-motion coalescing: a drag that stays inside one cell must not
+        // re-report. xterm fires a 1002/1003 motion event only when the
+        // pointer crosses into a new cell; without this a fast drag emits one
+        // SGR report per pixel of travel, flooding the TUI (cycle 842, audit).
+        // Press/release always report (the guard is motion-only) and refresh
+        // the baseline, so the next motion is compared against the right cell.
+        if !Self::motion_should_report(motion, self.last_mouse_cell, (row, col)) {
+            return true;
+        }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, self.mods);
         if let Some(p) = self.mux.focused() {
             p.term.write(&seq);
         }
+        self.last_mouse_cell = Some((row, col));
         true
     }
 
@@ -9537,9 +9579,9 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled, find_menu_row_y,
-        modal_swallows_pointer, rank_layouts, selection_kind, should_reveal_after_first_frame,
-        typeahead_match,
+        App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
+        find_menu_row_y, modal_swallows_pointer, rank_layouts, selection_kind,
+        should_reveal_after_first_frame, typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -9586,6 +9628,17 @@ mod tests {
     /// Windows) must be ignored — reconfiguring + `resize_all` to 0×0 collapses
     /// every PTY to a 1×1 grid (SIGWINCH storm). A behavioral test needs a winit
     /// event loop; pin the early-return at the source level.
+    #[test]
+    fn motion_coalesces_to_cell_crossings() {
+        // Press/release always report, regardless of the last cell.
+        assert!(App::motion_should_report(false, Some((4, 4)), (4, 4)));
+        assert!(App::motion_should_report(false, None, (4, 4)));
+        // Motion into a NEW cell reports; motion staying in the same cell does not.
+        assert!(App::motion_should_report(true, Some((4, 4)), (4, 5)));
+        assert!(App::motion_should_report(true, None, (4, 4)));
+        assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
+    }
+
     #[test]
     fn resized_ignores_degenerate_size() {
         let src = include_str!("app.rs");
