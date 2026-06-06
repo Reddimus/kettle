@@ -22,6 +22,7 @@
 use anyhow::{Context, Result};
 use mlua::Lua;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Cycle 601: per-call cap on `kettle.send_text(s)`. A hostile
@@ -53,6 +54,21 @@ const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
 /// up a couple dozen hooks tops out around 50). Past the cap, new
 /// pushes drop silently with a `log::warn`.
 const MAX_PENDING_COMMANDS: usize = 1024;
+
+/// Cycle 847 (audit): per-registry caps on Lua-registered callbacks. The
+/// command queue above is bounded against a hostile `init.lua`, but the
+/// callback registries (`kettle.on`, `add_menu_item`, `add_url_handler`) were
+/// not — a runaway `for i=1,1e9 do kettle.on('output', f) end` grew the
+/// registry unbounded AND made every event fire walk a giant list. Sized far
+/// above any legitimate plugin (a busy config wires up a few dozen). Past the
+/// cap, registration is a no-op with a single `log::warn` (the flags below
+/// keep a pathological loop from spamming the log).
+const MAX_LUA_CALLBACKS_PER_EVENT: usize = 256;
+const MAX_LUA_MENU_ITEMS: usize = 256;
+const MAX_LUA_URL_HANDLERS: usize = 256;
+static LUA_EVENTS_WARNED: AtomicBool = AtomicBool::new(false);
+static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
+static LUA_URL_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Cycle 601: locked push with queue-length cap. All four
 /// `kettle.*` side-effect callbacks route through this so the
@@ -385,10 +401,19 @@ impl LuaEngine {
                 "add_menu_item",
                 lua.create_function(|lua, (label, cb): (String, mlua::Function)| {
                     let items: mlua::Table = lua.named_registry_value("kettle_menu_items")?;
+                    let n = items.len()?;
+                    if n as usize >= MAX_LUA_MENU_ITEMS {
+                        if !LUA_MENU_WARNED.swap(true, Ordering::Relaxed) {
+                            log::warn!(
+                                "kettle.add_menu_item: registry capped at \
+                                 {MAX_LUA_MENU_ITEMS}; ignoring further items"
+                            );
+                        }
+                        return Ok(());
+                    }
                     let entry = lua.create_table()?;
                     entry.set("label", label)?;
                     entry.set("callback", cb)?;
-                    let n = items.len()?;
                     items.set(n + 1, entry)?;
                     Ok(())
                 })?,
@@ -415,11 +440,20 @@ impl LuaEngine {
                     |lua, (name, pattern, cb): (String, String, mlua::Function)| {
                         let handlers: mlua::Table =
                             lua.named_registry_value("kettle_url_handlers")?;
+                        let n = handlers.len()?;
+                        if n as usize >= MAX_LUA_URL_HANDLERS {
+                            if !LUA_URL_WARNED.swap(true, Ordering::Relaxed) {
+                                log::warn!(
+                                    "kettle.add_url_handler: registry capped at \
+                                     {MAX_LUA_URL_HANDLERS}; ignoring further handlers"
+                                );
+                            }
+                            return Ok(());
+                        }
                         let entry = lua.create_table()?;
                         entry.set("name", name)?;
                         entry.set("pattern", pattern)?;
                         entry.set("callback", cb)?;
-                        let n = handlers.len()?;
                         handlers.set(n + 1, entry)?;
                         Ok(())
                     },
@@ -452,6 +486,16 @@ impl LuaEngine {
                         }
                     };
                     let n = list.len()?;
+                    if n as usize >= MAX_LUA_CALLBACKS_PER_EVENT {
+                        if !LUA_EVENTS_WARNED.swap(true, Ordering::Relaxed) {
+                            log::warn!(
+                                "kettle.on('{name}'): capped at \
+                                 {MAX_LUA_CALLBACKS_PER_EVENT} callbacks; \
+                                 ignoring further subscribers"
+                            );
+                        }
+                        return Ok(());
+                    }
                     list.set(n + 1, cb)?;
                     Ok(())
                 })?,
@@ -665,6 +709,29 @@ impl LuaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cycle 847 (audit). The callback registries must be bounded against a
+    /// hostile/runaway `init.lua`, mirroring the command-queue cap. Registering
+    /// far past the cap saturates at the cap rather than growing unbounded.
+    #[test]
+    fn lua_callback_registries_are_capped() {
+        let eng = LuaEngine::new("Default").expect("init");
+        // Menu items: register well past the cap, assert it saturates.
+        eng.eval_str("for i=1,400 do kettle.add_menu_item('item '..i, function() end) end")
+            .expect("eval add_menu_item loop");
+        let labels = eng.list_menu_item_labels().expect("labels");
+        assert_eq!(
+            labels.len(),
+            MAX_LUA_MENU_ITEMS,
+            "menu registry must saturate at MAX_LUA_MENU_ITEMS, not grow unbounded"
+        );
+        // Event callbacks: register past the cap, then assert firing the event
+        // is bounded (it would panic/hang on an unbounded list; here it just
+        // returns) — the registry walk can't exceed the cap.
+        eng.eval_str("for i=1,400 do kettle.on('output', function() end) end")
+            .expect("eval kettle.on loop");
+        eng.fire_event(&LuaEvent::Output(1, b"x".to_vec()));
+    }
 
     #[test]
     fn kettle_namespace_exposes_version_and_theme() {

@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Robustness (cycle 847, audit) — Lua callback registries are now bounded.**
+    The side-effect command queue was already capped against a hostile
+    `init.lua` (`MAX_PENDING_COMMANDS`), but `kettle.on`, `add_menu_item`, and
+    `add_url_handler` appended with no length check — a runaway
+    `for i=1,1e9 do kettle.on('output', f) end` grew the registry without bound
+    *and* made every event fire walk a giant list. Each registry now caps at 256
+    (far above any real plugin); past the cap, registration is a no-op with a
+    single `log::warn`. Unit-tested.
+
   - **Zoom (cycle 846, audit) — `ScaledZoom` no longer discards a prior manual
     font zoom.** `Action::IncreaseFontSize`/`DecreaseFontSize` step the renderer
     size but never write `cfg.font_size`, so `ScaledZoom` — which saved
