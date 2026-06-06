@@ -1040,8 +1040,10 @@ impl Terminal {
     /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)):
     /// PTY child PID accessor. Returns the OS pid of the shell that
     /// kettle spawned at pane creation. None means either:
-    ///   - lock contention (extremely rare; the reader thread holds
-    ///     the child mutex briefly when reaping after exit)
+    ///   - lock contention (extremely rare; the child mutex is held only
+    ///     briefly by `child_exited`'s `try_wait` from `Mux::reap` and, on
+    ///     teardown, by the cycle-833 detached reaper thread's `wait` — the
+    ///     reader thread does NOT touch the child)
     ///   - the platform doesn't expose pids for this Child type
     ///     (Windows fallback path)
     ///
@@ -1357,10 +1359,29 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         // 1. Tell the reader to stop looping.
         self.stop.store(true, Ordering::Relaxed);
-        // 2. Kill the child (best-effort; already-exited returns Err).
-        if let Ok(mut c) = self.child.lock() {
+        // 2. Kill the child (best-effort; already-exited returns Err), then reap
+        //    it OFF the UI thread. Cycle 833 (audit): the pre-833 body kill()'d
+        //    but never wait()'d on the close/quit path — `std::process::Child`'s
+        //    Drop doesn't reap, and the only reaping path (`child_exited`
+        //    →`try_wait`) runs from `Mux::reap` for LIVE panes only — so a long
+        //    open/close session accumulated `<defunct>` zombies consuming PID
+        //    slots on Unix/macOS. A short detached thread `wait()`s the already-
+        //    SIGKILL'd child (returns almost immediately) so Drop stays
+        //    non-blocking AND no zombie leaks. The child is a `Send + Sync`
+        //    `Arc<Mutex<…>>`, and the reaper's clone keeps it alive to wait on.
+        //    Windows is unaffected (handle-based) but the same path reaps it.
+        let child = self.child.clone();
+        if let Ok(mut c) = child.lock() {
             let _ = c.kill();
         }
+        std::thread::Builder::new()
+            .name("kettle-pty-reaper".into())
+            .spawn(move || {
+                if let Ok(mut c) = child.lock() {
+                    let _ = c.wait();
+                }
+            })
+            .ok();
         // 3. Close the writer (conin / child stdin) by swapping in a discard
         //    sink and dropping the real writer — an EOF nudge for shells that
         //    exit on stdin close.
@@ -2940,6 +2961,13 @@ mod teardown_tests {
             !body.contains(".join("),
             "Terminal::Drop must NOT join the PTY reader — joining on the UI \
              thread deadlocks on a blocked ConPTY read (cycle 742)"
+        );
+        // Cycle 833: Drop must also REAP the killed child off-thread so it
+        // doesn't leak a <defunct> zombie on Unix/macOS — and must do so in a
+        // detached reaper (no blocking wait on the UI thread).
+        assert!(
+            body.contains("kettle-pty-reaper") && body.contains("c.wait()"),
+            "Drop must reap the killed child in a detached reaper thread (cycle 833)"
         );
     }
 }

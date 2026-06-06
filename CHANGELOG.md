@@ -9,6 +9,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 833, audit) — closed panes don't leak zombie processes.** On
+    pane close / quit, `Terminal::Drop` SIGKILL'd the PTY child but never
+    `wait()`'d it (`std::process::Child::drop` doesn't reap, and the live-pane
+    `try_wait` path doesn't run for a dropped pane), so a long open/close session
+    accumulated `<defunct>` processes consuming PID slots on Unix/macOS. Drop now
+    reaps the killed child in a short detached thread — staying non-blocking (no
+    UI freeze) while leaving no zombie. Windows is unaffected (handle-based).
+
   - **Fix (cycle 832, audit) — the `=` key can be rebound.** `keybind`
     parsing split the trigger/action on the *first* `=`, but the `=` key is a
     shipped default trigger, so `keybind = ctrl+==increase_font_size` parsed as
