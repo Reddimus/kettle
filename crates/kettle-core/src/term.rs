@@ -362,10 +362,24 @@ fn parse_wsl_distros(text: &str) -> Vec<String> {
 /// host without WSL simply offers no WSL entries.
 #[cfg(windows)]
 fn list_wsl_distros() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("wsl.exe")
-        .args(["-l", "-q"])
-        .output()
-    else {
+    // Cycle 834 (audit): run `wsl.exe -l -q` on a worker thread with a bounded
+    // wait. The dropdown that calls this (new-tab `▾`) runs on the UI thread, so
+    // a wedged LxssManager — the very `Wsl/Service/E_UNEXPECTED` state that
+    // freezes `wsl.exe` — would otherwise hang the whole window ("not
+    // responding"). On timeout we abandon the call and report no distros; the
+    // worker self-terminates if `wsl.exe` ever returns (its `send` no-ops once
+    // the receiver is gone). With the App-side cache (open_new_tab_menu), the
+    // worst case is one ~2 s wait on the first dropdown open. `-l -q` only reads
+    // the registry/service (it doesn't boot a distro), so 2 s is generous.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            std::process::Command::new("wsl.exe")
+                .args(["-l", "-q"])
+                .output(),
+        );
+    });
+    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(2)) else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -1552,6 +1566,25 @@ fn place_image(
 /// regression-proof core of a `vttest` sweep.
 #[cfg(test)]
 mod detect_shells_tests {
+
+    /// Cycle 834 (audit) drift guard. `list_wsl_distros` runs on the UI thread
+    /// (new-tab `▾`), so its `wsl.exe` call must stay BOUNDED — a wedged
+    /// LxssManager (the `Wsl/Service/E_UNEXPECTED` freeze) otherwise hangs the
+    /// window. Pin the worker-thread + `recv_timeout` shape at the source level
+    /// (a behavioral test would need to hang a real `wsl.exe`).
+    #[test]
+    fn list_wsl_distros_is_time_bounded() {
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn list_wsl_distros()")
+            .expect("list_wsl_distros present");
+        let body = &src[start..start + 1200];
+        assert!(
+            body.contains("recv_timeout"),
+            "list_wsl_distros must bound the wsl.exe call with recv_timeout so a \
+             hung LxssManager can't freeze the UI thread"
+        );
+    }
 
     #[test]
     fn parse_wsl_distros_strips_bom_nul_blanks_crlf() {

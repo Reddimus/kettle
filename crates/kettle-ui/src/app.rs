@@ -1756,6 +1756,10 @@ pub struct App {
     /// the background check). Esc dismisses it (and records the tag so it never
     /// re-nags); Enter opens the release URL.
     update_available: Option<(String, String)>,
+    /// Cycle 834 (audit): cached new-tab `▾` shell list. `detect_shells()` can
+    /// spawn `wsl.exe` (bounded, but still a one-off cost), so compute it at most
+    /// once per session instead of on every dropdown open.
+    detected_shells: Option<Vec<(String, Vec<String>)>>,
 }
 
 /// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
@@ -2152,6 +2156,7 @@ impl App {
             lua_startup_fired: false,
             window_shown: false,
             update_available: None,
+            detected_shells: None,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -4789,7 +4794,13 @@ impl App {
     /// so the click is never a dead no-op.
     fn open_new_tab_menu(&mut self, px: f32, py: f32) {
         self.close_all_modals();
-        let shells = kettle_core::term::detect_shells();
+        // Cycle 834 (audit): cache the detection — it can spawn `wsl.exe` (now
+        // bounded by a timeout in `list_wsl_distros`), so don't re-run it on
+        // every dropdown open.
+        let shells = self
+            .detected_shells
+            .get_or_insert_with(kettle_core::term::detect_shells)
+            .clone();
         if shells.is_empty() {
             let area = self.area();
             let (cols, rows) = self.grid_of(area);

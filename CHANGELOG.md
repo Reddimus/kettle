@@ -9,6 +9,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 834, audit) — the new-tab `▾` shell dropdown can't freeze the
+    window.** Opening it ran `detect_shells()` synchronously on the UI thread,
+    including a `wsl.exe -l -q` subprocess with no timeout — so a cold or wedged
+    `LxssManager` (the same `Wsl/Service/E_UNEXPECTED` state that hangs `wsl.exe`)
+    froze the whole window ("not responding"), and the detection re-ran on every
+    open. The `wsl.exe` call is now bounded by a worker-thread `recv_timeout`
+    (≤2 s, then no distros), and the result is cached per session.
+
   - **Fix (cycle 833, audit) — closed panes don't leak zombie processes.** On
     pane close / quit, `Terminal::Drop` SIGKILL'd the PTY child but never
     `wait()`'d it (`std::process::Child::drop` doesn't reap, and the live-pane
