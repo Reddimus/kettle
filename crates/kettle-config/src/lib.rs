@@ -2081,7 +2081,23 @@ impl Config {
                 | "search-background"
                 | "split-divider-color"
                 | "focused-split-color"
-                | "split-divider-color-focused" => Rgb::parse(v).is_some(),
+                | "split-divider-color-focused"
+                // Cycle 837 (audit): accent + per-pane titlebar colors were
+                // silently keeping the default on a typo too.
+                | "accent-color"
+                | "accent_color"
+                | "title-transmit-bg-color"
+                | "title_transmit_bg_color"
+                | "title-receive-bg-color"
+                | "title_receive_bg_color"
+                | "title-inactive-bg-color"
+                | "title_inactive_bg_color"
+                | "title-transmit-fg-color"
+                | "title_transmit_fg_color"
+                | "title-receive-fg-color"
+                | "title_receive_fg_color"
+                | "title-inactive-fg-color"
+                | "title_inactive_fg_color" => Rgb::parse(v).is_some(),
                 // `keybind = <trigger>=<action>` — both halves have to
                 // parse (same predicate `apply_keybind` uses, just split
                 // so we know which half failed). A user typo on either
@@ -2107,6 +2123,49 @@ impl Config {
                 "theme" => {
                     let want = v.trim().to_ascii_lowercase();
                     Theme::list().iter().any(|n| n.to_ascii_lowercase() == want)
+                }
+                // Cycle 837 (audit): light/dark-theme must name a real bundled
+                // theme (cycle-616 auto-theme); a typo silently kept the prior.
+                "light-theme" | "light_theme" | "dark-theme" | "dark_theme" => {
+                    Theme::find_name(v.trim()).is_some()
+                }
+                // Cycle 837 (audit): enum keys whose apply arm has a
+                // `_ => DefaultVariant` fallthrough — a typo silently took the
+                // default with no warning. Validate against the explicit variant
+                // set plus the default's conventional spelling.
+                "status-bar" | "statusbar" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "off" | "false" | "none" | "top" | "bottom" | "true" | "on"
+                ),
+                "exit-action" | "exit_action" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "close" | "restart" | "hold")
+                }
+                "backspace-binding" | "backspace_binding" | "delete-binding"
+                | "delete_binding" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "ascii-del"
+                        | "ascii_del"
+                        | "control-h"
+                        | "ctrl-h"
+                        | "control_h"
+                        | "escape-sequence"
+                        | "escape_sequence"
+                        | "automatic"
+                        | "auto"
+                ),
+                "broadcast-default" | "broadcast_default" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "all" | "off" | "none" | "group")
+                }
+                "theme-mode" | "theme_mode" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "light" | "dark" | "auto" | "system" | "follow-system" | "follow_system"
+                        | "explicit"
+                ),
+                "background-type" | "background_type" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "solid" | "image" | "transparent")
+                }
+                "lua-sandbox" | "lua_sandbox" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "safe" | "trusted" | "unsafe")
                 }
                 // Enum-typed config values: each apply arm above has a
                 // `_ => DefaultVariant` fallthrough, so a typo (`bell =
@@ -4879,6 +4938,42 @@ mod config_tests {
         assert!(Config::detect_malformed_values("case-sensitive = true\n").is_empty());
         assert_eq!(
             Config::detect_malformed_values("case-sensitive = ya\n").len(),
+            1
+        );
+        // Cycle 837: more enum keys that used to silently default on a typo —
+        // each documented value passes; each typo flags exactly once.
+        for (good, bad) in [
+            ("exit-action = restart", "exit-action = clse"),
+            (
+                "backspace-binding = control-h",
+                "backspace-binding = ctrl_x",
+            ),
+            ("delete-binding = escape-sequence", "delete-binding = esc"),
+            ("broadcast-default = all", "broadcast-default = evrywhere"),
+            ("theme-mode = auto", "theme-mode = atuo"),
+            ("background-type = image", "background-type = imag"),
+            ("lua-sandbox = trusted", "lua-sandbox = trused"),
+            ("status-bar = bottom", "status-bar = botom"),
+        ] {
+            assert!(
+                Config::detect_malformed_values(&format!("{good}\n")).is_empty(),
+                "valid {good:?} should pass"
+            );
+            assert_eq!(
+                Config::detect_malformed_values(&format!("{bad}\n")).len(),
+                1,
+                "{bad:?} should flag once"
+            );
+        }
+        // Cycle 837: color + theme-role keys.
+        assert!(Config::detect_malformed_values("accent-color = #ff8800\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("accent-color = nope\n").len(),
+            1
+        );
+        assert!(Config::detect_malformed_values("title-transmit-bg-color = #c80003\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("dark-theme = NotARealTheme\n").len(),
             1
         );
     }

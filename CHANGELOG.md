@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Error-handling (cycle 837, audit) — `--check-config` flags enum + color
+    typos too.** The cycle-826 diagnostic sweep covered bool keys but left enum
+    keys (`status-bar`, `exit-action`, `backspace-/delete-binding`,
+    `broadcast-default`, `theme-mode`, `background-type`, `lua-sandbox`), the
+    color keys (`accent-color`, the six `title-*-color`), and the theme-role keys
+    (`light-/dark-theme`) silently defaulting on a typo. They're now validated
+    against their variant sets / `Rgb::parse` / `Theme::find_name`, so
+    `exit-action = clse` or `accent-color = nope` is caught. Drift-tested.
+
   - **Fix (cycle 836, audit) — remote-session detection drives the right
     reconnect command.** Three arg-parsing bugs each produced a wrong title and a
     wrong command written to the PTY: `ssh -J jump host` took the bastion as the
