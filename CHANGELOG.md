@@ -9,6 +9,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Settings (cycle 856, audit) — "Window padding" sets both axes.** The
+    single Settings "Window padding" control persisted only `window-padding-x`,
+    leaving `window-padding-y` at its default — so nudging it produced visibly
+    asymmetric padding (wider left/right than top/bottom). It now mirrors the
+    value to both axes for uniform padding. Drift-guarded.
+
   - **Diagnostics (cycle 855, audit) — `--check-config` now flags out-of-range
     clamped numerics.** Cycle 837 closed the enum half of this gap; this closes
     the numeric half. `handle-size`, `tab-bar-width`, `background-darkness`,

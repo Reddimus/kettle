@@ -7482,6 +7482,13 @@ impl App {
                         )
                     };
                     self.persist_pref(key_str, &new_val);
+                    // Cycle 856 (audit): the single "Window padding" control is
+                    // meant to set *uniform* padding, but persisted only the X
+                    // axis — leaving `window-padding-y` at its default produced
+                    // visibly lopsided padding. Mirror the value to the Y axis.
+                    if key_str == "window-padding-x" {
+                        self.persist_pref("window-padding-y", &new_val);
+                    }
                     self.reload_config();
                 }
             }
@@ -9691,6 +9698,21 @@ mod tests {
         assert!(
             !arm.contains("self.cfg.font_size * 1.5"),
             "ScaledZoom must not scale from the (stale) config font size"
+        );
+    }
+
+    /// Cycle 856 (audit) drift guard. The single "Window padding" Settings
+    /// control must persist BOTH `window-padding-x` and `-y` so the result is
+    /// symmetric — persisting only X leaves Y at its default (lopsided). A
+    /// behavioral test needs the live overlay + persist path; pin the
+    /// dual-write at the source.
+    #[test]
+    fn window_padding_setting_writes_both_axes() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("if key_str == \"window-padding-x\" {")
+                && src.contains("self.persist_pref(\"window-padding-y\", &new_val);"),
+            "the Window-padding control must mirror its value to window-padding-y"
         );
     }
 
