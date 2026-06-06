@@ -9,6 +9,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 853, audit) — the per-frame quad list is pooled.**
+    `render_frame_with_status` allocated a fresh `Vec<QuadInstance>` sized
+    `panes*16 + 256` every frame for all the cell-background / cursor / UI quads.
+    It now reuses a `quad_scratch` buffer on the renderer (taken + cleared at the
+    top of the frame, returned after the GPU upload) so the steady-state 60fps
+    path keeps the allocation across frames — same high-water pooling as the
+    `span_scratch` / `pane_buffers` pools. Drift-guarded.
+
   - **Performance (cycle 852, audit) — the renderer borrows per-pane frame data
     instead of double-cloning it.** `redraw()` already builds a `guards`
     collection owning each visible pane's image `Vec`, title `String`, and

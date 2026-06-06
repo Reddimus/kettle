@@ -452,6 +452,11 @@ pub struct Renderer {
     span_scratch: Vec<(String, Rgb, bool, bool)>,
     /// Cycle 827: pooled scratch for `build_pane`'s line-break indices.
     span_breaks_scratch: Vec<usize>,
+    /// Cycle 853 (audit): pooled scratch for the per-frame cell/UI quad list
+    /// (`render_frame_with_status` filled a fresh `Vec` of `panes*16+256`
+    /// `QuadInstance`s every frame). Taken + cleared at the top of the frame,
+    /// returned after the GPU upload — same high-water pooling as `span_scratch`.
+    quad_scratch: Vec<QuadInstance>,
     /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 3): one TextBuffer per pane for the title text
     /// drawn in the cycle-379 titlebar quad. Reused across redraws
@@ -697,6 +702,7 @@ impl Renderer {
             text_renderer,
             pane_buffers: Vec::new(),
             span_scratch: Vec::new(),
+            quad_scratch: Vec::new(),
             span_breaks_scratch: Vec::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
@@ -993,7 +999,12 @@ impl Renderer {
         // per-pane chrome + cell-background quads dominate `quads`). Capacities
         // are rough upper-of-typical estimates; growth still happens for
         // outliers but the common 60fps path avoids the realloc churn.
-        let mut quads: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 16 + 256);
+        // Cycle 853 (audit): reuse the pooled quad scratch (cleared, capacity
+        // retained from the prior frame) instead of allocating a fresh Vec every
+        // frame. Returned to `self.quad_scratch` after the GPU upload below.
+        let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
+        quads.clear();
+        quads.reserve(panes.len() * 16 + 256);
         // Third quad pass — drawn after `over` so the right-click
         // context menu's bg/shadow/border/highlight sit on top of
         // every other UI element. The menu's text is rendered by
@@ -2427,6 +2438,9 @@ impl Renderer {
         )?;
         self.quads
             .upload(&self.device, &self.queue, [sw, sh], &quads);
+        // Cycle 853: return the scratch to the pool (keeps its capacity for next
+        // frame). Last use of `quads` is the upload just above.
+        self.quad_scratch = quads;
         self.imgs
             .upload(&self.device, &self.queue, [sw, sh], &img_items);
         self.imgs.gc(&live);
@@ -4888,6 +4902,15 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             src.contains("self.span_scratch = spans;"),
             "span scratch must be returned to the pool for the next frame"
+        );
+        // Cycle 853: the per-frame quad list is pooled the same way.
+        assert!(
+            src.contains("std::mem::take(&mut self.quad_scratch)"),
+            "the frame quad Vec must be taken from the pool, not allocated fresh"
+        );
+        assert!(
+            src.contains("self.quad_scratch = quads;"),
+            "the frame quad Vec must be returned to the pool after upload"
         );
         assert!(
             src.contains("slot.0.clear();"),
