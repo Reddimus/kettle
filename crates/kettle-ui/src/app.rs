@@ -8340,6 +8340,17 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                // Cycle 841 (audit): minimizing a window delivers Resized(0, 0)
+                // on Windows. Reconfiguring the surface + `resize_all` to a 0×0
+                // area collapsed every PTY to a 1×1 grid (`grid_of`'s `.max(1)`),
+                // firing a SIGWINCH storm that reflowed/redrew every TUI in every
+                // pane — and the restore event then reflowed them all back. Skip
+                // a degenerate size entirely: keep the last good grid so PTYs
+                // hold their real dimensions; the genuine restore carries the
+                // true non-zero size and reflows once.
+                if size.width == 0 || size.height == 0 {
+                    return;
+                }
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
                 }
@@ -9571,6 +9582,24 @@ mod tests {
     /// modal + tracking PTY; pin the gated shape at the source level. Both the
     /// Pressed and Released arms must guard `send_mouse(sgr, …)` with
     /// `!modal_swallows_pointer(…)` inside the `extra_mouse_sgr` block.
+    /// Cycle 841 (audit) drift guard. A 0×0 `Resized` (window minimize on
+    /// Windows) must be ignored — reconfiguring + `resize_all` to 0×0 collapses
+    /// every PTY to a 1×1 grid (SIGWINCH storm). A behavioral test needs a winit
+    /// event loop; pin the early-return at the source level.
+    #[test]
+    fn resized_ignores_degenerate_size() {
+        let src = include_str!("app.rs");
+        let arm = src
+            .split("WindowEvent::Resized(size) => {")
+            .nth(1)
+            .expect("Resized arm present");
+        let head = &arm[..arm.len().min(900)];
+        assert!(
+            head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
+            "the Resized handler must early-return on a 0-dimension size"
+        );
+    }
+
     #[test]
     fn side_button_forward_is_modal_gated() {
         let src = include_str!("app.rs");

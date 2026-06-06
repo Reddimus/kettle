@@ -9,6 +9,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Cross-platform (cycle 841, audit) — minimizing no longer reflows every
+    PTY to 1×1.** On Windows, minimizing delivers `Resized(0, 0)`; kettle
+    reconfigured the surface and ran `resize_all` to a 0×0 area, collapsing every
+    pane's PTY to a 1×1 grid (a SIGWINCH storm that reflowed every TUI) — then
+    reflowed them all back on restore. A degenerate `Resized` is now ignored, so
+    panes keep their real size; the genuine restore reflows once. Drift-guarded.
+
   - **Cross-platform (cycle 840, audit) — no POSIX `-l` for explicit Windows
     shells either.** Cycle 822 stopped `login-shell = true` from injecting `-l`
     into the *default* Windows shell, but the explicit-`command` arm still added
