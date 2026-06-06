@@ -9,6 +9,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Performance (cycle 852, audit) — the renderer borrows per-pane frame data
+    instead of double-cloning it.** `redraw()` already builds a `guards`
+    collection owning each visible pane's image `Vec`, title `String`, and
+    group-name for the whole frame, then mapped it into `PaneView`s that *cloned*
+    all three again — so every frame deep-copied every pane's placements + title.
+    `PaneView` now borrows (`images: &'a [Placement]`, `title: &'a str`,
+    `group_name: Option<&'a str>`) from `guards`, exactly as `term` already
+    borrowed the `MutexGuard`. Zero per-pane clones on the render hot path;
+    drift-guarded.
+
   - **Performance (cycle 851, audit) — remote-context polling refreshes the
     process snapshot once per tick, not once per pane.** `detect_remote_with`
     refreshes the OS-wide process list *and* rebuilds the parent→children index

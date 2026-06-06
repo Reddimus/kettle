@@ -4178,6 +4178,10 @@ impl App {
                 }
             }
         }
+        // Cycle 852 (audit): hand the renderer borrows into `guards` (which lives
+        // for the whole frame) instead of a second per-pane clone of the images
+        // Vec / title String / group_name. `term` already borrowed the guard the
+        // same way; the data outlives `panes` because `guards` is dropped after.
         let panes: Vec<PaneView> = guards
             .iter()
             .map(
@@ -4185,12 +4189,12 @@ impl App {
                     rect: *r,
                     term: g,
                     focused: *f,
-                    images: imgs.clone(),
-                    title: title.clone(),
+                    images: imgs.as_slice(),
+                    title: title.as_str(),
                     size_cols: *cols,
                     size_rows: *rows,
                     bell: *bell,
-                    group_name: group_name.clone(),
+                    group_name: group_name.as_deref(),
                 },
             )
             .collect();

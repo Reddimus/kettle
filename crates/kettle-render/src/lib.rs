@@ -404,12 +404,16 @@ pub struct PaneView<'a> {
     pub term: &'a Term<EventProxy>,
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
-    pub images: Vec<kettle_core::Placement>,
+    ///
+    /// Borrowed (cycle 852, audit): the backing `Vec` lives in the per-frame
+    /// `guards` collection for the whole frame — exactly like `term` borrows the
+    /// `MutexGuard` — so the renderer reads it without a second per-pane clone.
+    pub images: &'a [kettle_core::Placement],
     /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 3 follow-up): the pane's title — rendered into
     /// the cycle-379 titlebar background quad when
-    /// cfg.show_titlebar = true.
-    pub title: String,
+    /// cfg.show_titlebar = true. Borrowed from `guards` (cycle 852).
+    pub title: &'a str,
     /// Cycle 386 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 6): pane terminal size in cols × rows. Appended
     /// to the titlebar title text as `WxH` unless
@@ -423,8 +427,8 @@ pub struct PaneView<'a> {
     /// Cycle 406 (Terminator parity, titlebar Bucket-D sub-cycle 8):
     /// optional named broadcast group. When `Some(name)`, the
     /// titlebar prefixes `[name]` (group label in brackets)
-    /// before the pane title.
-    pub group_name: Option<String>,
+    /// before the pane title. Borrowed from `guards` (cycle 852).
+    pub group_name: Option<&'a str>,
 }
 
 pub struct Renderer {
@@ -941,10 +945,10 @@ impl Renderer {
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (_, _, rw, _) = pv.rect;
-                let title = if pv.title.trim().is_empty() {
-                    "kettle".to_string()
+                let title: &str = if pv.title.trim().is_empty() {
+                    "kettle"
                 } else {
-                    pv.title.clone()
+                    pv.title
                 };
                 // Cycle 386: titlebar text = "  TITLE [WxH] [●]"
                 // where:
@@ -958,7 +962,7 @@ impl Renderer {
                 //   shape (sub-cycle 7 can promote to a real
                 //   colored chip).
                 let mut label = String::new();
-                if let Some(g) = &pv.group_name
+                if let Some(g) = pv.group_name
                     && !g.is_empty()
                 {
                     label.push_str(&format!("  [{g}]"));
@@ -1475,7 +1479,7 @@ impl Renderer {
                         draw(p);
                     }
                 } else {
-                    for p in &pv.images {
+                    for p in pv.images {
                         draw(p);
                     }
                 }
@@ -4916,6 +4920,29 @@ mod pane_buffer_lifecycle_tests {
     /// reads). The field must stay `Arc<str>` so that clone is a refcount bump,
     /// not a per-frame heap alloc + memcpy at 60fps. A behavioral test needs a
     /// GPU `Renderer`; pin the field type at the source level.
+    /// Cycle 852 drift guard. `PaneView` must *borrow* its per-frame
+    /// images/title/group_name from the frame's `guards` collection (exactly as
+    /// `term` borrows the `MutexGuard`), not own clones — otherwise `redraw()`
+    /// double-clones every visible pane's image `Vec` + title `String` every
+    /// frame. A behavioral test needs the full app frame loop; pin the borrowed
+    /// field types at the source.
+    #[test]
+    fn paneview_borrows_per_frame_data() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("pub images: &'a [kettle_core::Placement],"),
+            "PaneView.images must borrow the frame's image Vec, not clone it"
+        );
+        assert!(
+            src.contains("pub title: &'a str,"),
+            "PaneView.title must borrow, not own a cloned String"
+        );
+        assert!(
+            src.contains("pub group_name: Option<&'a str>,"),
+            "PaneView.group_name must borrow, not own a cloned String"
+        );
+    }
+
     #[test]
     fn font_family_is_arc_str_not_string() {
         let src = include_str!("lib.rs");
