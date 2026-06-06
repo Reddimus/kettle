@@ -17,6 +17,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **Rendering/search (cycle 865, audit) — two small correctness fixes.** The
+    cell-measurement probe sized its layout box at a fixed 1000×100px, but at a
+    large font on a high-DPI display the 10-glyph probe (~1300px at 72pt×3)
+    wrapped against it — so `cell_w` came out too narrow and mis-gridded the
+    terminal; the box is now sized relative to the metrics so it never wraps.
+    Search now skips zero-width regex matches (`a*`, `^`, `\b`) that otherwise
+    painted a spurious one-cell highlight per position.
+
   - **Docs/packaging (cycle 864, audit) — accuracy fixes from the fresh review.**
     The man page listed `~/Library/Application Support` as the macOS config path,
     but the resolver is `XDG_CONFIG_HOME` → `$HOME/.config` → `%APPDATA%` with no

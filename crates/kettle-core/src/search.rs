@@ -95,6 +95,13 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
             text.push(ch);
         }
         for m in re.find_iter(&text) {
+            // Cycle 865 (audit): skip zero-width matches. A user pattern that can
+            // match empty (`a*`, `^`, `\b`) yields a zero-length match at every
+            // position; without this each produces a spurious one-cell highlight
+            // the match doesn't really cover.
+            if m.start() == m.end() {
+                continue;
+            }
             let start_col = col_of_byte.get(m.start()).copied().unwrap_or(0);
             let end_col = col_of_byte
                 .get(m.end().saturating_sub(1))

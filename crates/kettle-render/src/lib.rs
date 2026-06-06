@@ -3537,7 +3537,16 @@ fn measure_cell(
     metrics: Metrics,
 ) -> (f32, f32) {
     buf.set_metrics(fs, metrics);
-    buf.set_size(fs, Some(1000.0), Some(100.0));
+    // Cycle 865 (audit): size the measure box relative to the (physical)
+    // metrics, not a fixed 1000×100. At a large font on a high-DPI display the
+    // physical font size can be ~200px, so the 10-glyph probe is ~1300px wide
+    // and wrapped against the old 1000px box — `line_w` then reflected only the
+    // first wrapped line and `cell_w` came out too narrow, mis-gridding the
+    // terminal. A monospace `M` is ~0.6em, so 10 fit in ~6em; 20em + slack is
+    // ample headroom that can never wrap regardless of size/scale.
+    let box_w = metrics.font_size * 20.0 + 100.0;
+    let box_h = metrics.line_height * 2.0 + 100.0;
+    buf.set_size(fs, Some(box_w), Some(box_h));
     buf.set_text(
         fs,
         "MMMMMMMMMM",
@@ -4861,6 +4870,31 @@ mod hidpi_scale_tests {
         assert!(
             (h2 / h1 - 2.0).abs() < 0.15,
             "cell height should ≈ double at 2× scale: {h1} → {h2}"
+        );
+    }
+
+    /// Cycle 865 (audit): at a large font on a high-DPI display the 10-glyph
+    /// measure probe (~1300px at 72pt×3) exceeded the old fixed 1000px measure
+    /// box and wrapped, so `cell_w` came out too narrow and mis-gridded the
+    /// terminal. With the metrics-relative box it must scale linearly.
+    #[test]
+    fn measured_cell_does_not_wrap_at_large_font_highdpi() {
+        let mut fs = FontSystem::new();
+        for face in kettle_config::font::all() {
+            fs.db_mut().load_font_data(face.to_vec());
+        }
+        let fam = "JetBrains Mono";
+        let m1 = metrics_for(72.0, 1.0);
+        let mut b1 = TextBuffer::new(&mut fs, m1);
+        let (w1, _) = measure_cell(&mut fs, &mut b1, fam, m1);
+        // 72pt × 3 = 216px physical; the ~1300px probe would have wrapped the
+        // old 1000px box. Width must still scale ~3×.
+        let m3 = metrics_for(72.0, 3.0);
+        let mut b3 = TextBuffer::new(&mut fs, m3);
+        let (w3, _) = measure_cell(&mut fs, &mut b3, fam, m3);
+        assert!(
+            (w3 / w1 - 3.0).abs() < 0.15,
+            "cell width must scale ~3× without wrapping: {w1} → {w3}"
         );
     }
 }
