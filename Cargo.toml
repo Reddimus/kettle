@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.7.1"
+version = "2.8.0"
 # Cycle 213: edition was "2021" but every crate's Cargo.toml declared
 # "2024" individually. Bumped here to match reality and let crates
 # inherit via `edition.workspace = true`.
@@ -68,12 +68,12 @@ categories = ["command-line-utilities"]
 # was at 1.45.1; the literal version diverged every release because
 # nobody updated the path-dep pins. Workspace-deps make the next
 # `release.sh` version bump update one line instead of ten.
-kettle-config = { path = "crates/kettle-config", version = "2.7.1" }
-kettle-core = { path = "crates/kettle-core", version = "2.7.1" }
-kettle-vt = { path = "crates/kettle-vt", version = "2.7.1" }
-kettle-render = { path = "crates/kettle-render", version = "2.7.1" }
-kettle-remote = { path = "crates/kettle-remote", version = "2.7.1" }
-kettle-ui = { path = "crates/kettle-ui", version = "2.7.1" }
+kettle-config = { path = "crates/kettle-config", version = "2.8.0" }
+kettle-core = { path = "crates/kettle-core", version = "2.8.0" }
+kettle-vt = { path = "crates/kettle-vt", version = "2.8.0" }
+kettle-render = { path = "crates/kettle-render", version = "2.8.0" }
+kettle-remote = { path = "crates/kettle-remote", version = "2.8.0" }
+kettle-ui = { path = "crates/kettle-ui", version = "2.8.0" }
 
 anyhow = "1"
 thiserror = "2"
