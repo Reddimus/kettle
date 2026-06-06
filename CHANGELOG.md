@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  Substantive fixes from a third, whole-codebase systematic sweep (every file +
+  cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
+
+  - **Fix (cycle 829, audit) — custom tab titles actually show now.** A title set
+    via `EditTabTitle` was stored in `title_override` (and re-read into the edit
+    dialog, so it "stuck" there) but `tab_titles()` — the source of truth for
+    both the horizontal and vertical bars — never consulted it, so it had zero
+    visible effect and the shell's next OSC 2 title silently won. The override
+    now takes precedence (via a pure, drift-tested `resolve_tab_title`).
+
 ## [2.7.1] — 2026-06-05
 
   Post-v2.7.0 hardening from a fresh multi-agent production audit (each finding

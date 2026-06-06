@@ -1680,30 +1680,49 @@ impl Mux {
             .map(|(i, t)| {
                 let pane = self.panes.get(&t.focus);
                 let title = pane.map(|p| p.title.as_str()).unwrap_or("");
-                // Most shells set the title quickly via OSC 2 on every
-                // prompt — but until that first prompt fires, our default
-                // placeholder "kettle" is the only string we have. Fall
-                // back to the focused pane's cwd basename in that gap so
-                // a fresh tab opened in `~/Repos/kettle` reads as
-                // `kettle` instead of the literal program name (matches
-                // iTerm2 / Ghostty / WezTerm where untitled tabs show
-                // the cwd / shell). Only used while the title is the
-                // placeholder — once a shell sets a real one, that wins.
-                if title.is_empty() || title == "kettle" {
-                    if let Some(cwd) = pane.and_then(|p| p.term.current_dir())
-                        && let Some(name) = std::path::Path::new(&cwd)
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                        && !name.is_empty()
-                    {
-                        return name.to_string();
-                    }
-                    return format!("tab {}", i + 1);
-                }
-                title.to_string()
+                let cwd = pane.and_then(|p| p.term.current_dir());
+                resolve_tab_title(t.title_override.as_deref(), title, cwd.as_deref(), i)
             })
             .collect()
     }
+}
+
+/// Display title for one tab, in priority order: an explicit `title_override`
+/// (Action::EditTabTitle) wins; else the focused pane's title; else — while the
+/// title is still the `kettle` placeholder — the cwd basename; else `tab N`.
+///
+/// Cycle 829 (audit): the override branch was missing from `tab_titles`, so a
+/// custom tab title was stored but never shown (a silent no-op overwritten by
+/// the shell's next OSC 2 title). Pulled out as a pure fn so the precedence is
+/// drift-tested without standing up a PTY.
+///
+/// Most shells set the title quickly via OSC 2 on every prompt; until that
+/// first prompt fires, the `kettle` placeholder is all we have, so a fresh tab
+/// in `~/Repos/kettle` reads as `kettle` instead of the program name (matching
+/// iTerm2 / Ghostty / WezTerm). Once a shell sets a real title, that wins.
+fn resolve_tab_title(
+    title_override: Option<&str>,
+    pane_title: &str,
+    cwd: Option<&str>,
+    idx: usize,
+) -> String {
+    if let Some(ov) = title_override
+        && !ov.is_empty()
+    {
+        return ov.to_string();
+    }
+    if pane_title.is_empty() || pane_title == "kettle" {
+        if let Some(cwd) = cwd
+            && let Some(name) = std::path::Path::new(cwd)
+                .file_name()
+                .and_then(|s| s.to_str())
+            && !name.is_empty()
+        {
+            return name.to_string();
+        }
+        return format!("tab {}", idx + 1);
+    }
+    pane_title.to_string()
 }
 
 /// Apply the *post-spawn* tree mutation for a split: graft the new pane id
@@ -1871,6 +1890,36 @@ mod node_tests {
                 "scope {scope:?} should yield no targets with no active tab"
             );
         }
+    }
+
+    #[test]
+    fn resolve_tab_title_precedence() {
+        use super::resolve_tab_title;
+        // Cycle 829 (audit): an explicit override wins over a real pane title
+        // AND over the cwd fallback — the bug was that it was ignored entirely.
+        assert_eq!(
+            resolve_tab_title(Some("deploy"), "bash", Some("/home/u/proj"), 0),
+            "deploy"
+        );
+        assert_eq!(
+            resolve_tab_title(Some("notes"), "kettle", Some("/home/u/proj"), 2),
+            "notes"
+        );
+        // Empty override is ignored (falls through to the normal chain).
+        assert_eq!(resolve_tab_title(Some(""), "vim", None, 0), "vim");
+        // No override: a real shell title wins.
+        assert_eq!(
+            resolve_tab_title(None, "vim - main.rs", None, 0),
+            "vim - main.rs"
+        );
+        // Placeholder title → cwd basename.
+        assert_eq!(
+            resolve_tab_title(None, "kettle", Some("/home/u/Repos/kettle"), 0),
+            "kettle"
+        );
+        // Placeholder + no cwd → "tab N" (1-based).
+        assert_eq!(resolve_tab_title(None, "kettle", None, 3), "tab 4");
+        assert_eq!(resolve_tab_title(None, "", None, 0), "tab 1");
     }
 
     #[test]
