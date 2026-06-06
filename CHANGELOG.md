@@ -9,6 +9,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Cross-platform (cycle 840, audit) — no POSIX `-l` for explicit Windows
+    shells either.** Cycle 822 stopped `login-shell = true` from injecting `-l`
+    into the *default* Windows shell, but the explicit-`command` arm still added
+    it for any non-`wsl.exe` prog — so `command = pwsh` + `login-shell = true`
+    fed `pwsh -l` (rejected). A shared `prog_accepts_login_flag` now excludes
+    `pwsh`/`powershell`/`cmd` (and `wsl.exe`) in both arms. Unit-tested.
+
   - **Docs (cycle 839, audit) — man page + doc drift corrected.** The man page
     (`kettle.1`) was missing **nine** `--<flag>` entries (incl. `--check-update`
     and `--write-default-config`, the recommended Windows bootstrap),

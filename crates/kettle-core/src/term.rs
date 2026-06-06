@@ -235,6 +235,27 @@ const fn default_shell_accepts_login_flag() -> bool {
     cfg!(not(windows))
 }
 
+/// Whether an EXPLICIT `command = <prog>` accepts the POSIX `-l` login switch.
+///
+/// Cycle 840 (audit): the cycle-822 guard only covered the no-argv default-shell
+/// arm; the explicit-argv arm still injected `-l` for `wsl.exe` (where `-l`
+/// means "list distros") only via `!is_wsl_launcher`, leaving Windows-native
+/// shells (`pwsh`/`powershell`/`cmd`) to receive a `-l` they reject. Exclude
+/// both, matching on the case-insensitive basename sans `.exe`. POSIX shells
+/// (bash/zsh/fish/…) and anything else honor `-l`.
+fn prog_accepts_login_flag(prog: &str) -> bool {
+    if is_wsl_launcher(prog) {
+        return false;
+    }
+    let base = prog
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(prog)
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    !matches!(base, "pwsh" | "powershell" | "cmd")
+}
+
 /// Cycle 799: build the `WSLENV` value that propagates kettle's
 /// terminal-identity env vars into a WSL distro. WSL only forwards Windows
 /// env vars listed in `WSLENV`; each is suffixed `/u` ("pass Windows→WSL
@@ -543,14 +564,15 @@ impl Terminal {
         let mut cmd = match argv.split_first() {
             Some((prog, rest)) => {
                 let mut c = CommandBuilder::new(prog);
-                if login_shell && !is_wsl_launcher(prog) {
+                if login_shell && prog_accepts_login_flag(prog) {
                     // Cycle 343: `-l` (POSIX-defined "shell that
                     // reads /etc/profile + ~/.profile + login dotfiles
                     // before running interactively"). Goes BEFORE
                     // the user's argv args so a config like
                     // `command = bash -i` still works.
-                    // Cycle 748: skipped for `wsl.exe`, where `-l` would
-                    // mean "list distros" and never open a shell.
+                    // Cycle 748/840: skipped for `wsl.exe` (where `-l` lists
+                    // distros) and Windows-native shells (pwsh/powershell/cmd
+                    // reject it) via `prog_accepts_login_flag`.
                     c.arg("-l");
                 }
                 for a in rest {
@@ -3007,7 +3029,29 @@ mod teardown_tests {
 
 #[cfg(test)]
 mod login_flag_tests {
-    use super::default_shell_accepts_login_flag;
+    use super::{default_shell_accepts_login_flag, prog_accepts_login_flag};
+
+    /// Cycle 840 (audit): an explicit `command = …` only gets `-l` for a POSIX
+    /// shell — never wsl.exe (where `-l` lists distros) or a Windows-native
+    /// shell (pwsh/powershell/cmd reject it).
+    #[test]
+    fn prog_accepts_login_flag_excludes_wsl_and_windows_shells() {
+        // POSIX shells (and unknown progs) honor -l.
+        assert!(prog_accepts_login_flag("bash"));
+        assert!(prog_accepts_login_flag("/bin/zsh"));
+        assert!(prog_accepts_login_flag("/usr/bin/fish"));
+        // Windows-native shells reject -l (path + .exe + case variants).
+        assert!(!prog_accepts_login_flag("pwsh.exe"));
+        assert!(!prog_accepts_login_flag(
+            r"C:\Program Files\PowerShell\7\pwsh.exe"
+        ));
+        assert!(!prog_accepts_login_flag("powershell.exe"));
+        assert!(!prog_accepts_login_flag("CMD.EXE"));
+        assert!(!prog_accepts_login_flag("cmd"));
+        // wsl.exe is excluded (-l there means "list distros").
+        assert!(!prog_accepts_login_flag("wsl.exe"));
+        assert!(!prog_accepts_login_flag("wsl"));
+    }
 
     /// Cycle 822 (audit) drift guard. The spawn path gates the default-shell
     /// `-l` injection on this fn, so pinning its value pins the behavior: `-l`
