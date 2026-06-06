@@ -17,6 +17,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **VT (cycle 867, audit) — tmux `%output` rejects a non-ASCII literal byte.**
+    The literal (non-octal) branch of the tmux control-mode output decoder used
+    `c as u8`, silently truncating any char `> 0xFF` (e.g. a `U+FFFD` that an
+    upstream `from_utf8_lossy` introduced from corrupt input) to a wrong byte. It
+    now rejects the event via `u8::try_from`, matching the strict octal-branch
+    handling. Unit-tested.
+
   - **CI (cycle 866, audit) — PowerShell shell-integration is now smoked.** The
     CLI smoke loops covered `bash`/`zsh`/`fish` but not `powershell` — the one
     shell-integration target Windows users actually use (`install.ps1

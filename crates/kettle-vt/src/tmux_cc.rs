@@ -260,7 +260,13 @@ fn parse_output(rest: &str) -> Option<TmuxEvent> {
             // pane content are encoded as raw bytes inside `\nnn`
             // sequences, not as UTF-8 codepoints, so this branch
             // sees only single-byte ASCII characters.
-            bytes.push(c as u8);
+            //
+            // Cycle 867 (audit): a char > 0xFF here (e.g. a U+FFFD that
+            // `from_utf8_lossy` introduced upstream from corrupt input) must be
+            // rejected, not truncated to a wrong byte by `as u8` — same strict
+            // handling as the octal branch above.
+            let byte = u8::try_from(c as u32).ok()?;
+            bytes.push(byte);
         }
     }
     Some(TmuxEvent::Output {
@@ -344,6 +350,12 @@ mod tests {
             TmuxEvent::Output { data, .. } => assert_eq!(data, &[255u8]),
             other => panic!("expected Output, got {other:?}"),
         }
+        // Cycle 867: a literal char > 0xFF (here U+20AC '€', e.g. from an
+        // upstream from_utf8_lossy replacement) is rejected, not truncated.
+        assert!(
+            drain("%output %1 a\u{20ac}b\n".as_bytes()).is_empty(),
+            "a non-ASCII literal char must reject the event, not truncate"
+        );
     }
 
     #[test]
