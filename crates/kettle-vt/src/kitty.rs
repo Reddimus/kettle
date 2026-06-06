@@ -169,43 +169,50 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
         return 0;
     }
     let clamp_current = || (st.current.max(1) as usize - 1).min(gaps.len() - 1);
-    let shown: Vec<(usize, u128)> = gaps
-        .iter()
-        .enumerate()
-        .filter(|&(_, &g)| g > 0)
-        .map(|(i, &g)| (i, g as u128))
-        .collect();
-    if !st.running || shown.is_empty() {
+    // Cycle 849 (audit): two cheap passes over `gaps` instead of collecting a
+    // `Vec<(usize, u128)>` of the displayable frames. This runs from
+    // `Terminal::placements()` on every paint of a playing animation, so a
+    // running GIF allocated + freed a Vec per frame. Pass 1 accumulates the
+    // total dwell + the last displayable (`g > 0`) index; the modulo walk below
+    // re-filters `gaps` directly. A frame is displayable when its gap is `> 0`
+    // (kitty `graphics-protocol.rst:909`).
+    let mut total: u128 = 0;
+    let mut last_shown: Option<usize> = None;
+    for (i, &g) in gaps.iter().enumerate() {
+        if g > 0 {
+            total += g as u128;
+            last_shown = Some(i);
+        }
+    }
+    if !st.running {
         return clamp_current();
     }
-    let total: u128 = shown.iter().map(|&(_, g)| g).sum();
-    if total == 0 {
+    // No displayable frame ⇒ hold on `current`. Past this `let`, `last_shown` is
+    // set and `total >= 1` (every counted frame contributed `g >= 1`).
+    let Some(last_shown) = last_shown else {
         return clamp_current();
-    }
-    // Finite, non-loading loop count: freeze on the last shown frame once
-    // all passes have elapsed.
-    //
-    // The three `shown.last().expect(...)` calls below are safe because we
-    // early-returned at line `if shown.is_empty() { return clamp_current(); }`
-    // — past that point `shown` carries at least one entry, so `last()`
-    // never returns None. Documenting via `expect` rather than `unwrap`
-    // so a future refactor that breaks the invariant fails with a
-    // pinpointed message instead of a bare `unwrap on None`.
+    };
+    // Finite, non-loading loop count: freeze on the last shown frame once all
+    // passes have elapsed.
     if !st.loading && st.loops > 0 && elapsed_ms >= total * st.loops as u128 {
-        return shown.last().expect("shown non-empty after early-return").0;
+        return last_shown;
     }
     // Loading mode never loops: hold the last shown frame at/after the end.
     if st.loading && elapsed_ms >= total {
-        return shown.last().expect("shown non-empty after early-return").0;
+        return last_shown;
     }
     let mut t = elapsed_ms % total;
-    for &(idx, g) in &shown {
+    for (idx, &g) in gaps.iter().enumerate() {
+        if g <= 0 {
+            continue;
+        }
+        let g = g as u128;
         if t < g {
             return idx;
         }
         t -= g;
     }
-    shown.last().expect("shown non-empty after early-return").0
+    last_shown
 }
 
 /// What a kitty APC resolved to.
@@ -977,6 +984,21 @@ mod tests {
         assert_eq!(current_frame(&g2, &load, 50), 0);
         assert_eq!(current_frame(&g2, &load, 250), 1);
         assert_eq!(current_frame(&g2, &load, 900), 1, "loading waits at end");
+
+        // Cycle 849: the freeze / loading-hold must land on the last
+        // *displayable* frame, skipping a trailing gapless one — the two-pass
+        // rewrite tracks the last `g > 0` index, so guard that directly.
+        let g3 = [100, 200, -1]; // displayable: idx 0,1; total 300
+        assert_eq!(
+            current_frame(&g3, &run(1, false), 999),
+            1,
+            "finite-loop freeze skips a trailing gapless frame"
+        );
+        assert_eq!(
+            current_frame(&g3, &run(0, true), 999),
+            1,
+            "loading-hold skips a trailing gapless frame"
+        );
     }
 
     #[test]
