@@ -9,6 +9,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Diagnostics (cycle 855, audit) — `--check-config` now flags out-of-range
+    clamped numerics.** Cycle 837 closed the enum half of this gap; this closes
+    the numeric half. `handle-size`, `tab-bar-width`, `background-darkness`,
+    `cell-height`/`cell-width`, `inactive-color-offset`/`inactive-bg-color-offset`,
+    and `theme-schedule-lat`/`-long` are clamped (or, for lat/long, silently
+    discarded) by the parser, so an out-of-range value used to report OK while
+    the runtime used something else — and the `theme-schedule-lat` doc even
+    *promised* a diagnostic that didn't exist. `detect_malformed_values` now
+    range-checks each against the same bounds the parser clamps to. Unit-tested
+    (valid passes, out-of-range flags once).
+
   - **Performance (cycle 853, audit) — the per-frame quad list is pooled.**
     `render_frame_with_status` allocated a fresh `Vec<QuadInstance>` sized
     `panes*16 + 256` every frame for all the cell-background / cursor / UI quads.

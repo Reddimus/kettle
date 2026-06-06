@@ -2069,6 +2069,44 @@ impl Config {
                 // 5000 — surface it now so the user's diagnostic
                 // matches their runtime.
                 "cursor-blink-interval" => v.parse::<u64>().is_ok_and(|n| (50..=5000).contains(&n)),
+                // Cycle 855 (audit): the remaining clamped/range-checked
+                // numerics. parse_collect clamps (or, for lat/long, silently
+                // discards) an out-of-range value, so without these the
+                // diagnostic said OK while the runtime used something else —
+                // the exact silent-fallback trap cycles 131/132 set out to
+                // close. Bounds mirror the parse_collect clamp/range arms.
+                "handle-size" | "handle_size" => {
+                    v.parse::<i32>().is_ok_and(|n| (-1..=50).contains(&n))
+                }
+                "tab-bar-width" | "tab_bar_width" => {
+                    v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
+                }
+                "background-darkness" | "background_darkness" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
+                }
+                "cell-height" | "cell_height" | "cell-width" | "cell_width" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.5..=3.0).contains(&n))
+                }
+                "inactive-color-offset"
+                | "inactive_color_offset"
+                | "inactive-bg-color-offset"
+                | "inactive_bg_color_offset" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
+                }
+                // theme-schedule-lat/long are *range-checked* (out-of-range is
+                // discarded, leaving the schedule unset) — the doc at the
+                // `theme_schedule_lat` field even promises this diagnostic.
+                "theme-schedule-lat" | "theme_schedule_lat" => {
+                    v.parse::<f64>().is_ok_and(|n| (-90.0..=90.0).contains(&n))
+                }
+                "theme-schedule-long"
+                | "theme_schedule_long"
+                | "theme-schedule-lon"
+                | "theme_schedule_lon"
+                | "theme-schedule-longitude"
+                | "theme_schedule_longitude" => {
+                    v.parse::<f64>().is_ok_and(|n| (-180.0..=180.0).contains(&n))
+                }
                 // Color keys: `Rgb::parse` accepts `#RRGGBB`, `rgb:RR/GG/BB`,
                 // X11 names ("red"), etc. Bad values otherwise silently
                 // keep the default — same trap as the numeric keys.
@@ -4976,6 +5014,33 @@ mod config_tests {
             Config::detect_malformed_values("dark-theme = NotARealTheme\n").len(),
             1
         );
+        // Cycle 855: clamped/range-checked numerics — an in-range value passes;
+        // an out-of-range one (which the runtime silently clamps/discards) is
+        // flagged exactly once. Bounds mirror parse_collect.
+        for (good, bad) in [
+            ("handle-size = 12", "handle-size = 9000"),
+            ("tab-bar-width = 200", "tab-bar-width = 5"),
+            ("background-darkness = 0.4", "background-darkness = 2.0"),
+            ("cell-height = 1.2", "cell-height = 9.0"),
+            ("cell-width = 1.0", "cell-width = 0.1"),
+            ("inactive-color-offset = 0.5", "inactive-color-offset = 3.0"),
+            (
+                "inactive-bg-color-offset = 0.5",
+                "inactive-bg-color-offset = -1.0",
+            ),
+            ("theme-schedule-lat = 47.6", "theme-schedule-lat = 200"),
+            ("theme-schedule-long = -122.3", "theme-schedule-long = 999"),
+        ] {
+            assert!(
+                Config::detect_malformed_values(&format!("{good}\n")).is_empty(),
+                "valid {good:?} should pass"
+            );
+            assert_eq!(
+                Config::detect_malformed_values(&format!("{bad}\n")).len(),
+                1,
+                "out-of-range {bad:?} should flag once"
+            );
+        }
     }
 
     #[test]
