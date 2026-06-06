@@ -9,6 +9,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Substantive fixes from a third, whole-codebase systematic sweep (every file +
   cross-cutting concerns reviewed; 82 findings 2-skeptic-verified; cycles 829+):
 
+  - **Fix (cycle 836, audit) — remote-session detection drives the right
+    reconnect command.** Three arg-parsing bugs each produced a wrong title and a
+    wrong command written to the PTY: `ssh -J jump host` took the bastion as the
+    target (the value-taking flag set omitted `-J` and others — now the full
+    OpenSSH set); `docker exec --privileged c sh` skipped the container (bare
+    `--flag` was assumed to take a value — now valueless by default with a small
+    allowlist); and global flags before `exec` (`kubectl -n ns exec pod`) made
+    detection silently fail (now it scans for `exec` past leading options).
+
   - **Fix (cycle 835, audit) — a stray key in the keybind-capture overlay can't
     soft-brick typing.** Settings → keybind capture bound whatever key was
     pressed with no guard, so a modifier-less mis-press (a bare `a`) inserted

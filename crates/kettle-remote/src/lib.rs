@@ -305,10 +305,36 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         if let Some(s) = a.strip_prefix('-')
             && !s.is_empty()
         {
-            // `-o foo=bar` / `-p 22` / `-l user` style: skip a value.
+            // `-o foo=bar` / `-p 22` / `-l user` / `-J jump` style: skip a value.
+            // Cycle 836 (audit): this is the COMPLETE OpenSSH value-taking
+            // single-char option set (ssh(1)). The old subset omitted `-J`
+            // (ProxyJump, common in bastion setups) and `-w/-e/-m/-O/-Q/-S/-B/
+            // -E/-I`, so e.g. `ssh -J jump host` skipped nothing and took `jump`
+            // as the target → reconnected to the bastion. The joined form
+            // (`-Jjump`) is a single multi-char token and is already skipped as
+            // one below.
             let needs_value = matches!(
                 s,
-                "o" | "p" | "l" | "i" | "b" | "c" | "F" | "L" | "R" | "D" | "W"
+                "B" | "b"
+                    | "c"
+                    | "D"
+                    | "E"
+                    | "e"
+                    | "F"
+                    | "I"
+                    | "i"
+                    | "J"
+                    | "L"
+                    | "l"
+                    | "m"
+                    | "O"
+                    | "o"
+                    | "p"
+                    | "Q"
+                    | "R"
+                    | "S"
+                    | "W"
+                    | "w"
             );
             if needs_value && i + 1 < argv.len() {
                 i += 2;
@@ -356,11 +382,15 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     };
     let mut i = 1; // skip argv[0] (the exe)
     if runtime != ContainerRuntime::Lxc {
-        // Expect "exec" subcommand at argv[1].
-        if argv.get(i).map(String::as_str) != Some("exec") {
-            return None;
+        // Cycle 836 (audit): find the `exec` subcommand, allowing GLOBAL options
+        // before it (`kubectl -n ns exec …`, `docker --context foo exec …`)
+        // rather than pinning it at argv[1] (which silently returned None for
+        // those). Scan for the first literal `exec` token; a container/namespace
+        // named "exec" is contrived enough to ignore.
+        match argv.iter().skip(1).position(|a| a == "exec") {
+            Some(pos) => i = 1 + pos + 1,
+            None => return None,
         }
-        i += 1;
     }
     // Skip flags + their values. Container CLIs share the same
     // shape — `-it` is a stacked short-flag bundle (no value),
@@ -380,12 +410,27 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
             continue;
         }
         if let Some(stripped) = a.strip_prefix("--") {
-            if stripped.contains('=') {
-                i += 1;
-            } else {
-                // GNU-style --flag value — skip both.
-                i += 2;
-            }
+            // Cycle 836 (audit): a bare `--flag` is VALUELESS by default — most
+            // docker/podman/kubectl exec long flags are booleans
+            // (--privileged/--interactive/--tty/--detach). The old `i += 2`
+            // treated `docker exec --privileged alpine sh` as `--privileged
+            // alpine`, skipping the container and returning `sh`. Only a small
+            // allowlist of long flags takes a separate value.
+            let long_needs_value = !stripped.contains('=')
+                && i + 1 < argv.len()
+                && matches!(
+                    stripped,
+                    "env"
+                        | "user"
+                        | "workdir"
+                        | "namespace"
+                        | "detach-keys"
+                        | "cidfile"
+                        | "name"
+                        | "context"
+                        | "kubeconfig"
+                );
+            i += if long_needs_value { 2 } else { 1 };
             continue;
         }
         if let Some(stripped) = a.strip_prefix('-')
@@ -846,6 +891,69 @@ mod tests {
             Some(RemoteContext::Ssh {
                 host: "h".into(),
                 user: Some("carol".into()),
+            })
+        );
+    }
+
+    /// Cycle 836 (audit): each of these argv shapes used to drive the WRONG
+    /// reconnect target/command.
+    #[test]
+    fn detect_handles_proxyjump_bool_flags_and_global_flags() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // (a) ssh -J jump host → host (was: 'jump', the bastion).
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-J", "jump.example", "me@host"])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: Some("me".into()),
+            })
+        );
+        // Joined -Jjump form is one token; the host still wins.
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-Jjump.example", "host"])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: None,
+            })
+        );
+        // (b) docker exec --privileged <c> sh → c (was: 'sh').
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", "--privileged", "alpine", "sh"])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "alpine".into(),
+            })
+        );
+        // A value-taking long flag still skips its value.
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", "--user", "root", "alpine", "sh"])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "alpine".into(),
+            })
+        );
+        // (c) global flags before `exec` (kubectl -n ns exec pod) → pod.
+        assert_eq!(
+            detect_container(&argv(&[
+                "kubectl", "-n", "prod", "exec", "my-pod", "--", "sh"
+            ])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "my-pod".into(),
+            })
+        );
+        assert_eq!(
+            detect_container(&argv(&[
+                "docker",
+                "--context",
+                "remote",
+                "exec",
+                "web",
+                "bash"
+            ])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "web".into(),
             })
         );
     }
