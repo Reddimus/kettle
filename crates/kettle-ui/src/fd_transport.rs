@@ -134,11 +134,18 @@ pub fn recv_fds(
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == SCM_RIGHTS {
-                let data = libc::CMSG_DATA(cmsg) as *const RawFd;
-                let n_fds = ((*cmsg).cmsg_len as usize - (libc::CMSG_LEN(0) as usize))
-                    / std::mem::size_of::<RawFd>();
-                for i in 0..n_fds {
-                    out.push(*data.add(i));
+                // Cycle 863 (audit): guard the length arithmetic. A cmsg whose
+                // `cmsg_len < CMSG_LEN(0)` would make the subtraction underflow
+                // and the loop read wildly OOB. SCM_RIGHTS headers from the
+                // kernel always satisfy this, but it's a cheap check on an
+                // `unsafe` path.
+                let base = libc::CMSG_LEN(0) as usize;
+                if (*cmsg).cmsg_len as usize >= base {
+                    let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+                    let n_fds = ((*cmsg).cmsg_len as usize - base) / std::mem::size_of::<RawFd>();
+                    for i in 0..n_fds {
+                        out.push(*data.add(i));
+                    }
                 }
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);

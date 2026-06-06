@@ -822,7 +822,24 @@ impl Mux {
         ch: u16,
         mk: &dyn Fn() -> Waker,
     ) -> bool {
+        // Cycle 863 (audit): bound the total PTY fan-out. The 16 MiB file-size
+        // cap is a weak proxy — a small session.json of minimal flat leaves
+        // (~30 bytes each) could ask to fork hundreds of thousands of shells on
+        // launch, hanging/OOMing the machine. Stop restoring further tabs once
+        // the running pane count would exceed the cap (256 panes is far past any
+        // real layout) and surface why.
+        const MAX_RESTORE_PANES: usize = 256;
+        let mut spawned = 0usize;
         for (i, st) in s.tabs.iter().enumerate() {
+            let tab_leaves = st.root.leaf_count();
+            if spawned + tab_leaves > MAX_RESTORE_PANES {
+                log::warn!(
+                    "session restore: stopping at tab {i} — would exceed the \
+                     {MAX_RESTORE_PANES}-pane restore cap (session may be corrupt or crafted)"
+                );
+                break;
+            }
+            spawned += tab_leaves;
             match self.build_node(&st.root, cfg, cw, ch, mk) {
                 Ok(root) => {
                     // Restore the focused leaf at its DFS index (saved

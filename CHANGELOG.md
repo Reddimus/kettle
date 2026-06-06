@@ -17,6 +17,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     any untrusted Sixel DCS in the PTY stream. Each component is now clamped to
     its spec-valid `0..=100` percentage before scaling. Regression-tested.
 
+  - **Hardening (cycle 863, audit) — six small robustness fixes from the fresh
+    review.** (1) The SSH-host input now filters control characters like its
+    sibling handlers (a cycle-857 comment had wrongly claimed it already did).
+    (2) `Mux::restore` bounds the PTY fan-out at 256 panes, so a crafted-but-tiny
+    `session.json` of minimal leaves can't fork hundreds of thousands of shells
+    on launch. (3) `--tab-handoff-fd` rejects a descriptor `< 3` before it
+    reaches `from_raw_fd` (a negative fd is UB; 0/1/2 would adopt+close stdio).
+    (4) The panic hook writes via `writeln!` instead of `eprintln!`, so a broken
+    stderr pipe can't double-fault the hook and lose the crash-log write.
+    (5) `recv_fds` guards its `cmsg_len` subtraction against underflow on a
+    malformed control message. (6) Removed a duplicated
+    `#[allow(clippy::too_many_arguments)]`. Unit-/drift-tested.
+
   - **Diagnostics (cycle 862, audit) — three more `--check-config` gaps closed.**
     A malformed `theme-schedule` (bad `HH:MM` / mode word) and a typo'd
     `ask-before-closing` both silently fell back to a default without being

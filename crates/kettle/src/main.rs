@@ -405,7 +405,15 @@ fn install_panic_hook() {
              location: {loc}\nmessage: {msg}\nbacktrace:\n{bt}\n"
         );
 
-        eprintln!("{report}");
+        // Cycle 863 (audit): a fallible write, not `eprintln!`. With SIGPIPE at
+        // SIG_IGN (Rust default), `eprintln!` to a broken stderr pipe panics —
+        // and a panic inside the panic hook aborts immediately under
+        // `panic = "abort"`, losing the crash-log write below. `writeln!` lets
+        // us swallow the error and still persist the report.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{report}");
+        }
 
         let path = crash_log_path(when, std::process::id(), |k| std::env::var(k).ok());
         if let Some(parent) = path.parent() {
@@ -1055,6 +1063,15 @@ fn main() -> anyhow::Result<()> {
     // same shape as the config parse arm, no hard fail.
     let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
     let remote_file = cli.remote_file.clone().or_else(default_remote_file);
+    // Cycle 863 (audit): validate the internal handoff fd before it reaches
+    // `UnixStream::from_raw_fd`. The source process always passes an inherited
+    // descriptor >= 3; a negative value violates `from_raw_fd`'s safety
+    // contract, and 0/1/2 would adopt stdio as a socket (and later `close` it).
+    if let Some(fd) = cli.tab_handoff_fd
+        && fd < 3
+    {
+        anyhow::bail!("--tab-handoff-fd: expected an inherited descriptor >= 3, got {fd}");
+    }
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,

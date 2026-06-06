@@ -2679,7 +2679,6 @@ impl Renderer {
 
     /// Build one pane's text buffer + background/cursor/selection/search quads.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn build_pane(
         &mut self,
         idx: usize,

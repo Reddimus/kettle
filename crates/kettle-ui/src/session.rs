@@ -22,6 +22,20 @@ pub enum SNode {
     },
 }
 
+impl SNode {
+    /// Number of leaf panes in this tree — each leaf becomes one real PTY on
+    /// restore, so `Mux::restore` uses this to bound the spawn fan-out against a
+    /// crafted-but-small `session.json` (cycle 863, audit). serde_json's default
+    /// 128-level recursion limit already bounds nesting depth, so this is a
+    /// simple (non-recursive-overflow) count.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            SNode::Leaf { .. } => 1,
+            SNode::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct STab {
     pub root: SNode,
@@ -286,6 +300,29 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cycle 863 (audit): `leaf_count` bounds the restore PTY fan-out, so it
+    /// must count every leaf across an arbitrarily nested split tree.
+    #[test]
+    fn snode_leaf_count_walks_the_tree() {
+        let leaf = || SNode::Leaf {
+            cwd: None,
+            cmd: vec![],
+        };
+        assert_eq!(leaf().leaf_count(), 1);
+        let tree = SNode::Split {
+            vertical: false,
+            ratio: 0.5,
+            a: Box::new(leaf()),
+            b: Box::new(SNode::Split {
+                vertical: true,
+                ratio: 0.5,
+                a: Box::new(leaf()),
+                b: Box::new(leaf()),
+            }),
+        };
+        assert_eq!(tree.leaf_count(), 3);
+    }
 
     /// Cycle 789 drift guard (audit D1, security). `sanitize_layout_name` is
     /// the sole barrier between an untrusted `--layout <NAME>` CLI argument and

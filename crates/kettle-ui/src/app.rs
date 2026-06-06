@@ -7832,7 +7832,11 @@ impl App {
                 }
             }
             _ => {
+                // Cycle 863 (audit): filter control chars before appending,
+                // like the search / palette / title handlers — the cycle-857
+                // comment claimed this handler already did, but it didn't.
                 if let Some(t) = text
+                    && !t.chars().any(|c| c.is_control())
                     && let Some(q) = self.ssh_input.as_mut()
                 {
                     q.push_str(t);
@@ -9736,6 +9740,24 @@ mod tests {
             arm.contains("!t.chars().any(|c| c.is_control())")
                 && arm.contains("self.mux.search.query.push_str(t)"),
             "search_key must filter control chars before appending to the query"
+        );
+    }
+
+    /// Cycle 863 (audit) drift guard. `ssh_key` must filter control chars
+    /// before appending to the host input, like its sibling handlers (the
+    /// cycle-857 comment had claimed this was already done). Needs full App
+    /// state; pin at the source.
+    #[test]
+    fn ssh_key_filters_control_chars() {
+        let src = include_str!("app.rs");
+        let arm = src
+            .split("fn ssh_key(")
+            .nth(1)
+            .and_then(|s| s.split("fn ").next())
+            .expect("ssh_key present");
+        assert!(
+            arm.contains("!t.chars().any(|c| c.is_control())") && arm.contains("q.push_str(t)"),
+            "ssh_key must filter control chars before appending to the host input"
         );
     }
 
