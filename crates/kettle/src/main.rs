@@ -218,6 +218,15 @@ struct Cli {
     #[arg(long, value_name = "FD", verbatim_doc_comment)]
     tab_handoff_fd: Option<i32>,
 
+    /// Developer-only: record this session to an asciicast-compatible trace at
+    /// PATH (replays with `asciinema play`). Captures terminal output, resizes,
+    /// keystroke *tokens* (never raw typed characters by default), and UI
+    /// markers. Only exists in builds made with `--features dev-record`; never
+    /// on by default. Also honored via the `KETTLE_RECORD` env var.
+    #[cfg(feature = "dev-record")]
+    #[arg(long, value_name = "PATH", verbatim_doc_comment)]
+    record: Option<std::path::PathBuf>,
+
     /// Launch with a named-profile *config* (distinct from --layout
     /// which picks the *session*). Loads
     /// `<config-dir>/profiles/<NAME>.config` instead of the default
@@ -1145,6 +1154,10 @@ fn main() -> anyhow::Result<()> {
         lua_script: cli.lua_script,
         tab_handoff: cli.tab_handoff,
         tab_handoff_fd: cli.tab_handoff_fd,
+        #[cfg(feature = "dev-record")]
+        record: cli
+            .record
+            .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from)),
     })
 }
 

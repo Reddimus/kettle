@@ -72,6 +72,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     *new* names were copied in — every existing theme's palette is left exactly
     as-is, so no one's current theme changes — bringing the bundle to 532 themes.
 
+  - **Dev tooling (cycle 875) — opt-in developer-only session recorder
+    (`--features dev-record`).** A new compile-time Cargo feature adds a `kettle
+    --record <path>` flag (also honored via `KETTLE_RECORD`) that writes an
+    asciicast v2-compatible trace of the session — terminal output + resizes
+    now, keystroke tokens + UI/UX markers next (cycle 876) — replayable with
+    `asciinema play`. It is compiled OUT of every released / packaged binary
+    (zero code, zero overhead for normal users), never on by default, and writes
+    a local-only file (`0600` on Unix). Output capture reuses the existing
+    per-pane output sidechannel; writes are best-effort (a full disk disables
+    the recorder, it never crashes the terminal). Header/event formatting and
+    the end-to-end file write are unit-tested (under the feature).
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles

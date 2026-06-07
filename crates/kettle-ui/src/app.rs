@@ -1547,6 +1547,11 @@ pub struct App {
     /// reliably stop the Win11 taskbar flash, so we track outstanding requests
     /// and clear them directly via `Taskbar::clear_attention` on focus-gain.
     attention_active: bool,
+    /// Cycle 875: developer session recorder (asciicast trace). `Some` only in
+    /// a `dev-record` feature build when `--record PATH` / `KETTLE_RECORD` was
+    /// given; compiled out entirely of shipped builds.
+    #[cfg(feature = "dev-record")]
+    recorder: Option<crate::dev_record::Recorder>,
     renderer: Option<Renderer>,
     mux: Mux,
     mods: ModifiersState,
@@ -2079,6 +2084,10 @@ impl App {
         // App can fire LuaEvent::Output. Set before the Mux moves
         // into the struct.
         let lua_output_subscribed = lua_engine.is_some();
+        // Cycle 875: also subscribe to per-pane PTY output when a dev recording
+        // is requested, so the recorder can tee output into the asciicast trace.
+        #[cfg(feature = "dev-record")]
+        let lua_output_subscribed = lua_output_subscribed || startup.record.is_some();
         // Cycle 560 (BUG FIX): cycle 357 misread Terminator's
         // `broadcast_default` config key. The Terminator semantics
         // are: when the user ENABLES broadcast (via a chord), what
@@ -2107,6 +2116,8 @@ impl App {
             window: None,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
+            #[cfg(feature = "dev-record")]
+            recorder: None,
             renderer: None,
             mux: {
                 let mut m = Mux::new();
@@ -3436,6 +3447,13 @@ impl App {
         // fire LuaEvent::Output(pane_id, bytes) for each pane that
         // accumulated PTY-output chunks this drain pass.
         for (pane_id, bytes) in output_chunks {
+            // Cycle 875: tee PTY output into the asciicast trace (borrow before
+            // the bytes move into the Lua event below). All panes feed one
+            // stream — fine for the common single-pane recording.
+            #[cfg(feature = "dev-record")]
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.record_output(&bytes);
+            }
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
             }
@@ -8388,6 +8406,22 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        // Cycle 875: start the developer session recorder now that the grid
+        // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`).
+        #[cfg(feature = "dev-record")]
+        if let Some(path) = self.startup.record.clone() {
+            let (cols, rows) = self.grid_of(self.area());
+            match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16) {
+                Ok(rec) => {
+                    log::info!("dev-record: recording this session to {}", path.display());
+                    self.recorder = Some(rec);
+                }
+                Err(e) => log::warn!(
+                    "dev-record: could not start recorder at {}: {e}",
+                    path.display()
+                ),
+            }
+        }
         // Cycle 794: kick off the update check on a background thread — AFTER
         // the first paint so it never blocks startup. It's opt-out
         // (`update-check`), skips the very first launch, throttles to once/24h
@@ -8434,6 +8468,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                // Cycle 875: flush the recorder before exit (Drop also flushes).
+                #[cfg(feature = "dev-record")]
+                if let Some(rec) = self.recorder.as_mut() {
+                    rec.finish();
+                }
                 self.save_session();
                 event_loop.exit();
             }
@@ -8453,6 +8492,14 @@ impl ApplicationHandler<UserEvent> for App {
                     r.resize(size.width, size.height);
                 }
                 self.resize_all();
+                // Cycle 875: record the new grid size into the asciicast trace.
+                #[cfg(feature = "dev-record")]
+                if self.recorder.is_some() {
+                    let (cols, rows) = self.grid_of(self.area());
+                    if let Some(rec) = self.recorder.as_mut() {
+                        rec.record_resize(cols as u16, rows as u16);
+                    }
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }

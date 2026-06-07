@@ -12,6 +12,13 @@ description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlay
 [lints]
 workspace = true
 
+[features]
+# Cycle 875: developer-only session recorder (asciicast-compatible trace of
+# output / resize / keystroke tokens / UI markers). Compiled OUT of released
+# and packaged builds — enable with `cargo build --features dev-record`. The
+# `--record <path>` CLI flag only exists in feature-enabled builds.
+dev-record = []
+
 [dependencies]
 anyhow.workspace = true
 # Cycle 277: default-features off drops the `image_data` feature,

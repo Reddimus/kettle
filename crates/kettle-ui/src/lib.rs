@@ -43,6 +43,10 @@ mod fd_transport;
 // FSM; the App's mouse-handler advances it on MouseDown / Move /
 // Up. Cross-platform (no Unix-specific code).
 mod detach;
+// Cycle 875: developer-only session recorder (asciicast trace). Compiled out of
+// released / packaged builds via the `dev-record` Cargo feature.
+#[cfg(feature = "dev-record")]
+mod dev_record;
 
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
@@ -96,6 +100,11 @@ pub struct Options {
     /// the tab with adopted fds (running shells preserved).
     /// Unix-only.
     pub tab_handoff_fd: Option<i32>,
+    /// Cycle 875: developer session-recorder output path (`--record PATH`).
+    /// Writes an asciicast-compatible trace. Only present in `dev-record`
+    /// feature builds — absent from released / packaged binaries.
+    #[cfg(feature = "dev-record")]
+    pub record: Option<std::path::PathBuf>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).
