@@ -65,6 +65,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     bundle as **Terminator Linux / XTerm / Rxvt / Ambience**, so "all Terminator
     themes" is literally complete. Unit-tested (bundled + palette parses).
 
+  - **Themes (cycle 874) — refreshed the bundle with new upstream schemes.**
+    Additively synced the 16 themes added to the upstream iTerm2-Color-Schemes
+    collection since kettle last pulled it (Aardvark Ink, Electron Highlighter
+    Day, Neon Purple, and the London / Sequoia / Serendipity families). Only the
+    *new* names were copied in — every existing theme's palette is left exactly
+    as-is, so no one's current theme changes — bringing the bundle to 532 themes.
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
