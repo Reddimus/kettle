@@ -44,6 +44,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     scrub a `.cast` before sharing — the largest exposure surface); the doc is now
     linked from TESTING.md, which also documents the `dev-record` CI step.
 
+  - **CI (cycle 885) — fix the red `build (windows-latest)` job + normalize line
+    endings.** The Windows CI runner checks out with `autocrlf`, turning the
+    LF-committed source into CRLF, which made one drift test's multi-line `\n`
+    source-scan (`side_button_forward_is_modal_gated`) match 0 and fail — the
+    Windows build had been red since v2.8.0 (masked because earlier releases
+    watched `release.yml`, which builds the artifacts separately and was green).
+    A new `.gitattributes` (`* text=auto eol=lf`) makes every checkout LF so all
+    `include_str!` drift guards are deterministic cross-platform, and the test
+    now strips `\r` before scanning (belt-and-suspenders). Restores green
+    all-OS CI.
+
 ## [2.9.0] — 2026-06-06
 
   Windows 11 polish + new capabilities (cycles 868–877): a flash-free

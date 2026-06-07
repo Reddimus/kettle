@@ -9970,7 +9970,14 @@ mod tests {
 
     #[test]
     fn side_button_forward_is_modal_gated() {
-        let src = include_str!("app.rs");
+        // Cycle 885: normalize CRLF before this multi-line `\n` scan. The GitHub
+        // Windows runner checks out with autocrlf, turning the LF-committed file
+        // into CRLF so the exact `{\n   self.send_mouse(sgr,` literal matched 0
+        // (the `build (windows-latest)` job was red from v2.8.0). The new
+        // `.gitattributes eol=lf` fixes checkout; this keeps the test robust
+        // even on a CRLF working tree. (`\r` removal doesn't touch the escaped
+        // `\n` in this literal, so the test's own source can't self-match.)
+        let src = include_str!("app.rs").replace('\r', "");
         let gated = src
             .matches("if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {\n                        self.send_mouse(sgr,")
             .count();
