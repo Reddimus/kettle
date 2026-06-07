@@ -166,7 +166,7 @@ After install, launch `kettle` from any shell. A few one-liners worth
 trying first:
 
 ```sh
-kettle --list-themes      # browse the ~512 bundled themes
+kettle --list-themes      # browse the 500+ bundled themes
 kettle --config-path      # show where your config file lives
 kettle --list-keybinds    # see every default keybind (with overrides applied)
 kettle --check-config     # validate the config; flags unknown keys
@@ -190,7 +190,7 @@ kettle --print-default-config > "$(kettle --config-path)"
 ```
 
 Inside kettle: **right-click anywhere in a pane** for the context menu —
-Copy / Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled
+Copy / Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled
 themes), **Profile ▸**, and **Preferences ▸** with one-click toggles for
 cursor blink, scrollbar mode, bell, copy-on-select, mouse-hide, and font
 size. Reload config with `Ctrl+Shift+M`; cycle themes from the command
@@ -249,7 +249,7 @@ system packages. Minimum supported Rust version is **1.89** (Cargo.toml
 
 ```sh
 cargo test --workspace      # 500+ tests incl. an offscreen GPU pipeline check
-cargo run -p kettle -- --list-themes | wc -l   # 512
+cargo run -p kettle -- --list-themes | wc -l   # 500+ (currently 532)
 ```
 
 The GPU self-test (`kettle_render::offscreen_selftest`) compiles the WGSL

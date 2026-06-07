@@ -143,7 +143,7 @@ Each cycle has the same shape:
 
 ```text
 crates/
-  kettle-config/   Config parsing · 512 themes · keybinds · ssh-host · fuzzy
+  kettle-config/   Config parsing · 500+ themes · keybinds · ssh-host · fuzzy
   kettle-vt/       Image-protocol extractor (Sixel · kitty · iTerm2 · OSC 7/133)
   kettle-core/     PTY reader · alacritty_terminal+vte · search · hints · links
   kettle-render/   wgpu pipelines · glyphon text · screenshots · GPU self-test

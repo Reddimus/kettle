@@ -70,6 +70,11 @@ impl Recorder {
 
     /// Record a chunk of terminal OUTPUT (`o`). Non-UTF-8 bytes become U+FFFD —
     /// the trace stays valid asciicast / valid JSON, not byte-perfect.
+    ///
+    /// Privacy: this is VERBATIM and cannot be redacted — a terminal can't tell
+    /// a secret from normal output, so anything printed/echoed on screen lands
+    /// in the trace in cleartext. Review/scrub a `.cast` before sharing it (see
+    /// docs/DEV-RECORD.md).
     pub fn record_output(&mut self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
         self.emit("o", &text);

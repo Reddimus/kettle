@@ -136,7 +136,7 @@ pub fn categories() -> Vec<Category> {
                 // Cycle 872: the most popular themes as a cyclable list of
                 // options; ←/→ live-previews each (the settings handler persists
                 // + reloads on every step, so the theme applies instantly). The
-                // full ~512 bundle stays reachable via the right-click Theme
+                // full 500+ bundle stays reachable via the right-click Theme
                 // submenu / NextTheme / the `theme =` config line.
                 choice(
                     "Theme",

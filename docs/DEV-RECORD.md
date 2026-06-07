@@ -36,6 +36,13 @@ bar, overlays, and focus — across both **interactive** (tab add/close) and
 A terminal can't reliably detect a typed password (the PTY *master* never sees
 the child's `ECHO` flag), so the recorder is conservative by default:
 
+- **Output is captured verbatim and cannot be redacted.** The `o` channel
+  records everything the terminal displays — a terminal can't tell a secret from
+  normal output — so anything printed or echoed on screen during recording
+  (`cat ~/.ssh/id_rsa`, `env` showing `AWS_SECRET_ACCESS_KEY`, a token echoed by
+  a CLI, or a password at a prompt that left echo on) lands in the trace in
+  cleartext. This is the largest exposure surface — **review/scrub a `.cast`
+  before sharing it.**
 - **Keystrokes are redacted to tokens.** A typed password is recorded as its
   length + timing (`······`), never the characters. `--record-raw-input`
   (or `KETTLE_RECORD_RAW_INPUT=1`) opts into literal capture — ⚠ the trace can

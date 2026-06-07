@@ -8,7 +8,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Works out of the box** — bundled Nerd Font, ~512 themes, Terminator
+**Works out of the box** — bundled Nerd Font, 500+ themes, Terminator
 keybinds, right-click Preferences. **GPU-accelerated** with `wgpu` so
 splits and scrollback stay smooth on busy panes. **Cross-platform**:
 one binary on Linux, macOS, and Windows 11.
@@ -47,7 +47,7 @@ and **WezTerm** into one tool.
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
-- **Every Ghostty theme bundled** (~512, from iTerm2-Color-Schemes), default
+- **Every Ghostty theme bundled** (500+, from iTerm2-Color-Schemes), default
   **TokyoNight Night**. Ghostty-compatible `key = value` config with live
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
@@ -82,7 +82,7 @@ and **WezTerm** into one tool.
   git-hash / IP on screen; type a label to open it (URLs) or copy it.
 - **Command palette** — `Ctrl+Shift+K` opens a fuzzy command palette;
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
-- **Live theme switching** — cycle the ~512 bundled themes at runtime
+- **Live theme switching** — cycle the 500+ bundled themes at runtime
   (palette: "Next/Previous theme", or `next_theme`/`prev_theme` binds).
 - **Update check** — on by default, a quiet once-a-day check against GitHub
   releases shows a dismissable in-app banner when a newer version ships (it
@@ -195,7 +195,7 @@ kettle --write-default-config                             # bootstrap a commente
 kettle --print-default-config > ~/.config/kettle/config   # or print it to stdout to redirect yourself
 kettle --shell-integration bash >> ~/.bashrc              # OSC 133 jump-to-prompt (zsh/fish also supported)
 kettle --print-completions bash >> ~/.bashrc              # tab-complete every kettle flag
-kettle --list-themes        # list every bundled theme (~512)
+kettle --list-themes        # list every bundled theme (500+)
 kettle --list-keybinds      # print the *effective* keymap (defaults + your overrides + unbinds)
 kettle --list-actions       # list every action name accepted by `keybind = trigger=action`
 kettle --list-ssh-hosts     # print configured `ssh-host = name=target` entries
@@ -231,7 +231,7 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 
 > **Tip — right-click anywhere in a pane** for the context menu: Copy /
-> Paste / Split / Close, plus **Theme ▸** (cycle through ~512 bundled
+> Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled
 > themes), **Profile ▸**, and the **Preferences ▸** submenu
 > with one-click toggles for scrollbar mode, cursor blink, copy-on-select,
 > bell mode, mouse-hide, and font size. Settings persist atomically to

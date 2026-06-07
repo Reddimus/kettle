@@ -1,5 +1,5 @@
 //! Theme model + the bundled Ghostty theme set (the iTerm2-Color-Schemes
-//! `ghostty/` collection, ~500 themes, embedded at compile time).
+//! `ghostty/` collection, 500+ themes, embedded at compile time).
 
 use crate::color::Rgb;
 use crate::parse;
@@ -57,7 +57,7 @@ impl Theme {
     /// (rough popularity order), surfaced as the Settings → Appearance → Theme
     /// list of options — cycling them with ←/→ live-previews each. Every entry
     /// MUST be a bundled theme name (`popular_names_are_all_bundled` guards it).
-    /// The full ~512 bundle stays reachable via the right-click Theme submenu,
+    /// The full 500+ bundle stays reachable via the right-click Theme submenu,
     /// the `NextTheme`/`PrevTheme` actions, and the `theme =` config line.
     pub const POPULAR: &'static [&'static str] = &[
         "TokyoNight Night",
@@ -123,7 +123,7 @@ impl Theme {
     pub fn by_name(name: &str) -> Theme {
         // `eq_ignore_ascii_case` compares in place — no per-element
         // `to_ascii_lowercase` String alloc (this runs on every theme keypress
-        // / session restore over ~513 bundled names). Cycle 843 (audit).
+        // / session restore over 500+ bundled names). Cycle 843 (audit).
         let want = name.trim();
         for (n, body) in BUNDLED_THEMES.iter() {
             if n.eq_ignore_ascii_case(want) {
@@ -285,5 +285,20 @@ mod tests {
             );
             assert!(seen.insert(*name), "duplicate curated theme {name:?}");
         }
+    }
+
+    /// Cycle 883: the docs advertise "500+ bundled themes" — range-stable
+    /// phrasing chosen so the exact count can't silently drift in the docs each
+    /// time the bundle is re-synced. Guard the FLOOR so a catastrophic drop
+    /// would fail CI rather than quietly contradict that claim. (Current bundle
+    /// is ~532; this only trips if it falls below 500.)
+    #[test]
+    fn bundled_theme_count_supports_500_plus_claim() {
+        let n = Theme::list().len();
+        assert!(
+            n >= 500,
+            "bundled theme count fell to {n}; the docs claim '500+'. Re-sync \
+             assets/themes/ from iTerm2-Color-Schemes or update the docs."
+        );
     }
 }

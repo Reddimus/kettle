@@ -171,6 +171,11 @@ name the shape of bug each cycle caught.
 - Cycle-220 **iconutil / ico packaging smoke** on macOS and
   Windows runners — verifies the .icns / .ico build assets stay
   intact on every push (not just release tags).
+- Cycle-876 **`dev-record` feature build** — the developer-only session
+  recorder is compiled OUT of shipped builds, so the default checks never
+  exercise it; CI separately runs `clippy -D` + the recorder tests under
+  `--features dev-record` so the gated code + hooks can't bit-rot. See
+  [DEV-RECORD.md](DEV-RECORD.md).
 
 Separate workflows:
 
