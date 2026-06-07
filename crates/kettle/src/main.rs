@@ -450,7 +450,9 @@ fn install_panic_hook() {
 /// and kettle stays a pure GUI app: no console window, no flash.
 #[cfg(windows)]
 fn attach_parent_console_if_needed() {
-    use windows_sys::Win32::Foundation::{GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        GetLastError, HANDLE, INVALID_HANDLE_VALUE, SetLastError,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileType, OPEN_EXISTING,
     };
@@ -478,8 +480,13 @@ fn attach_parent_console_if_needed() {
         if h.is_null() || h == INVALID_HANDLE_VALUE {
             return false;
         }
-        // SAFETY: `h` came from GetStdHandle; GetFileType/GetLastError only
-        // read OS state for this process.
+        // SAFETY: `h` came from GetStdHandle; these only read/clear this
+        // thread's OS state. GetFileType returns FILE_TYPE_UNKNOWN BOTH for a
+        // genuine unknown device AND on error, and does NOT reset last-error on
+        // success — so clear last-error FIRST, then a post-call GetLast() == 0
+        // means a real (non-error) UNKNOWN. Without the SetLastError(0) the
+        // check could read a stale code from an earlier Win32 call (cycle 878).
+        unsafe { SetLastError(0) };
         match unsafe { GetFileType(h) } {
             FILE_TYPE_DISK | FILE_TYPE_PIPE | FILE_TYPE_CHAR => true,
             // UNKNOWN counts as usable only when it isn't actually an error.

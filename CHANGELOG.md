@@ -4,6 +4,46 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  Post-v2.9.0 self-review batch (cycles 878–884): an adversarial multi-agent
+  review of the v2.9.0 changes surfaced 10 confirmed low/medium findings (no
+  high-severity, none a user-facing functional regression) — all fixed here,
+  toward the next release.
+
+  - **Windows (cycle 878) — `is_inherited` clears last-error before GetFileType.**
+    The `FILE_TYPE_UNKNOWN` arm tested `GetLastError() == 0` without the mandatory
+    preceding `SetLastError(0)`, so a stale error code could misclassify an exotic
+    UNKNOWN std handle. Now follows the documented Win32 pattern.
+  - **Windows (cycle 879) — the update-available banner raises taskbar attention
+    only when unfocused**, matching the bell path, so `attention_active` keeps
+    meaning "a flash is actually outstanding" (it was latched even while focused,
+    where `FlashWindowEx` is a no-op).
+  - **Themes (cycle 880) — a theme picked in Settings now survives an unclean
+    exit.** The Settings handler persisted to config + reloaded but never synced
+    the session file, so a crash/kill/reboot before the next save let the stale
+    session theme revert the pick on restart. It now calls `save_session()` like
+    the NextTheme / context-menu / ToggleLightDark paths.
+  - **dev-record (cycle 881) — the recorder uses a lossless (unbounded) output
+    channel** instead of the lossy `bounded(64)` Lua sidechannel, so a fast output
+    burst can't silently drop chunks and leave holes in the "verbatim" asciicast
+    (same rationale as the already-unbounded event channel). Lua plugins keep
+    their drop-on-full channel.
+  - **Tests (cycle 882) — the synchronized-output (DEC 2026) test feeds through
+    the real Extractor → Processor pipeline**, not the Processor directly, so a
+    future Extractor change that swallowed the `?2026` toggles would actually fail
+    it — the property its docstring promised.
+  - **Docs (cycle 883) — theme count is now range-stable.** README / INSTALL /
+    SETTINGS / CONTRIBUTING and code comments said "~512" after the bundle grew to
+    532; they now say "500+" (and the INSTALL verify step shows `# 500+`), and a
+    new floor-guard test asserts the bundle stays ≥ 500 so the docs can't silently
+    drift again. The intra-section CHANGELOG "~512 vs 532" wording was reconciled.
+  - **dev-record docs (cycle 884) — output-privacy caveat + discoverability.**
+    docs/DEV-RECORD.md (and the `record_output` doc) now state plainly that the
+    `o` channel captures on-screen output VERBATIM and cannot be redacted (review/
+    scrub a `.cast` before sharing — the largest exposure surface); the doc is now
+    linked from TESTING.md, which also documents the `dev-record` CI step.
+
 ## [2.9.0] — 2026-06-06
 
   Windows 11 polish + new capabilities (cycles 868–877): a flash-free
@@ -58,7 +98,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     Main/Moon/Dawn, Everforest Dark/Light, Kanagawa Wave/Lotus, One Half
     Dark/Light, Ayu Mirage/Light, Monokai Pro, Night Owl). ←/→ cycles them and
     **live-previews each instantly**, persisting the choice to the config file.
-    The full ~512 bundled themes stay reachable via the right-click Theme
+    The full bundled theme set stays reachable via the right-click Theme
     submenu, `NextTheme`/`PrevTheme`, or a `theme =` config line. The curated
     list is unit-tested to contain only real bundled theme names.
 

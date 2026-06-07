@@ -2158,6 +2158,12 @@ impl App {
             mux: {
                 let mut m = Mux::new();
                 m.lua_output_subscribed = lua_output_subscribed;
+                // Cycle 881: a dev recording needs a lossless output channel so
+                // the asciicast trace can't drop chunks under a fast burst.
+                #[cfg(feature = "dev-record")]
+                {
+                    m.record_lossless = startup.record.is_some();
+                }
                 m
             },
             mods: ModifiersState::empty(),
@@ -7593,6 +7599,15 @@ impl App {
                         self.persist_pref("window-padding-y", &new_val);
                     }
                     self.reload_config();
+                    // Cycle 880: `theme` is the one Settings key also mirrored in
+                    // the session file. persist+reload only wrote the config, so
+                    // on an unclean exit (crash/kill/reboot) before the next
+                    // save_session, startup's session-theme override would revert
+                    // this pick. Sync the session now, like the NextTheme /
+                    // context-menu SetTheme / ToggleLightDark paths do.
+                    if key_str == "theme" {
+                        self.save_session();
+                    }
                 }
             }
             _ => {}
@@ -8526,9 +8541,17 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 self.update_available = Some((tag, url));
                 if let Some(w) = &self.window {
-                    w.request_user_attention(Some(UserAttentionType::Informational));
+                    // Cycle 879: only raise OS attention (+ latch the tracker)
+                    // when unfocused — mirroring the bell path — so
+                    // `attention_active` keeps meaning "a flash is actually
+                    // outstanding". FlashWindowEx is a no-op on the foreground
+                    // window anyway, and latching the flag while focused would
+                    // leave it set until an unrelated defocus/refocus.
+                    if !self.window_focused {
+                        w.request_user_attention(Some(UserAttentionType::Informational));
+                        self.attention_active = true;
+                    }
                     w.request_redraw();
-                    self.attention_active = true;
                 }
             }
         }

@@ -1857,6 +1857,19 @@ mod conformance {
         p.advance(term, bytes);
     }
 
+    /// Cycle 882: feed bytes through the SAME two-stage path the PTY reader
+    /// thread uses — `Extractor::feed` then each `Chunk::Pass` →
+    /// `Processor::advance` — so a test exercises kettle's REAL pipeline (the
+    /// Extractor sits in front of the engine at runtime) instead of driving the
+    /// alacritty `Processor` in isolation.
+    fn feed_ex(term: &mut Term<EventProxy>, p: &mut Processor, ex: &mut Extractor, bytes: &[u8]) {
+        for chunk in ex.feed(bytes) {
+            if let Chunk::Pass(b) = chunk {
+                p.advance(term, &b);
+            }
+        }
+    }
+
     fn row_text(term: &Term<EventProxy>, row: i32) -> String {
         let g = term.grid();
         (0..g.columns())
@@ -2159,24 +2172,27 @@ mod conformance {
     /// locks the grid never samples a half-drawn frame; the buffered changes
     /// apply atomically on close. This is the property that lets well-behaved
     /// TUIs avoid the transient mid-repaint tearing a terminal would otherwise
-    /// show. kettle drives the same `Processor` alacritty does, so this guards
-    /// that kettle's feed path keeps the behavior (e.g. a future Extractor
-    /// change must not swallow the `?2026` toggles).
+    /// show. The bytes are fed through kettle's REAL pipeline (`feed_ex` →
+    /// Extractor → Processor), so this also guards that a future `Extractor`
+    /// change cannot swallow the `?2026` toggles (cycle 882: was previously
+    /// fed straight to the Processor, bypassing the Extractor it claims to
+    /// guard).
     #[test]
     fn synchronized_update_defers_grid_mutation_until_close() {
         let (mut t, mut p) = harness(6, 2);
-        feed(&mut t, &mut p, b"A");
+        let mut ex = Extractor::new();
+        feed_ex(&mut t, &mut p, &mut ex, b"A");
         assert_eq!(t.grid()[Point::new(Line(0), Column(0))].c, 'A');
         // Open a synchronized update, return to col 0 and overwrite with 'B',
         // but DO NOT close the block yet.
-        feed(&mut t, &mut p, b"\x1b[?2026h\rB");
+        feed_ex(&mut t, &mut p, &mut ex, b"\x1b[?2026h\rB");
         assert_eq!(
             t.grid()[Point::new(Line(0), Column(0))].c,
             'A',
             "grid mutated mid-synchronized-update (mode 2026 not honored)"
         );
         // Close the block — the buffered write now applies atomically.
-        feed(&mut t, &mut p, b"\x1b[?2026l");
+        feed_ex(&mut t, &mut p, &mut ex, b"\x1b[?2026l");
         assert_eq!(
             t.grid()[Point::new(Line(0), Column(0))].c,
             'B',
