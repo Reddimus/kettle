@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.10.0] — 2026-06-07
 
   Post-v2.9.0 self-review batch (cycles 878–884): an adversarial multi-agent
   review of the v2.9.0 changes surfaced 10 confirmed low/medium findings (no
