@@ -4,9 +4,14 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.9.0] — 2026-06-06
 
-  Windows 11 polish + new capabilities, bundled toward v2.9.0.
+  Windows 11 polish + new capabilities (cycles 868–877): a flash-free
+  GUI-subsystem launch, a taskbar notification that actually clears on focus,
+  a Settings **Theme** picker with live preview (532 bundled themes — incl. all
+  Terminator palettes), a cursor / synchronized-output rendering pass, and an
+  opt-in, developer-only session recorder. Every change is drift-/unit-tested
+  and `just gauntlet`-green.
 
   - **Windows (cycle 868) — no more phantom console window/flash on launch.**
     kettle now builds as a Windows GUI-subsystem app, so Explorer / Start-menu
