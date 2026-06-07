@@ -74,6 +74,109 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
       `find_foreground_shell` (deepest-shell-wins, non-shell ignored, plain pane
       → none), and `argv_is_wsl` basename detection.
 
+  Comprehensive whole-codebase audit batch (cycles 889–906): a 13-dimension
+  multi-agent audit of every crate, feature, UI/UX state, and platform path
+  produced 34 reviewer-confirmed findings (0 high after adversarial
+  verification; 9 medium, 25 low) — all addressed here, each a durable fix with
+  a unit / drift test and `just gauntlet`-green.
+
+  - **Context menu (cycles 889–890) — mouse drill-in + keyboard parity.** Mouse-
+    clicking a submenu row dismissed the menu instead of drilling in (the menu
+    was nulled *before* the dispatch match, making the drill arm dead code); and
+    keyboard Enter/Space + mnemonics only fired plain `Item` rows, so the
+    new-tab `▾` dropdown, Lua items, config-commands, and theme/profile choices
+    were keyboard dead-ends. All three input paths now route through one shared
+    row→click mapper + dispatcher, and theme/profile leaves are keyboard-
+    navigable. (medium ×2)
+  - **Render — unfocused-pane OSC 11 backdrop (cycle 891).** An unfocused pane
+    running a program that set its own background (OSC 11) painted no quad on
+    its default-bg cells, so they leaked the focused pane's clear color. Each
+    pane now paints a backdrop over its interior when its default bg differs
+    from the surface clear color (border/titlebar-aware geometry, unit-tested).
+    (medium)
+  - **Render — background-image cache (cycle 892).** The decoded wallpaper (up
+    to ~256 MiB) is now freed when the config leaves `background-type = image`,
+    and the cache key includes the blur radius so toggling `background-blur`
+    reloads even when the path is unchanged. (low ×2)
+  - **Session restore — no leaked PTYs on partial failure (cycle 893).** When a
+    split-tree's later pane failed to spawn, the panes already created for the
+    same tree were orphaned in the mux (a leaked PTY + child process each).
+    `build_node` now tracks spawned ids and reaps them on the restore error
+    path. (medium)
+  - **WSL split `--cd` ordering (cycle 894).** `--cd <dir>` was appended at the
+    END of argv, so a launcher carrying a command (`wsl -d Ubuntu -- bash -l`)
+    passed `--cd` to the *command*, not WSL — the dir was ignored. It's now
+    inserted in WSL's option section (right after the launcher). (medium)
+  - **Config validator parity sweep (cycle 895).** `--check-config`'s diagnostic
+    now covers every alias the parser accepts, with bounds mirroring the apply
+    clamps: `cursor-shape`/`cursor_shape` + `ibeam`/`i-beam`, `scrollback-limit`,
+    `tab-silence-threshold-ms` / `command-notify-threshold-ms`, the
+    `background-color`/`foreground-color` (`_color`) spellings, and padding now
+    rejects `inf`/`nan` (which the runtime rejects). (medium + low ×5)
+  - **`persist_config_toggle` rollback (cycle 896).** Contract point 5 — a
+    post-write re-validation that rolls back a malformed write — was documented
+    but never implemented. It now re-scans the written file and restores the
+    previous content (returning an error) if the edit introduced a malformed
+    value. (low)
+  - **App event-state gates (cycle 897).** A file dropped behind an open modal
+    no longer injects its path into the PTY; latched drag flags
+    (`selecting`/`dragging_scrollbar`/`tab_drag_active`/`mouse_btn`) are cleared
+    on focus loss (a swallowed button-up used to leave them stuck); and a
+    side-button press/release with a lone context menu open dismisses the menu
+    instead of leaking SGR. (low ×3)
+  - **Confirm-close honors close returns (cycle 898).** The confirm dialog's
+    CloseTab/ClosePane dispatch ignored the "that was the last tab/pane" return,
+    deferring exit a tick and painting an empty frame; it now exits immediately,
+    matching the keybind paths. (low)
+  - **`fd_transport` short-write fix (cycle 899, Unix).** The no-fds send used
+    `write` (ignoring short writes) and the SCM_RIGHTS path didn't flush a
+    partial `sendmsg`, so a partial send silently lost the tail of a transferred
+    tab (the caller closes the source tab on "success"). Both paths now deliver
+    the whole payload via `write_all` (fds sent once, remainder flushed). (low)
+  - **Lua instruction budget (cycle 900).** Lua scripts/callbacks had no CPU
+    budget — a `while true do end` (incl. in the `output` callback) wedged the
+    UI thread forever. An mlua instruction-count hook now aborts a runaway after
+    a per-invocation budget; user Lua can't disable it. (low)
+  - **Update-checker overall timeout (cycle 901).** The fetch set only per-phase
+    timeouts, so a trickling server (resetting the per-byte read timeout) could
+    keep the thread / synchronous `--check-update` alive indefinitely. Added an
+    overall request deadline. (low)
+  - **OSC 133 prompt-mark ring (cycle 902).** Switched the prompt ring from a
+    `Vec` with O(n) `drain(0..d)` (on the hot reader path once full) to a
+    `VecDeque` with O(1) `pop_front`. (low)
+  - **`term.rs` duplicate `#[allow]` (cycle 903).** Removed two dead duplicate
+    `#[allow(clippy::too_many_arguments)]` attributes. (low)
+  - **Mouse drag-to-resize split dividers (cycle 904).** Dragging a split
+    divider now resizes the panes (with a hover resize-cursor) — previously
+    keyboard-only. Pure, unit-tested geometry (seam hit-test, position→ratio,
+    path-addressed ratio set); drag ends on button-up and focus loss. (low)
+  - **Docs sweep + privacy correction (cycle 905).** Documented the previously-
+    undocumented runtime config keys (auto light/dark `theme-mode`/
+    `theme-schedule`/`-lat`/`-long` + `light-theme`/`dark-theme`, `allow-bold`,
+    `bold-is-bright`, `clear-select-on-copy`, `invert-search`,
+    `backspace-binding`/`delete-binding`, `login-shell`, `term`, `colorterm`)
+    and the vertical tab strips (`tab-bar-position = left|right|hidden` +
+    `tab-bar-width`); back-filled the keybind action reference (with a pointer to
+    `kettle --list-actions`) and noted digits/punctuation + key aliases. Fixed
+    the ARCHITECTURE.md crate-graph (removed a nonexistent `core → cfg` edge) and
+    the range-stable theme count (`~512` → `500+`) in ARCHITECTURE/PERFORMANCE/
+    example-config, and the man page (`--shell-integration` lists `powershell`;
+    icon sizes `16`–`256`). **Corrected the update-check privacy claim**: the
+    prebuilt release binaries (and the Homebrew/AUR packages that *repackage*
+    them) are not built with `KETTLE_PACKAGED`, so they DO auto-check — only a
+    from-source build that sets that flag compiles the check out; the runtime
+    `update-check = false` opt-out applies regardless. (medium ×3 + low)
+  - **CI — Windows release build + smoke (cycle 906).** The Windows CI leg now
+    builds the release binary and smokes a piped `kettle --version` under
+    PowerShell 7, so a release-profile Windows regression (incl. the
+    GUI-subsystem console-attach path) surfaces on every PR, not only at tag
+    time in `release.yml`. (low)
+
+  Deferred (tracked): the app.rs god-object refactor (audit `architecture-rust`)
+  is intentionally staged — the punch-list calls for incremental extraction,
+  each landing green with a drift test, which is a multi-cycle effort unsuited to
+  a pre-release blind change.
+
 ## [2.9.0] — 2026-06-06
 
   Windows 11 polish + new capabilities (cycles 868–877): a flash-free

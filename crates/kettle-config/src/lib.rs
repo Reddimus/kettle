@@ -1317,12 +1317,15 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
 ///      writes don't touch the backup — it's a "what did my config
 ///      look like before I started clicking toggles?" forensic
 ///      snapshot.
-///   5. **Post-write parse check**: after the rename, the new file
-///      is re-parsed via `Config::parse_collect`; if parsing
-///      produces a different number of recognized keys than before
-///      (modulo the edited key), we roll back from the backup and
-///      return an `io::Error` so the caller can surface to the
-///      user. This is the "I don't corrupt your config" safety net.
+///   5. **Post-write validation + rollback**: after the rename, the
+///      new file is re-scanned with `Config::detect_malformed_values`.
+///      Because this helper only ever rewrites a single line, any
+///      *additional* diagnostic compared with the pre-edit content
+///      means the new value is malformed — so we restore the previous
+///      content and return an `io::Error` for the caller to surface.
+///      This is the "I don't corrupt your config" safety net (cycle
+///      896 made it real; before, this contract point was documented
+///      but never implemented).
 ///   6. **Symlink rejection**: the path's *canonical* parent must
 ///      live inside `<config-root>` (resolved via
 ///      `Config::default_path`'s parent or `cli --config` parent).
@@ -1412,6 +1415,25 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     ));
     std::fs::write(&tmp, &text)?;
     std::fs::rename(&tmp, path)?;
+    // Contract point 5 (cycle 896): re-validate the written file. We only
+    // ever rewrite ONE line, so any malformed-value diagnostic the new file
+    // has that the pre-edit content did NOT means our edit introduced bad
+    // data — restore the previous content and report it, rather than leaving
+    // a silently-corrupted config the user can't see. (`existing` holds the
+    // exact pre-edit bytes; the `.bak` may be an older forensic snapshot.)
+    let before_bad = Config::detect_malformed_values(&existing).len();
+    let after_bad = Config::detect_malformed_values(&text).len();
+    if after_bad > before_bad {
+        // Best-effort rollback to the known-good pre-edit content.
+        std::fs::write(path, &existing)?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to persist `{key} = {new_value}`: it would introduce a \
+                 malformed config value; restored the previous content"
+            ),
+        ));
+    }
     Ok(bak)
 }
 
@@ -2032,8 +2054,13 @@ impl Config {
                 // Padding: parse-only (no fixed runtime clamp). Big
                 // pads just shrink the rendered body area — the
                 // cycle-119 `cap_axis_cells` keeps screenshots safe.
+                // Cycle 895 (audit): require a FINITE value. The apply arm
+                // (`v.is_finite()`) rejects `inf`/`nan`, but `"inf".parse::
+                // <f32>()` succeeds, so the diagnostic said OK while the
+                // runtime silently kept the default — the exact mismatch
+                // the clamped-numeric arms exist to prevent.
                 "padding-x" | "window-padding-x" | "padding-y" | "window-padding-y" => {
-                    v.parse::<f32>().is_ok()
+                    v.parse::<f32>().is_ok_and(|n| n.is_finite())
                 }
                 // Numerics with a *runtime clamp* — parse AND land
                 // inside the clamp range, otherwise the user's
@@ -2058,7 +2085,11 @@ impl Config {
                 // would have allocated >100 GB of history rows
                 // (cycle 133 clamps them at parse, but flag the
                 // diagnostic too).
-                "scrollback" => {
+                // Cycle 895 (audit): the apply arm accepts the
+                // `scrollback-limit` alias too, so the diagnostic must
+                // recognise it — otherwise `scrollback-limit = 99999999999`
+                // bypassed the malformed-value warning entirely.
+                "scrollback" | "scrollback-limit" => {
                     v.eq_ignore_ascii_case("infinite")
                         || v.eq_ignore_ascii_case("unlimited")
                         || v.parse::<usize>().is_ok_and(|n| n <= INFINITE_SCROLLBACK)
@@ -2069,6 +2100,20 @@ impl Config {
                 // 5000 — surface it now so the user's diagnostic
                 // matches their runtime.
                 "cursor-blink-interval" => v.parse::<u64>().is_ok_and(|n| (50..=5000).contains(&n)),
+                // Cycle 895 (audit): the notification thresholds are clamped at
+                // parse (`tab-silence` to [1000, 600000]; `command-notify` to
+                // [0, 86_400_000] with 0 = disable) but had no diagnostic, so an
+                // out-of-range value silently became something else. Bounds
+                // mirror the apply-arm clamps exactly.
+                "tab-silence-threshold-ms" | "tab-silence-threshold" => {
+                    v.parse::<u64>().is_ok_and(|n| (1_000..=600_000).contains(&n))
+                }
+                "command-notify-threshold-ms"
+                | "command-notify-threshold"
+                | "command_notify_threshold_ms"
+                | "command_notify_threshold" => {
+                    v.parse::<u64>().is_ok_and(|n| n <= 86_400_000)
+                }
                 // Cycle 855 (audit): the remaining clamped/range-checked
                 // numerics. parse_collect clamps (or, for lat/long, silently
                 // discards) an out-of-range value, so without these the
@@ -2112,6 +2157,15 @@ impl Config {
                 // keep the default — same trap as the numeric keys.
                 "background"
                 | "foreground"
+                // Cycle 895 (audit): the apply path accepts the Terminator
+                // `background-color`/`foreground-color` (and `_color`) aliases,
+                // so a bad color under those spellings must be diagnosed too —
+                // otherwise `background-color = notacolor` silently kept the
+                // theme default and passed `--check-config`.
+                | "background-color"
+                | "background_color"
+                | "foreground-color"
+                | "foreground_color"
                 | "cursor-color"
                 | "selection-background"
                 | "selection-foreground"
@@ -2235,9 +2289,16 @@ impl Config {
                 // fallback to Block. Cycle 146: case-insensitive so
                 // `Block` / `BLOCK` etc. also pass (matching the
                 // parse_collect behavior).
-                "cursor-style" => matches!(
+                // Cycle 895 (audit): include the `cursor-shape`/`cursor_shape`
+                // Terminator aliases (the apply arm accepts them) so a typo
+                // under those spellings is diagnosed instead of silently
+                // becoming Block; and add `ibeam`/`i-beam`, which the apply
+                // arm accepts but the diagnostic previously flagged as
+                // malformed — a false positive that failed `--check-config`
+                // on a valid value.
+                "cursor-style" | "cursor-shape" | "cursor_shape" => matches!(
                     v.to_ascii_lowercase().as_str(),
-                    "block" | "underline" | "bar" | "beam"
+                    "block" | "underline" | "bar" | "beam" | "ibeam" | "i-beam"
                 ),
                 // Cycle 146: enum keys are case-insensitive so
                 // `bell = OFF` validates the same as `bell = off`.
@@ -3570,6 +3631,43 @@ mod config_tests {
         assert!(
             malformed.is_empty(),
             "example config has malformed values (docs drift): {malformed:?}"
+        );
+    }
+
+    /// Cycle 905 (audit): every config key documented in `docs/CONFIG.md`'s
+    /// Keys table that this cycle back-filled must be a key the parser actually
+    /// recognizes — otherwise the docs claim a key that does nothing. Feeds a
+    /// valid `key = value` for each and asserts the parser reports no unknown
+    /// keys. (The example config has its own broader round-trip guard above.)
+    #[test]
+    fn newly_documented_config_keys_are_recognized() {
+        let sample = "\
+theme-mode = dark\n\
+light-theme = TokyoNight Day\n\
+dark-theme = TokyoNight Night\n\
+theme-schedule = 19:00 dark,07:00 light\n\
+theme-schedule-lat = 33.77\n\
+theme-schedule-long = -118.19\n\
+allow-bold = false\n\
+bold-is-bright = true\n\
+clear-select-on-copy = true\n\
+invert-search = true\n\
+backspace-binding = ascii-del\n\
+delete-binding = escape-sequence\n\
+login-shell = true\n\
+term = xterm-256color\n\
+colorterm = truecolor\n\
+tab-bar-position = left\n\
+tab-bar-width = 200\n";
+        let (_cfg, unknown) = Config::parse_collect(sample);
+        assert!(
+            unknown.is_empty(),
+            "CONFIG.md documents keys the parser doesn't recognize: {unknown:?}"
+        );
+        let malformed = Config::detect_malformed_values(sample);
+        assert!(
+            malformed.is_empty(),
+            "the documented sample values must validate clean: {malformed:?}"
         );
     }
 
@@ -5652,6 +5750,51 @@ mod config_tests {
         assert_eq!(c.background_opacity, 0.0);
     }
 
+    /// Cycle 895 (audit): the validator must cover every alias the apply
+    /// path accepts, with bounds that mirror the apply-arm clamps exactly.
+    /// Before this, a bad value under an *alias* spelling slipped past
+    /// `--check-config` (the diagnostic only knew the canonical key), and a
+    /// `padding = inf` / valid `cursor-shape = ibeam` mismatched the runtime.
+    #[test]
+    fn detect_malformed_values_covers_aliases_and_clamps() {
+        // Bad values under the previously-uncovered spellings must flag.
+        let bad = Config::detect_malformed_values(
+            "cursor-shape = wibble\n\
+             cursor_shape = nonsense\n\
+             scrollback-limit = 99999999999\n\
+             background-color = notacolor\n\
+             background_color = zzz\n\
+             foreground-color = nope\n\
+             foreground_color = quux\n\
+             tab-silence-threshold-ms = 0\n\
+             tab-silence-threshold-ms = 700000\n\
+             command-notify-threshold-ms = 99999999999\n\
+             padding-x = inf\n\
+             padding-y = nan\n",
+        );
+        assert_eq!(bad.len(), 12, "all twelve should flag: {bad:?}");
+
+        // The matching valid values must NOT flag — including `ibeam`/`i-beam`
+        // (apply accepts them; the diagnostic used to false-positive), the
+        // disable sentinel `0` for command-notify, and finite padding.
+        let ok = Config::detect_malformed_values(
+            "cursor-shape = ibeam\n\
+             cursor_shape = i-beam\n\
+             cursor-shape = block\n\
+             scrollback-limit = 50000\n\
+             scrollback-limit = infinite\n\
+             background-color = #112233\n\
+             foreground-color = rgb:aa/bb/cc\n\
+             tab-silence-threshold-ms = 1000\n\
+             tab-silence-threshold-ms = 600000\n\
+             command-notify-threshold-ms = 0\n\
+             command-notify-threshold-ms = 86400000\n\
+             padding-x = 8\n\
+             padding-y = 0\n",
+        );
+        assert!(ok.is_empty(), "all valid forms pass: {ok:?}");
+    }
+
     #[test]
     fn detect_malformed_values_flags_font_size_out_of_renderer_range() {
         // Cycle 131: font-size = 500 silently clamps to 72 at the
@@ -7033,6 +7176,35 @@ mod config_tests {
         // write state.
         super::persist_config_toggle(&path, "cursor-blink", "true").expect("second");
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), snapshot);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 896 (audit): contract point 5 — a write that would introduce a
+    /// malformed value is rejected and the previous content restored, instead
+    /// of leaving a corrupted config. The doc promised this for cycles but it
+    /// was never implemented.
+    #[test]
+    fn persist_config_toggle_rolls_back_on_malformed_value() {
+        let dir = tempdir_for("rollback");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor-blink = true\n").expect("seed");
+        // `cursor-style = wibble` is a malformed enum value (detect flags it).
+        let err = super::persist_config_toggle(&path, "cursor-style", "wibble")
+            .expect_err("malformed value must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // The file is restored to its exact pre-edit content — the bad value
+        // never lands.
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "cursor-blink = true\n"
+        );
+        // A subsequent VALID write still succeeds and persists.
+        super::persist_config_toggle(&path, "cursor-style", "bar").expect("valid write");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("cursor-style = bar")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

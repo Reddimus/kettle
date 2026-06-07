@@ -75,7 +75,7 @@ for each invocation.
   terminal but is dominated by:
   - The bundled JetBrains Mono Nerd Font set (~50 MB of glyph data
     via `kettle_config::font::all()`).
-  - The ~512 bundled themes (Ghostty + iTerm2-Color-Schemes set).
+  - The 500+ bundled themes (Ghostty + iTerm2-Color-Schemes set).
   - The wgpu adapter (software-Vulkan in the headless path; the
     GPU driver on a real machine pages most of this out).
   - The font atlas + glyph cache (one entry per visible glyph,

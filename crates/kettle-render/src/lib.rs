@@ -515,7 +515,13 @@ pub struct Renderer {
     /// 3+4): decoded background-image cache. Tuple of
     /// (cfg.background_image path, decoded ImageData). Invalidated
     /// + re-decoded when the config path changes.
-    bg_image_cache: Option<(String, kettle_core::ImageData)>,
+    // Cycle 892 (audit): key is `(path, blur_radius)` — keying on the path
+    // alone meant toggling `background-blur` was ignored on reload unless
+    // the image path *also* changed. The value is the decoded RGBA (up to
+    // ~256 MiB); it is freed (`= None`) when the config moves away from
+    // `background-type = image` so a large wallpaper doesn't sit resident
+    // for the rest of the session after the user turns it off.
+    bg_image_cache: Option<(String, u32, kettle_core::ImageData)>,
 
     /// `Arc<str>` so `render_frame_with_status`'s per-frame
     /// `self.font_family.clone()` (needed to satisfy the borrow checker while
@@ -1027,11 +1033,6 @@ impl Renderer {
         if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
         {
             let want = cfg.background_image.clone();
-            let need_reload = self
-                .bg_image_cache
-                .as_ref()
-                .map(|(p, _)| p != &want)
-                .unwrap_or(true);
             // Cycle 396: route through decode_bg_image_with_blur
             // so cfg.background_blur takes effect at load time.
             // Radius 8 is a reasonable default for the on/off
@@ -1039,6 +1040,14 @@ impl Renderer {
             // sub-cycle could expose a `background_blur_radius`
             // numeric for finer control.
             let blur_radius: u32 = if cfg.background_blur { 8 } else { 0 };
+            // Cycle 892 (audit): reload when the path OR the blur radius
+            // changes. Before, blur lived outside the cache key, so toggling
+            // `background-blur` on a still-loaded image was silently ignored.
+            let need_reload = self
+                .bg_image_cache
+                .as_ref()
+                .map(|(p, b, _)| p != &want || *b != blur_radius)
+                .unwrap_or(true);
             if need_reload
                 && let Some(decoded) = bg_image::decode_bg_image_with_blur(&want, blur_radius)
             {
@@ -1048,9 +1057,9 @@ impl Renderer {
                     height: decoded.height,
                     rgba: Arc::new(decoded.rgba),
                 };
-                self.bg_image_cache = Some((want.clone(), data));
+                self.bg_image_cache = Some((want.clone(), blur_radius, data));
             }
-            if let Some((_, data)) = self.bg_image_cache.as_ref() {
+            if let Some((_, _, data)) = self.bg_image_cache.as_ref() {
                 // Cycle 390 (Terminator parity, bg-image Bucket-D
                 // sub-cycle 5): UV-mode variants. background-image-mode
                 // controls how the decoded image fills the surface.
@@ -1138,6 +1147,12 @@ impl Renderer {
                     }
                 }
             }
+        } else if self.bg_image_cache.is_some() {
+            // Cycle 892 (audit): config no longer requests an image background
+            // (type switched away, or path cleared) — drop the decoded RGBA so
+            // an up-to-256-MiB wallpaper isn't pinned for the rest of the
+            // session. Re-enabling re-decodes via the need_reload path above.
+            self.bg_image_cache = None;
         }
 
         // Cycle 296: status-bar background. The text is uploaded
@@ -1452,6 +1467,9 @@ impl Renderer {
                 overlay.vi_visual_anchor,
                 &mut quads,
                 pane_titlebar_h,
+                // Cycle 891: the whole-surface clear color so build_pane can
+                // detect when an unfocused pane needs its own bg backdrop.
+                default_bg,
             );
 
             // Image placements, anchored history-aware so they scroll.
@@ -2695,6 +2713,13 @@ impl Renderer {
         // so it doesn't overlap the cycle-379 titlebar bar. When
         // titlebar is off this is 0.0 (zero overhead).
         pane_titlebar_h: f32,
+        // Cycle 891 (audit): the whole-surface clear color (the FOCUSED
+        // pane's OSC 11 bg, or the theme bg). When this pane's own
+        // default bg differs from it we must paint a backdrop — the
+        // per-cell loop skips quads for default-bg cells on the
+        // assumption the clear already painted them, which is false for
+        // an unfocused pane carrying its own OSC 11 background.
+        surface_bg: Rgb,
     ) {
         let theme = &cfg.theme;
         let (rx, ry, rw, rh) = pv.rect;
@@ -2719,6 +2744,39 @@ impl Renderer {
         let default_bg = term_colors[257]
             .map(|c| Rgb::new(c.r, c.g, c.b))
             .unwrap_or(theme.background);
+
+        // Cycle 891 (audit): when this pane's default bg differs from the
+        // surface clear color (e.g. an UNFOCUSED pane running a program that
+        // set its own OSC 11 background, while the focused pane defines the
+        // clear color), paint a backdrop over the pane interior. Without it
+        // the per-cell loop below skips a quad for every default-bg cell —
+        // correct for the focused pane (the clear already painted them) but
+        // wrong here, so those cells leaked the *other* pane's background.
+        //
+        // Cover the interior only: inside the border (`bw`) and below/above
+        // the titlebar strip, so we don't paint over the focus border or the
+        // per-pane titlebar quad (both drawn by the caller before this call).
+        // Alpha mirrors the surface clear so window transparency / darkness
+        // applies to this pane's bg exactly as it does to the focused one.
+        if default_bg != surface_bg {
+            let bw = if cfg.handle_size < 0 {
+                1.0
+            } else {
+                cfg.handle_size as f32
+            };
+            if let Some((bx, by, bwid, bhgt)) =
+                pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
+            {
+                quads.push(rect(
+                    bx,
+                    by,
+                    bwid,
+                    bhgt,
+                    default_bg,
+                    composed_bg_alpha(cfg) as f32,
+                ));
+            }
+        }
 
         // Cycle 827 (audit): take the pooled scratch (with last frame's String
         // buffers) instead of allocating fresh. `n` is the LOGICAL run count;
@@ -3535,6 +3593,32 @@ fn srgb(c: u8) -> f64 {
 ///                               so users get the dim tint stage early)
 ///
 /// All inputs already clamped at parse time so no defensive math needed.
+/// Cycle 891 (audit): the interior rectangle of a pane to paint with its
+/// own default background, given the pane `(x, y, w, h)`, border width
+/// `bw`, titlebar strip height `pane_titlebar_h` (0 when off), and whether
+/// the titlebar sits at the bottom. Returns the rect *inside* the border
+/// and clear of the titlebar so the backdrop never overpaints the focus
+/// border or the per-pane titlebar quad. `None` when the interior would be
+/// empty (degenerate pane / border ≥ half the size).
+fn pane_backdrop_rect(
+    pane: (f32, f32, f32, f32),
+    bw: f32,
+    pane_titlebar_h: f32,
+    title_at_bottom: bool,
+) -> Option<(f32, f32, f32, f32)> {
+    let (rx, ry, rw, rh) = pane;
+    let (title_top, title_bot) = if title_at_bottom {
+        (0.0, pane_titlebar_h)
+    } else {
+        (pane_titlebar_h, 0.0)
+    };
+    let bx = rx + bw;
+    let by = ry + bw + title_top;
+    let bwid = (rw - 2.0 * bw).max(0.0);
+    let bhgt = (rh - 2.0 * bw - title_top - title_bot).max(0.0);
+    (bwid > 0.0 && bhgt > 0.0).then_some((bx, by, bwid, bhgt))
+}
+
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     use kettle_config::BackgroundType;
     match cfg.background_type {
@@ -4953,6 +5037,81 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             src.contains("self.pane_titlebar_buffers.truncate(panes.len())"),
             "pane_titlebar_buffers must be truncated to panes.len() too"
+        );
+    }
+
+    /// Cycle 891 (audit): an unfocused pane carrying its own OSC 11
+    /// background must paint a backdrop over its interior, because the
+    /// per-cell loop skips default-bg cells (they'd otherwise leak the
+    /// focused pane's clear color). The backdrop rect must stay INSIDE the
+    /// border and clear of the titlebar strip so it never overpaints the
+    /// focus border or per-pane titlebar.
+    #[test]
+    fn pane_backdrop_rect_stays_inside_border_and_titlebar() {
+        use super::pane_backdrop_rect;
+        // 200x150 pane at (10, 20), 2px border, 18px titlebar at the top.
+        let pane = (10.0, 20.0, 200.0, 150.0);
+        let (x, y, w, h) = pane_backdrop_rect(pane, 2.0, 18.0, false).unwrap();
+        // Inside the left/top border, below the top titlebar.
+        assert_eq!(x, 12.0);
+        assert_eq!(y, 40.0); // 20 + 2 (border) + 18 (titlebar)
+        assert_eq!(w, 196.0); // 200 - 2*2
+        assert_eq!(h, 128.0); // 150 - 2*2 - 18
+        // Backdrop must end at/above the bottom border.
+        assert!(y + h <= pane.1 + pane.3 - 2.0 + f32::EPSILON);
+
+        // Titlebar at the bottom: interior shifts to leave the bottom strip.
+        let (_, yb, _, hb) = pane_backdrop_rect(pane, 2.0, 18.0, true).unwrap();
+        assert_eq!(yb, 22.0); // 20 + 2 (border), no top titlebar
+        assert_eq!(hb, 128.0); // 150 - 2*2 - 18 (bottom titlebar)
+
+        // No titlebar (h = 0): interior is the full pane minus border.
+        let (_, y0, _, h0) = pane_backdrop_rect(pane, 1.0, 0.0, false).unwrap();
+        assert_eq!(y0, 21.0);
+        assert_eq!(h0, 148.0);
+
+        // Degenerate pane (border ≥ half the size) → None, no quad pushed.
+        assert!(pane_backdrop_rect((0.0, 0.0, 3.0, 3.0), 2.0, 0.0, false).is_none());
+    }
+
+    /// Cycle 892 (audit): the background-image cache must (a) key on blur
+    /// radius so toggling `background-blur` reloads, and (b) be freed when
+    /// the config moves away from `background-type = image`. Pinned at the
+    /// source level — exercising it needs a full GPU `Renderer`.
+    #[test]
+    fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("Option<(String, u32, kettle_core::ImageData)>"),
+            "bg_image_cache must key on (path, blur_radius) so a blur toggle \
+             reloads even when the path is unchanged"
+        );
+        assert!(
+            src.contains("p != &want || *b != blur_radius"),
+            "need_reload must compare blur radius, not just the path"
+        );
+        assert!(
+            src.contains("} else if self.bg_image_cache.is_some() {")
+                && src.contains("self.bg_image_cache = None;"),
+            "the decoded wallpaper must be freed when background-type leaves \
+             image / the path is cleared"
+        );
+    }
+
+    /// Cycle 891 (audit): the unfocused-pane backdrop is gated on the pane's
+    /// own default bg differing from the surface clear color, and pinned to
+    /// the build_pane path. Source-level guard (behavioral check needs GPU).
+    #[test]
+    fn unfocused_pane_backdrop_is_wired_into_build_pane() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("if default_bg != surface_bg {"),
+            "build_pane must paint a backdrop when this pane's default bg \
+             differs from the surface clear color"
+        );
+        assert!(
+            src.contains("pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)"),
+            "the backdrop must use the border/titlebar-aware geometry helper"
         );
     }
 

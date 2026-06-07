@@ -44,7 +44,8 @@ live**.
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read |
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
-| `tab-bar-position` | `top`\|`bottom` | `top` | Where the tab bar sits |
+| `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); `hidden` forces the bar off regardless of `tab-bar` |
+| `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
@@ -75,6 +76,42 @@ live**.
 | `accent-color` | color | — | Peacock parity — when set, overrides the active tab segment's accent strip, focused pane border, and dragged-tab ghost so multi-window kettle setups are visually distinguishable. CLI override `--accent COLOR` wins over the config value. Accepts `#rrggbb`, `#rgb`, `0xRRGGBB`, X11 color names. `palette[3]` broadcast yellow and the cursor are not affected by design |
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value — no `\|action` split, so alternation patterns like `(BUILD SUCCESSFUL\|FAILED)` survive intact |
+| `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` switches between them on a schedule (see `theme-schedule`) |
+| `light-theme` / `dark-theme` | string | — (falls back to `theme`) | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`) |
+| `theme-schedule` | string | — | Auto light/dark switch for `theme-mode = auto`. Either two `HH:MM <role>` entries (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
+| `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
+| `allow-bold` | bool | `true` | When `false`, the SGR bold attribute is suppressed — useful on fonts without a bold companion (Terminator `allow_bold`) |
+| `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
+| `clear-select-on-copy` | bool | `false` | When `true`, the selection highlight is cleared right after a copy (some users prefer the selection to disappear once captured) |
+| `invert-search` | bool | `false` | When `true`, the in-pane search overlay opens at the bottom instead of the top |
+| `backspace-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `ascii-del` | Byte(s) the Backspace key sends. `ascii-del` = `0x7f` (the modern default); `control-h` = `0x08` for hosts expecting the old binding |
+| `delete-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `escape-sequence` | Byte(s) the Delete key sends. `escape-sequence` = the standard `CSI 3~` |
+| `login-shell` | bool | `false` | Launch the shell as a login shell (`-l`). Ignored for `wsl.exe` (where `-l` means "list distros" — see the WSL note below) |
+| `term` | string | `xterm-256color` | The `TERM` value exported to the PTY |
+| `colorterm` | string | `truecolor` | The `COLORTERM` value exported to the PTY (advertises 24-bit color) |
+
+### Auto light/dark theme switching
+
+Set `theme-mode = auto` to follow a schedule. Either give an explicit
+light window:
+
+```ini
+theme-mode     = auto
+light-theme    = TokyoNight Day
+dark-theme     = TokyoNight Night
+theme-schedule = 19:00 dark,07:00 light   # dark at 19:00, light at 07:00
+```
+
+…or compute sunrise/sunset from your location:
+
+```ini
+theme-mode          = auto
+light-theme         = TokyoNight Day
+dark-theme          = TokyoNight Night
+theme-schedule      = auto
+theme-schedule-lat  = 33.77       # e.g. Long Beach, CA
+theme-schedule-long = -118.19
+```
 
 ### Launching WSL / Ubuntu as your shell (Windows)
 
@@ -220,8 +257,12 @@ state.
   all aliases for the same Super-key bit, so a chord copied from a
   macOS / Windows / Linux config works without renaming.
 
-Keys: `a`..`z`, `f1`..`f12`, `up`/`down`/`left`/`right`,
-`page_up`/`page_down`, `home`/`end`, `enter`, `tab`, `plus`/`minus`/`equal`.
+Keys: any single printable character is a valid key — letters `a`..`z`,
+**digits** `0`..`9` (e.g. `alt+1`..`alt+9` for `goto_tab:N`), and **punctuation**
+(e.g. `ctrl+,` for `open_settings`). Plus the named keys: `f1`..`f12`,
+`up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
+`prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`, and the symbolic
+names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
 A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
 flagged by `kettle --check-config` — it doesn't silently degrade
@@ -245,9 +286,13 @@ into a right-side split).
 
 **Focus + resize**: `focus_next`, `focus_prev`,
 `goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
-`toggle_zoom` (also `toggle_split_zoom`).
+`toggle_zoom` (also `toggle_split_zoom`), `rotate_cw` / `rotate_ccw`
+(rotate the split layout).
 
-**Window**: `new_window`, `close_window`, `toggle_fullscreen`.
+**Window**: `new_window`, `close_window`, `toggle_fullscreen`,
+`move_tab_to_new_window` (tear the focused tab out into its own window),
+`open_settings` (`settings` — the Ctrl+, overlay), `layout_picker`,
+`screenshot` (`take_screenshot` / `terminalshot`).
 
 **Editing**: `copy` (`copy_to_clipboard`), `paste`
 (`paste_from_clipboard`).
@@ -261,12 +306,18 @@ into a right-side split).
 scrollback only; keep the visible screen unlike `reset`).
 
 **Broadcast / group input**: `broadcast_all` (`group_all`),
-`broadcast_off` (`ungroup_all`).
+`broadcast_off` (`ungroup_all`), `group_tab` (broadcast to every pane in the
+focused tab), `broadcast_group` (type to every pane in the focused pane's
+named group).
 
 **Font**: `increase_font_size` (`zoom_in`), `decrease_font_size`
 (`zoom_out`), `reset_font_size` (`zoom_normal`).
 
-**Themes**: `next_theme`, `prev_theme` (`previous_theme`).
+**Themes**: `next_theme`, `prev_theme` (`previous_theme`), `toggle_light_dark`
+(swap between `light-theme` and `dark-theme`).
+
+**Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
+inline rename overlay for the OS window / active tab / focused pane).
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`), `new_ssh` (`ssh`), `context_menu`
@@ -280,7 +331,12 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state),
-`reload_config`.
+`reload_config`, `detach_tab` (Unix-only cross-window tab tear-off).
+
+> This list covers the common actions. For the **complete, always-current**
+> set of bindable action names (and every accepted alias), run
+> `kettle --list-actions` — it prints straight from the parser, so it can't
+> drift from the build.
 
 The action `unbind` (also `none`, `null`, `false`, or an empty string) removes
 the default binding for that trigger — useful when a default like

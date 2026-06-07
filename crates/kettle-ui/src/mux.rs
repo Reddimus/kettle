@@ -365,6 +365,120 @@ impl Node {
         }
         false
     }
+
+    /// Cycle 904 (audit): collect every split's divider seam, each tagged with
+    /// the `path` (a/b descent from the root) that addresses it for mutation,
+    /// its `dir`, the split's full `rect`, and the seam coordinate `pos` (x for
+    /// a Horizontal split's vertical divider, y for a Vertical split's
+    /// horizontal divider). Mirrors `layout`'s geometry exactly so a hit-test
+    /// against these seams matches what the renderer drew. Drives mouse
+    /// drag-to-resize of split dividers.
+    fn dividers(&self, rect: Rect, path: &mut Vec<bool>, out: &mut Vec<SplitSeam>) {
+        if let Node::Split { dir, ratio, a, b } = self {
+            let (x, y, w, h) = rect;
+            let r = ratio.clamp(0.05, 0.95);
+            let (a_rect, b_rect, pos) = match dir {
+                Dir::Horizontal => {
+                    let aw = (w * r).round();
+                    ((x, y, aw, h), (x + aw, y, w - aw, h), x + aw)
+                }
+                Dir::Vertical => {
+                    let ah = (h * r).round();
+                    ((x, y, w, ah), (x, y + ah, w, h - ah), y + ah)
+                }
+            };
+            out.push(SplitSeam {
+                path: path.clone(),
+                dir: *dir,
+                rect,
+                pos,
+            });
+            path.push(false);
+            a.dividers(a_rect, path, out);
+            path.pop();
+            path.push(true);
+            b.dividers(b_rect, path, out);
+            path.pop();
+        }
+    }
+
+    /// Cycle 904: set the ratio of the split addressed by `path` (the a/b
+    /// descent produced by `dividers`). Returns false if the path doesn't land
+    /// on a split (stale path after a layout change). The ratio is clamped to
+    /// the same [0.05, 0.95] band `layout` enforces, so a pane can't be dragged
+    /// to zero width.
+    fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
+        match self {
+            Node::Split { ratio: r, a, b, .. } => match path.split_first() {
+                None => {
+                    *r = ratio.clamp(0.05, 0.95);
+                    true
+                }
+                Some((&go_b, rest)) => {
+                    if go_b {
+                        b.set_ratio_at(rest, ratio)
+                    } else {
+                        a.set_ratio_at(rest, ratio)
+                    }
+                }
+            },
+            Node::Leaf(_) => false,
+        }
+    }
+}
+
+/// Cycle 904 (audit): one split divider, addressable for mouse drag-to-resize.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitSeam {
+    /// a/b descent from the tab root that uniquely addresses the split node.
+    pub path: Vec<bool>,
+    pub dir: Dir,
+    /// The split's full rect — the basis for converting a cursor position into
+    /// a new ratio.
+    pub rect: Rect,
+    /// Seam coordinate: x for a Horizontal split (vertical divider line), y for
+    /// a Vertical split (horizontal divider line).
+    pub pos: f32,
+}
+
+/// Cycle 904: the ratio a Horizontal/Vertical split should take so its divider
+/// sits under the cursor, clamped to the same band `layout` enforces.
+pub fn ratio_from_pos(rect: Rect, dir: Dir, px: f32, py: f32) -> f32 {
+    let (x, y, w, h) = rect;
+    let raw = match dir {
+        Dir::Horizontal => {
+            if w > 0.0 {
+                (px - x) / w
+            } else {
+                0.5
+            }
+        }
+        Dir::Vertical => {
+            if h > 0.0 {
+                (py - y) / h
+            } else {
+                0.5
+            }
+        }
+    };
+    raw.clamp(0.05, 0.95)
+}
+
+/// Cycle 904: index of the first seam within `tol` px of the cursor (along the
+/// seam's perpendicular axis) and inside the split's cross-axis extent. Inner
+/// (deeper) seams are pushed AFTER their ancestors by `dividers`, so a tie near
+/// nested dividers resolves to the outer split — a stable, predictable pick.
+pub fn seam_at(seams: &[SplitSeam], px: f32, py: f32, tol: f32) -> Option<usize> {
+    seams.iter().position(|s| {
+        let (x, y, w, h) = s.rect;
+        match s.dir {
+            // Vertical divider line at x = pos; cursor must be near it
+            // horizontally and within the split's vertical span.
+            Dir::Horizontal => (px - s.pos).abs() <= tol && py >= y && py <= y + h,
+            // Horizontal divider line at y = pos.
+            Dir::Vertical => (py - s.pos).abs() <= tol && px >= x && px <= x + w,
+        }
+    })
 }
 
 pub struct Tab {
@@ -795,6 +909,13 @@ impl Mux {
         cw: u16,
         ch: u16,
         mk: &dyn Fn() -> Waker,
+        // Cycle 893 (audit): every pane id spawned while building this
+        // subtree is appended here so the caller can reap them if a LATER
+        // sibling fails. Without it, a split whose first child spawned but
+        // whose second child failed left the first child's PTY + child
+        // process orphaned in `self.panes` (attached to no tab) — a leaked
+        // process per partially-restored split.
+        spawned: &mut Vec<u64>,
     ) -> Result<Node> {
         match n {
             SNode::Leaf { cwd, cmd } => {
@@ -804,6 +925,7 @@ impl Mux {
                     cmd.clone()
                 };
                 let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref(), &argv)?;
+                spawned.push(id);
                 Ok(Node::Leaf(id))
             }
             SNode::Split {
@@ -812,8 +934,8 @@ impl Mux {
                 a,
                 b,
             } => {
-                let a = self.build_node(a, cfg, cw, ch, mk)?;
-                let b = self.build_node(b, cfg, cw, ch, mk)?;
+                let a = self.build_node(a, cfg, cw, ch, mk, spawned)?;
+                let b = self.build_node(b, cfg, cw, ch, mk, spawned)?;
                 Ok(Node::Split {
                     dir: if *vertical {
                         Dir::Vertical
@@ -856,7 +978,12 @@ impl Mux {
                 break;
             }
             spawned += tab_leaves;
-            match self.build_node(&st.root, cfg, cw, ch, mk) {
+            // Cycle 893 (audit): track every pane id this tab's tree spawns so
+            // a partial failure (e.g. the 2nd pane of a split fails to fork)
+            // can reap the panes already created for the same tree instead of
+            // leaking their PTYs + child processes.
+            let mut tab_pane_ids: Vec<u64> = Vec::new();
+            match self.build_node(&st.root, cfg, cw, ch, mk, &mut tab_pane_ids) {
                 Ok(root) => {
                     // Restore the focused leaf at its DFS index (saved
                     // by `snapshot`). `nth_leaf` falls back to the
@@ -874,6 +1001,14 @@ impl Mux {
                     });
                 }
                 Err(e) => {
+                    // Cycle 893 (audit): reap any panes the partially-built
+                    // tree already spawned. A split's first child can fork
+                    // fine and the second fail (cwd gone, fork under quota);
+                    // those orphans would otherwise sit in `self.panes`
+                    // attached to no tab, leaking a PTY + child process each.
+                    for id in &tab_pane_ids {
+                        self.panes.remove(id);
+                    }
                     // Don't fail the whole restore — a single broken
                     // tab (e.g. saved cwd no longer exists, PTY
                     // allocation under quota) shouldn't sink the
@@ -882,7 +1017,11 @@ impl Mux {
                     // the cause under `RUST_LOG=warn` (the default
                     // filter). Pre-fix this was a silent skip — the
                     // user just saw fewer tabs than they remembered.
-                    log::warn!("session restore: tab {i} failed to rebuild and was skipped: {e}");
+                    log::warn!(
+                        "session restore: tab {i} failed to rebuild and was skipped \
+                         ({} orphaned pane(s) reaped): {e}",
+                        tab_pane_ids.len()
+                    );
                 }
             }
         }
@@ -1068,6 +1207,30 @@ impl Mux {
             }
         }
         v
+    }
+
+    /// Cycle 904 (audit): the divider seams of `tab` laid out over `area`,
+    /// matching `layout`'s geometry. Empty when the tab is zoomed (one pane, no
+    /// dividers) — so mouse drag-to-resize is inert in zoom, as it should be.
+    pub fn split_seams(&self, tab: usize, area: Rect) -> Vec<SplitSeam> {
+        let mut out = Vec::new();
+        if let Some(t) = self.tabs.get(tab)
+            && !t.zoomed
+        {
+            let mut path = Vec::new();
+            t.root.dividers(area, &mut path, &mut out);
+        }
+        out
+    }
+
+    /// Cycle 904: set the ratio of the split addressed by `path` in `tab`.
+    /// Returns whether a split was found (false on a stale path). The ratio is
+    /// clamped to layout's [0.05, 0.95] band.
+    pub fn set_split_ratio(&mut self, tab: usize, path: &[bool], ratio: f32) -> bool {
+        self.tabs
+            .get_mut(tab)
+            .map(|t| t.root.set_ratio_at(path, ratio))
+            .unwrap_or(false)
     }
 
     /// Toggle zoom (maximize the focused pane) for the active tab.
@@ -1875,8 +2038,17 @@ fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, O
         if let Some(d) = raw_cwd.filter(|d| !d.is_empty())
             && !argv.iter().any(|a| a == "--cd")
         {
-            argv.push("--cd".to_string());
-            argv.push(d);
+            // Cycle 894 (audit): insert `--cd <dir>` immediately AFTER the
+            // launcher (index 1), in WSL's option section. Appending at the
+            // end was wrong whenever argv carried a command —
+            // `wsl -d Ubuntu -- bash -l` became
+            // `wsl -d Ubuntu -- bash -l --cd <dir>`, where `--cd <dir>` is
+            // passed to `bash`, not WSL, so the working dir was ignored.
+            // WSL parses all options (in any order) before the command, so
+            // placing `--cd` first is always valid and never lands past a
+            // `--` separator or a positional command token.
+            argv.insert(1, d);
+            argv.insert(1, "--cd".to_string());
         }
         (argv, None)
     } else {
@@ -1943,6 +2115,107 @@ mod node_tests {
         let solo = Node::Leaf(7);
         assert_eq!(solo.leaf_index_of(7), Some(0));
         assert_eq!(solo.nth_leaf(0), 7);
+    }
+
+    /// Cycle 893 drift guard (audit). When a saved split-tree partially
+    /// rebuilds — the first child spawns, a later sibling fails (cwd gone,
+    /// fork under quota) — `build_node` returns `Err` and the whole tree is
+    /// discarded, but the panes already spawned for the first child stay in
+    /// `self.panes`, orphaned: a leaked PTY + child process each. The fix
+    /// threads a `spawned: &mut Vec<u64>` accumulator through `build_node`
+    /// and reaps those ids on the restore error path. A behavioral test
+    /// would need a real PTY + event-loop `Waker` (unavailable in unit
+    /// tests, like every other spawn path here), so the wiring is pinned at
+    /// the source level.
+    #[test]
+    fn build_node_reaps_orphan_panes_on_partial_restore_failure() {
+        let src = include_str!("mux.rs");
+        assert!(
+            src.contains("spawned: &mut Vec<u64>"),
+            "build_node must thread a spawned-id accumulator so a partial \
+             subtree's panes can be reaped on failure"
+        );
+        assert!(
+            src.contains("spawned.push(id);"),
+            "each spawned pane id must be recorded in the accumulator"
+        );
+        assert!(
+            src.contains("for id in &tab_pane_ids {") && src.contains("self.panes.remove(id);"),
+            "the restore error arm must reap every pane the partial tree \
+             spawned, or a failed split leaks PTYs + child processes"
+        );
+    }
+
+    /// Cycle 904 (audit): split divider drag-to-resize geometry. `dividers`
+    /// must mirror `layout` exactly, `set_ratio_at` must address the right
+    /// split via its path, and the pos→ratio + hit-test helpers must be
+    /// correct. These are the pieces a behavioral mouse test can't reach
+    /// (no window), so unit-test the math directly.
+    #[test]
+    fn split_divider_geometry_round_trips() {
+        use super::{Dir, Node, ratio_from_pos, seam_at};
+
+        // Horizontal split (side-by-side) at ratio 0.5 over a 200x100 area
+        // anchored at (0,0): one vertical divider at x=100, spanning y∈[0,100].
+        let split = |dir, ratio, a, b| Node::Split {
+            dir,
+            ratio,
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let root = split(Dir::Horizontal, 0.5, Node::Leaf(1), Node::Leaf(2));
+        let mut seams = Vec::new();
+        root.dividers((0.0, 0.0, 200.0, 100.0), &mut Vec::new(), &mut seams);
+        assert_eq!(seams.len(), 1);
+        assert_eq!(seams[0].pos, 100.0);
+        assert_eq!(seams[0].dir, Dir::Horizontal);
+        assert!(seams[0].path.is_empty(), "root split has empty path");
+
+        // Hit-test: a cursor within tol of the vertical seam (x≈100) and inside
+        // the vertical span hits; one far away misses.
+        assert_eq!(seam_at(&seams, 102.0, 50.0, 4.0), Some(0));
+        assert_eq!(seam_at(&seams, 140.0, 50.0, 4.0), None); // too far in x
+        assert_eq!(seam_at(&seams, 100.0, 150.0, 4.0), None); // outside y span
+
+        // pos→ratio: dragging the seam to x=150 over the 200-wide split → 0.75.
+        let r = ratio_from_pos(seams[0].rect, seams[0].dir, 150.0, 50.0);
+        assert!((r - 0.75).abs() < 1e-6, "ratio was {r}");
+        // Clamp: dragging past the edge pins to the band, never 0/1.
+        assert_eq!(
+            ratio_from_pos(seams[0].rect, Dir::Horizontal, -50.0, 0.0),
+            0.05
+        );
+        assert_eq!(
+            ratio_from_pos(seams[0].rect, Dir::Horizontal, 999.0, 0.0),
+            0.95
+        );
+
+        // Nested tree: root Horizontal(0.5){ Leaf1, Vertical(0.5){Leaf2,Leaf3} }.
+        // Two seams: the root vertical divider (path []) and the right child's
+        // horizontal divider (path [true]).
+        let mut nested = split(
+            Dir::Horizontal,
+            0.5,
+            Node::Leaf(1),
+            split(Dir::Vertical, 0.5, Node::Leaf(2), Node::Leaf(3)),
+        );
+        let mut seams = Vec::new();
+        nested.dividers((0.0, 0.0, 200.0, 100.0), &mut Vec::new(), &mut seams);
+        assert_eq!(seams.len(), 2);
+        // Outer first, then inner (so a tie resolves to the outer split).
+        assert_eq!(seams[0].path, Vec::<bool>::new());
+        assert_eq!(seams[1].path, vec![true]);
+        assert_eq!(seams[1].dir, Dir::Vertical);
+
+        // Set the inner (path [true]) split's ratio and confirm only it moved.
+        assert!(nested.set_ratio_at(&[true], 0.8));
+        let mut seams2 = Vec::new();
+        nested.dividers((0.0, 0.0, 200.0, 100.0), &mut Vec::new(), &mut seams2);
+        // Inner Vertical split now at 0.8 of its 100-tall right column → y=80.
+        let inner = seams2.iter().find(|s| s.path == vec![true]).unwrap();
+        assert_eq!(inner.pos, 80.0);
+        // A path that doesn't land on a split returns false (stale path).
+        assert!(!nested.set_ratio_at(&[false, true], 0.5)); // descends into Leaf1
     }
 
     /// Cycle 678 drift guard. `compute_broadcast_targets` is the
@@ -2149,16 +2422,44 @@ mod node_tests {
         assert_eq!(argv, s(&["pwsh.exe"]));
         assert_eq!(cwd, None);
 
-        // WSL + a reported (Linux) dir → carried via `--cd`, no Windows spawn cwd.
+        // WSL + a reported (Linux) dir → carried via `--cd`, inserted in the
+        // option section right after the launcher (cycle 894), no spawn cwd.
         let (argv, cwd) = launch_cwd(
             s(&["wsl.exe", "-d", "Ubuntu"]),
             Some("/mnt/c/Users/me/proj".into()),
         );
         assert_eq!(
             argv,
-            s(&["wsl.exe", "-d", "Ubuntu", "--cd", "/mnt/c/Users/me/proj"])
+            s(&["wsl.exe", "--cd", "/mnt/c/Users/me/proj", "-d", "Ubuntu"])
         );
         assert_eq!(cwd, None);
+
+        // Cycle 894 (audit): WSL carrying a command after `--`. `--cd` MUST
+        // land before the `--` separator so it reaches WSL, not the command.
+        // Appending at the end (the pre-894 bug) put it after `bash -l`.
+        let (argv, cwd) = launch_cwd(
+            s(&["wsl.exe", "-d", "Ubuntu", "--", "bash", "-l"]),
+            Some("/home/me/proj".into()),
+        );
+        assert_eq!(
+            argv,
+            s(&[
+                "wsl.exe",
+                "--cd",
+                "/home/me/proj",
+                "-d",
+                "Ubuntu",
+                "--",
+                "bash",
+                "-l"
+            ])
+        );
+        assert_eq!(cwd, None);
+
+        // Cycle 894: WSL with a bare command positional (no `--`). `--cd`
+        // still goes first so it isn't consumed as an argument to the command.
+        let (argv, _) = launch_cwd(s(&["wsl.exe", "htop"]), Some("/home/me".into()));
+        assert_eq!(argv, s(&["wsl.exe", "--cd", "/home/me", "htop"]));
 
         // WSL + no reported dir → unchanged argv, no spawn cwd.
         let (argv, cwd) = launch_cwd(s(&["wsl"]), None);

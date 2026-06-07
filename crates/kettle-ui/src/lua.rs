@@ -22,7 +22,7 @@
 use anyhow::{Context, Result};
 use mlua::Lua;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Cycle 601: per-call cap on `kettle.send_text(s)`. A hostile
@@ -198,11 +198,32 @@ impl LuaEvent {
 /// today (Lua VMs aren't natively reentrant); future cycles may
 /// wrap in `Arc<Mutex<...>>` to allow event-hook callbacks from
 /// the App's threads.
+/// Cycle 900 (audit): the every-N-instructions hook fires once per this many
+/// Lua VM instructions. Large enough that any normal callback (which runs far
+/// fewer instructions) never triggers it — zero overhead in the common case —
+/// while still giving fine-grained runaway detection.
+const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000_000;
+
+/// Cycle 900: default per-invocation budget, expressed as the max number of
+/// hook fires before a script is force-aborted. `128 × 1_000_000` ≈ 128 M
+/// instructions — an enormous margin over any realistic plugin call, but a
+/// `while true do end` (incl. inside the `output` callback) trips it in well
+/// under a second instead of wedging the UI thread forever.
+const DEFAULT_MAX_HOOK_FIRES: u64 = 128;
+
 pub struct LuaEngine {
     lua: Lua,
     /// Side-effect commands queued by Lua functions. Drained by
     /// the App after exec_file returns.
     pending: Arc<Mutex<Vec<LuaCommand>>>,
+    /// Cycle 900 (audit): instruction-budget watchdog. `hook_fires` counts how
+    /// many times the every-N-instructions hook has fired since the current
+    /// top-level Lua invocation began (reset by `arm_budget`); when it exceeds
+    /// the cap captured in the hook closure, the hook returns an error,
+    /// aborting a runaway script. Without this, a plugin's `while true do end`
+    /// (or an infinite `output` callback) froze the UI thread permanently —
+    /// there was no CPU budget.
+    hook_fires: Arc<AtomicU64>,
 }
 
 impl LuaEngine {
@@ -234,6 +255,21 @@ impl LuaEngine {
     /// where the standard globals can't be removed isn't safe to
     /// proceed with.
     pub fn new_with_sandbox(theme_name: &str, safe: bool) -> Result<Self> {
+        Self::new_inner(theme_name, safe, DEFAULT_MAX_HOOK_FIRES)
+    }
+
+    /// Cycle 900: test-only constructor that dials the instruction budget down
+    /// so a runaway aborts in a few million instructions (sub-second) rather
+    /// than the ~128 M production cap.
+    #[cfg(test)]
+    pub(crate) fn new_with_max_hook_fires(theme_name: &str, max_fires: u64) -> Result<Self> {
+        Self::new_inner(theme_name, true, max_fires)
+    }
+
+    /// Cycle 900: the real constructor. `max_fires` is the per-invocation
+    /// instruction-budget cap (in hook fires), captured by value into the hook
+    /// closure — fixed for the VM's life, so no shared field is needed.
+    fn new_inner(theme_name: &str, safe: bool, max_fires: u64) -> Result<Self> {
         let lua = Lua::new();
         if safe {
             // Block dangerous APIs. Setting to nil is the canonical
@@ -279,6 +315,32 @@ impl LuaEngine {
             // `Lua::unsafe_new()` (or explicitly loads `StdLib::DEBUG`)
             // fails the gauntlet rather than silently widening the
             // surface.
+        }
+        // Cycle 900 (audit): install the instruction-budget watchdog. The hook
+        // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
+        // top-level invocation exceeds `max_hook_fires` fires it errors out,
+        // unwinding the runaway script. User Lua can't disable it — mlua's
+        // `StdLib::ALL_SAFE` excludes the `debug` library (so `debug.sethook`
+        // is unreachable), and the hook is set from the Rust side here.
+        let hook_fires = Arc::new(AtomicU64::new(0));
+        {
+            let fires = hook_fires.clone();
+            lua.set_hook(
+                mlua::HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
+                move |_lua, _debug| {
+                    let n = fires.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n > max_fires {
+                        Err(mlua::Error::RuntimeError(
+                            "kettle: Lua script exceeded its instruction budget \
+                             (possible infinite loop); aborted"
+                                .to_string(),
+                        ))
+                    } else {
+                        Ok(mlua::VmState::Continue)
+                    }
+                },
+            )
+            .context("install Lua instruction-budget hook")?;
         }
         let pending: Arc<Mutex<Vec<LuaCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
@@ -504,13 +566,27 @@ impl LuaEngine {
         lua.globals()
             .set("kettle", kettle_tbl)
             .context("install kettle namespace")?;
-        Ok(Self { lua, pending })
+        Ok(Self {
+            lua,
+            pending,
+            hook_fires,
+        })
+    }
+
+    /// Cycle 900 (audit): reset the instruction budget at the start of a
+    /// top-level Lua invocation, so each call gets the full budget rather than
+    /// sharing one cumulative counter across the session (which would
+    /// eventually false-trip a long-lived plugin). Called by every public entry
+    /// point that runs user Lua.
+    fn arm_budget(&self) {
+        self.hook_fires.store(0, Ordering::Relaxed);
     }
 
     /// Cycle 375: list the labels of every Lua-registered context
     /// menu item, in registration order. Used by App to extend the
     /// cycle-245 context menu with kettle.add_menu_item entries.
     pub fn list_menu_item_labels(&self) -> mlua::Result<Vec<String>> {
+        self.arm_budget();
         let items: mlua::Table = self.lua.named_registry_value("kettle_menu_items")?;
         let n = items.len()?;
         let mut out = Vec::with_capacity(n as usize);
@@ -527,6 +603,7 @@ impl LuaEngine {
     /// same order `list_menu_item_labels` returned). Errors
     /// log::warn + don't propagate.
     pub fn invoke_menu_item(&self, idx: usize) {
+        self.arm_budget();
         let result: mlua::Result<()> = (|| {
             let items: mlua::Table = self.lua.named_registry_value("kettle_menu_items")?;
             let entry: mlua::Table = items.get(idx + 1)?;
@@ -554,6 +631,7 @@ impl LuaEngine {
     /// the common URL shapes — alternation isn't supported but most
     /// URL handlers don't need it).
     pub fn try_url_handler(&self, url: &str) -> bool {
+        self.arm_budget();
         let r: mlua::Result<bool> = (|| {
             let handlers: mlua::Table = self.lua.named_registry_value("kettle_url_handlers")?;
             let n = handlers.len()?;
@@ -593,6 +671,7 @@ impl LuaEngine {
     /// Errors from individual callbacks log::warn but DON'T abort
     /// kettle — one broken plugin can't take down the terminal.
     pub fn fire_event(&self, event: &LuaEvent) {
+        self.arm_budget();
         let result: mlua::Result<()> = (|| {
             let events: mlua::Table = self.lua.named_registry_value("kettle_events")?;
             let name = event.name();
@@ -675,6 +754,7 @@ impl LuaEngine {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read lua script {}", path.display()))?;
+        self.arm_budget();
         self.lua
             .load(&text)
             .set_name(path.display().to_string())
@@ -688,6 +768,7 @@ impl LuaEngine {
     /// Returns the empty string if the expression evaluates to
     /// `nil`.
     pub fn eval_str(&self, expr: &str) -> Result<String> {
+        self.arm_budget();
         let v: mlua::Value = self
             .lua
             .load(expr)
@@ -1067,6 +1148,43 @@ mod tests {
         eng.invoke_menu_item(99);
         // fired is unchanged after the broken + out-of-range calls.
         assert_eq!(eng.eval_str("return fired").unwrap(), "11");
+    }
+
+    /// Cycle 900 (audit): a runaway script (`while true do end`) must be
+    /// force-aborted by the instruction-budget hook instead of wedging the
+    /// thread forever. The test dials the budget down so the abort happens in a
+    /// few million instructions (sub-second) rather than the ~128 M prod cap.
+    #[test]
+    fn runaway_script_aborted_by_instruction_budget() {
+        // ≈2 M instructions before abort (2 hook fires × 1 M interval).
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).expect("init");
+        let err = eng
+            .eval_str("while true do end")
+            .expect_err("an infinite loop must be aborted, not hang");
+        let msg = format!("{err:?}").to_lowercase();
+        assert!(
+            msg.contains("budget") || msg.contains("instruction"),
+            "abort error should mention the budget: {err:?}"
+        );
+        // The VM survives the abort: a normal expression still evaluates (the
+        // budget is re-armed per invocation).
+        assert_eq!(eng.eval_str("return 1 + 1").unwrap(), "2");
+    }
+
+    /// Cycle 900: the budget is per-invocation — a tight-but-finite loop that
+    /// fits well under the cap runs to completion across repeated calls without
+    /// a cumulative counter eventually tripping it.
+    #[test]
+    fn finite_loops_run_within_budget() {
+        let eng = LuaEngine::new("Default").expect("init");
+        for _ in 0..5 {
+            // ~50k iterations — far below one hook interval (1 M instructions).
+            assert_eq!(
+                eng.eval_str("local s=0 for i=1,50000 do s=s+i end return s")
+                    .unwrap(),
+                "1250025000"
+            );
+        }
     }
 
     #[test]

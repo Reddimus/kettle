@@ -148,6 +148,28 @@ jobs:
         # binary to run. Windows stays out (its smokes are bash-only).
         if: runner.os != 'Windows'
         run: cargo build --release -p kettle
+      - name: Build release binary + CLI smoke (Windows)
+        # Cycle 906 (audit): the Linux/macOS leg builds the release binary and
+        # smokes it, but Windows was skipped — so a release-PROFILE Windows
+        # regression (the GUI-subsystem + conditional console-attach path of
+        # cycle 868/878, the winresource .ico embed, panic=abort codegen) only
+        # surfaced at tag time in release.yml, not on every PR. Build it here
+        # and smoke `--version` through a pwsh pipe: capturing the output
+        # redirects stdout, the exact inherited-handle case the GUI-subsystem
+        # binary must still write to (the cycle-734 trap), so this verifies
+        # that behavior on real Windows under PowerShell 7 (the v2.0.0 default
+        # shell) — not just that it compiles.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release -p kettle
+          $ver = (& ".\target\release\kettle.exe" --version | Out-String).Trim()
+          Write-Host "kettle --version => $ver"
+          if ($ver -notmatch 'kettle \d+\.\d+\.\d+') {
+            Write-Error "unexpected --version output (GUI-subsystem piped stdout may be broken): $ver"
+            exit 1
+          }
+          Write-Host "Windows release build + piped --version smoke OK"
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:

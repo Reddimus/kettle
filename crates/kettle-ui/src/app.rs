@@ -21,6 +21,19 @@ use winit::window::{CursorIcon, Fullscreen, UserAttentionType, Window, WindowId}
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
 
+/// Cycle 904 (audit): live state for a split-divider mouse drag — the addressed
+/// split (`path`) and its orientation. The split's rect is re-fetched from
+/// `split_seams` on every move (keyed by `path`) so a layout change mid-drag
+/// (another pane closing) can't desync the ratio math.
+struct SplitDrag {
+    path: Vec<bool>,
+    dir: Dir,
+}
+
+/// Cycle 904 (audit): grab tolerance (px) for the thin split divider line, so
+/// it's easy to hit with the mouse without pixel-perfect aim.
+const SPLIT_SEAM_TOL: f32 = 5.0;
+
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
@@ -1523,10 +1536,63 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // will open the flyout once sub-cycle 3 lands. For now
             // the click no-ops with an info log.
             | ContextMenuItem::Submenu { .. }
+            // Cycle 890 (audit): theme / profile choice leaves are the
+            // *contents* of a drilled-in Theme ▸ / Profile ▸ submenu.
+            // They were absent here, so once you drilled in via the
+            // keyboard, ↑/↓ could not land on any row and Enter could
+            // not pick a theme — a keyboard dead-end. Mouse clicks
+            // worked, so the rows were reachable by mouse only.
+            | ContextMenuItem::ThemeChoice { .. }
+            | ContextMenuItem::ProfileChoice { .. }
             // Cycle 805: new-tab ▾ shell choices are always clickable + keyboard-
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
     )
+}
+
+/// Map a context-menu row at position `idx` (within the current level)
+/// to the click it dispatches. Shared by the mouse hit-test
+/// ([`App::context_menu_click_action`]) and the keyboard Enter / Space and
+/// mnemonic paths so every dispatchable row type (submenu, Lua,
+/// config-command, theme/profile choice, new-tab shell) is reachable
+/// identically from mouse and keyboard.
+///
+/// Cycle 890 (audit): the keyboard Enter / Space and mnemonic handlers
+/// previously inlined a *partial* match that only recognised `Item`
+/// (Enter / Space) or `Item`/`Submenu`/theme/profile (mnemonic), so
+/// Lua items, config commands and the new-tab ▾ dropdown were keyboard
+/// dead-ends. Routing all three input paths through this one mapper
+/// closes that gap and prevents the matches from drifting apart again.
+fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick> {
+    match item {
+        ContextMenuItem::Item {
+            action,
+            enabled: true,
+            ..
+        }
+        | ContextMenuItem::DynamicItem {
+            action,
+            enabled: true,
+            ..
+        } => Some(ContextMenuClick::Action(action.clone())),
+        ContextMenuItem::LuaItem { lua_idx, .. } => Some(ContextMenuClick::LuaMenuItem(*lua_idx)),
+        ContextMenuItem::ConfigItem { command, .. } => {
+            Some(ContextMenuClick::ConfigCommand(command.clone()))
+        }
+        ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
+        ContextMenuItem::ThemeChoice { theme, .. } => {
+            Some(ContextMenuClick::SetTheme(theme.clone()))
+        }
+        ContextMenuItem::ProfileChoice { profile, .. } => {
+            Some(ContextMenuClick::SetProfile(profile.clone()))
+        }
+        ContextMenuItem::NewTabShell { argv, .. } => {
+            Some(ContextMenuClick::NewTabWithArgv(argv.clone()))
+        }
+        ContextMenuItem::Item { enabled: false, .. }
+        | ContextMenuItem::DynamicItem { enabled: false, .. }
+        | ContextMenuItem::Separator => None,
+    }
 }
 
 fn next_context_menu_highlight(items: &[ContextMenuItem], current: usize, delta: isize) -> usize {
@@ -1598,6 +1664,10 @@ pub struct App {
     selecting: bool,
     /// Dragging the focused pane's scrollbar thumb.
     dragging_scrollbar: bool,
+    /// Cycle 904 (audit): in-progress mouse drag of a split divider. `Some`
+    /// while the left button is held after a press landed on a divider seam;
+    /// each CursorMoved recomputes the addressed split's ratio from the cursor.
+    dragging_split: Option<SplitDrag>,
     /// `(query, index)` last scrolled-to, so the viewport follows search
     /// matches into scrollback without re-scrolling every frame.
     search_revealed: Option<(String, usize)>,
@@ -2191,6 +2261,7 @@ impl App {
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
             dragging_scrollbar: false,
+            dragging_split: None,
             search_revealed: None,
             search_scan_key: None,
             links_scan_key: None,
@@ -2456,6 +2527,48 @@ impl App {
         }
     }
 
+    /// Cycle 904 (audit): the resize cursor for a split of the given
+    /// orientation. A Horizontal split places panes side-by-side (a vertical
+    /// divider you drag left/right → column resize); a Vertical split stacks
+    /// them (a horizontal divider you drag up/down → row resize).
+    fn resize_cursor_for(dir: Dir) -> CursorIcon {
+        match dir {
+            Dir::Horizontal => CursorIcon::ColResize,
+            Dir::Vertical => CursorIcon::RowResize,
+        }
+    }
+
+    /// Cycle 904: a SplitDrag for the divider seam under content-area pixel
+    /// `(px, py)`, or None. Used to start a drag-to-resize on left-press.
+    fn split_drag_at(&self, area: Rect, px: f32, py: f32) -> Option<SplitDrag> {
+        let seams = self.mux.split_seams(self.mux.active, area);
+        let i = crate::mux::seam_at(&seams, px, py, SPLIT_SEAM_TOL)?;
+        let s = &seams[i];
+        Some(SplitDrag {
+            path: s.path.clone(),
+            dir: s.dir,
+        })
+    }
+
+    /// Cycle 904: the resize cursor to show while merely HOVERING a divider
+    /// seam (no drag yet), or None when the cursor isn't over one. Suppressed
+    /// while a modal owns the pointer. Cheap in the common single-pane case —
+    /// `split_seams` returns empty when the tab root is a lone leaf.
+    fn split_seam_hover_icon(&self) -> Option<CursorIcon> {
+        if self.any_modal_open() {
+            return None;
+        }
+        let area = self.area();
+        let seams = self.mux.split_seams(self.mux.active, area);
+        let i = crate::mux::seam_at(
+            &seams,
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            SPLIT_SEAM_TOL,
+        )?;
+        Some(Self::resize_cursor_for(seams[i].dir))
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
@@ -2485,15 +2598,20 @@ impl App {
             hovered_close_button(&bar.segments, self.cursor.x as f32, self.cursor.y as f32);
         let close_hover = tab_close_hover_icon(self.hovered_close_idx.is_some());
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(), self.any_modal_open());
-        let want = close_hover.or(chrome).unwrap_or_else(|| {
-            let want_pointer = (self.mods.control_key() || self.mods.super_key())
-                && self.link_at_cursor().is_some();
-            if want_pointer {
-                CursorIcon::Pointer
-            } else {
-                CursorIcon::Text
-            }
-        });
+        // Cycle 904: a split divider under the cursor shows the resize cursor
+        // (after chrome/close-button, before the link-pointer / I-beam default).
+        let want = close_hover
+            .or(chrome)
+            .or_else(|| self.split_seam_hover_icon())
+            .unwrap_or_else(|| {
+                let want_pointer = (self.mods.control_key() || self.mods.super_key())
+                    && self.link_at_cursor().is_some();
+                if want_pointer {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Text
+                }
+            });
         if self.last_cursor_icon != Some(want)
             && let Some(w) = &self.window
         {
@@ -5149,6 +5267,100 @@ impl App {
 
     /// outside) or falls through to the regular click handling
     /// (right-click → re-open at the new point).
+    /// Dispatch one resolved context-menu selection. The single sink for
+    /// mouse clicks, keyboard Enter / Space, and mnemonic / typeahead
+    /// activation (cycle 889/890) so all three behave identically.
+    ///
+    /// Every *leaf* click closes the menu first, then acts. Only
+    /// `DrillIntoSubmenu` keeps the menu open — it replaces the visible
+    /// level with the submenu's items (parent pushed onto `drill_stack`).
+    ///
+    /// Cycle 889 (audit): the mouse path used to set `self.context_menu =
+    /// None` *before* matching the click, which made the
+    /// `DrillIntoSubmenu` arm — which needs `self.context_menu.as_mut()`
+    /// — dead code: a mouse-clicked submenu row silently dismissed the
+    /// whole menu instead of drilling in. Closing per-leaf here (and
+    /// leaving the menu intact for the drill) fixes that.
+    fn dispatch_context_menu_click(
+        &mut self,
+        click: ContextMenuClick,
+        event_loop: &ActiveEventLoop,
+    ) {
+        match click {
+            // Keep the menu open: swap the visible level for the submenu.
+            ContextMenuClick::DrillIntoSubmenu(idx) => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    let nested_items = match menu.items.get(idx) {
+                        Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
+                        _ => Vec::new(),
+                    };
+                    if !nested_items.is_empty() {
+                        let parent = std::mem::replace(&mut menu.items, nested_items);
+                        menu.drill_stack.push(parent);
+                        // Cycle 714: each level keeps its own scroll view.
+                        menu.scroll_stack.push(menu.scroll_offset);
+                        menu.scroll_offset = 0;
+                        // Drilling resets any in-progress typeahead so a
+                        // half-typed parent prefix doesn't bleed into the
+                        // child level.
+                        menu.typeahead_buf.clear();
+                        menu.typeahead_until = None;
+                        menu.highlight = menu
+                            .items
+                            .iter()
+                            .position(item_is_dispatchable)
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            ContextMenuClick::Action(action) => {
+                self.context_menu = None;
+                self.handle_action(action, event_loop);
+            }
+            ContextMenuClick::LuaMenuItem(idx) => {
+                self.context_menu = None;
+                // Cycle 375/433: invoke the Lua callback + drain any
+                // LuaCommands it queued through the canonical helper.
+                if let Some(eng) = &self.lua_engine {
+                    eng.invoke_menu_item(idx);
+                }
+                self.drain_lua_hook_commands("lua menu-item");
+            }
+            ContextMenuClick::ConfigCommand(command) => {
+                self.context_menu = None;
+                // Cycle 611 (Terminator parity): write `CMD\n` to the PTY.
+                if let Some(p) = self.mux.focused() {
+                    let mut bytes = command.into_bytes();
+                    bytes.push(b'\n');
+                    p.term.write(&bytes);
+                }
+            }
+            ContextMenuClick::SetTheme(name) => {
+                self.context_menu = None;
+                self.cfg.theme_name = name.clone();
+                self.cfg.theme = kettle_config::Theme::by_name(&name);
+                self.save_session();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            ContextMenuClick::SetProfile(name) => {
+                self.context_menu = None;
+                if let Some(p) = kettle_config::Config::path_for_profile(&name) {
+                    self.config_path = Some(p);
+                    self.reload_config();
+                }
+            }
+            ContextMenuClick::NewTabWithArgv(argv) => {
+                self.context_menu = None;
+                self.open_tab_with_argv(&argv);
+            }
+        }
+    }
+
     fn context_menu_click_action(&self, bcode: u8) -> Option<ContextMenuClick> {
         if bcode != 0 {
             return None;
@@ -5180,44 +5392,10 @@ impl App {
                 | ContextMenuItem::NewTabShell { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
-                match item {
-                    ContextMenuItem::Item {
-                        action,
-                        enabled: true,
-                        ..
-                    } => return Some(ContextMenuClick::Action(action.clone())),
-                    ContextMenuItem::DynamicItem {
-                        action,
-                        enabled: true,
-                        ..
-                    } => return Some(ContextMenuClick::Action(action.clone())),
-                    ContextMenuItem::LuaItem { lua_idx, .. } => {
-                        return Some(ContextMenuClick::LuaMenuItem(*lua_idx));
-                    }
-                    ContextMenuItem::ConfigItem { command, .. } => {
-                        return Some(ContextMenuClick::ConfigCommand(command.clone()));
-                    }
-                    ContextMenuItem::Submenu { .. } => {
-                        return Some(ContextMenuClick::DrillIntoSubmenu(idx));
-                    }
-                    ContextMenuItem::ThemeChoice { theme, .. } => {
-                        // Cycle 685: clicked inside a Theme flyout
-                        // (sub-cycle 3 will wire the flyout open;
-                        // until then this row isn't rendered in
-                        // the parent panel — see the projection
-                        // arm above).
-                        return Some(ContextMenuClick::SetTheme(theme.clone()));
-                    }
-                    ContextMenuItem::ProfileChoice { profile, .. } => {
-                        // Cycle 686: same shape as ThemeChoice.
-                        return Some(ContextMenuClick::SetProfile(profile.clone()));
-                    }
-                    ContextMenuItem::NewTabShell { argv, .. } => {
-                        // Cycle 805: a shell choice in the new-tab ▾ dropdown.
-                        return Some(ContextMenuClick::NewTabWithArgv(argv.clone()));
-                    }
-                    _ => return None,
-                }
+                // Cycle 890: shared mapper — the same row→click table the
+                // keyboard Enter / Space + mnemonic paths use, so mouse and
+                // keyboard dispatch can never diverge again.
+                return item_to_click(item, idx);
             }
             row_y += h;
         }
@@ -6995,7 +7173,16 @@ impl App {
                 // CloseTab dispatch (cycle X). Sub-cycle 6 wires
                 // ask-before-closing for CloseTab too; this arm is
                 // the dispatch target for that future wiring.
-                self.mux.close_tab();
+                // Cycle 898 (audit): honor close_tab()'s return like the
+                // keybind path (app.rs Action::CloseTab) — `true` means that
+                // was the LAST tab, so the window must exit now. Pre-fix the
+                // return was dropped, so closing the last tab via the confirm
+                // dialog deferred exit by a tick and painted an empty frame.
+                if self.mux.close_tab() {
+                    self.save_session();
+                    event_loop.exit();
+                    return;
+                }
                 self.save_session();
             }
             ConfirmAction::ClosePane => {
@@ -7003,11 +7190,23 @@ impl App {
                 // pane_close hook fires with the right id (mirrors the
                 // keybind path).
                 let closing_pane = self.mux.active_focus();
-                self.mux.close_focused();
+                let was_last = self.mux.close_focused();
                 if let Some(id) = closing_pane {
                     self.fire_pane_close_event(id);
                 }
+                // Cycle 898 (audit): honor close_focused()'s return like the
+                // keybind ClosePane path — `true` means the last pane closed,
+                // so exit; otherwise redraw the collapsed layout (the renderer
+                // cache + focus id are stale until a frame is scheduled).
+                if was_last {
+                    self.save_session();
+                    event_loop.exit();
+                    return;
+                }
                 self.save_session();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
         }
     }
@@ -7775,21 +7974,23 @@ impl App {
                 self.step_context_menu_highlight(-1);
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
-                let chosen = self
-                    .context_menu
-                    .as_ref()
-                    .and_then(|m| match &m.items[m.highlight] {
-                        ContextMenuItem::Item {
-                            action,
-                            enabled: true,
-                            ..
-                        } => Some(action.clone()),
-                        _ => None,
-                    });
-                self.context_menu = None;
+                // Cycle 890 (audit): resolve the highlighted row through the
+                // shared mapper so Enter / Space dispatches *every* row type
+                // — submenu (drills in), Lua item, config command, theme /
+                // profile choice, new-tab ▾ shell — not just `Item`. The
+                // mapper + dispatcher also own the close-or-keep decision, so
+                // a submenu Enter no longer wrongly closes the menu.
+                let chosen = self.context_menu.as_ref().and_then(|m| {
+                    m.items
+                        .get(m.highlight)
+                        .and_then(|it| item_to_click(it, m.highlight))
+                });
                 self.reset_blink_phase();
-                if let Some(a) = chosen {
-                    self.handle_action(a, event_loop);
+                match chosen {
+                    Some(click) => self.dispatch_context_menu_click(click, event_loop),
+                    // Highlight on a non-dispatchable row (shouldn't happen —
+                    // nav skips them — but close rather than trap the user).
+                    None => self.context_menu = None,
                 }
             }
             _ => {
@@ -7832,82 +8033,18 @@ impl App {
                     })
                 });
                 if let Some(idx) = mnemonic_hit {
-                    // Dispatch the matched row exactly the same way
-                    // Enter would: drill into Submenu, or fire the
-                    // Action, or set theme/profile.
-                    let click =
-                        self.context_menu
-                            .as_ref()
-                            .and_then(|m| match m.items.get(idx)? {
-                                ContextMenuItem::Item {
-                                    action,
-                                    enabled: true,
-                                    ..
-                                } => Some(ContextMenuClick::Action(action.clone())),
-                                ContextMenuItem::Submenu { .. } => {
-                                    Some(ContextMenuClick::DrillIntoSubmenu(idx))
-                                }
-                                ContextMenuItem::ThemeChoice { theme, .. } => {
-                                    Some(ContextMenuClick::SetTheme(theme.clone()))
-                                }
-                                ContextMenuItem::ProfileChoice { profile, .. } => {
-                                    Some(ContextMenuClick::SetProfile(profile.clone()))
-                                }
-                                _ => None,
-                            });
-                    match click {
-                        Some(ContextMenuClick::Action(a)) => {
-                            self.context_menu = None;
-                            self.handle_action(a, event_loop);
-                            return;
-                        }
-                        Some(ContextMenuClick::DrillIntoSubmenu(idx)) => {
-                            if let Some(menu) = self.context_menu.as_mut() {
-                                let nested_items = match menu.items.get(idx) {
-                                    Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
-                                    _ => Vec::new(),
-                                };
-                                if !nested_items.is_empty() {
-                                    let parent = std::mem::replace(&mut menu.items, nested_items);
-                                    menu.drill_stack.push(parent);
-                                    menu.scroll_stack.push(menu.scroll_offset);
-                                    menu.scroll_offset = 0;
-                                    menu.typeahead_buf.clear();
-                                    menu.typeahead_until = None;
-                                    menu.highlight = menu
-                                        .items
-                                        .iter()
-                                        .position(item_is_dispatchable)
-                                        .unwrap_or(0);
-                                }
-                            }
-                            return;
-                        }
-                        Some(ContextMenuClick::SetTheme(name)) => {
-                            self.context_menu = None;
-                            self.cfg.theme_name = name.clone();
-                            self.cfg.theme = kettle_config::Theme::by_name(&name);
-                            self.save_session();
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        Some(ContextMenuClick::SetProfile(name)) => {
-                            self.context_menu = None;
-                            if let Some(p) = kettle_config::Config::path_for_profile(&name) {
-                                self.config_path = Some(p);
-                                self.reload_config();
-                            }
-                            return;
-                        }
-                        // Cycle 805: keyboard-activate a new-tab ▾ shell choice.
-                        Some(ContextMenuClick::NewTabWithArgv(argv)) => {
-                            self.context_menu = None;
-                            self.open_tab_with_argv(&argv);
-                            return;
-                        }
-                        _ => {}
+                    // Cycle 890: dispatch the matched row through the same
+                    // shared mapper + sink as mouse clicks and Enter / Space,
+                    // so a mnemonic reaches every row type (Lua / config /
+                    // ▾ shell included) and the close-or-drill decision stays
+                    // in one place.
+                    let click = self
+                        .context_menu
+                        .as_ref()
+                        .and_then(|m| m.items.get(idx).and_then(|it| item_to_click(it, idx)));
+                    if let Some(click) = click {
+                        self.dispatch_context_menu_click(click, event_loop);
+                        return;
                     }
                 }
                 // Typeahead path: accumulate into the buffer, find
@@ -8717,6 +8854,36 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                // Cycle 904 (audit): dragging a split divider — recompute the
+                // addressed split's ratio from the cursor and apply. The split
+                // rect is re-fetched from the live seams so a mid-drag layout
+                // change (a pane elsewhere closing) can't desync the math; if
+                // the split has vanished, cancel the drag.
+                if self.dragging_split.is_some() {
+                    let (path, dir) = {
+                        let d = self.dragging_split.as_ref().unwrap();
+                        (d.path.clone(), d.dir)
+                    };
+                    let area = self.area();
+                    let seams = self.mux.split_seams(self.mux.active, area);
+                    match seams.iter().find(|s| s.path == path).map(|s| s.rect) {
+                        Some(rect) => {
+                            let ratio = crate::mux::ratio_from_pos(
+                                rect,
+                                dir,
+                                self.cursor.x as f32,
+                                self.cursor.y as f32,
+                            );
+                            self.mux.set_split_ratio(self.mux.active, &path, ratio);
+                            if let Some(w) = &self.window {
+                                w.set_cursor(Self::resize_cursor_for(dir));
+                                w.request_redraw();
+                            }
+                        }
+                        None => self.dragging_split = None,
+                    }
+                    return;
+                }
                 // Any real mouse movement undoes the hide-while-typing
                 // state. Sub-pixel movements that winit *might* coalesce
                 // are fine to ignore — the next "real" motion will fire.
@@ -8835,6 +9002,19 @@ impl ApplicationHandler<UserEvent> for App {
                 // dialog (the exact leak cycle 786 closed for L/M/R + wheel). A
                 // lone context menu isn't a modal here.
                 if let Some(sgr) = extra_mouse_sgr(button) {
+                    // Cycle 897 (audit): a lone context menu must swallow the
+                    // side-button press too — dismiss the menu and DON'T forward.
+                    // `modal_swallows_pointer` returns false for a lone menu, so
+                    // pre-fix a Back/Forward click both leaked SGR to the
+                    // tracking app *behind* the menu AND left the menu open
+                    // (every other button dismisses it).
+                    if self.context_menu.is_some() {
+                        self.context_menu = None;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
                         self.send_mouse(sgr, true, false);
                     }
@@ -8855,100 +9035,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.context_menu.is_some()
                     && let Some(click) = self.context_menu_click_action(bcode)
                 {
-                    self.context_menu = None;
-                    match click {
-                        ContextMenuClick::Action(action) => {
-                            self.handle_action(action, event_loop);
-                        }
-                        ContextMenuClick::LuaMenuItem(idx) => {
-                            // Cycle 375: invoke the Lua callback +
-                            // drain any LuaCommands it queued.
-                            // Cycle 433: drain through the canonical
-                            // helper to match the other 5 LuaEvent
-                            // hook drains (Startup / TabAdd / TabClose
-                            // / Bell / Output). Menu-item click is
-                            // NOT a LuaEvent emission but it consumes
-                            // the same LuaCommand queue.
-                            if let Some(eng) = &self.lua_engine {
-                                eng.invoke_menu_item(idx);
-                            }
-                            self.drain_lua_hook_commands("lua menu-item");
-                        }
-                        // Cycle 611 (Terminator parity, custom_commands.py):
-                        // dispatch a config-file `menu-item = LABEL =
-                        // CMD` click by writing the command + newline to
-                        // the focused PTY. Simpler than the LuaItem path
-                        // because there's no callback to invoke + no
-                        // command queue to drain — just bytes to the
-                        // PTY, identical to typing the command
-                        // letter-by-letter.
-                        ContextMenuClick::ConfigCommand(command) => {
-                            if let Some(p) = self.mux.focused() {
-                                let mut bytes = command.into_bytes();
-                                bytes.push(b'\n');
-                                p.term.write(&bytes);
-                            }
-                        }
-                        // Cycle 685 (theme-submenu sub-cycle 2):
-                        // theme picked from a Theme submenu
-                        // flyout. Same swap path as the cycle-
-                        // 3514 NextTheme action.
-                        ContextMenuClick::SetTheme(name) => {
-                            self.cfg.theme_name = name.clone();
-                            self.cfg.theme = kettle_config::Theme::by_name(&name);
-                            self.save_session();
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                        }
-                        // Cycle 686 (theme-submenu sub-cycle 8):
-                        // profile picked from a Profile submenu
-                        // flyout. Uses cycle-618
-                        // Config::path_for_profile + reload_config.
-                        ContextMenuClick::SetProfile(name) => {
-                            if let Some(p) = kettle_config::Config::path_for_profile(&name) {
-                                self.config_path = Some(p);
-                                self.reload_config();
-                            }
-                        }
-                        // Cycle 687 (theme-submenu sub-cycle 3):
-                        // drill into a submenu — push current
-                        // items onto drill_stack, replace with
-                        // the submenu's items, redraw.
-                        ContextMenuClick::DrillIntoSubmenu(idx) => {
-                            if let Some(menu) = self.context_menu.as_mut() {
-                                let nested_items = match menu.items.get(idx) {
-                                    Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
-                                    _ => Vec::new(),
-                                };
-                                if !nested_items.is_empty() {
-                                    let parent = std::mem::replace(&mut menu.items, nested_items);
-                                    menu.drill_stack.push(parent);
-                                    // Cycle 714: save parent's
-                                    // scroll_offset onto the parallel
-                                    // stack + reset the submenu's
-                                    // offset to 0. Each level has
-                                    // its own view.
-                                    menu.scroll_stack.push(menu.scroll_offset);
-                                    menu.scroll_offset = 0;
-                                    menu.highlight = menu
-                                        .items
-                                        .iter()
-                                        .position(item_is_dispatchable)
-                                        .unwrap_or(0);
-                                }
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
-                                }
-                            }
-                        }
-                        // Cycle 805: a shell picked from the new-tab ▾ dropdown
-                        // — open a tab running that argv, inheriting the focused
-                        // tab's cwd.
-                        ContextMenuClick::NewTabWithArgv(argv) => {
-                            self.open_tab_with_argv(&argv);
-                        }
-                    }
+                    // Cycle 889: route through the shared sink. It closes the
+                    // menu per-leaf and keeps it open for DrillIntoSubmenu —
+                    // the old inline `self.context_menu = None` *before* the
+                    // match made the drill arm dead code (submenu clicks just
+                    // dismissed the menu).
+                    self.dispatch_context_menu_click(click, event_loop);
                     return;
                 }
                 if self.context_menu.is_some() && bcode == 0 {
@@ -9140,6 +9232,21 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Cycle 904 (audit): a left-press on a split divider seam starts
+                // a drag-to-resize gesture rather than focusing a pane / starting
+                // a selection. Seams are hit-tested over the same content `area`
+                // the panes lay out in, with a small grab tolerance.
+                if bcode == 0
+                    && let Some(drag) = self.split_drag_at(area, px, py)
+                {
+                    let dir = drag.dir;
+                    self.dragging_split = Some(drag);
+                    if let Some(w) = &self.window {
+                        w.set_cursor(Self::resize_cursor_for(dir));
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 let pre = self.focus_key();
                 self.mux
                     .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
@@ -9278,6 +9385,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // tracking app sees the matching button-up after the press.
                 // Cycle 831 (audit): gated behind an open modal, matching Pressed.
                 if let Some(sgr) = extra_mouse_sgr(button) {
+                    // Cycle 897 (audit): symmetry with the Pressed path — a lone
+                    // context menu swallows the side-button release too (its
+                    // press was swallowed above, so no up-report should leak).
+                    if self.context_menu.is_some() {
+                        return;
+                    }
                     if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
                         self.send_mouse(sgr, false, false);
                     }
@@ -9301,6 +9414,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.selecting = false;
                     self.dragging_scrollbar = false;
+                    // Cycle 904: end any split-divider drag on left-button up.
+                    self.dragging_split = None;
                     // Cycle 249: end the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just
@@ -9404,6 +9519,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::DroppedFile(path) => {
+                // Cycle 897 (audit): a file dropped while a modal (search /
+                // palette / settings / confirm dialog / inline title-edit / vi
+                // copy-mode / …) is open must NOT inject its path into the PTY
+                // behind the dialog — the same pointer-leak class cycle 786
+                // closed for clicks. A lone context menu doesn't count here.
+                if self.any_modal_open() {
+                    return;
+                }
                 // Standard modern-terminal affordance: dragging a file
                 // onto the window inserts its (shell-quoted) path at the
                 // cursor, so the user can drop a config / log / Rust
@@ -9458,6 +9581,24 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         "kettle:focus_out"
                     });
+                }
+                // Cycle 897 (audit): a focus loss can swallow the button-UP that
+                // ends an in-progress drag (the release lands on whatever window
+                // took focus), latching `selecting` / `dragging_scrollbar` /
+                // `tab_drag_active` / a held `mouse_btn`. The next CursorMoved
+                // then kept extending the selection or dragging a tab with no
+                // button down. Disarm them on focus loss, committing any pending
+                // copy-on-select first (mirrors the left-button-up path).
+                if !f {
+                    if self.selecting && self.cfg.copy_on_select {
+                        self.copy_selection();
+                    }
+                    self.selecting = false;
+                    self.dragging_scrollbar = false;
+                    self.tab_drag_active = false;
+                    // Cycle 904: a focus loss also ends any split-divider drag.
+                    self.dragging_split = None;
+                    self.mouse_btn = None;
                 }
                 // Cycle 344 (Terminator parity, terminatorlib/config.py:77
                 // `hide_on_lose_focus`): Quake-style auto-hide. When
@@ -9866,6 +10007,32 @@ mod modal_discipline_guard {
              through to the terminal behind it"
         );
     }
+
+    /// Cycle 898 drift guard (audit). The confirm-dialog dispatch must honor
+    /// the close return values like the keybind paths: `close_tab()` /
+    /// `close_focused()` returning `true` means the last tab / pane closed, so
+    /// the window must `event_loop.exit()` immediately instead of deferring a
+    /// tick and painting an empty frame. A behavioral test needs an event loop;
+    /// pin the honored returns at the source level.
+    #[test]
+    fn confirm_close_honors_close_returns() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn dispatch_confirm_action(")
+            .expect("dispatch_confirm_action not found");
+        let rest = &src[start..];
+        let end = rest.find("\n    }").expect("fn end");
+        let body = &rest[..end];
+        assert!(
+            body.contains("if self.mux.close_tab() {") && body.contains("event_loop.exit();"),
+            "CloseTab dispatch must exit when close_tab() reports the last tab"
+        );
+        assert!(
+            body.contains("let was_last = self.mux.close_focused();")
+                && body.contains("if was_last {"),
+            "ClosePane dispatch must exit when close_focused() reports the last pane"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9908,6 +10075,79 @@ mod tests {
         // Defensive: even if both were somehow set, the context-menu
         // exclusion wins (its dedicated handling ran first).
         assert!(!modal_swallows_pointer(true, true));
+    }
+
+    /// Cycle 904 (audit) drift guard. Mouse drag-to-resize of split dividers is
+    /// wired across three event handlers (press starts the drag, move applies
+    /// the new ratio, up/focus-loss ends it) plus a hover resize-cursor. A
+    /// behavioral test needs a window + a real mouse drag (and the geometry math
+    /// is already unit-tested in `mux::node_tests`), so pin the wiring at the
+    /// source level.
+    #[test]
+    fn split_divider_drag_is_wired() {
+        let src = include_str!("app.rs");
+        // Press starts the drag from a seam hit-test.
+        assert!(
+            src.contains("if let Some(drag) = self.split_drag_at(area, px, py)"),
+            "left-press must start a split-divider drag on a seam hit"
+        );
+        // Move applies the new ratio.
+        assert!(
+            src.contains("if self.dragging_split.is_some() {")
+                && src.contains("self.mux.set_split_ratio(self.mux.active, &path, ratio);"),
+            "CursorMoved must apply the dragged split ratio"
+        );
+        // Up + focus-loss end the drag (distinctive comments at each site, so
+        // this guard doesn't self-match its own assertion literals).
+        assert!(
+            src.contains("Cycle 904: end any split-divider drag on left-button up."),
+            "the split drag must be cleared on left-button up"
+        );
+        assert!(
+            src.contains("Cycle 904: a focus loss also ends any split-divider drag."),
+            "the split drag must be cleared on focus loss"
+        );
+        // Hover shows a resize cursor.
+        assert!(
+            src.contains(".or_else(|| self.split_seam_hover_icon())"),
+            "hovering a divider must show the resize cursor"
+        );
+    }
+
+    /// Cycle 897 (audit) drift guards. Three event-state leaks, each needing a
+    /// winit event loop (+ modal / tracking PTY / drag gesture) for a behavioral
+    /// test, so pinned at the source level like the sibling pointer-gate guards:
+    ///   1. A dropped file behind an open modal must not inject into the PTY.
+    ///   2. Focus loss must disarm latched drag flags (a swallowed button-up
+    ///      otherwise leaves `selecting` / `tab_drag_active` / `mouse_btn` set).
+    ///   3. A side-button press/release with a lone context menu open must
+    ///      dismiss the menu and NOT forward SGR (the lone menu isn't a
+    ///      `modal_swallows_pointer` modal, so the forward leaked before).
+    #[test]
+    fn event_state_leaks_are_gated() {
+        let src = include_str!("app.rs");
+        // 1. Dropped-file modal gate, at the top of the arm.
+        assert!(
+            src.contains("WindowEvent::DroppedFile(path) => {")
+                && src.contains("if self.any_modal_open() {\n                    return;\n                }\n                // Standard modern-terminal affordance"),
+            "DroppedFile must early-return when a modal is open"
+        );
+        // 2. Focus-loss drag-flag reset (the block also clears dragging_split
+        //    since cycle 904, so check the individual resets, not a contiguous
+        //    block).
+        assert!(
+            src.contains("if self.selecting && self.cfg.copy_on_select {")
+                && src.contains("self.selecting = false;")
+                && src.contains("self.tab_drag_active = false;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    self.dragging_split = None;\n                    self.mouse_btn = None;"),
+            "the Focused `!f` arm must disarm the latched drag flags"
+        );
+        // 3. Side-button dismisses a lone context menu instead of leaking SGR.
+        assert!(
+            src.contains(
+                "if self.context_menu.is_some() {\n                        self.context_menu = None;"
+            ),
+            "a side-button press must dismiss a lone context menu, not forward SGR"
+        );
     }
 
     /// Cycle 831 (audit) drift guard. The cycle-810 side-button (Back/Forward)
@@ -10960,6 +11200,137 @@ mod tests {
         // empty menu, but the guard exists.)
         let all_disabled = vec![ContextMenuItem::Separator];
         assert_eq!(next_context_menu_highlight(&all_disabled, 0, 1), 0);
+    }
+
+    /// Cycle 889/890 (audit): the shared row→click mapper must recognise
+    /// EVERY dispatchable row type, so the keyboard Enter / Space +
+    /// mnemonic paths reach the same set of rows the mouse hit-test does.
+    /// Before the fix, Enter handled only `Item`, and the mnemonic path
+    /// handled only Item / Submenu / theme / profile — Lua items, config
+    /// commands and the new-tab ▾ dropdown were keyboard dead-ends.
+    #[test]
+    fn item_to_click_maps_every_dispatchable_row_type() {
+        use super::{ContextMenuClick, ContextMenuItem, item_to_click};
+        use kettle_config::Action;
+
+        // Enabled Item / DynamicItem → Action.
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::Item {
+                    label: "Copy",
+                    action: Action::Copy,
+                    enabled: true
+                },
+                0
+            ),
+            Some(ContextMenuClick::Action(_))
+        ));
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::DynamicItem {
+                    label: "Bold".into(),
+                    action: Action::Copy,
+                    enabled: true
+                },
+                0
+            ),
+            Some(ContextMenuClick::Action(_))
+        ));
+        // Submenu → DrillIntoSubmenu(idx) — carries the row index so the
+        // dispatcher knows which level to descend into.
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::Submenu {
+                    label: "Theme".into(),
+                    items: vec![]
+                },
+                7
+            ),
+            Some(ContextMenuClick::DrillIntoSubmenu(7))
+        ));
+        // Lua item → LuaMenuItem (was a keyboard dead-end before 890).
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::LuaItem {
+                    label: "Plugin".into(),
+                    lua_idx: 3
+                },
+                0
+            ),
+            Some(ContextMenuClick::LuaMenuItem(3))
+        ));
+        // Config command → ConfigCommand (was a keyboard dead-end).
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::ConfigItem {
+                    label: "Clear".into(),
+                    command: "clear".into()
+                },
+                0
+            ),
+            Some(ContextMenuClick::ConfigCommand(_))
+        ));
+        // Theme / profile choices → SetTheme / SetProfile.
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::ThemeChoice {
+                    label: "Dracula".into(),
+                    theme: "Dracula".into()
+                },
+                0
+            ),
+            Some(ContextMenuClick::SetTheme(_))
+        ));
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::ProfileChoice {
+                    label: "work".into(),
+                    profile: "work".into()
+                },
+                0
+            ),
+            Some(ContextMenuClick::SetProfile(_))
+        ));
+        // New-tab ▾ shell choice → NewTabWithArgv (was a keyboard dead-end).
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::NewTabShell {
+                    label: "bash".into(),
+                    argv: vec!["bash".into()]
+                },
+                0
+            ),
+            Some(ContextMenuClick::NewTabWithArgv(_))
+        ));
+        // Non-dispatchable rows → None (disabled item + separator).
+        assert!(
+            item_to_click(
+                &ContextMenuItem::Item {
+                    label: "Copy",
+                    action: Action::Copy,
+                    enabled: false
+                },
+                0
+            )
+            .is_none()
+        );
+        assert!(item_to_click(&ContextMenuItem::Separator, 0).is_none());
+    }
+
+    /// Cycle 890 (audit): theme + profile choice leaves must be keyboard-
+    /// navigable, otherwise drilling into a Theme ▸ / Profile ▸ submenu
+    /// leaves ↑/↓ unable to land on any row.
+    #[test]
+    fn theme_and_profile_choices_are_keyboard_navigable() {
+        use super::{ContextMenuItem, item_is_dispatchable};
+        assert!(item_is_dispatchable(&ContextMenuItem::ThemeChoice {
+            label: "Nord".into(),
+            theme: "Nord".into()
+        }));
+        assert!(item_is_dispatchable(&ContextMenuItem::ProfileChoice {
+            label: "work".into(),
+            profile: "work".into()
+        }));
     }
 
     #[test]

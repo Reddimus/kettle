@@ -128,7 +128,10 @@ pub struct Terminal {
     /// kitty relative placements, keyed by `(child img, child placement)`.
     pub relatives: Relatives,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
-    pub prompts: Arc<Mutex<Vec<i64>>>,
+    /// Cycle 902 (audit): a `VecDeque` so the ring-buffer trim is an O(1)
+    /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
+    /// every prompt once full — this is the hot reader-thread path.
+    pub prompts: Arc<Mutex<std::collections::VecDeque<i64>>>,
     /// Cycle 612 (Terminator parity, `command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
     /// cleared when the matching `CommandEnd` fires. The reader
@@ -440,8 +443,26 @@ fn default_prog() -> CommandBuilder {
     CommandBuilder::new_default_prog()
 }
 
+/// Cycle 902 (audit): cap on the OSC 133 prompt-mark ring. A long-lived shell
+/// session emits one mark per prompt; without a cap the Vec grew unbounded.
+const MAX_PROMPT_MARKS: usize = 2048;
+
+/// Cycle 902 (audit): push an absolute prompt-start line into the bounded ring.
+/// Dedups against the most-recent mark (some shells emit OSC 133 `A` twice for a
+/// single prompt) and trims oldest-first with O(1) `pop_front` — the previous
+/// `Vec::drain(0..d)` shifted all ~2048 elements on every prompt once full, on
+/// the hot reader-thread path. Pure, so the ring discipline is unit-tested.
+fn push_prompt_mark(ring: &mut std::collections::VecDeque<i64>, abs: i64) {
+    if ring.back() == Some(&abs) {
+        return;
+    }
+    ring.push_back(abs);
+    while ring.len() > MAX_PROMPT_MARKS {
+        ring.pop_front();
+    }
+}
+
 impl Terminal {
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         argv: &[String],
@@ -485,7 +506,6 @@ impl Terminal {
     /// (`:115`); `login_shell` is `:122`. Empty strings preserve
     /// kettle's existing default — same shape as the parse-side
     /// fall-through (cycle 335).
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_env(
         argv: &[String],
@@ -734,7 +754,8 @@ impl Terminal {
         let virtuals: Virtuals = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let anims: Animations = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let relatives: Relatives = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let prompts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+        let prompts: Arc<Mutex<std::collections::VecDeque<i64>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
         // Cycle 612 (Terminator parity, `command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
@@ -965,14 +986,12 @@ impl Terminal {
                                                 let rc = t.renderable_content();
                                                 let line = rc.cursor.point.line.0 as i64;
                                                 let abs = t.grid().history_size() as i64 + line;
-                                                if let Ok(mut m) = prompts.lock()
-                                                    && m.last() != Some(&abs)
-                                                {
-                                                    m.push(abs);
-                                                    if m.len() > 2048 {
-                                                        let d = m.len() - 2048;
-                                                        m.drain(0..d);
-                                                    }
+                                                if let Ok(mut m) = prompts.lock() {
+                                                    // Cycle 902 (audit): O(1)
+                                                    // bounded ring push (dedup +
+                                                    // pop_front trim) — see
+                                                    // push_prompt_mark.
+                                                    push_prompt_mark(&mut m, abs);
                                                 }
                                             }
                                         }
@@ -1117,7 +1136,12 @@ impl Terminal {
 
     /// Absolute prompt-start lines recorded via OSC 133.
     pub fn prompt_marks(&self) -> Vec<i64> {
-        self.prompts.lock().map(|m| m.clone()).unwrap_or_default()
+        // Cycle 902: `prompts` is now a VecDeque — collect to the Vec the
+        // callers (jump-to-prompt nav) expect, preserving oldest→newest order.
+        self.prompts
+            .lock()
+            .map(|m| m.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Image placements for this terminal (cloned cheaply; `ImageData` is
@@ -2976,6 +3000,39 @@ mod conformance {
 mod teardown_tests {
     use super::*;
     use std::time::Duration;
+
+    /// Cycle 902 (audit): the OSC 133 prompt-mark ring must (a) dedup against
+    /// the most-recent mark, (b) preserve insertion order, and (c) cap at
+    /// `MAX_PROMPT_MARKS` by dropping the OLDEST — all with O(1) `pop_front`,
+    /// not an O(n) `Vec::drain` on every prompt (the hot reader-thread path).
+    #[test]
+    fn prompt_mark_ring_dedups_and_caps_oldest_first() {
+        use std::collections::VecDeque;
+        let mut ring: VecDeque<i64> = VecDeque::new();
+
+        // Dedup: pushing the same most-recent mark twice keeps one.
+        push_prompt_mark(&mut ring, 10);
+        push_prompt_mark(&mut ring, 10);
+        assert_eq!(ring.len(), 1);
+        // A different mark appends; a non-adjacent repeat is allowed (the shell
+        // genuinely re-prompted at a line it used earlier after scrollback).
+        push_prompt_mark(&mut ring, 20);
+        push_prompt_mark(&mut ring, 10);
+        assert_eq!(ring.iter().copied().collect::<Vec<_>>(), vec![10, 20, 10]);
+
+        // Cap: push well past the limit; length pins at MAX, oldest dropped,
+        // newest retained, order preserved.
+        let mut ring: VecDeque<i64> = VecDeque::new();
+        for i in 0..(MAX_PROMPT_MARKS as i64 + 500) {
+            push_prompt_mark(&mut ring, i);
+        }
+        assert_eq!(ring.len(), MAX_PROMPT_MARKS);
+        assert_eq!(*ring.front().unwrap(), 500); // oldest 500 dropped
+        assert_eq!(
+            *ring.back().unwrap(),
+            MAX_PROMPT_MARKS as i64 + 499 // newest kept
+        );
+    }
 
     /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose
     /// child is alive and whose PTY reader is parked in a blocking `read()`

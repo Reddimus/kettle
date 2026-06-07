@@ -52,9 +52,15 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     }
     if fds.is_empty() {
         // No fds → fall through to normal write. Saves a cmsg.
+        // Cycle 899 (audit): `write` can short-write (return < payload.len()),
+        // and the caller (the detachable-tabs IPC layer) closes the SOURCE tab
+        // on a "successful" send — so a partial write silently lost the tail of
+        // the serialized tab and the tab vanished. `write_all` loops until the
+        // whole payload is delivered (or errors).
         use std::io::Write;
         let mut s = socket;
-        return s.write(payload);
+        s.write_all(payload)?;
+        return Ok(payload.len());
     }
     // Build ancillary cmsg buffer carrying the SCM_RIGHTS payload.
     let fd_bytes = std::mem::size_of_val(fds);
@@ -88,7 +94,21 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     if sent < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(sent as usize)
+    // Cycle 899 (audit): sendmsg can SHORT-write on a stream socket. The fds
+    // (ancillary SCM_RIGHTS data) ride with the first delivered byte and must
+    // NOT be resent (re-sending the cmsg would duplicate the fds in the
+    // receiver). So flush any remaining payload bytes with a plain write_all —
+    // the cmsg is already delivered. Without this, a partial send dropped the
+    // tail of the serialized tab and the caller, treating the send as complete,
+    // closed the source tab → silent tab loss. (payload is non-empty and the
+    // socket is blocking, so `sent >= 1` here and the fds were delivered.)
+    let sent = sent as usize;
+    if sent < payload.len() {
+        use std::io::Write;
+        let mut s = socket;
+        s.write_all(&payload[sent..])?;
+    }
+    Ok(payload.len())
 }
 
 /// Receive bytes + duplicated fds. Caller provides a buffer for
@@ -202,6 +222,32 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = (&s2).read(&mut buf).expect("read");
         assert_eq!(&buf[..n], payload);
+    }
+
+    /// Cycle 899 (audit): both send paths must guarantee the WHOLE payload is
+    /// delivered — a short write loses the tail of the serialized tab, and the
+    /// caller closes the source tab on a "successful" send → silent tab loss.
+    /// The no-fds path must use `write_all`; the SCM_RIGHTS path must flush any
+    /// post-sendmsg remainder with `write_all` (without re-sending the cmsg,
+    /// which would duplicate the fds). Forcing a real short write needs a tuned
+    /// SO_SNDBUF + a large payload (flaky); pin the loop-to-completion shape at
+    /// the source level instead.
+    #[test]
+    fn send_fds_writes_whole_payload_no_short_writes() {
+        let src = include_str!("fd_transport.rs");
+        assert!(
+            !src.contains("return s.write(payload);"),
+            "the no-fds path must not use a single `write` (short writes lose data)"
+        );
+        assert!(
+            src.contains("s.write_all(payload)?;"),
+            "the no-fds path must use write_all to deliver the whole payload"
+        );
+        assert!(
+            src.contains("if sent < payload.len() {")
+                && src.contains("s.write_all(&payload[sent..])?;"),
+            "the SCM_RIGHTS path must flush any post-sendmsg remainder"
+        );
     }
 
     /// Cycle 848 (audit): a sent fd round-trips and is delivered close-on-exec

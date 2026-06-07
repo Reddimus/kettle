@@ -87,9 +87,12 @@ and **WezTerm** into one tool.
 - **Update check** — on by default, a quiet once-a-day check against GitHub
   releases shows a dismissable in-app banner when a newer version ships (it
   never auto-downloads anything). Run `kettle --check-update` to check on
-  demand, or set `update-check = false` to turn it off. Builds compiled with
-  `KETTLE_PACKAGED` set (distro/Homebrew/AUR packages) never check at all, so
-  package-managed installs don't phone home.
+  demand, or set `update-check = false` to turn it off. The check is compiled
+  out entirely only when a build sets `KETTLE_PACKAGED` — intended for distros
+  that build kettle from source and ship their own update channel. The official
+  prebuilt binaries (and the Homebrew/AUR packages, which repackage those same
+  binaries) are *not* built that way, so they do check by default; the runtime
+  `update-check = false` opt-out applies to them.
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

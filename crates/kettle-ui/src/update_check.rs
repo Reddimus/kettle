@@ -21,9 +21,13 @@
 //!     tag re-triggers.
 //!   * **fail silent** — offline / timeout / rate-limited / malformed all just
 //!     `log::warn` and return; never a blocking dialog, never a panic.
-//!   * **packaged builds opt out at compile time** — distro / Homebrew / winget
-//!     / source builds set `KETTLE_PACKAGED` in the build env (they have their
-//!     own update channel), which compiles the auto-check into a no-op.
+//!   * **source-from-distro builds opt out at compile time** — a build that
+//!     sets `KETTLE_PACKAGED` in its env (a distro compiling from source with
+//!     its own update channel) compiles the auto-check into a no-op. NOTE: the
+//!     official prebuilt binaries are deliberately NOT built that way, so a
+//!     directly-downloaded kettle does check; the Homebrew/AUR packages
+//!     *repackage those same prebuilt binaries*, so they check too. The runtime
+//!     `update-check = false` opt-out (and `--check-update`) apply regardless.
 
 use std::io::Read;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -40,12 +44,22 @@ const DEFAULT_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// Network timeouts — the check runs off-thread so this never stalls input,
 /// but keep it short so a flaky network doesn't leave a thread hanging long.
 const NET_TIMEOUT_SECS: u64 = 5;
+/// Cycle 901 (audit): overall (whole-request) deadline. The per-phase
+/// `timeout_read` resets on every byte received, so a server that trickles one
+/// byte at a time could keep the thread — and the synchronous `--check-update`
+/// — alive indefinitely. This caps the entire fetch (connect + TLS + body)
+/// regardless of how the bytes dribble in. Generous enough (15s) that a legit
+/// slow connection (slow DNS + TLS + body, each under the 5s per-phase cap)
+/// still completes, but a trickle attack is bounded instead of unbounded.
+const NET_TOTAL_TIMEOUT_SECS: u64 = 15;
 /// Cap the response we'll read so a hostile/huge body can't balloon memory.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
-/// Set by packagers in the build env (any value) so distro/Homebrew/winget/
-/// source builds — which have their own update path — never auto-check.
-/// `--check-update` still works for a deliberate manual check.
+/// Set in the build env (any value) by a distro that compiles kettle from
+/// source and owns its own update channel, to compile the auto-check out.
+/// The official prebuilt binaries are NOT built with it (so a direct download
+/// auto-checks), and the Homebrew/AUR packages repackage those binaries, so
+/// they check too. `--check-update` + `update-check = false` work regardless.
 const PACKAGED: bool = option_env!("KETTLE_PACKAGED").is_some();
 
 /// The two release fields we care about. `#[serde(default)]` + ignoring the
@@ -169,6 +183,9 @@ fn fetch_outcome(current: &str) -> CheckOutcome {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(NET_TIMEOUT_SECS))
         .timeout_read(Duration::from_secs(NET_TIMEOUT_SECS))
+        // Cycle 901 (audit): overall deadline so a trickling server can't keep
+        // the request alive past this by resetting the per-byte read timeout.
+        .timeout(Duration::from_secs(NET_TOTAL_TIMEOUT_SECS))
         .build();
     let resp = match agent
         .get(RELEASES_URL)
@@ -297,6 +314,22 @@ pub fn run_blocking_check(current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_INTERVAL_SECS, is_due, is_newer, parse_version};
+
+    /// Cycle 901 (audit): the fetch must set an OVERALL request deadline, not
+    /// just per-phase read/connect timeouts — a trickling server resets the
+    /// per-byte read timeout and could otherwise keep the thread (and the
+    /// synchronous `--check-update`) alive indefinitely. A behavioral test
+    /// needs a malicious slow server; pin the overall `.timeout(...)` at the
+    /// source level.
+    #[test]
+    fn fetch_sets_overall_request_timeout() {
+        let src = include_str!("update_check.rs");
+        assert!(
+            src.contains(".timeout(Duration::from_secs(NET_TOTAL_TIMEOUT_SECS))"),
+            "fetch_outcome must set an overall request deadline so a trickling \
+             server can't keep the request alive past it"
+        );
+    }
 
     #[test]
     fn parse_version_handles_v_prefix_and_rejects_junk() {
