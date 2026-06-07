@@ -977,6 +977,29 @@ impl Mux {
         Ok(())
     }
 
+    /// Cycle 886/887: the `(argv, spawn-cwd)` that reproduces the focused pane
+    /// in a new pane/tab — clones its launch command and inherits its cwd, so a
+    /// pane launched as WSL / ssh / a specific shell duplicates into the same.
+    /// A default-shell pane's argv IS the configured shell, so the common case
+    /// is unchanged; an empty argv (legacy "≡ configured shell") falls back to
+    /// the shell.
+    ///
+    /// WSL-aware dir: WSL reports a Linux cwd (`/mnt/c/...` or a native path) a
+    /// Windows spawn can't `cd` into, so for a `wsl` launcher the dir is carried
+    /// via `wsl --cd <dir>` (which accepts both Windows and Linux paths) and the
+    /// Windows spawn cwd is left unset — otherwise the new pane would fall back
+    /// to the home dir (the bug the user hit: split a WSL pane → pwsh in ~).
+    fn clone_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
+        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
+            Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
+            None => (Vec::new(), None),
+        };
+        if argv.is_empty() {
+            argv = shell_argv(cfg);
+        }
+        launch_cwd(argv, raw_cwd)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn split(
         &mut self,
@@ -991,8 +1014,41 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        let argv = shell_argv(cfg);
-        let cwd = self.focused_cwd();
+        // Cycle 886/887: clone the focused pane's launch command + cwd (WSL-aware
+        // dir) so splitting a pane launched as WSL / ssh / a specific shell gives
+        // another of the same in the same dir — the least-astonishing behavior.
+        // A default-shell pane's argv IS the configured shell, so the common case
+        // is unchanged. See `clone_focused_launch`.
+        let (argv, cwd) = self.clone_focused_launch(cfg);
+        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        let a = self.active;
+        if let Some(tab) = self.tabs.get_mut(a) {
+            insert_split(tab, new_id, dir);
+        }
+        Ok(())
+    }
+
+    /// Cycle 888: split running an explicit `argv` + cwd — e.g. a shell detected
+    /// running inside the focused pane (`pwsh → wsl`). Mirrors `split` but with a
+    /// caller-supplied command instead of cloning the pane's launch argv; the
+    /// WSL `--cd` dir handling is applied via `launch_cwd`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_with(
+        &mut self,
+        dir: Dir,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+    ) -> Result<()> {
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        if self.tabs.is_empty() {
+            return self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref());
+        }
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
@@ -1400,10 +1456,16 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
-        let (argv, cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), usable_cwd(pane.term.current_dir())),
-            None => return self.new_tab(cfg, cols, rows, cw, ch, waker),
-        };
+        if self
+            .active_focus()
+            .and_then(|id| self.panes.get(&id))
+            .is_none()
+        {
+            return self.new_tab(cfg, cols, rows, cw, ch, waker);
+        }
+        // Cycle 886/887: clone via the shared helper so a WSL tab duplicates
+        // with `wsl --cd <dir>` instead of falling back to the home dir.
+        let (argv, cwd) = self.clone_focused_launch(cfg);
         self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
     }
 
@@ -1426,10 +1488,9 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        let (argv, cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), usable_cwd(pane.term.current_dir())),
-            None => return Ok(()),
-        };
+        // Cycle 886/887: shares `clone_focused_launch` with `split` (now also a
+        // clone) — clones the focused pane's argv + cwd, WSL-aware.
+        let (argv, cwd) = self.clone_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
@@ -1791,6 +1852,39 @@ fn usable_cwd(dir: Option<String>) -> Option<String> {
     dir.filter(|d| std::path::Path::new(d).is_dir())
 }
 
+/// Cycle 887: is this argv launching WSL (`wsl` / `wsl.exe`, by argv[0]
+/// basename)? Used to route the cloned cwd through `wsl --cd` instead of the
+/// Windows spawn cwd. Mirrors `kettle_core`'s private `is_wsl_launcher`.
+fn argv_is_wsl(argv: &[String]) -> bool {
+    argv.first()
+        .map(|p| {
+            let last = p.rsplit(['/', '\\']).next().unwrap_or(p);
+            last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
+        })
+        .unwrap_or(false)
+}
+
+/// Cycle 887: given a cloned `argv` + the focused pane's raw reported cwd,
+/// decide the `(argv, spawn-cwd)` to launch with. For a WSL launcher the dir is
+/// carried via `wsl --cd <dir>` (which accepts Windows AND Linux paths) and no
+/// Windows spawn cwd is set — WSL reports a Linux path a Windows spawn would
+/// reject, leaving the new pane in the home dir. Non-WSL panes inherit the
+/// usable Windows dir as before. Pure (unit-tested).
+fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, Option<String>) {
+    if argv_is_wsl(&argv) {
+        if let Some(d) = raw_cwd.filter(|d| !d.is_empty())
+            && !argv.iter().any(|a| a == "--cd")
+        {
+            argv.push("--cd".to_string());
+            argv.push(d);
+        }
+        (argv, None)
+    } else {
+        let cwd = usable_cwd(raw_cwd);
+        (argv, cwd)
+    }
+}
+
 fn collect_ids(n: &Node, out: &mut Vec<u64>) {
     match n {
         Node::Leaf(id) => out.push(*id),
@@ -2021,6 +2115,62 @@ mod node_tests {
             CursorShape::Underline
         );
         assert_eq!(engine_cursor_shape(CursorStyle::Bar), CursorShape::Beam);
+    }
+
+    #[test]
+    fn argv_is_wsl_detects_launcher_by_basename() {
+        assert!(argv_is_wsl(&["wsl".to_string()]));
+        assert!(argv_is_wsl(&["wsl.exe".to_string()]));
+        assert!(argv_is_wsl(&["WSL.EXE".to_string()]));
+        assert!(argv_is_wsl(&[
+            "C:\\Windows\\System32\\wsl.exe".to_string(),
+            "-d".to_string()
+        ]));
+        assert!(!argv_is_wsl(&["pwsh.exe".to_string()]));
+        assert!(!argv_is_wsl(&["bash".to_string()]));
+        assert!(!argv_is_wsl(&[]));
+    }
+
+    /// Cycle 886/887: splitting/duplicating clones the focused pane's command;
+    /// for WSL the dir is carried via `wsl --cd` (a Windows spawn can't `cd`
+    /// into the Linux path WSL reports). Guards the pure decision.
+    #[test]
+    fn launch_cwd_routes_wsl_dir_through_cd_flag() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+
+        // Non-WSL + a real Windows dir → inherited as the spawn cwd, argv as-is.
+        let (argv, cwd) = launch_cwd(s(&["pwsh.exe"]), Some(tmp.clone()));
+        assert_eq!(argv, s(&["pwsh.exe"]));
+        assert_eq!(cwd, Some(tmp));
+
+        // Non-WSL + a non-directory (e.g. a Linux path) → no spawn cwd.
+        let (argv, cwd) = launch_cwd(s(&["pwsh.exe"]), Some("/mnt/c/nope-xyz".into()));
+        assert_eq!(argv, s(&["pwsh.exe"]));
+        assert_eq!(cwd, None);
+
+        // WSL + a reported (Linux) dir → carried via `--cd`, no Windows spawn cwd.
+        let (argv, cwd) = launch_cwd(
+            s(&["wsl.exe", "-d", "Ubuntu"]),
+            Some("/mnt/c/Users/me/proj".into()),
+        );
+        assert_eq!(
+            argv,
+            s(&["wsl.exe", "-d", "Ubuntu", "--cd", "/mnt/c/Users/me/proj"])
+        );
+        assert_eq!(cwd, None);
+
+        // WSL + no reported dir → unchanged argv, no spawn cwd.
+        let (argv, cwd) = launch_cwd(s(&["wsl"]), None);
+        assert_eq!(argv, s(&["wsl"]));
+        assert_eq!(cwd, None);
+
+        // WSL already specifying --cd → not double-injected.
+        let (argv, _) = launch_cwd(
+            s(&["wsl.exe", "--cd", "/home/me"]),
+            Some("/mnt/c/other".into()),
+        );
+        assert_eq!(argv, s(&["wsl.exe", "--cd", "/home/me"]));
     }
 
     #[test]

@@ -98,6 +98,14 @@ pub trait ProcessTree {
     /// exotic and the detectors only care about `argv[0]` + flags
     /// which are always ASCII in practice.
     fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
+    /// Cycle 888: the working directory of `pid` (lossy UTF-8), or `None` if
+    /// unknown. Default `None` so an external impl that can't report a cwd
+    /// degrades gracefully (shell-detection just inherits no cwd); the sysinfo
+    /// impl overrides it. Used to carry the dir of a detected running shell into
+    /// a split.
+    fn cwd_of(&self, _pid: u32) -> Option<String> {
+        None
+    }
     /// All known PIDs in the current snapshot. Used to build the
     /// children-by-parent map exactly once per detection pass.
     fn all_pids(&self) -> Vec<u32>;
@@ -135,6 +143,12 @@ impl ProcessTree for sysinfo::System {
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect()
         })
+    }
+
+    fn cwd_of(&self, pid: u32) -> Option<String> {
+        self.process(sysinfo::Pid::from_u32(pid))
+            .and_then(|p| p.cwd())
+            .map(|c| c.to_string_lossy().into_owned())
     }
 
     fn all_pids(&self) -> Vec<u32> {
@@ -223,6 +237,15 @@ impl RemoteScanner {
     pub fn detect_root(&self, child_pid: u32) -> Option<RemoteContext> {
         detect_root_in_index(child_pid, &self.sys, &self.index)
     }
+
+    /// Cycle 888: the deepest known-shell descendant of the pane rooted at
+    /// `child_pid` (its argv + cwd), using the index from the last
+    /// [`refresh`](Self::refresh). Lets a Split / Duplicate clone the shell the
+    /// user actually entered (e.g. `wsl` typed inside pwsh) instead of the
+    /// pane's original launch command. `None` for a plain pane.
+    pub fn foreground_shell(&self, child_pid: u32) -> Option<ShellLaunch> {
+        find_foreground_shell_in_index(child_pid, &self.sys, &self.index)
+    }
 }
 
 /// Cycle 730: generic BFS over any [`ProcessTree`]. Walks descendants
@@ -307,6 +330,100 @@ fn detect_root_in_index<T: ProcessTree + ?Sized>(
         }
     }
     None
+}
+
+/// Cycle 888: a shell session detected running inside a pane — the argv to
+/// relaunch it with and its working directory. Returned by
+/// [`RemoteScanner::foreground_shell`] so a Split / Duplicate can reproduce the
+/// shell the user is actually in (e.g. they opened pwsh then typed `wsl`) rather
+/// than the pane's original launch command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellLaunch {
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+}
+
+/// Cycle 888: is `prog` (an argv[0]) a known interactive shell a split should
+/// reproduce? Matched on the basename (path- and `.exe`-insensitive, via
+/// [`argv0_basename`]). Deliberately an allowlist — a split should clone
+/// `wsl` / `bash` / `pwsh`, but NOT an arbitrary foreground program like `vim`.
+fn is_known_shell(prog: &str) -> bool {
+    matches!(
+        argv0_basename(prog).as_str(),
+        "wsl"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "sh"
+            | "dash"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+    )
+}
+
+/// Cycle 888: find the DEEPEST known-shell descendant of `child_pid` — the shell
+/// the user has effectively entered (e.g. `pwsh → wsl.exe`). Returns its argv +
+/// cwd to relaunch in a split. BFS by depth; the deepest shell wins (the most
+/// nested ≈ the current foreground). `None` when no descendant is a known shell
+/// (a plain pane, or one running a non-shell program) — the caller then falls
+/// back to cloning the pane's own launch command.
+fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
+    child_pid: u32,
+    tree: &T,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+) -> Option<ShellLaunch> {
+    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    if let Some(initial) = children_by_parent.get(&child_pid) {
+        for &pid in initial {
+            if visited.insert(pid) {
+                queue.push_back((pid, 1));
+            }
+        }
+    }
+    let mut best: Option<(u32, u32)> = None; // (depth, pid) of the deepest shell
+    while let Some((pid, depth)) = queue.pop_front() {
+        let is_shell = tree
+            .argv_of(pid)
+            .and_then(|a| a.first().map(|p| is_known_shell(p)))
+            .unwrap_or(false);
+        if is_shell && best.map(|(d, _)| depth > d).unwrap_or(true) {
+            best = Some((depth, pid));
+        }
+        if let Some(grand) = children_by_parent.get(&pid) {
+            for &gpid in grand {
+                if visited.insert(gpid) {
+                    queue.push_back((gpid, depth + 1));
+                }
+            }
+        }
+    }
+    let (_, pid) = best?;
+    let argv = tree.argv_of(pid).filter(|a| !a.is_empty())?;
+    Some(ShellLaunch {
+        cwd: tree.cwd_of(pid),
+        argv,
+    })
+}
+
+/// Cycle 888: one-shot [`find_foreground_shell_in_index`] over a fresh snapshot
+/// (mirrors [`detect_in_tree`]). Test-only — the app uses
+/// [`RemoteScanner::foreground_shell`] for the amortized shared-index path.
+#[cfg(test)]
+fn find_foreground_shell<T: ProcessTree + ?Sized>(
+    child_pid: u32,
+    tree: &mut T,
+) -> Option<ShellLaunch> {
+    tree.refresh();
+    let children_by_parent = build_children_index(tree);
+    find_foreground_shell_in_index(child_pid, tree, &children_by_parent)
 }
 
 /// Cross-platform basename of an `argv[0]` for matching against bare command
@@ -1044,6 +1161,7 @@ mod tests {
     struct MockProc {
         parent: Option<u32>,
         argv: Vec<String>,
+        cwd: Option<String>,
     }
 
     impl MockProcessTree {
@@ -1059,6 +1177,20 @@ mod tests {
                 MockProc {
                     parent,
                     argv: argv.iter().map(|s| (*s).to_string()).collect(),
+                    cwd: None,
+                },
+            );
+        }
+
+        /// Cycle 888: like `add` but with a reported working directory (for the
+        /// foreground-shell tests).
+        fn add_cwd(&mut self, pid: u32, parent: Option<u32>, argv: &[&str], cwd: &str) {
+            self.procs.insert(
+                pid,
+                MockProc {
+                    parent,
+                    argv: argv.iter().map(|s| (*s).to_string()).collect(),
+                    cwd: Some(cwd.to_string()),
                 },
             );
         }
@@ -1077,9 +1209,59 @@ mod tests {
             self.procs.get(&pid).map(|p| p.argv.clone())
         }
 
+        fn cwd_of(&self, pid: u32) -> Option<String> {
+            self.procs.get(&pid).and_then(|p| p.cwd.clone())
+        }
+
         fn all_pids(&self) -> Vec<u32> {
             self.procs.keys().copied().collect()
         }
+    }
+
+    /// Cycle 888 drift guard: `pwsh → wsl.exe` (the user's exact case — open
+    /// PowerShell, type `wsl`, split) resolves to the WSL shell + its dir, so a
+    /// split can clone WSL in the same directory instead of a fresh pwsh.
+    #[test]
+    fn find_foreground_shell_clones_typed_wsl_under_pwsh() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["pwsh.exe"]); // the pane's launch shell
+        tree.add_cwd(200, Some(100), &["wsl.exe"], "C:\\Users\\me\\Repos\\proj");
+        assert_eq!(
+            find_foreground_shell(100, &mut tree),
+            Some(ShellLaunch {
+                argv: vec!["wsl.exe".to_string()],
+                cwd: Some("C:\\Users\\me\\Repos\\proj".to_string()),
+            })
+        );
+    }
+
+    /// Cycle 888: the DEEPEST shell wins (most-nested ≈ current foreground), and
+    /// a non-shell foreground (e.g. vim) is never cloned.
+    #[test]
+    fn find_foreground_shell_picks_deepest_and_ignores_non_shells() {
+        // Deepest shell wins: pwsh → wsl → bash → (returns bash).
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        tree.add(2, Some(1), &["wsl.exe"]);
+        tree.add_cwd(3, Some(2), &["bash"], "/home/me");
+        assert_eq!(
+            find_foreground_shell(1, &mut tree),
+            Some(ShellLaunch {
+                argv: vec!["bash".to_string()],
+                cwd: Some("/home/me".to_string()),
+            })
+        );
+
+        // A non-shell descendant (vim) is NOT cloned → None (caller falls back).
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        tree.add(2, Some(1), &["vim", "file.rs"]);
+        assert_eq!(find_foreground_shell(1, &mut tree), None);
+
+        // A plain pane with no descendants → None.
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        assert_eq!(find_foreground_shell(1, &mut tree), None);
     }
 
     /// Cycle 730 drift guard: ssh as a direct child of the pane's

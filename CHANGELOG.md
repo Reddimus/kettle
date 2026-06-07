@@ -55,6 +55,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     now strips `\r` before scanning (belt-and-suspenders). Restores green
     all-OS CI.
 
+  - **Split now reproduces the shell you're actually in — including WSL (cycles
+    886–888).** Splitting (or duplicating) a pane now clones the focused pane's
+    shell + working directory instead of always opening the configured shell:
+    - It clones the pane's launch command + cwd, so a pane opened as WSL / ssh /
+      a specific shell (the `▾` new-tab dropdown, `-e`, or a `command =` config)
+      splits into the same in the same dir. Default-shell panes are unchanged
+      (their argv *is* the configured shell).
+    - It also walks the focused pane's process tree (reusing the SSH/Docker
+      scanner in `kettle-remote`): if you've **entered** a shell the pane
+      launched — e.g. opened PowerShell, then typed `wsl` — the split clones
+      THAT shell, in the same directory. WSL reports a Linux cwd a Windows shell
+      can't `cd` into, so the dir is carried via `wsl --cd` using the pane's
+      OSC 7 directory. Limited to known shells (wsl/bash/zsh/fish/pwsh/cmd/…),
+      never an arbitrary foreground program like `vim`. Verified live: pwsh →
+      `wsl` → split → WSL in the same repo dir.
+    - Unit-tested: `launch_cwd` WSL `--cd` routing + non-WSL dir inheritance,
+      `find_foreground_shell` (deepest-shell-wins, non-shell ignored, plain pane
+      → none), and `argv_is_wsl` basename detection.
+
 ## [2.9.0] — 2026-06-06
 
   Windows 11 polish + new capabilities (cycles 868–877): a flash-free

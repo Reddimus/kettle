@@ -2325,6 +2325,30 @@ impl App {
         self.drain_lua_hook_commands("tab_close hook");
     }
 
+    /// Cycle 888: the shell the focused pane has effectively entered (e.g. the
+    /// user opened pwsh then typed `wsl`) — its argv + cwd, so a split can clone
+    /// it in the same directory instead of a fresh default shell. Walks the
+    /// focused pane's process tree via the remote scanner (one refresh on the
+    /// split keystroke — not per frame). `None` for a plain pane, in which case
+    /// the split falls back to cloning the pane's own launch command (cycle 886).
+    fn focused_foreground_shell(&mut self) -> Option<kettle_remote::ShellLaunch> {
+        let (pid, pane_cwd) = {
+            let pane = self.mux.focused()?;
+            (pane.term.child_pid()?, pane.term.current_dir())
+        };
+        self.remote_scanner.refresh();
+        let mut shell = self.remote_scanner.foreground_shell(pid)?;
+        // Prefer the pane's OSC 7-reported cwd — where the user actually is (e.g.
+        // the WSL bash dir) — over the detected process's cwd, which Windows
+        // sysinfo typically can't read for `wsl.exe` (it returned None, so the
+        // split fell back to WSL's home `~`). `launch_cwd` carries this via
+        // `wsl --cd`, which accepts both `/mnt/c/...` and native Linux paths.
+        if pane_cwd.is_some() {
+            shell.cwd = pane_cwd;
+        }
+        Some(shell)
+    }
+
     /// Cycle 750: fire LuaEvent::PaneClose + drain commands — the pane analog
     /// of `fire_tab_close_event`. Every close-pane call site calls this with
     /// the id captured *before* `Mux::close_focused` removes the pane, so
@@ -5477,21 +5501,50 @@ impl App {
                 }
             }
             Action::SplitRight => {
-                // Cycle 802 (audit): log a split's PTY-spawn failure instead
-                // of swallowing it — a silently-missing split read as "the
-                // keybind does nothing."
-                if let Err(e) =
-                    self.mux
-                        .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker)
-                {
+                // Cycle 888: if the focused pane has entered a shell it launched
+                // (e.g. typed `wsl` in pwsh), clone THAT shell + its dir; else
+                // clone the pane's own launch command (cycle 886). Cycle 802:
+                // log a spawn failure instead of swallowing it.
+                let detected = self.focused_foreground_shell();
+                let res = match detected {
+                    Some(s) => self.mux.split_with(
+                        Dir::Horizontal,
+                        &self.cfg,
+                        cols,
+                        rows,
+                        cw,
+                        ch,
+                        waker,
+                        s.argv,
+                        s.cwd,
+                    ),
+                    None => self
+                        .mux
+                        .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker),
+                };
+                if let Err(e) = res {
                     log::warn!("could not split pane (right): {e}");
                 }
             }
             Action::SplitDown | Action::SplitAuto => {
-                if let Err(e) = self
-                    .mux
-                    .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker)
-                {
+                let detected = self.focused_foreground_shell();
+                let res = match detected {
+                    Some(s) => self.mux.split_with(
+                        Dir::Vertical,
+                        &self.cfg,
+                        cols,
+                        rows,
+                        cw,
+                        ch,
+                        waker,
+                        s.argv,
+                        s.cwd,
+                    ),
+                    None => self
+                        .mux
+                        .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker),
+                };
+                if let Err(e) = res {
                     log::warn!("could not split pane (down): {e}");
                 }
             }
