@@ -8262,6 +8262,15 @@ impl ApplicationHandler<UserEvent> for App {
         // CLI `-e cmd` / `-d dir` (consumed once) take precedence over a
         // saved session: explicit intent shouldn't be overridden by restore.
         let startup = std::mem::take(&mut self.startup);
+        // Cycle 875: capture the recorder opts NOW — `self.startup` was just
+        // taken (so it's default/empty), and the local `startup` is consumed
+        // building the first tab below. The recorder is started further down,
+        // after the first paint, from this captured value.
+        #[cfg(feature = "dev-record")]
+        let dev_record = startup
+            .record
+            .clone()
+            .map(|p| (p, startup.record_raw_input));
         let has_override = startup.command.is_some() || startup.cwd.is_some();
         let restored = if has_override {
             let argv = startup.command.unwrap_or_default();
@@ -8466,10 +8475,10 @@ impl ApplicationHandler<UserEvent> for App {
             w.request_redraw();
         }
         // Cycle 875: start the developer session recorder now that the grid
-        // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`).
+        // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`;
+        // opts captured above before `startup` was consumed).
         #[cfg(feature = "dev-record")]
-        if let Some(path) = self.startup.record.clone() {
-            let raw = self.startup.record_raw_input;
+        if let Some((path, raw)) = dev_record {
             let (cols, rows) = self.grid_of(self.area());
             match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16, raw) {
                 Ok(rec) => {
