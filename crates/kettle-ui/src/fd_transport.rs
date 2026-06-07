@@ -224,29 +224,48 @@ mod tests {
         assert_eq!(&buf[..n], payload);
     }
 
-    /// Cycle 899 (audit): both send paths must guarantee the WHOLE payload is
-    /// delivered — a short write loses the tail of the serialized tab, and the
-    /// caller closes the source tab on a "successful" send → silent tab loss.
-    /// The no-fds path must use `write_all`; the SCM_RIGHTS path must flush any
-    /// post-sendmsg remainder with `write_all` (without re-sending the cmsg,
-    /// which would duplicate the fds). Forcing a real short write needs a tuned
-    /// SO_SNDBUF + a large payload (flaky); pin the loop-to-completion shape at
-    /// the source level instead.
+    /// Cycle 899 (audit): the no-fds send path must deliver the WHOLE payload
+    /// even when the kernel send buffer can't hold it in one write — a short
+    /// write would lose the tail of the serialized tab, and the caller closes
+    /// the source tab on a "successful" send → silent tab loss. Behavioral
+    /// test: a tiny SO_SNDBUF + a payload far larger than it forces the
+    /// `write_all` loop across many writes; a concurrent reader drains the
+    /// socket so the blocking writer makes progress. (Replaces a cycle-899
+    /// source-scan guard that self-matched its own banned-literal and failed
+    /// on the unix CI leg where this module actually compiles.)
     #[test]
-    fn send_fds_writes_whole_payload_no_short_writes() {
-        let src = include_str!("fd_transport.rs");
-        assert!(
-            !src.contains("return s.write(payload);"),
-            "the no-fds path must not use a single `write` (short writes lose data)"
-        );
-        assert!(
-            src.contains("s.write_all(payload)?;"),
-            "the no-fds path must use write_all to deliver the whole payload"
-        );
-        assert!(
-            src.contains("if sent < payload.len() {")
-                && src.contains("s.write_all(&payload[sent..])?;"),
-            "the SCM_RIGHTS path must flush any post-sendmsg remainder"
+    fn send_fds_delivers_whole_payload_under_buffer_pressure() {
+        use std::io::Read;
+        use std::os::unix::io::AsRawFd;
+        let (s1, s2) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        // Shrink the send buffer so a large payload can't fit in one write.
+        let small: libc::c_int = 4096;
+        unsafe {
+            libc::setsockopt(
+                s1.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &small as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        // 256 KiB — far larger than any rounded-up 4 KiB send buffer, so the
+        // write_all loop must iterate many times.
+        let payload: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let expected = payload.clone();
+        // Concurrent reader so the blocking writer's write_all can drain.
+        let mut reader = s2;
+        let handle = std::thread::spawn(move || {
+            let mut buf = vec![0u8; expected.len()];
+            reader.read_exact(&mut buf).expect("read_exact");
+            buf
+        });
+        let sent = send_fds(&s1, &payload, &[]).expect("send");
+        assert_eq!(sent, payload.len(), "send_fds must report the full length");
+        let got = handle.join().expect("reader thread");
+        assert_eq!(
+            got, payload,
+            "the whole payload must arrive despite a tiny send buffer (no short-write loss)"
         );
     }
 
