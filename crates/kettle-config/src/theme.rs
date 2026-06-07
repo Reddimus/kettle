@@ -243,6 +243,35 @@ mod tests {
         assert_eq!(Theme::find_name("no such theme zzz"), None);
     }
 
+    /// Cycle 873: the four Terminator-app built-in palettes (linux / xterm /
+    /// rxvt / ambience) are NOT in the upstream iTerm2-Color-Schemes collection
+    /// kettle bundles, so they were hand-ported into `assets/themes/` to make
+    /// "all Terminator themes" literally complete. Guard that they're bundled
+    /// (filename → theme name) and that the file actually parsed.
+    #[test]
+    fn bundled_themes_include_terminator_defaults() {
+        for name in [
+            "Terminator Linux",
+            "Terminator XTerm",
+            "Terminator Rxvt",
+            "Terminator Ambience",
+        ] {
+            assert!(
+                Theme::find_name(name).is_some(),
+                "hand-ported Terminator default {name:?} is not bundled (file under \
+                 assets/themes/ missing, or build.rs didn't rerun)"
+            );
+        }
+        // Ambience must carry Ubuntu's aubergine background — proves the file
+        // parsed, not just name-matched then fell back to the default palette.
+        let amb = Theme::by_name("Terminator Ambience");
+        assert_eq!(
+            (amb.background.r, amb.background.g, amb.background.b),
+            (0x30, 0x0a, 0x24),
+            "Terminator Ambience background should be Ubuntu aubergine #300a24"
+        );
+    }
+
     /// Cycle 872: every curated Settings theme must resolve to a real bundled
     /// theme — otherwise the Settings → Theme list would offer a dead option
     /// that silently falls back to the default. Also guards against duplicates.

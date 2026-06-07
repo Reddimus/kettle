@@ -57,6 +57,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     submenu, `NextTheme`/`PrevTheme`, or a `theme =` config line. The curated
     list is unit-tested to contain only real bundled theme names.
 
+  - **Themes (cycle 873) — bundle the Terminator app's own built-in palettes.**
+    kettle already ships the full iTerm2-Color-Schemes collection (the same set
+    Terminator theme repos draw from), but Terminator's four *app-built-in*
+    palettes — `linux`, `xterm`, `rxvt`, and Ubuntu's `ambience` (aubergine
+    `#300a24`) — aren't in that collection. They're now hand-ported into the
+    bundle as **Terminator Linux / XTerm / Rxvt / Ambience**, so "all Terminator
+    themes" is literally complete. Unit-tested (bundled + palette parses).
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
