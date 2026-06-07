@@ -53,6 +53,44 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// Cycle 872: a curated shortlist of the most popular terminal themes
+    /// (rough popularity order), surfaced as the Settings → Appearance → Theme
+    /// list of options — cycling them with ←/→ live-previews each. Every entry
+    /// MUST be a bundled theme name (`popular_names_are_all_bundled` guards it).
+    /// The full ~512 bundle stays reachable via the right-click Theme submenu,
+    /// the `NextTheme`/`PrevTheme` actions, and the `theme =` config line.
+    pub const POPULAR: &'static [&'static str] = &[
+        "TokyoNight Night",
+        "TokyoNight Storm",
+        "TokyoNight Moon",
+        "TokyoNight Day",
+        "Catppuccin Mocha",
+        "Catppuccin Macchiato",
+        "Catppuccin Frappe",
+        "Catppuccin Latte",
+        "Dracula",
+        "Gruvbox Dark",
+        "Gruvbox Light",
+        "Gruvbox Material",
+        "Nord",
+        "Nord Light",
+        "iTerm2 Solarized Dark",
+        "iTerm2 Solarized Light",
+        "Rose Pine",
+        "Rose Pine Moon",
+        "Rose Pine Dawn",
+        "Everforest Dark Hard",
+        "Everforest Light Med",
+        "Kanagawa Wave",
+        "Kanagawa Lotus",
+        "One Half Dark",
+        "One Half Light",
+        "Ayu Mirage",
+        "Ayu Light",
+        "Monokai Pro",
+        "Night Owl",
+    ];
+
     /// Parse a theme from Ghostty-syntax text (`palette = N=#hex`, etc.).
     /// Unspecified fields keep the default (TokyoNight Night) value.
     pub fn parse(text: &str) -> Theme {
@@ -203,5 +241,20 @@ mod tests {
             format!("{:?}", Theme::by_name(first)),
         );
         assert_eq!(Theme::find_name("no such theme zzz"), None);
+    }
+
+    /// Cycle 872: every curated Settings theme must resolve to a real bundled
+    /// theme — otherwise the Settings → Theme list would offer a dead option
+    /// that silently falls back to the default. Also guards against duplicates.
+    #[test]
+    fn popular_names_are_all_bundled() {
+        let mut seen = std::collections::HashSet::new();
+        for name in Theme::POPULAR {
+            assert!(
+                Theme::find_name(name).is_some(),
+                "curated POPULAR theme {name:?} is not a bundled theme name"
+            );
+            assert!(seen.insert(*name), "duplicate curated theme {name:?}");
+        }
     }
 }

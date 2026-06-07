@@ -46,6 +46,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
       only ever locks a consistent grid — now pinned by a regression test so a
       future change to the byte-extraction path can't silently break it.
 
+  - **Themes (cycle 872) — pick a theme right in Settings.** Settings →
+    Appearance gains a **Theme** row listing the most popular themes (Catppuccin
+    Mocha/Macchiato/Frappé/Latte, Tokyo Night Night/Storm/Moon/Day, Dracula,
+    Gruvbox Dark/Light/Material, Nord/Nord Light, Solarized Dark/Light, Rosé Pine
+    Main/Moon/Dawn, Everforest Dark/Light, Kanagawa Wave/Lotus, One Half
+    Dark/Light, Ayu Mirage/Light, Monokai Pro, Night Owl). ←/→ cycles them and
+    **live-previews each instantly**, persisting the choice to the config file.
+    The full ~512 bundled themes stay reachable via the right-click Theme
+    submenu, `NextTheme`/`PrevTheme`, or a `theme =` config line. The curated
+    list is unit-tested to contain only real bundled theme names.
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles

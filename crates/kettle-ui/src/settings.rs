@@ -133,6 +133,17 @@ pub fn categories() -> Vec<Category> {
         Category {
             name: "Appearance",
             fields: vec![
+                // Cycle 872: the most popular themes as a cyclable list of
+                // options; ←/→ live-previews each (the settings handler persists
+                // + reloads on every step, so the theme applies instantly). The
+                // full ~512 bundle stays reachable via the right-click Theme
+                // submenu / NextTheme / the `theme =` config line.
+                choice(
+                    "Theme",
+                    "theme",
+                    kettle_config::Theme::POPULAR,
+                    kettle_config::Theme::POPULAR,
+                ),
                 number("Font size", "font-size", 6, 72, 1, "pt"),
                 number("Background opacity", "background-opacity", 20, 100, 5, "%"),
                 number("Window padding", "window-padding-x", 0, 40, 2, "px"),
@@ -340,6 +351,10 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             FocusMode::System => "system",
         }
         .to_string(),
+        // Cycle 872: the live theme name (canonical bundled casing). When the
+        // current theme isn't in the curated POPULAR list, `read`'s Choice arm
+        // falls back to showing this raw name, and ←/→ cycles into the list.
+        "theme" => cfg.theme_name.clone(),
         _ => String::new(),
     }
 }
