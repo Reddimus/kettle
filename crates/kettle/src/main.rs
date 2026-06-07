@@ -227,6 +227,13 @@ struct Cli {
     #[arg(long, value_name = "PATH", verbatim_doc_comment)]
     record: Option<std::path::PathBuf>,
 
+    /// Developer-only: with --record, capture RAW typed characters instead of
+    /// redacted key tokens. WARNING: the trace can then contain typed passwords;
+    /// leave it off unless you need byte-exact input. `--features dev-record`.
+    #[cfg(feature = "dev-record")]
+    #[arg(long, verbatim_doc_comment)]
+    record_raw_input: bool,
+
     /// Launch with a named-profile *config* (distinct from --layout
     /// which picks the *session*). Loads
     /// `<config-dir>/profiles/<NAME>.config` instead of the default
@@ -1158,6 +1165,9 @@ fn main() -> anyhow::Result<()> {
         record: cli
             .record
             .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from)),
+        #[cfg(feature = "dev-record")]
+        record_raw_input: cli.record_raw_input
+            || std::env::var_os("KETTLE_RECORD_RAW_INPUT").is_some(),
     })
 }
 

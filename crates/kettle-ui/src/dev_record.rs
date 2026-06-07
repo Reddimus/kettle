@@ -24,13 +24,17 @@ pub struct Recorder {
     start: Instant,
     /// Set after the first write error so we stop trying (fail-silent).
     disabled: bool,
+    /// Cycle 876: when true, record raw typed characters in `i` events.
+    /// Default false — bare printables are redacted to a generic class so a
+    /// typed password never lands in the trace (`--record-raw-input` opts in).
+    raw_input: bool,
 }
 
 impl Recorder {
     /// Open `path` (truncating), write the asciicast header sized to the current
     /// grid, and start the monotonic clock. Errors propagate so the caller can
     /// log + skip recording without affecting the terminal.
-    pub fn start(path: &Path, cols: u16, rows: u16) -> std::io::Result<Self> {
+    pub fn start(path: &Path, cols: u16, rows: u16, raw_input: bool) -> std::io::Result<Self> {
         let file = open_private(path)?;
         let mut writer = BufWriter::new(file);
         writeln!(writer, "{}", header_line(cols, rows))?;
@@ -39,7 +43,13 @@ impl Recorder {
             writer,
             start: Instant::now(),
             disabled: false,
+            raw_input,
         })
+    }
+
+    /// Whether raw typed characters are captured (vs redacted). Cycle 876.
+    pub fn raw_input(&self) -> bool {
+        self.raw_input
     }
 
     fn emit(&mut self, code: &str, data: &str) {
@@ -68,6 +78,24 @@ impl Recorder {
     /// Record a grid resize (`r`), data `"<cols>x<rows>"`.
     pub fn record_resize(&mut self, cols: u16, rows: u16) {
         self.emit("r", &format!("{cols}x{rows}"));
+    }
+
+    /// Record a keystroke as an `i` event. Cycle 876: the caller passes a
+    /// privacy-preserving TOKEN (a named key / chord like `Enter` / `Ctrl+c`,
+    /// or a redacted printable class via `printable_token`) — never raw typed
+    /// characters unless raw-input mode was opted into. Pasted content is never
+    /// routed here (it's a `paste` marker instead).
+    pub fn record_input(&mut self, token: &str) {
+        self.emit("i", token);
+    }
+
+    /// Record a kettle UI/UX state transition as an `m` marker (cycle 876).
+    /// `label` is a short tag like `kettle:tab_add` / `kettle:focus_out` /
+    /// `kettle:paste len=42`. Players that understand markers show the label;
+    /// others ignore it. Captures state the PTY output stream can't (kettle's
+    /// own tab bar / overlays / focus), incl. non-interactive transitions.
+    pub fn record_marker(&mut self, label: &str) {
+        self.emit("m", label);
     }
 
     /// Flush any buffered events. Called on close and from `Drop`.
@@ -110,9 +138,22 @@ fn event_line(time: f64, code: &str, data: &str) -> String {
     format!("[{time:.6}, \"{code}\", {data_json}]")
 }
 
+/// Cycle 876: redact a bare printable keystroke. In raw mode the literal text is
+/// kept (full-fidelity repro the dev explicitly opted into with
+/// `--record-raw-input`); otherwise each character collapses to a generic class
+/// glyph so a typed password never appears in the trace — only its keystroke
+/// count and timing survive. Pure (unit-tested).
+pub fn printable_token(text: &str, raw: bool) -> String {
+    if raw {
+        text.to_string()
+    } else {
+        "·".repeat(text.chars().count().max(1))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{event_line, header_line};
+    use super::{event_line, header_line, printable_token};
 
     #[test]
     fn header_is_valid_asciicast_v2_json() {
@@ -145,12 +186,26 @@ mod tests {
     }
 
     #[test]
+    fn printable_token_redacts_unless_raw() {
+        // Default: each char collapses to a class glyph — count/timing survive,
+        // the secret content does not.
+        assert_eq!(printable_token("p", false), "·");
+        assert_eq!(printable_token("abc", false), "···");
+        assert!(
+            !printable_token("hunter2", false).contains('h'),
+            "redacted token must not leak the typed characters"
+        );
+        // Raw opt-in: literal characters are kept.
+        assert_eq!(printable_token("abc", true), "abc");
+    }
+
+    #[test]
     fn writes_a_replayable_asciicast_file() {
         use std::io::Read;
         // Unique temp path (pid, not random/clock — those are unavailable here).
         let path = std::env::temp_dir().join(format!("kettle-devrec-{}.cast", std::process::id()));
         {
-            let mut rec = super::Recorder::start(&path, 80, 24).expect("start recorder");
+            let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start recorder");
             rec.record_output(b"hello\r\n");
             rec.record_resize(100, 30);
             rec.record_output(b"\x1b[31mred\x1b[0m");

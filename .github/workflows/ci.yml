@@ -55,6 +55,14 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Cycle 876: the developer-only session recorder lives behind the
+      # `dev-record` Cargo feature (compiled OUT of shipped builds), so the
+      # default build/clippy/test above never exercise it. Build, lint and test
+      # it explicitly so the gated code + hooks can't silently bit-rot.
+      - name: dev-record feature (clippy + tests)
+        run: |
+          cargo clippy -p kettle --features dev-record --all-targets -- -D warnings
+          cargo test -p kettle-ui --features dev-record dev_record::
       # Cycle 730: verify the Justfile parses on every OS — catches
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a

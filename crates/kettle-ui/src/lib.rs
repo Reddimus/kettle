@@ -105,6 +105,11 @@ pub struct Options {
     /// feature builds — absent from released / packaged binaries.
     #[cfg(feature = "dev-record")]
     pub record: Option<std::path::PathBuf>,
+    /// Cycle 876: with `record`, capture RAW typed characters in `i` events
+    /// (`--record-raw-input`). Off by default — keystrokes are redacted tokens,
+    /// not literal characters, so typed secrets aren't written to the trace.
+    #[cfg(feature = "dev-record")]
+    pub record_raw_input: bool,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

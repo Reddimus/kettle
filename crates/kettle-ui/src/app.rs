@@ -700,6 +700,42 @@ fn cwd_is_local(cwd: &str) -> bool {
 /// reported to vim/tmux/htop were all off by one. Subtracting the same
 /// `titlebar_h` here realigns the hit-test with what's drawn. Col/line clamp
 /// to ≥ 0 so a click in the chrome/padding doesn't underflow.
+/// Cycle 876: record a keystroke into the dev recorder as a privacy-preserving
+/// token. Named keys and modified chords (`Enter`, `Ctrl+c`, `ArrowUp`) are
+/// recorded by name — they aren't secret. A bare printable character is recorded
+/// only as a redacted class glyph unless raw-input was opted into, so a typed
+/// password never lands in the trace (its keystroke count + timing still do).
+#[cfg(feature = "dev-record")]
+fn dev_record_key(
+    rec: &mut crate::dev_record::Recorder,
+    key: &winit::keyboard::Key,
+    mods: ModifiersState,
+) {
+    use winit::keyboard::Key;
+    let mut prefix = String::new();
+    if mods.control_key() {
+        prefix.push_str("Ctrl+");
+    }
+    if mods.alt_key() {
+        prefix.push_str("Alt+");
+    }
+    if mods.super_key() {
+        prefix.push_str("Super+");
+    }
+    let token = match key {
+        Key::Named(nk) => Some(format!("{prefix}{nk:?}")),
+        Key::Character(s) if !prefix.is_empty() => Some(format!("{prefix}{}", s.as_str())),
+        Key::Character(s) => Some(crate::dev_record::printable_token(
+            s.as_str(),
+            rec.raw_input(),
+        )),
+        _ => None,
+    };
+    if let Some(t) = token {
+        rec.record_input(&t);
+    }
+}
+
 fn px_to_cell(
     px: f32,
     py: f32,
@@ -2258,6 +2294,10 @@ impl App {
     /// plugins load) should call this. Centralizes the plugin-
     /// contract dispatch so future new_tab callers can't drift.
     fn fire_tab_add_event(&mut self) {
+        #[cfg(feature = "dev-record")]
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.record_marker("kettle:tab_add");
+        }
         if let Some(eng) = &self.lua_engine {
             eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
         }
@@ -2269,6 +2309,10 @@ impl App {
     /// listening for tab_close see every close regardless of
     /// trigger source.
     fn fire_tab_close_event(&mut self, closing_idx: usize) {
+        #[cfg(feature = "dev-record")]
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.record_marker("kettle:tab_close");
+        }
         if let Some(eng) = &self.lua_engine {
             eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
         }
@@ -3093,6 +3137,13 @@ impl App {
         // generic byte-clamper that preserves char boundaries — exactly
         // what we want for any paste channel.
         let text = clamp_osc52(&text, LOCAL_PASTE_MAX);
+        // Cycle 876: record that a paste happened and its length — NEVER the
+        // pasted content (a common secret vector). The per-key hook captures
+        // the Ctrl+V chord; this marker captures the size without the bytes.
+        #[cfg(feature = "dev-record")]
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
+        }
         // Broadcast paste (cycle 174 sibling to cycle 173): with the
         // group-input mode on (Ctrl+Shift+G), keystrokes go to every
         // pane in the active tab — paste is also user input and
@@ -3481,6 +3532,14 @@ impl App {
         let cwd = pane.and_then(|p| p.term.current_dir()).unwrap_or_default();
         let tab = self.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
+        // Cycle 876: an always-visible recording indicator in the title bar so
+        // the dev recorder is never silently capturing.
+        #[cfg(feature = "dev-record")]
+        let want = if self.recorder.is_some() {
+            format!("{want}  ● REC")
+        } else {
+            want
+        };
         if want != self.last_title {
             if let Some(w) = &self.window {
                 w.set_title(&want);
@@ -8410,8 +8469,9 @@ impl ApplicationHandler<UserEvent> for App {
         // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`).
         #[cfg(feature = "dev-record")]
         if let Some(path) = self.startup.record.clone() {
+            let raw = self.startup.record_raw_input;
             let (cols, rows) = self.grid_of(self.area());
-            match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16) {
+            match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16, raw) {
                 Ok(rec) => {
                     log::info!("dev-record: recording this session to {}", path.display());
                     self.recorder = Some(rec);
@@ -9304,6 +9364,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 self.window_focused = f;
+                // Cycle 876: non-interactive UI-state marker (OS-driven focus
+                // change — a transition the PTY output stream can't show).
+                #[cfg(feature = "dev-record")]
+                if let Some(rec) = self.recorder.as_mut() {
+                    rec.record_marker(if f {
+                        "kettle:focus_in"
+                    } else {
+                        "kettle:focus_out"
+                    });
+                }
                 // Cycle 344 (Terminator parity, terminatorlib/config.py:77
                 // `hide_on_lose_focus`): Quake-style auto-hide. When
                 // the user clicks away to another window, hide the
@@ -9351,6 +9421,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
+                }
+                // Cycle 876: record the keystroke (redacted token) BEFORE any
+                // modal/early-return path consumes it, so the trace captures
+                // every key. Pasted content never reaches here — it's a `paste`
+                // marker (see the paste sites), never raw bytes.
+                #[cfg(feature = "dev-record")]
+                {
+                    let mods = self.mods;
+                    if let Some(rec) = self.recorder.as_mut() {
+                        dev_record_key(rec, &event.logical_key, mods);
+                    }
                 }
                 // Keep the cursor solid while actively typing (cycle 144).
                 // Routes through the shared helper so the eight

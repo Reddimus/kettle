@@ -84,6 +84,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     the recorder, it never crashes the terminal). Header/event formatting and
     the end-to-end file write are unit-tested (under the feature).
 
+  - **Dev tooling (cycle 876) — the recorder now captures keystrokes + UI/UX
+    state, privacy-first.** Building on cycle 875: `i` events record keystroke
+    *tokens* (named keys / chords like `Enter` / `Ctrl+c`; bare printables
+    redacted to a class glyph, so a typed password is recorded as length +
+    timing — never the characters; `--record-raw-input` / `KETTLE_RECORD_RAW_INPUT`
+    opts into literal capture). Pasted content is never recorded — only a
+    `kettle:paste len=N` marker. New `m` markers capture kettle's own UI
+    transitions the PTY stream can't show (`kettle:tab_add` / `tab_close` /
+    `focus_in` / `focus_out`), spanning interactive and non-interactive states.
+    An always-visible `● REC` indicator sits in the title bar while recording. CI
+    now builds + lints + tests the `dev-record` feature so the gated code can't
+    bit-rot. Documented in `docs/DEV-RECORD.md` (with a data-flow diagram); the
+    redaction is unit-tested.
+
 ## [2.8.0] — 2026-06-06
 
   Substantive fixes from a third whole-codebase systematic sweep (cycles
