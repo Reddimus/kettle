@@ -4,6 +4,30 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  - **dev-record (cycle 908) — capture the session's full output, head and
+    tail.** The recorder (a `dev-record` feature build, compiled out of releases)
+    is fed PTY output ONLY by `drain_events()` on redraw, and it started *after*
+    the first redraw and was never drained on close — so a session's opening
+    output and its final in-flight chunk could be dropped (a fast `-e cmd`'s
+    line, or bytes still queued when the user clicks X). A 16-agent adversarial
+    audit + live close-path tests (graceful shell-exit, window WM_CLOSE, hard
+    kill) confirmed: recording always STOPS cleanly on close and the trace is
+    always valid/replayable (every event is flushed per-event; asciicast v2
+    needs no footer) — the only gap was the completeness of the tail. Fixed by
+    (a) starting the recorder before the first `redraw()`/drain, and (b) draining
+    each pane's output sidechannel into the trace before reap and on close, with
+    a brief *bounded* settle (only while a just-closed pane is present, so steady
+    frames pay nothing) that lets the PTY reader push a just-exited shell's final
+    bytes before its channel is dropped. Verified: real commands captured 5/5,
+    all traces valid, clean stop. (A command that exits in <~50 ms — e.g.
+    `cmd /c echo x` — can still have its output collapsed by Windows ConPTY's
+    screen-differ and never emitted to kettle at all; that affects display too
+    and is not a recorder issue.) Feature-gated drift guard
+    `recorder_output_flushed_before_reap_and_on_close`; no effect on shipped
+    (non-feature) builds.
+
 ## [2.10.0] — 2026-06-07
 
   Post-v2.9.0 self-review batch (cycles 878–884): an adversarial multi-agent

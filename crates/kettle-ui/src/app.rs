@@ -3668,6 +3668,83 @@ impl App {
         }
     }
 
+    /// Cycle 908 (dev-record completeness): tee any PTY output still queued in
+    /// the recorder output sidechannels into the trace, right now. The recorder
+    /// is otherwise fed ONLY by `drain_events()` (on redraw), so output that
+    /// lands after the last redraw-drain and before a pane is reaped or the
+    /// window closes — a fast `-e cmd`'s final line, or bytes in flight when the
+    /// user clicks X — would be dropped with the pane: the sidechannel is
+    /// unbounded + lossless so it accumulates, but it's never read once the
+    /// pane is gone. Call this immediately before `mux.reap()` and on close so
+    /// the trace keeps its tail. Per-event flush makes each chunk durable. No-op
+    /// when not recording. Verified by `dev-record`-feature test
+    /// `recorder_captures_fast_command_tail` + the live close-path tests.
+    #[cfg(feature = "dev-record")]
+    fn flush_recorder_output(&mut self) {
+        if self.recorder.is_none() {
+            return;
+        }
+        // Always drain what's queued right now (cheap, non-blocking).
+        self.drain_recorder_output_once();
+        // A pane marked `closed` (its shell exited under exit-action = close /
+        // restart) is about to be reaped + its sidechannel dropped. The PTY
+        // reader may still be teeing the shell's FINAL output: the child-exit
+        // signal can beat the reader's last write, so a sub-frame-lifetime
+        // session (e.g. `-e cmd /c echo x`) would lose its output entirely.
+        // Give the reader a brief BOUNDED window to finish, draining as we go.
+        // Bounded to ~60 ms worst case and gated on a closed pane being present,
+        // so steady-state frames (and exit-action = hold dead panes, which keep
+        // `closed = false`) pay nothing. Early-out after 3 idle rounds.
+        let mut idle = 0u8;
+        let mut rounds = 0u8;
+        while rounds < 30
+            && self
+                .mux
+                .panes
+                .values()
+                .any(|p| p.closed && p.output_rx.is_some())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            if self.drain_recorder_output_once() {
+                idle = 0;
+            } else {
+                idle += 1;
+                if idle >= 3 {
+                    break;
+                }
+            }
+            rounds += 1;
+        }
+    }
+
+    /// Drain every pane's recorder output sidechannel into the trace once.
+    /// Returns whether any bytes were captured. (Per-event flush in the Recorder
+    /// makes each chunk durable immediately.)
+    #[cfg(feature = "dev-record")]
+    fn drain_recorder_output_once(&mut self) -> bool {
+        // Collect first (immutable borrow of the panes), then feed the recorder
+        // (mutable borrow of self.recorder) — two sequential borrows.
+        let mut tail: Vec<Vec<u8>> = Vec::new();
+        for pane in self.mux.panes.values() {
+            if let Some(rx) = &pane.output_rx {
+                let mut combined: Vec<u8> = Vec::new();
+                while let Ok(chunk) = rx.try_recv() {
+                    combined.extend_from_slice(&chunk);
+                }
+                if !combined.is_empty() {
+                    tail.push(combined);
+                }
+            }
+        }
+        let got = !tail.is_empty();
+        if let Some(rec) = self.recorder.as_mut() {
+            for chunk in &tail {
+                rec.record_output(chunk);
+            }
+        }
+        got
+    }
+
     /// Keep the OS window title in sync with the *active* pane's title —
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
@@ -4304,6 +4381,10 @@ impl App {
             self.blink_on = !self.blink_on;
             self.last_blink = std::time::Instant::now();
         }
+        // Cycle 908: capture a just-exited pane's final output before reap drops
+        // its sidechannel — otherwise the shell's last line is lost from the trace.
+        #[cfg(feature = "dev-record")]
+        self.flush_recorder_output();
         if self.mux.reap() {
             return;
         }
@@ -8675,13 +8756,13 @@ impl ApplicationHandler<UserEvent> for App {
         // (init failure above `exit()`s and returns), so this never early-
         // returns before revealing. The follow-up `request_redraw` schedules
         // the next frame — now delivered normally, the window being visible.
-        self.redraw();
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
         // Cycle 875: start the developer session recorder now that the grid
         // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`;
         // opts captured above before `startup` was consumed).
+        // Cycle 908 (dev-record completeness): start it BEFORE the first
+        // `redraw()` below — `redraw()` runs the first `drain_events()`, which
+        // tees PTY output into the trace; starting the recorder *after* it
+        // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
         #[cfg(feature = "dev-record")]
         if let Some((path, raw)) = dev_record {
             let (cols, rows) = self.grid_of(self.area());
@@ -8695,6 +8776,10 @@ impl ApplicationHandler<UserEvent> for App {
                     path.display()
                 ),
             }
+        }
+        self.redraw();
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
         // Cycle 794: kick off the update check on a background thread — AFTER
         // the first paint so it never blocks startup. It's opt-out
@@ -8750,10 +8835,17 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                // Cycle 875: flush the recorder before exit (Drop also flushes).
+                // Cycle 875/908: tee any in-flight PTY output into the trace,
+                // THEN flush, before exit (Drop also flushes). Without the
+                // drain, bytes queued in a pane's output_rx when the user clicks
+                // X are never recorded — `finish()` only flushes already-written
+                // events, it does not pull the output sidechannel.
                 #[cfg(feature = "dev-record")]
-                if let Some(rec) = self.recorder.as_mut() {
-                    rec.finish();
+                {
+                    self.flush_recorder_output();
+                    if let Some(rec) = self.recorder.as_mut() {
+                        rec.finish();
+                    }
                 }
                 self.save_session();
                 event_loop.exit();
@@ -9930,6 +10022,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Cycle 908: drain trailing recorder output before reap removes a
+        // just-exited pane (covers the shell-exit → process-exit close path,
+        // e.g. a fast `-e cmd` session).
+        #[cfg(feature = "dev-record")]
+        self.flush_recorder_output();
         if self.mux.reap() && self.window.is_some() {
             self.save_session();
             event_loop.exit();
@@ -10112,6 +10209,35 @@ mod tests {
             src.contains(".or_else(|| self.split_seam_hover_icon())"),
             "hovering a divider must show the resize cursor"
         );
+    }
+
+    /// Cycle 908 (dev-record completeness) drift guard. The recorder is fed PTY
+    /// output ONLY by `drain_events()` (on redraw), so output that lands after
+    /// the last redraw-drain and before a pane is reaped / the window closes
+    /// would be dropped with the pane (a fast `-e cmd`'s final line, or bytes in
+    /// flight at close). `flush_recorder_output()` must therefore run before
+    /// BOTH `mux.reap()` sites and on `CloseRequested`. A behavioral test needs
+    /// a full App + window; pin the wiring at the source level via the
+    /// distinctive per-site comments (so the guard can't self-match its own
+    /// assertion literals). The live close-path tests verify behavior.
+    #[cfg(feature = "dev-record")]
+    #[test]
+    fn recorder_output_flushed_before_reap_and_on_close() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("fn flush_recorder_output(&mut self)"),
+            "the recorder-output flush helper must exist"
+        );
+        for marker in [
+            "Cycle 908: capture a just-exited pane's final output before reap drops",
+            "Cycle 908: drain trailing recorder output before reap removes a",
+            "Cycle 875/908: tee any in-flight PTY output into the trace,",
+        ] {
+            assert!(
+                src.contains(marker),
+                "missing recorder-flush wiring at a close/reap site: {marker:?}"
+            );
+        }
     }
 
     /// Cycle 897 (audit) drift guards. Three event-state leaks, each needing a
