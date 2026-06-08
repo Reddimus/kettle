@@ -259,5 +259,9 @@ Next steps:
      before pushing because it returns the previous run, not the
      one you just triggered):
        sleep 5  # let GitHub register the push-triggered run
-       gh run watch \$(gh run list --workflow=release.yml --branch "v${VERSION}" --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
+       RUN=\$(gh run list --workflow=release.yml --branch "v${VERSION}" --limit 1 --json databaseId --jq '.[0].databaseId')
+       gh run watch "\$RUN"
+       # ALWAYS verify the conclusion — \`gh run watch\`'s exit code has given a
+       # false-green on a FAILED run here (cycle 910). This must print success:
+       gh run view "\$RUN" --json conclusion,jobs --jq '.conclusion'
 EOF

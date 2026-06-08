@@ -62,7 +62,11 @@ jobs:
       - name: dev-record feature (clippy + tests)
         run: |
           cargo clippy -p kettle --features dev-record --all-targets -- -D warnings
-          cargo test -p kettle-ui --features dev-record dev_record::
+          # Cycle 912 (audit): run ALL kettle-ui tests under the feature, not just
+          # the `dev_record::` module — the cycle-908 completeness guard
+          # `recorder_output_flushed_before_reap_and_on_close` lives in
+          # `app::tests::`, so the old narrow filter compiled it but never ran it.
+          cargo test -p kettle-ui --features dev-record
       # Cycle 730: verify the Justfile parses on every OS — catches
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a
@@ -451,12 +455,12 @@ jobs:
             | grep -qE 'k\.cfg$'
         shell: bash
 
-  # Verify the declared workspace MSRV (`rust-version = "1.88"` in
-  # Cargo.toml, cycle 225) actually still builds. Without this job we
+  # Verify the declared workspace MSRV (`rust-version = "1.89"` in
+  # Cargo.toml, cycle 250) actually still builds. Without this job we
   # only know `stable` works — a user on the declared floor (e.g. a
-  # distro shipping Rust 1.88 in its package manager, or `cargo
+  # distro shipping Rust 1.89 in its package manager, or `cargo
   # install kettle` on a slightly-stale toolchain) could hit a
-  # compile error if we accidentally use a Rust-1.89+ feature.
+  # compile error if we accidentally use a Rust-1.90+ feature.
   # Linux-only because MSRV is a "does this compile" question, not a
   # platform-portability question — the platform matrix above already
   # covers OS portability under stable. Build + test only (clippy /

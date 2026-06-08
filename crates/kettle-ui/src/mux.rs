@@ -128,6 +128,11 @@ pub struct Pane {
     /// quick-toggle path.
     pub group_name: Option<String>,
     pub closed: bool,
+    /// Cycle 912 (audit): `exit-action = hold` was silently broken — `reap()`
+    /// removed any pane whose child had exited regardless of intent. `held`
+    /// marks a pane deliberately KEPT on screen after its shell exited (Hold);
+    /// reap skips it until the user explicitly closes it (which sets `closed`).
+    pub held: bool,
     /// Scrollback `history_size()` observed at the *previous* redraw — used
     /// to detect new output for `scroll-on-output`. `None` while no frame
     /// has been drawn yet (so the first frame doesn't look like growth).
@@ -149,6 +154,15 @@ pub struct Pane {
     /// pane title shows `format_remote_title(...)` and the right-
     /// click menu (sub-cycle 7) exposes a "Clone session" entry.
     pub remote_context: Option<kettle_remote::RemoteContext>,
+}
+
+/// Cycle 912 (audit): pure reap predicate. A pane is removed when explicitly
+/// closed (Close / Restart / ClosePane set `closed`) OR its child exited and it
+/// is not being HELD on screen (`exit-action = hold`). Without the `!held` guard
+/// Hold behaved identically to Close — the dead shell vanished on the next
+/// event-loop turn, defeating the feature entirely.
+pub(crate) fn is_reapable(closed: bool, held: bool, child_exited: bool) -> bool {
+    closed || (!held && child_exited)
 }
 
 pub enum Node {
@@ -835,6 +849,7 @@ impl Mux {
                 title: initial_title,
                 group_name: None,
                 closed: false,
+                held: false,
                 last_history: None,
                 argv: argv.to_vec(),
                 remote_context: None,
@@ -1083,6 +1098,28 @@ impl Mux {
             self.active = self.tabs.len() - 1;
         }
         Ok(())
+    }
+
+    /// Cycle 912 (audit): new tab running an explicit `argv` + cwd, with the same
+    /// WSL-aware `--cd` dir translation `split_with` applies. The new-tab ▾
+    /// dropdown's WSL entry routed through `new_tab_with` directly (a raw spawn),
+    /// so a WSL launcher's Linux cwd failed the Windows `is_dir` gate and the new
+    /// tab fell back to the home dir — the cycle-887 regression class, where only
+    /// splits/duplicates were wired through `launch_cwd`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_tab_with_launch(
+        &mut self,
+        cfg: &Config,
+        cols: usize,
+        rows: usize,
+        cw: u16,
+        ch: u16,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+    ) -> Result<()> {
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
     }
 
     /// Open a new tab running `ssh -t <target>` (SSH multiplexing).
@@ -1714,7 +1751,7 @@ impl Mux {
             .panes
             .iter_mut()
             .filter_map(|(id, p)| {
-                if p.closed || p.term.child_exited() {
+                if is_reapable(p.closed, p.held, p.term.child_exited()) {
                     Some(*id)
                 } else {
                     None
@@ -2724,6 +2761,24 @@ mod node_tests {
             "focus must move to the *nearest neighbor* (30), not jump back \
              to the leftmost-leaf-of-the-tab (10) — that's the cycle-602 bug"
         );
+    }
+
+    /// Cycle 912 (audit): `exit-action = hold` survival. Before the fix `reap`
+    /// removed any child-exited pane, so Hold behaved like Close. `is_reapable`
+    /// now keeps a held child-exited pane until it's explicitly closed.
+    #[test]
+    fn is_reapable_holds_child_exited_pane_until_closed() {
+        use super::is_reapable;
+        // Live pane (child still running) — never reaped.
+        assert!(!is_reapable(false, false, false));
+        // Default (Close): child exited, not held -> reaped.
+        assert!(is_reapable(false, false, true));
+        // Hold: child exited but held -> NOT reaped (the cycle-912 fix).
+        assert!(!is_reapable(false, true, true));
+        // Explicit close (ClosePane / Restart set `closed`) always reaps, even
+        // a held pane — so the user can still dismiss a held dead shell.
+        assert!(is_reapable(true, true, true));
+        assert!(is_reapable(true, false, false));
     }
 
     /// Cycle 603: companion to cycle 602's close-focused fix —

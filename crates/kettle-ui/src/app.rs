@@ -3121,13 +3121,22 @@ impl App {
         if sr >= rows {
             return String::new();
         }
+        // Cycle 912 (R1 completion): the vi rows are viewport-relative (clamped
+        // to 0..screen_lines, rendered at `oy + row*ch`), so convert each to a
+        // grid-absolute line — a visual-yank made while scrolled back then reads
+        // the VISIBLE rows, consistent with where the vi highlight is drawn,
+        // instead of the active screen. No-op at the bottom (display_offset == 0).
+        let off = t.grid().display_offset();
         let mut out = String::new();
         for r in sr..=er.min(rows.saturating_sub(1)) {
+            let base = viewport_point_to_grid(
+                kettle_core::Point::new(kettle_core::Line(r as i32), kettle_core::Column(0)),
+                off,
+            );
             let first = if r == sr { sc } else { 0 };
             let last = if r == er { ec.min(cols - 1) } else { cols - 1 };
             for c in first..=last {
-                let p =
-                    kettle_core::Point::new(kettle_core::Line(r as i32), kettle_core::Column(c));
+                let p = kettle_core::Point::new(base.line, kettle_core::Column(c));
                 out.push(t.grid()[p].c);
             }
             if r != er {
@@ -3629,7 +3638,11 @@ impl App {
                     // argv via Mux::spawn_pane.
                     // Close (default): unchanged kettle behavior.
                     TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
-                        kettle_config::ExitAction::Hold => {}
+                        // Cycle 912 (audit): keep the dead shell on screen. Set
+                        // `held` so `reap()` skips this child-exited pane until
+                        // the user explicitly closes it — the previous empty arm
+                        // let reap remove it anyway, so Hold behaved like Close.
+                        kettle_config::ExitAction::Hold => pane.held = true,
                         kettle_config::ExitAction::Restart => {
                             // Cycle 418: queue for post-drain
                             // respawn via Mux::new_tab_with. The
@@ -3967,10 +3980,17 @@ impl App {
         };
         let g = t.grid();
         let (rows, cols) = (g.screen_lines(), g.columns());
+        // Cycle 912 (R1 completion): convert each viewport row to its grid-
+        // absolute line so hint detection scans the VISIBLE rows (incl. history
+        // when scrolled back), not the active screen — otherwise a quick-select
+        // label drawn over a visible URL would open the active-screen URL at the
+        // same index. `HintTarget.row` stays viewport-relative for label placement.
+        let off = g.display_offset();
         let lines: Vec<String> = (0..rows)
             .map(|r| {
+                let base = viewport_point_to_grid(Point::new(Line(r as i32), Column(0)), off);
                 let s: String = (0..cols)
-                    .map(|c| g[Point::new(Line(r as i32), Column(c))].c)
+                    .map(|c| g[Point::new(base.line, Column(c))].c)
                     .collect();
                 s.trim_end().to_string()
             })
@@ -5297,9 +5317,12 @@ impl App {
         let (cw, ch) = self.cell_px();
         let waker = self.waker();
         let cwd = self.mux.focused().and_then(|p| p.term.current_dir());
+        // Cycle 912 (audit): route through new_tab_with_launch so a WSL ▾-dropdown
+        // entry's Linux cwd is carried via `wsl --cd` instead of being dropped
+        // (a Windows spawn can't `cd` into a Linux path, so it fell back home).
         match self
             .mux
-            .new_tab_with(&self.cfg, cols, rows, cw, ch, waker, argv, cwd.as_deref())
+            .new_tab_with_launch(&self.cfg, cols, rows, cw, ch, waker, argv.to_vec(), cwd)
         {
             Ok(()) => self.fire_tab_add_event(),
             Err(e) => log::warn!("could not open shell tab ({argv:?}): {e}"),
@@ -11143,6 +11166,34 @@ mod tests {
             Some(now),
             OUTPUT_FRAME_BUDGET
         ));
+    }
+
+    /// Cycle 912 (audit): the `about_to_wait` coalescer must FLUSH a due deferred
+    /// frame (clear `coalescing_paint`) BEFORE it computes the WaitUntil clamp,
+    /// or a still-pending paint could re-schedule a ~1 ms wake every tick
+    /// (busy-spin). A behavioral test needs a live winit event loop; pin the
+    /// ordering at the source level (the `modal_discipline_guard` pattern).
+    #[test]
+    fn output_coalescer_flushes_before_the_wait_clamp() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn about_to_wait(")
+            .expect("about_to_wait present");
+        let rest = &src[start..];
+        // Bound the scan to the about_to_wait body (it is the last method in the
+        // impl, so the next column-0 `}` closes the impl).
+        let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
+        let body = &rest[..end];
+        let flush = body
+            .find("self.coalescing_paint = false")
+            .expect("the coalesce_due flush must exist in about_to_wait");
+        let clamp = body
+            .find(".max(1)")
+            .expect("the wait-ms clamp must exist in about_to_wait");
+        assert!(
+            flush < clamp,
+            "coalescing_paint flush must precede the .max(1) wait clamp (anti-busy-spin)"
+        );
     }
 
     #[test]

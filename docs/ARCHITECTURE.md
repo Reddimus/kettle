@@ -160,8 +160,8 @@ renderer, so the menu pass reuses already-cached glyphs.
   citing the ownership contract. No `transmute`, no raw-pointer
   abstractions, no `Send`/`Sync` impls outside the foreign-fd
   protocols. Per-pane `Arc<Mutex<...>>` are contended only on PTY
-  read or App snapshot; lock-hold times are O(bytes) — measured at
-  cycle X to stay under 100 µs per drain even on fast scrolling.
+  read or App snapshot; lock-hold times are O(bytes) — designed to
+  stay well under one frame's budget per drain even on fast scrolling.
 
 ## Why the extractor sits *in front of* the VT engine
 

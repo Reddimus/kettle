@@ -121,7 +121,7 @@ discipline here.
 
 ## End-to-end harness: selection, copy & `.cast` replay (cycles 909–911)
 
-The PTY-driven conformance harness in `kettle-core/src/term.rs` (`harness()` +
+The no-PTY conformance harness in `kettle-core/src/term.rs` (`harness()` +
 `feed_ex()`) builds a real `Term` and drives the **same Extractor → Processor →
 grid pipeline the PTY reader uses**, with no PTY and no child process — so a
 whole interactive session (Claude Code, Codex CLI, AstroNvim, tmux) can be
@@ -237,4 +237,7 @@ Separate workflows:
 - `.github/workflows/release.yml` — multi-platform packaging on
   every `v*` tag push. Cycle-254 adds SHA-256 sidecars (.sha256
   file alongside each artifact); cycle-258 onward, each release
-  has six assets (three platform binaries + three sidecars).
+  has up to eight assets (four platform binaries — linux-x86_64,
+  macos-universal, windows-x86_64, and the best-effort aarch64-linux tarball —
+  each with a `.sha256` sidecar; the aarch64 leg is non-blocking, so an
+  occasional release has six).

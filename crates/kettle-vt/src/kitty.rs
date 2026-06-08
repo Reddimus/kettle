@@ -266,6 +266,14 @@ impl KittyState {
     /// Feed one APC `G` body (between `ESC _ G` and `ESC \`).
     pub fn feed(&mut self, body: &str) -> KittyOut {
         let (control, payload) = body.split_once(';').unwrap_or((body, ""));
+        // Cycle 912 (audit): a malformed APC `G` body with a multi-MB control
+        // prefix (no ';') would expand into a huge transient HashMap in
+        // parse_control. Kitty control keys are tiny, so reject an over-long
+        // control half outright — defense-in-depth (every other kitty map is
+        // already capped; the control half was the gap).
+        if control.len() > 4096 {
+            return KittyOut::None;
+        }
         let kv = parse_control(control);
         let id = kv.get("i").and_then(|v| v.parse().ok()).unwrap_or(0u32);
         // Continuation chunks carry only `m` (no `a`); route them to the
@@ -781,6 +789,17 @@ fn decode(control: &str, b64: &str) -> Option<ImageData> {
         "24" => {
             let w: u32 = kv.get("s")?.parse().ok()?;
             let h: u32 = kv.get("v")?.parse().ok()?;
+            // Cycle 912 (audit): validate the payload length against the declared
+            // dimensions BEFORE the 4/3 RGBA expansion, mirroring what the f=32
+            // arm gets for free from ImageData::new. Without this, a mismatched
+            // 1x1 claim carrying a huge payload wasted a ~payload-sized alloc +
+            // O(payload) copy first (untrusted-PTY resource waste).
+            let expected = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|wh| wh.checked_mul(3))?;
+            if raw.len() != expected {
+                return None;
+            }
             let mut rgba = Vec::with_capacity(raw.len() / 3 * 4);
             for px in raw.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
@@ -797,6 +816,30 @@ mod tests {
 
     // One opaque RGBA pixel (f=32,s=1,v=1): bytes [1,2,3,4].
     const PX: &str = "AQIDBA==";
+
+    /// Cycle 912 (audit): the f=24 RGB arm validates the payload length against
+    /// the declared dimensions BEFORE the 4/3 RGBA expansion. A mismatched 1x1
+    /// claim carrying a larger payload is rejected (None) instead of allocating
+    /// and copying first; a correctly-sized payload still decodes.
+    #[test]
+    fn kitty_f24_validates_payload_length_before_alloc() {
+        // 1x1 RGB needs exactly 3 bytes. PX decodes to 4 -> mismatch -> None.
+        assert!(super::decode("f=24,s=1,v=1", PX).is_none());
+        // Exactly 3 bytes (base64 "AQID" = [1,2,3]) -> decodes.
+        assert!(super::decode("f=24,s=1,v=1", "AQID").is_some());
+    }
+
+    /// Cycle 912 (audit): an APC `G` body with a multi-MB control prefix (no ';')
+    /// is rejected fast (KittyOut::None) instead of expanding into a huge
+    /// transient HashMap in parse_control.
+    #[test]
+    fn kitty_rejects_oversized_apc_control_prefix() {
+        let mut k = KittyState::default();
+        // ~8 KB control half, no ';' separator -> over the 4 KiB cap.
+        let body = "a=T,".repeat(2000);
+        assert!(body.len() > 4096);
+        assert!(matches!(k.feed(&body), KittyOut::None));
+    }
 
     /// Cycle 814 (audit) drift guard for the kitty `o=z` decompression-bomb
     /// defense. A few dozen bytes of zlib inflate to 64 KiB of zeros; under a

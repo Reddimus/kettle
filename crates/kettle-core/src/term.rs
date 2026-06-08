@@ -2042,6 +2042,43 @@ mod conformance {
         );
     }
 
+    /// Cycle 912 (R1 render completion): locks the contract kettle-render relies
+    /// on to position per-cell bg / underline / strikeout / selection quads. The
+    /// `display_iter` yields GRID-ABSOLUTE lines (negative when scrolled into
+    /// history), and `viewport_row = grid_line + display_offset` recovers the
+    /// 0-based viewport row. The render bug used the raw grid-absolute line as the
+    /// viewport Y, so decorations detached from text (and a scrolled-back
+    /// selection's highlight was dropped) while scrolled.
+    #[test]
+    fn display_iter_is_grid_absolute_so_render_adds_display_offset() {
+        use alacritty_terminal::grid::Scroll;
+        let (mut t, mut p) = harness(12, 4);
+        feed(
+            &mut t,
+            &mut p,
+            b"A0\r\nA1\r\nA2\r\nA3\r\nA4\r\nA5\r\nA6\r\nA7",
+        );
+        t.scroll_display(Scroll::Delta(3));
+        let off = t.grid().display_offset() as i32;
+        assert_eq!(off, 3, "scrolled back 3");
+        let first = t
+            .grid()
+            .display_iter()
+            .next()
+            .expect("at least one visible cell");
+        // The top visible cell is grid-absolute line -off (in history), and
+        // grid_line + display_offset == 0 == the pane-top viewport row.
+        assert_eq!(
+            first.point.line.0, -off,
+            "display_iter is grid-absolute (negative in history)"
+        );
+        assert_eq!(
+            first.point.line.0 + off,
+            0,
+            "grid_line + display_offset = viewport row 0 (what kettle-render must use)"
+        );
+    }
+
     #[test]
     fn erase_line_and_display() {
         let (mut t, mut p) = harness(10, 3);

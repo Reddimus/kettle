@@ -2738,6 +2738,15 @@ impl Renderer {
         // configured `selection-foreground` color was parsed and stored
         // but the renderer ignored it.
         let selection_range = content.selection;
+        // Cycle 912 (R1 completion): `display_iter` + `content.selection` yield
+        // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
+        // bg/underline/strikeout quads and the selection-bg quad position by
+        // VIEWPORT row, so convert with `viewport_row = grid_line + display_offset`
+        // (alacritty's `point_to_viewport`). The text itself flows correctly off
+        // relative line-break deltas, so only the quad Y needs this. No-op when
+        // not scrolled (display_offset == 0).
+        let display_off = content.display_offset as i32;
+        let screen_rows = term.grid().screen_lines() as i32;
         // Match the surface clear-color so a cell whose bg resolves to the
         // active default (OSC 11 override or theme bg) doesn't paint a
         // redundant quad over the already-correct backdrop.
@@ -2797,6 +2806,9 @@ impl Renderer {
             let cell = indexed.cell;
             let row = point.line.0;
             let col = point.column.0;
+            // Cycle 912: viewport row for quad placement; `row` (grid-absolute,
+            // negative when scrolled) stays for the relative line-break deltas.
+            let vrow = row + display_off;
             if row != cur_row {
                 cur = None; // runs never span a line break
                 for _ in cur_row..row {
@@ -2851,7 +2863,7 @@ impl Renderer {
             if bg != default_bg {
                 quads.push(rect(
                     ox + col as f32 * cw,
-                    oy + row as f32 * ch,
+                    oy + vrow as f32 * ch,
                     cw,
                     ch,
                     bg,
@@ -2882,7 +2894,7 @@ impl Renderer {
                     .map(|c| color::resolve(c, theme, term_colors))
                     .unwrap_or(fg);
                 let x = ox + col as f32 * cw;
-                let y = oy + row as f32 * ch;
+                let y = oy + vrow as f32 * ch;
                 quads.push(rect(x, y + ch - 2.0, cw, 1.0, line_color, 1.0));
                 if flags.contains(Flags::DOUBLE_UNDERLINE) {
                     quads.push(rect(x, y + ch - 4.0, cw, 1.0, line_color, 1.0));
@@ -2891,7 +2903,7 @@ impl Renderer {
             if flags.contains(Flags::STRIKEOUT) {
                 quads.push(rect(
                     ox + col as f32 * cw,
-                    oy + row as f32 * ch + ch * 0.5,
+                    oy + vrow as f32 * ch + ch * 0.5,
                     cw,
                     1.0,
                     fg,
@@ -2929,7 +2941,12 @@ impl Renderer {
         if let Some(sel) = content.selection {
             let (s, e) = (sel.start, sel.end);
             for r in s.line.0..=e.line.0 {
-                if r < 0 {
+                // Cycle 912: selection lines are grid-absolute; map to the
+                // viewport row and clip to the visible screen. The old `r < 0`
+                // guard DROPPED any selection scrolled up into history, and a
+                // positive `r` was drawn at the wrong (un-offset) viewport y.
+                let vrow = r + display_off;
+                if vrow < 0 || vrow >= screen_rows {
                     continue;
                 }
                 let (c0, c1) = if s.line.0 == e.line.0 {
@@ -2944,7 +2961,7 @@ impl Renderer {
                 let w = (c1 + 1).saturating_sub(c0).max(1);
                 quads.push(rect(
                     ox + c0 as f32 * cw,
-                    oy + r as f32 * ch,
+                    oy + vrow as f32 * ch,
                     w as f32 * cw,
                     ch,
                     theme.selection_background,

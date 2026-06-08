@@ -4,6 +4,75 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.12.0] — 2026-06-08
+
+  Whole-codebase audit batch (cycle 912): a 45-agent, 8-dimension production-grade
+  audit with adversarial per-finding verification surfaced 26 confirmed issues
+  (0 release-blocking high). The dominant theme: the v2.11.0 R1 `display_offset`
+  fix was INCOMPLETE — it corrected the copy coordinate but the same
+  grid-absolute-vs-viewport bug recurred at four more sites. All mediums + the
+  security/quick-win lows are fixed here; a handful of genuinely-low items
+  (per-frame Vec pooling, `append_keybind` `=`-hygiene, `images::prune` wiring,
+  a few CLI-validation niceties, the `font-feature` diagnostic asymmetry, the
+  app.rs god-object extraction) are tracked for a follow-up cycle.
+
+  - **Selection/copy/render (cycle 912) — finish the R1 `display_offset` fix
+    across all 5 sites.** v2.11.0 converted the mouse-selection coordinate but
+    missed: (1) **vi-mode visual yank** (`yank_vi_selection`) and (2) **URL/
+    quick-select hint detection** (`collect_hints`) both indexed the grid with a
+    raw viewport row — so while scrolled back they read the active screen, not
+    the visible history (silent wrong/empty yank, hint over the wrong URL); and,
+    in the renderer, (3) the **per-cell bg / underline / strikethrough quads** and
+    (4) the **selection-background highlight** positioned by the raw grid-absolute
+    line (`display_iter` and `content.selection` are grid-absolute, negative in
+    history) — so cell backgrounds/decorations detached from the text and a
+    scrolled-back selection's highlight was DROPPED (the `r < 0` guard). All four
+    now convert with `viewport_row = grid_line + display_offset` (alacritty's
+    `point_to_viewport`); the cursor path was verified already viewport-relative.
+    No-op at the bottom (`display_offset == 0`), so no regression. New kettle-core
+    contract test `display_iter_is_grid_absolute_so_render_adds_display_offset`
+    locks the render invariant.
+
+  - **Pane lifecycle (cycle 912) — `exit-action = hold` was silently broken.**
+    `reap()` removed any pane whose child had exited regardless of intent, so the
+    documented Hold behavior (keep the dead shell on screen) acted exactly like
+    Close — the pane vanished on the next event-loop turn. Added a `held` flag
+    (set on the Hold arm), a pure `is_reapable(closed, held, child_exited)`
+    predicate (`closed || (!held && child_exited)`), and a unit test. A held pane
+    stays until explicitly closed (which sets `closed`).
+
+  - **WSL (cycle 912) — new-tab ▾ dropdown dropped the inherited cwd.**
+    `open_tab_with_argv` called `new_tab_with` (a raw spawn) directly, bypassing
+    the `launch_cwd` WSL `--cd` translation that splits/duplicates use — so a WSL
+    entry's Linux cwd failed the Windows `is_dir` gate and the new tab fell back
+    to `~` (the cycle-887 regression class). Added `Mux::new_tab_with_launch`
+    (mirrors `split_with`) and routed the dropdown through it.
+
+  - **CI/CD (cycle 912).** The `dev-record` CI leg filtered tests by the
+    `dev_record::` module path, so the cycle-908 completeness guard (in
+    `app::tests::`) compiled but never RAN — now runs all `--features dev-record`
+    tests. And `release.yml` passed `generate_release_notes: true` on all four
+    matrix legs, duplicating the release body 4× (v2.6.0–v2.10.0) — now generated
+    on exactly one leg (gated on the artifact name, since `runner.os == Linux`
+    matches both ubuntu legs); the others attach assets only.
+
+  - **Untrusted-PTY hardening (cycle 912, kitty images).** Capped the kitty APC
+    control-string half at 4 KiB (`KittyState::feed`) so a multi-MB control prefix
+    with no `;` can't amplify into a huge transient HashMap in `parse_control`;
+    and the kitty `f=24` RGB arm now validates the payload length against the
+    declared dimensions BEFORE the 4/3 RGBA expansion (a mismatched 1×1 claim with
+    a large payload no longer wastes a payload-sized alloc + copy). Both
+    drift-guarded.
+
+  - **Rendering (cycle 912).** Added a source-level drift guard pinning the
+    output-coalescer's flush-before-wait-clamp ordering in `about_to_wait`
+    (anti-busy-spin invariant). Doc corrections: `docs/TESTING.md` (the no-PTY
+    harness was mislabeled "PTY-driven"; release asset count six → up to eight),
+    `.github/workflows/ci.yml` (stale 1.88 MSRV comment → 1.89), `scripts/
+    release.sh` ("Next steps" now watch-THEN-verify the run conclusion, not the
+    unreliable `gh run watch` exit code), `docs/ARCHITECTURE.md` (removed an
+    unfilled "cycle X" placeholder).
+
 ## [2.11.0] — 2026-06-08
 
   Claude-Code-CLI GUI batch: fixes the two GUI bugs that only showed up running
