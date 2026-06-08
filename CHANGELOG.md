@@ -4,7 +4,13 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.13.0] — 2026-06-08
+
+  Post-v2.12.0 batch: the cycle-912 audit tail (cycles 913–915) plus a literal
+  whole-codebase file-by-file review (cycle 916) that found defects the
+  8-dimension audit missed — including a bracketed-paste injection-guard bypass,
+  a third missed `display_offset` site (the cursor block over scrollback), and a
+  cycle-904 divider-drag regression that left child PTYs unresized.
 
   - **Whole-codebase file-by-file review (cycle 916).** A literal pass over every
     one of the 49 source files (82 reviewer/verifier agents, 40 adversarially
