@@ -143,7 +143,10 @@ struct Cli {
     print_completions: Option<String>,
 
     /// Render a representative frame offscreen to a PNG and exit (no window).
-    #[arg(long, value_name = "PATH")]
+    // Cycle 913 (audit): mutually exclusive with --screenshot-menu so passing
+    // both fails loudly (clap rejects symmetrically + it shows in --help) rather
+    // than silently dropping one.
+    #[arg(long, value_name = "PATH", conflicts_with = "screenshot_menu")]
     screenshot: Option<std::path::PathBuf>,
 
     /// Render like `--screenshot` but with a synthetic right-click
@@ -1158,6 +1161,15 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("--tab-handoff-fd: expected an inherited descriptor >= 3, got {fd}");
     }
+    // Cycle 913 (audit): a whitespace-only program name (`kettle -e ""`) slips
+    // past the is_empty check (the Vec has one element) but would reach
+    // CommandBuilder::new("") — fail loudly at the CLI surface, like --config /
+    // --working-directory already do for bad paths.
+    if let Some(prog) = cli.exec.first()
+        && prog.trim().is_empty()
+    {
+        anyhow::bail!("-e/--exec: program name is empty");
+    }
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         cwd: cli.working_directory,
@@ -1723,6 +1735,26 @@ mod tests {
         // Defaults: no overrides.
         let d = Cli::try_parse_from(["kettle"]).unwrap();
         assert!(d.exec.is_empty() && d.working_directory.is_none() && d.config.is_none());
+    }
+
+    /// Cycle 913 (audit): `--screenshot` and `--screenshot-menu` are mutually
+    /// exclusive — passing both now fails loudly instead of silently dropping one.
+    #[test]
+    fn cli_screenshot_flags_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "kettle",
+                "--screenshot",
+                "a.png",
+                "--screenshot-menu",
+                "b.png"
+            ])
+            .is_err(),
+            "both screenshot flags must conflict"
+        );
+        // Either one alone still parses.
+        assert!(Cli::try_parse_from(["kettle", "--screenshot", "a.png"]).is_ok());
+        assert!(Cli::try_parse_from(["kettle", "--screenshot-menu", "b.png"]).is_ok());
     }
 
     #[test]

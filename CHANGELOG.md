@@ -4,6 +4,21 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  - **Config/CLI (cycle 913, cycle-912 audit tail).** Three small correctness/
+    robustness fixes deferred from the audit: `--check-config` no longer
+    false-positives on a `font-feature` trailing comma / empty token (`liga,`,
+    `liga, , calt`) — it now skips empties like the apply path already does;
+    `--screenshot` and `--screenshot-menu` are mutually exclusive (clap
+    `conflicts_with`) instead of silently dropping one; and a whitespace-only
+    `-e`/`--exec` program name (`kettle -e ""`) fails loudly at the CLI surface.
+    Test: `cli_screenshot_flags_are_mutually_exclusive`. Remaining low-severity
+    audit items — per-frame Vec pooling, `append_keybind` `=`-hygiene,
+    `images::prune` wiring (memory is already bounded by the 512-placement cap),
+    the `BOOL_KEYS` forward-only test, and the app.rs god-object extraction —
+    stay tracked for a future cycle.
+
 ## [2.12.0] — 2026-06-08
 
   Whole-codebase audit batch (cycle 912): a 45-agent, 8-dimension production-grade

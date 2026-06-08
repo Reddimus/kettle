@@ -2378,8 +2378,14 @@ impl Config {
                 // (`liga`, `+calt`, `cv01=2`, etc.). One bad token in
                 // the list is enough to flag — that token's silently
                 // dropped while the rest apply, leaving the user with
-                // a half-applied feature set.
-                "font-feature" => v.split(',').all(|tok| FontFeature::parse(tok).is_some()),
+                // a half-applied feature set. Cycle 913 (audit): skip
+                // empty/whitespace tokens so a trailing comma (`liga,`)
+                // or `liga, , calt` isn't a false-positive — the apply
+                // path already tolerates them (it `if let Some`-skips).
+                "font-feature" => v
+                    .split(',')
+                    .filter(|t| !t.trim().is_empty())
+                    .all(|tok| FontFeature::parse(tok).is_some()),
                 // `ssh-host = name=user@host` — requires the `=`
                 // separator; without it the entry is silently dropped
                 // (no `name` to bind via the Ctrl+Shift+S launcher).
