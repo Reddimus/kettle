@@ -19,3 +19,9 @@ crossbeam-channel = "0.5.15"
 kettle-vt.workspace = true
 portable-pty = "0.9.0"
 regex.workspace = true
+
+[dev-dependencies]
+# Cycle 911: parse asciicast v2 (.cast) traces in the e2e replay test — the
+# format dev_record.rs writes — so a recorded session can be replayed through
+# the VT pipeline deterministically. Dev-only; not in the shipped crate.
+serde_json = "1"

@@ -119,6 +119,59 @@ discipline here.
   pins `verbatim_doc_comment` on every flag with an indented
   example block (the bug the v1.2.1 patch landed against).
 
+## End-to-end harness: selection, copy & `.cast` replay (cycles 909–911)
+
+The PTY-driven conformance harness in `kettle-core/src/term.rs` (`harness()` +
+`feed_ex()`) builds a real `Term` and drives the **same Extractor → Processor →
+grid pipeline the PTY reader uses**, with no PTY and no child process — so a
+whole interactive session (Claude Code, Codex CLI, AstroNvim, tmux) can be
+replayed deterministically in CI.
+
+**Selection / copy across scrollback.** Mouse selection involves three
+coordinate spaces; the bug fixed in cycle 909 was a missing `− display_offset`
+when converting a click to the grid-absolute point alacritty's `Selection`
+expects, so copying an earlier chunk *while scrolled up* (the constant motion in
+a long Claude Code conversation) read the wrong rows:
+
+```mermaid
+flowchart LR
+    M["Mouse pixel (x, y)"] -->|"px_to_cell:<br/>− rect, padding, titlebar"| V["Viewport cell (row, col)"]
+    V -->|"viewport_point_to_grid:<br/>− display_offset  ⟵ cycle 909"| G["Grid-absolute Point"]
+    G --> S["alacritty Selection"]
+    S -->|"selection_to_string / to_range"| C["Clipboard text + highlight rect"]
+```
+
+Guarded by `selection_while_scrolled_reads_visible_row_not_active_screen`,
+`simple_drag_selection_while_scrolled_copies_visible_rows` (kettle-core) and the
+pure `viewport_point_to_grid_applies_display_offset` (kettle-ui). The same
+conversion now also feeds smart double-click selection and its grid-row text
+read, so word-select works while scrolled too.
+
+**Output coalescing (cycle 910).** Apps that repaint without DEC 2026
+synchronized output (Claude Code toggles `?25l/?25h` ~1750×/session and never
+opens 2026) can be snapshot mid-repaint under load — the transient "cursor above
+the prompt". kettle caps PTY-output paints to one per `OUTPUT_FRAME_BUDGET`
+(~16 ms — a 60 fps cap) so a multi-read burst settles into one frame; input/cursor
+paints bypass the cap so typing stays instant:
+
+```mermaid
+flowchart LR
+    PTY["PTY reader thread<br/>(64 KB reads)"] -->|"Extractor → Processor"| Grid["alacritty Term grid"]
+    PTY -->|"Waker → UserEvent::Wakeup"| Coal{"should_defer_output_paint?<br/>last paint &lt; 16 ms ago"}
+    Coal -->|no| RR["request_redraw"]
+    Coal -->|"yes"| Pend["coalescing_paint = true<br/>about_to_wait wakes at deadline"]
+    Pend --> RR
+    RR --> Redraw["redraw: drain all events,<br/>render ONE settled frame"]
+```
+
+Guarded by the pure `output_paint_coalesces_within_frame_budget` (kettle-ui).
+
+**`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
+v2 trace — the exact format [`docs/DEV-RECORD.md`](DEV-RECORD.md)'s recorder
+writes — and feeds its `o` (output) events through the harness, asserting grid
+text + SGR state. A scrubbed recording of a real agent session can therefore be
+committed as a regression fixture and re-fed without a PTY or auth.
+
 ## Manual / interactive checks
 
 These need a real display and are run by hand (or on real hardware):

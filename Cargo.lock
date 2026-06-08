@@ -1629,6 +1629,7 @@ dependencies = [
  "kettle-vt",
  "portable-pty",
  "regex",
+ "serde_json",
 ]
 
 [[package]]

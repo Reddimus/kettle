@@ -765,6 +765,54 @@ fn px_to_cell(
     (col, line)
 }
 
+/// Cycle 909 (R1 — selection/copy while scrolled back): map a VIEWPORT-relative
+/// point (line 0 = top visible row, what `px_to_point` returns) to the
+/// GRID-ABSOLUTE point that alacritty's `Selection` / `selection_to_string` /
+/// `to_range` and `grid[..]` indexing expect. It subtracts the focused pane's
+/// `display_offset` via alacritty's own `viewport_to_point`. Without this, a
+/// selection or grid-row read taken while scrolled into history addressed the
+/// active-screen row instead of the scrolled-to row — so the copy returned the
+/// wrong/empty text and the highlight slipped down by the scroll amount (the
+/// bug is invisible at the bottom, where `display_offset == 0` makes viewport
+/// and absolute coincide). Pure (drift-tested in
+/// `viewport_point_to_grid_applies_display_offset`).
+fn viewport_point_to_grid(
+    viewport: kettle_core::Point,
+    display_offset: usize,
+) -> kettle_core::Point {
+    let line = viewport.line.0.max(0) as usize;
+    kettle_core::viewport_to_point(
+        display_offset,
+        kettle_core::Point::new(line, viewport.column),
+    )
+}
+
+/// Cycle 910 (R2): minimum wall-clock between output-driven frames — a 60 fps
+/// paint cap (the standard terminal/display refresh target; Alacritty/WezTerm do
+/// the same). Imperceptible for keystroke echo / streaming output, large enough
+/// to collapse a multi-read repaint burst into one settled frame, and — vs an
+/// uncapped or 125 fps repaint — it roughly halves the paint-side CPU a chatty
+/// re-rendering TUI (Claude Code's spinner, a progress bar) would otherwise burn.
+const OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Cycle 910 (R2): whether an output-driven repaint should be DEFERRED
+/// (coalesced) rather than painted now — true when the previous frame painted
+/// less than `budget` ago. Capping PTY-output paints to one per budget lets a
+/// non-atomic repaint burst (an app that doesn't bracket frames with DEC 2026
+/// synchronized output, e.g. Claude Code) settle before kettle snapshots the
+/// grid, avoiding the transient mid-repaint cursor jump. Pure (drift-tested in
+/// `output_paint_coalesces_within_frame_budget`).
+fn should_defer_output_paint(
+    now: std::time::Instant,
+    last_paint: Option<std::time::Instant>,
+    budget: std::time::Duration,
+) -> bool {
+    match last_paint {
+        Some(t) => now.saturating_duration_since(t) < budget,
+        None => false,
+    }
+}
+
 /// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. Cycle 817
 /// (audit): a multi-pane tab's per-pane titlebar steals `titlebar_h` of height,
 /// so the PTY must be sized for the rows that actually fit *below* it — without
@@ -1824,6 +1872,16 @@ pub struct App {
     blink_on: bool,
     last_blink: std::time::Instant,
     last_bell: Option<std::time::Instant>,
+    /// Cycle 910 (R2): coalesce output-driven repaints. `last_paint` is when the
+    /// last frame painted; `coalescing_paint` marks a deferred output paint
+    /// whose frame budget has not elapsed yet. Capping PTY-output paints to one
+    /// per `OUTPUT_FRAME_BUDGET` lets a non-atomic repaint burst (apps that skip
+    /// DEC 2026 synchronized output, e.g. Claude Code) settle into a single
+    /// frame instead of being snapshot mid-update — the transient that flashed
+    /// the cursor a row above the prompt under load. Input/cursor paints bypass
+    /// this (they call `request_redraw` directly), so typing stays instant.
+    last_paint: Option<std::time::Instant>,
+    coalescing_paint: bool,
     last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     last_title: String,
@@ -2294,6 +2352,8 @@ impl App {
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_bell: None,
+            last_paint: None,
+            coalescing_paint: false,
             last_click: None,
             last_title: String::new(),
             config_path: startup.config.clone(),
@@ -3091,9 +3151,16 @@ impl App {
         if row >= rows {
             return None;
         }
+        // R1: `row` is viewport-relative; index the grid-absolute line so the
+        // smart-select regex runs on the row the user double-clicked even when
+        // scrolled back into history.
+        let base = viewport_point_to_grid(
+            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(0)),
+            t.grid().display_offset(),
+        );
         let mut out = String::with_capacity(cols);
         for c in 0..cols {
-            let p = kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(c));
+            let p = kettle_core::Point::new(base.line, kettle_core::Column(c));
             out.push(t.grid()[p].c);
         }
         // Trim trailing spaces so the regex doesn't try to match across
@@ -3117,9 +3184,18 @@ impl App {
         let Ok(mut t) = pane.term.term.lock() else {
             return false;
         };
-        let line = kettle_core::Line(row as i32);
-        let anchor = kettle_core::Point::new(line, kettle_core::Column(start));
-        let end_pt = kettle_core::Point::new(line, kettle_core::Column(end));
+        // R1: the click `row` is viewport-relative; convert both ends to
+        // grid-absolute so a double-click word-select while scrolled back
+        // selects (and copies) the row the user actually clicked.
+        let off = t.grid().display_offset();
+        let anchor = viewport_point_to_grid(
+            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(start)),
+            off,
+        );
+        let end_pt = viewport_point_to_grid(
+            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(end)),
+            off,
+        );
         let mut sel = kettle_core::Selection::new(
             kettle_core::SelectionType::Simple,
             anchor,
@@ -3140,10 +3216,14 @@ impl App {
             kettle_core::SelectionType::Simple | kettle_core::SelectionType::Block
         );
         if let Some(rect) = self.focused_rect(area) {
-            let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+            let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
             if let Some(pane) = self.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
+                // R1: store the grid-absolute point (viewport − display_offset)
+                // so a selection started while scrolled back anchors on the
+                // history row the user sees, not the active screen.
+                let p = viewport_point_to_grid(vp, t.grid().display_offset());
                 t.selection = Some(kettle_core::Selection::new(ty, p, kettle_core::Side::Left));
             }
         }
@@ -3338,12 +3418,16 @@ impl App {
             return;
         }
         if let Some(rect) = self.focused_rect(area) {
-            let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+            let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
             if let Some(pane) = self.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
-                && let Some(sel) = t.selection.as_mut()
             {
-                sel.update(p, kettle_core::Side::Right);
+                // R1: convert to grid-absolute before the mutable `selection`
+                // borrow so the dragged end-point tracks scrollback too.
+                let p = viewport_point_to_grid(vp, t.grid().display_offset());
+                if let Some(sel) = t.selection.as_mut() {
+                    sel.update(p, kettle_core::Side::Right);
+                }
             }
         }
     }
@@ -3359,16 +3443,20 @@ impl App {
             Some(r) => r,
             None => return false,
         };
-        let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+        let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
         if let Some(pane) = self.mux.focused()
             && let Ok(mut t) = pane.term.term.lock()
-            && let Some(sel) = t.selection.as_mut()
         {
-            sel.update(p, kettle_core::Side::Right);
-            // Enter drag mode so a follow-up mouse-move keeps extending —
-            // matches every Mac/Linux text-control: shift-click, then drag.
-            self.selecting = true;
-            return true;
+            // R1: grid-absolute end-point so Shift+Click extends to the right
+            // history row while scrolled back.
+            let p = viewport_point_to_grid(vp, t.grid().display_offset());
+            if let Some(sel) = t.selection.as_mut() {
+                sel.update(p, kettle_core::Side::Right);
+                // Enter drag mode so a follow-up mouse-move keeps extending —
+                // matches every Mac/Linux text-control: shift-click, then drag.
+                self.selecting = true;
+                return true;
+            }
         }
         false
     }
@@ -4542,6 +4630,10 @@ impl App {
             }
             self.window_shown = true;
         }
+        // Cycle 910 (R2): record the paint time and clear any pending coalesced
+        // output paint now that this settled frame is on the surface.
+        self.last_paint = Some(std::time::Instant::now());
+        self.coalescing_paint = false;
     }
 
     /// Cycle 296: compose the status-bar contents (HH:MM:SS · theme ·
@@ -8799,7 +8891,19 @@ impl ApplicationHandler<UserEvent> for App {
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
                 self.run_triggers();
-                if let Some(w) = &self.window {
+                // Cycle 910 (R2): coalesce rapid PTY-output paints to ~one per
+                // frame budget so a non-atomic repaint burst settles before we
+                // snapshot the grid. When deferred, `about_to_wait` schedules
+                // the flush at the budget deadline so the final frame still
+                // paints. Input/cursor paints don't come through here, so
+                // typing and the cursor stay immediate.
+                if should_defer_output_paint(
+                    std::time::Instant::now(),
+                    self.last_paint,
+                    OUTPUT_FRAME_BUDGET,
+                ) {
+                    self.coalescing_paint = true;
+                } else if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
@@ -10054,22 +10158,46 @@ impl ApplicationHandler<UserEvent> for App {
                 .map(|r| selection_autoscroll_lines(self.cursor.y as f32, r.1, r.1 + r.3) != 0)
                 .unwrap_or(false)
         };
-        if bell_active || blink_active || anim_active || autoscroll_active {
+        // Cycle 910 (R2): a deferred (coalesced) output paint becomes due
+        // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
+        // pending and we wake at its deadline so the burst paints exactly once.
+        let now = std::time::Instant::now();
+        let coalesce_due = self.coalescing_paint
+            && self
+                .last_paint
+                .map(|t| now.saturating_duration_since(t) >= OUTPUT_FRAME_BUDGET)
+                .unwrap_or(true);
+        if bell_active || blink_active || anim_active || autoscroll_active || coalesce_due {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
-            // Bell decay, animation playback and selection autoscroll all
-            // want a ~30 fps tick; cursor blink alone can coast at 120 ms.
-            let wait = if bell_active || anim_active || autoscroll_active {
-                33
-            } else {
-                120
-            };
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(wait),
-            ));
+            if coalesce_due {
+                self.coalescing_paint = false;
+            }
+        }
+        // Pick the earliest wake we still need: ~30 fps for bell / animation /
+        // autoscroll, 120 ms for cursor-blink alone, or the pending coalesced
+        // output paint's deadline.
+        let mut wait_ms: Option<u64> = if bell_active || anim_active || autoscroll_active {
+            Some(33)
+        } else if blink_active {
+            Some(120)
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        };
+        if self.coalescing_paint {
+            let remaining = self
+                .last_paint
+                .map(|t| OUTPUT_FRAME_BUDGET.saturating_sub(now.saturating_duration_since(t)))
+                .unwrap_or_default();
+            let ms = (remaining.as_millis() as u64).max(1);
+            wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+        }
+        match wait_ms {
+            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
+                now + std::time::Duration::from_millis(ms),
+            )),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }
@@ -10970,6 +11098,50 @@ mod tests {
             &finished,
             Duration::from_secs(30),
             Duration::from_millis(10)
+        ));
+    }
+
+    #[test]
+    fn viewport_point_to_grid_applies_display_offset() {
+        use super::viewport_point_to_grid;
+        use kettle_core::{Column, Line, Point};
+        // At the bottom (display_offset 0): viewport == grid-absolute.
+        let p = viewport_point_to_grid(Point::new(Line(5), Column(3)), 0);
+        assert_eq!(p.line, Line(5));
+        assert_eq!(p.column, Column(3));
+        // Scrolled back by 3: absolute = viewport − offset (the R1 bug was the
+        // missing subtraction, so a scrolled selection read the wrong row).
+        assert_eq!(
+            viewport_point_to_grid(Point::new(Line(5), Column(0)), 3).line,
+            Line(2)
+        );
+        // Scrolled far enough that the visible row maps into history (negative
+        // absolute line — alacritty's grid indexes history with negative lines).
+        assert_eq!(
+            viewport_point_to_grid(Point::new(Line(2), Column(0)), 10).line,
+            Line(-8)
+        );
+    }
+
+    #[test]
+    fn output_paint_coalesces_within_frame_budget() {
+        use super::{OUTPUT_FRAME_BUDGET, should_defer_output_paint};
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        // No prior paint → paint immediately (never defer the first frame).
+        assert!(!should_defer_output_paint(now, None, OUTPUT_FRAME_BUDGET));
+        // Painted just now → defer so a same-burst wakeup coalesces.
+        assert!(should_defer_output_paint(
+            now,
+            Some(now),
+            OUTPUT_FRAME_BUDGET
+        ));
+        // A frame's worth later → the budget elapsed, paint immediately.
+        let later = now + OUTPUT_FRAME_BUDGET + Duration::from_millis(5);
+        assert!(!should_defer_output_paint(
+            later,
+            Some(now),
+            OUTPUT_FRAME_BUDGET
         ));
     }
 

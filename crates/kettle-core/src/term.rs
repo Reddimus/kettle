@@ -1914,6 +1914,134 @@ mod conformance {
         assert_eq!(row_text(&t, 2), " X");
     }
 
+    /// Cycle 909 (R1): a selection made while scrolled back must read the
+    /// VISIBLE (history) row, not the active-screen row at the same viewport
+    /// index. This guards alacritty's `Selection` coordinate contract — it
+    /// expects GRID-ABSOLUTE points (viewport − display_offset, via
+    /// `viewport_to_point`). kettle-ui previously stored the raw viewport line,
+    /// so copying while scrolled returned the wrong/empty text. The two branches
+    /// below show the bug (raw viewport) vs the fix (`viewport_to_point`) select
+    /// different rows — exactly why the conversion is required.
+    #[test]
+    fn selection_while_scrolled_reads_visible_row_not_active_screen() {
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::index::Side;
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        use alacritty_terminal::term::viewport_to_point;
+        // 4 visible rows; feed 8 lines so the first 4 spill into scrollback.
+        let (mut t, mut p) = harness(20, 4);
+        feed(
+            &mut t,
+            &mut p,
+            b"L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7",
+        );
+        // Bottom: visible rows are L4..L7. Scroll back 3 → visible top = L1.
+        t.scroll_display(Scroll::Delta(3));
+        let off = t.grid().display_offset();
+        assert_eq!(off, 3, "scrolled back 3 lines");
+
+        // FIXED: convert viewport row 0 (showing "L1") to its grid-absolute line.
+        let a = viewport_to_point(off, Point::new(0usize, Column(0)));
+        let mut s = Selection::new(SelectionType::Lines, a, Side::Left);
+        s.update(a, Side::Right);
+        t.selection = Some(s);
+        let fixed = t.selection_to_string().unwrap_or_default();
+        assert!(
+            fixed.contains("L1"),
+            "fixed reads the visible row: {fixed:?}"
+        );
+        assert!(
+            !fixed.contains("L4"),
+            "fixed must not read the active screen: {fixed:?}"
+        );
+
+        // BUGGY: the raw viewport line used as absolute reads the active-screen
+        // row "L4" instead — the regression this conversion prevents.
+        let b = Point::new(Line(0), Column(0));
+        let mut s2 = Selection::new(SelectionType::Lines, b, Side::Left);
+        s2.update(b, Side::Right);
+        t.selection = Some(s2);
+        let buggy = t.selection_to_string().unwrap_or_default();
+        assert!(buggy.contains("L4"), "buggy reads active screen: {buggy:?}");
+        assert_ne!(
+            fixed.trim(),
+            buggy.trim(),
+            "display_offset conversion must change which row is copied"
+        );
+    }
+
+    /// Cycle 909 (R1): a real drag-select (Simple selection spanning rows) made
+    /// while scrolled to the top of history must copy the VISIBLE history rows,
+    /// not the active screen — the exact action a user does when copying an
+    /// earlier chunk of a long Claude Code / Codex conversation.
+    #[test]
+    fn simple_drag_selection_while_scrolled_copies_visible_rows() {
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::index::Side;
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        use alacritty_terminal::term::viewport_to_point;
+        let (mut t, mut p) = harness(12, 3);
+        feed(
+            &mut t,
+            &mut p,
+            b"row-A\r\nrow-B\r\nrow-C\r\nrow-D\r\nrow-E\r\nrow-F",
+        );
+        // active screen = row-D/E/F; history = row-A/B/C. Scroll to the top.
+        t.scroll_display(Scroll::Delta(3));
+        let off = t.grid().display_offset();
+        assert_eq!(off, 3, "scrolled to the top of a 3-line history");
+        // Drag from viewport (0,0) down to (1, end): copies "row-A" + "row-B".
+        let start = viewport_to_point(off, Point::new(0usize, Column(0)));
+        let end = viewport_to_point(off, Point::new(1usize, Column(11)));
+        let mut s = Selection::new(SelectionType::Simple, start, Side::Left);
+        s.update(end, Side::Right);
+        t.selection = Some(s);
+        let copied = t.selection_to_string().unwrap_or_default();
+        assert!(
+            copied.contains("row-A"),
+            "copied the visible top rows: {copied:?}"
+        );
+        assert!(copied.contains("row-B"), "{copied:?}");
+        assert!(
+            !copied.contains("row-D"),
+            "must not read the active screen while scrolled: {copied:?}"
+        );
+    }
+
+    /// Cycle 911 (e2e harness): replay an asciicast v2 trace — the format
+    /// `dev_record.rs` writes — through the REAL VT pipeline and assert the grid
+    /// reflects it. This is the `.cast` record→replay regression path: a captured
+    /// Claude Code / Codex / tmux session can be re-fed deterministically (no
+    /// PTY, no auth) to guard rendering, selection, and SGR handling.
+    #[test]
+    fn replays_asciicast_v2_output_into_grid() {
+        // A minimal hand-authored trace (no real session data): plain text, an
+        // SGR-bold run, and a CRLF — the shapes a Claude Code frame emits.
+        let cast = concat!(
+            "{\"version\":2,\"width\":20,\"height\":4}\n",
+            "[0.10, \"o\", \"hello \"]\n",
+            "[0.20, \"o\", \"\\u001b[1mworld\\u001b[0m\"]\n",
+            "[0.30, \"o\", \"\\r\\nsecond line\"]\n",
+        );
+        let (mut t, mut p) = harness(20, 4);
+        for line in cast.lines().skip(1) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("event is valid JSON");
+            if v[1] == "o" {
+                feed(&mut t, &mut p, v[2].as_str().unwrap_or("").as_bytes());
+            }
+        }
+        assert_eq!(row_text(&t, 0), "hello world");
+        assert_eq!(row_text(&t, 1), "second line");
+        // The SGR bold from the trace applied to "world".
+        let g = t.grid();
+        assert!(
+            g[Point::new(Line(0), Column(6))]
+                .flags
+                .contains(Flags::BOLD),
+            "replayed SGR bold must reach the grid"
+        );
+    }
+
     #[test]
     fn erase_line_and_display() {
         let (mut t, mut p) = harness(10, 3);

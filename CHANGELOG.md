@@ -4,7 +4,66 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.11.0] — 2026-06-08
+
+  Claude-Code-CLI GUI batch: fixes the two GUI bugs that only showed up running
+  the Claude Code CLI inside kettle — copying earlier output returned the
+  wrong/truncated/empty text, and the cursor flashed above the prompt under load
+  — plus a deterministic end-to-end harness so both stay fixed. Root causes were
+  pinned against a real recorded session (`?2026`=0, `?1049`=0, `?25l/h`≈1750:
+  Claude Code repaints non-atomically on the MAIN screen, without synchronized
+  output).
+
+  - **Selection & copy (cycle 909) — translate clicks by `display_offset` so
+    copying while scrolled reads the right rows.** Every selection-creation site
+    (`begin_selection`, `update_selection`, `extend_selection_to_cursor`,
+    `apply_smart_selection`) and the smart-select grid-row read built the
+    alacritty `Selection` / indexed the grid from a *raw viewport line*, but
+    alacritty's `Selection` / `selection_to_string` / `to_range` expect
+    GRID-ABSOLUTE points (its own frontend calls `viewport_to_point` first:
+    `absolute = viewport − display_offset`). At the bottom (offset 0) the two
+    coincide so it worked; scrolled back by N it stored `Line(v)` instead of
+    `Line(v − N)`, so `selection_to_string` read the wrong/empty rows (the
+    wrong/truncated/empty copy) and the highlight slipped down by the scroll
+    amount — most visible in Claude Code, where you constantly scroll up to
+    select earlier output. Fixed with one shared `viewport_point_to_grid`
+    converter (re-exporting alacritty's `viewport_to_point` from kettle-core)
+    routed through every selection + grid-row-read site; viewport-relative paths
+    (mouse-event reporting to vim/tmux, chrome hit-testing) are untouched. Tests:
+    pure `viewport_point_to_grid_applies_display_offset` (kettle-ui) +
+    `selection_while_scrolled_reads_visible_row_not_active_screen` and
+    `simple_drag_selection_while_scrolled_copies_visible_rows` (kettle-core,
+    which also show the buggy raw-viewport path reading the wrong row).
+
+  - **Rendering (cycle 910) — coalesce PTY-output paints so non-2026 apps don't
+    tear.** Apps that repaint without DEC 2026 synchronized output (Claude Code
+    toggles cursor hide/show ~1750×/session and never opens 2026) could be
+    snapshot mid-repaint when a burst of 64 KB reads each triggered an immediate
+    `request_redraw` — the transient "cursor above the prompt" under load. kettle
+    now caps output-driven paints to one per `OUTPUT_FRAME_BUDGET` (~16 ms — a
+    60 fps cap, the standard display-refresh target): a same-budget wakeup sets
+    `coalescing_paint` and `about_to_wait` flushes the settled frame at the
+    deadline, so a multi-read repaint lands as one frame. Beyond reducing tearing,
+    the cap roughly halves the paint-side CPU a continuously re-rendering TUI
+    (Claude Code's spinner / progress output) would otherwise burn vs an uncapped
+    repaint. Input and cursor paints bypass the cap (they call
+    `request_redraw` directly), so typing and the cursor stay immediate, and the
+    existing 2026 honoring is unchanged (it already makes well-behaved TUIs
+    atomic). It is a reduction, not a guarantee — an app that never uses 2026 can
+    still tear a hair under extreme load. Pure test
+    `output_paint_coalesces_within_frame_budget`.
+
+  - **Testing (cycle 911) — deterministic end-to-end harness + `.cast` replay.**
+    The no-PTY conformance harness (`harness()` + `feed_ex()`, the real
+    Extractor→Processor→grid path) now covers the selection/copy bug classes
+    above across `display_offset`, and a new
+    `replays_asciicast_v2_output_into_grid` parses an asciicast v2 trace — the
+    format `docs/DEV-RECORD.md`'s recorder writes — and feeds its output events
+    through the pipeline, so a scrubbed real Claude Code / Codex / tmux session
+    can be committed as a regression fixture and replayed with no PTY or auth.
+    `serde_json` added as a kettle-core dev-dependency (not in the shipped
+    crate). See [docs/TESTING.md](docs/TESTING.md) for the coordinate-space +
+    pipeline mermaid diagrams.
 
   - **dev-record (cycle 908) — capture the session's full output, head and
     tail.** The recorder (a `dev-record` feature build, compiled out of releases)
