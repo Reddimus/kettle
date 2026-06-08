@@ -6,6 +6,46 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  - **Whole-codebase file-by-file review (cycle 916).** A literal pass over every
+    one of the 49 source files (82 reviewer/verifier agents, 40 adversarially
+    confirmed findings, 0 release-blocking high) — distinct from the cycle-912
+    8-dimension audit and it earned its keep, catching real defects in
+    recently-touched code that the dimension lens missed. 18 fixed this cycle:
+    - **Bracketed-paste injection guard** (`input.rs`) — the single-pass
+      `.replace` strip was defeatable by *overlap reconstruction* (a crafted
+      clipboard like `\x1b[20\x1b[201~1~` re-forms an intact closer across the
+      splice seam, ending paste early so the tail auto-runs). Now a fixpoint loop;
+      the only finding with a real external attacker. + overlap regression test.
+    - **Cursor `display_offset`** (`render lib.rs`) — a THIRD missed cycle-912
+      site: the cursor block painted at its grid-absolute line, so when scrolled
+      back a phantom cursor rendered over scrollback. Now viewport-converted
+      (`cvrow = line + display_off`) with on-screen visibility folded into the gate.
+    - **Divider-drag PTY resize** (`app.rs`) — cycle-904 regression: dragging a
+      split divider changed the layout ratio but never `resize_all`'d, so child
+      TUIs kept stale cols/rows (clipped) until an unrelated event. Now resizes.
+    - **Mouse-tracking clamp** (`app.rs cursor_cell`) used the zero-inset grid, so
+      a bottom-edge click in a titlebar'd split reported one row past the PTY's
+      last (cycle-817 class) — now clamps against the inset grid.
+    - **Cross-platform / untrusted-PTY hardening:** bg-image `~/` now expands via
+      USERPROFILE on Windows (was HOME-only → silently never loaded); Sixel HLS
+      components clamped like RGB (cycle-860 parity); `FILE://` accepted
+      case-insensitively; iterm + kitty base64 strip embedded whitespace
+      (line-wrapped payloads); DCS Sixel detection requires a numeric `params q`
+      prefix so DECRQSS (`$q`) / XTGETTCAP (`+q`) aren't eaten as spurious images;
+      a kitty animation with all-zero gaps no longer pins a 30 fps redraw forever;
+      a Lua 256 MiB heap cap (a native `string.rep` can't OOM-abort kettle now).
+    - **Correctness/UX:** keybind `insert-pane-number` / `insert-pane-padded`
+      kebab aliases accepted; `--check-config` no longer flags the valid
+      `palette = NAME` named-preset form; remote process-tree tie-breaks sorted by
+      PID (deterministic split-clone / pane-title target); hints IP regex clamps
+      octets to 0–255; the byte→column map no longer over-selects a token ending
+      in a multi-byte char; `KETTLE_RECORD_RAW_INPUT` is bool-parsed (was
+      any-value-enables — a password-capture footgun; dev-record builds only).
+    - Deferred/tracked lows: MAX_SEQ vs image caps, place_image>256 cells,
+      persist_config duplicate-line edge, `--config` introspection-flag gate,
+      `--list-actions` rows, dev_record UTF-8-split, bg cache stale-on-fail,
+      unfocused-dim OSC-11, session WSL `--cd` restore, `images::prune` dead code.
+
   - **Config/CLI (cycle 913, cycle-912 audit tail).** Three small correctness/
     robustness fixes deferred from the audit: `--check-config` no longer
     false-positives on a `font-feature` trailing comma / empty token (`liga,`,

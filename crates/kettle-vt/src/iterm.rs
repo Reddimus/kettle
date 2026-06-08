@@ -9,8 +9,13 @@ use crate::image::ImageData;
 pub fn decode(body: &str) -> Option<ImageData> {
     let rest = body.strip_prefix("1337;File=")?;
     let (_args, b64) = rest.split_once(':')?;
+    // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace
+    // and `.trim()` only strips the ends, so a line-wrapped OSC-1337 body (raw
+    // newlines aren't ST, so they reach the decoder) silently failed. Strip all
+    // ASCII whitespace first.
+    let cleaned: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
+        .decode(&cleaned)
         .ok()?;
     ImageData::from_encoded(&bytes)
 }

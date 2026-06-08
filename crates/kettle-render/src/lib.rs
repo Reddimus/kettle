@@ -2997,10 +2997,22 @@ impl Renderer {
         // visible branch since DECSCUSR shapes and DEC ?25 hide are
         // independent (a program can use HollowBlock to mean "I'm
         // not in this pane" while still wanting the cursor visible).
-        let draw_cursor = shape != EShape::Hidden && cp.line.0 >= 0 && pv.focused && cursor_visible;
+        // Cycle 916 (file-by-file audit): the cursor point is grid-absolute
+        // (kettle never enters alacritty vi-mode), so when scrolled back
+        // (display_offset > 0) it must convert to a viewport row like the cells
+        // and selection already do (cycle 912) — else a phantom cursor block
+        // paints over scrollback after the text has scrolled away. The old
+        // `cp.line.0 >= 0` guard was dead (a writing cursor's absolute line is
+        // always >= 0); the real visibility test is whether its viewport row is
+        // on screen.
+        let cvrow = cp.line.0 + display_off;
+        let draw_cursor = shape != EShape::Hidden
+            && (0..screen_rows).contains(&cvrow)
+            && pv.focused
+            && cursor_visible;
         if draw_cursor {
             let bx = ox + cp.column.0 as f32 * cw;
-            let by = oy + cp.line.0 as f32 * ch;
+            let by = oy + cvrow as f32 * ch;
             // OSC 12 cursor color override (stored in `term_colors[258]`)
             // takes precedence over the theme — same precedence rule the
             // OSC 4/10/11/12 *query* path returns. Without this, programs

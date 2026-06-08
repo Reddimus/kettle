@@ -333,7 +333,15 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
         // genuine closer as "still pasted text" and never leaving paste
         // mode, swallowing further input. Alacritty/iTerm2/WezTerm all
         // strip both.
-        let safe = body.replace("\x1b[200~", "").replace("\x1b[201~", "");
+        // Strip in a FIXPOINT loop, not a single left-to-right pass: a crafted
+        // body like `\x1b[20\x1b[201~1~` re-forms an intact `\x1b[201~` across
+        // the splice seam after one `.replace`, leaving a live closer that ends
+        // bracketed paste early and auto-runs the tail. Loop until no marker
+        // survives (cycle 916, file-by-file audit).
+        let mut safe = body;
+        while safe.contains("\x1b[200~") || safe.contains("\x1b[201~") {
+            safe = safe.replace("\x1b[200~", "").replace("\x1b[201~", "");
+        }
         let mut v = Vec::with_capacity(safe.len() + 12);
         v.extend_from_slice(b"\x1b[200~");
         v.extend_from_slice(safe.as_bytes());
@@ -363,6 +371,27 @@ mod tests {
             p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
             1,
             "embedded bracketed-paste end marker must be stripped"
+        );
+    }
+
+    #[test]
+    fn paste_strips_overlap_reconstructed_marker() {
+        // Cycle 916 (file-by-file audit): a single left-to-right `.replace` pass
+        // leaves a marker that re-forms across the splice seam.
+        // `\x1b[20\x1b[201~1~` -> (strip inner `\x1b[201~`) -> `\x1b[201~`. The
+        // fixpoint loop must leave exactly ONE closer (the wrapper's). The old
+        // single-pass code left two (the reconstructed one auto-runs the tail).
+        let p = paste_payload("a\x1b[20\x1b[201~1~b", true);
+        assert_eq!(
+            p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
+            1,
+            "overlap-reconstructed end marker must be stripped to the fixpoint"
+        );
+        let q = paste_payload("a\x1b[20\x1b[200~0~b", true);
+        assert_eq!(
+            q.windows(6).filter(|w| *w == b"\x1b[200~").count(),
+            1,
+            "overlap-reconstructed start marker must be stripped to the fixpoint"
         );
     }
 

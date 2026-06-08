@@ -812,8 +812,12 @@ impl Action {
             | "edit-terminal-title"
             | "edit_pane_title"
             | "edit-pane-title" => EditPaneTitle,
-            "insert_number" | "insert-number" | "insert_pane_number" => InsertPaneNumber,
-            "insert_padded" | "insert-padded" | "insert_pane_padded" => InsertPanePadded,
+            "insert_number" | "insert-number" | "insert_pane_number" | "insert-pane-number" => {
+                InsertPaneNumber
+            }
+            "insert_padded" | "insert-padded" | "insert_pane_padded" | "insert-pane-padded" => {
+                InsertPanePadded
+            }
             "insert_name" | "insert-name" | "insert_pane_name" | "insert-pane-name"
             | "insert_term_name" | "insert-term-name" => InsertPaneName,
             "open_cwd" | "open-cwd" | "open_cwd_in_file_manager" | "open-cwd-in-file-manager" => {

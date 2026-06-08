@@ -144,21 +144,34 @@ fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<
     std::mem::swap(&mut img.rgba, scratch);
 }
 
+/// Home directory for `~/` expansion. Cycle 916 (file-by-file audit): Windows is
+/// the primary platform and sets `USERPROFILE`, not `HOME`, so a HOME-only probe
+/// silently failed every `background-image = ~/wallpaper.png` there. Mirrors
+/// kettle-core's `home_dir_fallback` (HOME -> USERPROFILE -> APPDATA).
+fn home_dir() -> Option<String> {
+    for key in ["HOME", "USERPROFILE", "APPDATA"] {
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
 pub fn decode_bg_image(path: &str) -> Option<BgImage> {
     if path.trim().is_empty() {
         return None;
     }
     let expanded = if let Some(stripped) = path.strip_prefix("~/") {
-        std::env::var("HOME")
-            .ok()
-            .map(|h| format!("{h}/{stripped}"))
+        home_dir().map(|h| format!("{}/{stripped}", h.trim_end_matches(['/', '\\'])))
     } else {
         Some(path.to_string())
     };
     let p = match expanded {
         Some(s) => s,
         None => {
-            log::warn!("background-image: can't expand ~ (HOME unset): {path}");
+            log::warn!("background-image: can't expand ~ (no HOME/USERPROFILE): {path}");
             return None;
         }
     };

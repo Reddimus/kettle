@@ -211,7 +211,16 @@ pub fn decode(data: &[u8]) -> Option<ImageData> {
                         let pct = |v: i64| (v.clamp(0, 100) * 255 / 100) as u8;
                         Rgb(pct(comps[0]), pct(comps[1]), pct(comps[2]))
                     } else {
-                        hls_to_rgb(comps[0] as f32, comps[1] as f32, comps[2] as f32)
+                        // Cycle 916 (file-by-file audit): clamp HLS components
+                        // like the RGB branch (cycle 860) — read_num saturates a
+                        // long digit run at i64::MAX, so an unclamped cast feeds
+                        // garbage hue/lightness/saturation into hls_to_rgb. Spec
+                        // ranges: H 0..=360, L/S 0..=100.
+                        hls_to_rgb(
+                            comps[0].clamp(0, 360) as f32,
+                            comps[1].clamp(0, 100) as f32,
+                            comps[2].clamp(0, 100) as f32,
+                        )
                     };
                     if (pc as usize) < palette.len() {
                         palette[pc as usize] = rgb;

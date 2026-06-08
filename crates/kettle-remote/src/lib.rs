@@ -283,6 +283,13 @@ fn build_children_index<T: ProcessTree + ?Sized>(
             children_by_parent.entry(parent).or_default().push(*pid);
         }
     }
+    // Cycle 916 (file-by-file audit): all_pids() comes from sysinfo's HashMap, so
+    // sibling order is non-deterministic. BFS over it made equal-depth tie-breaks
+    // (which shell a Split clones; which remote client the pane title shows) flap
+    // run-to-run. Sort each sibling list so the lowest PID deterministically wins.
+    for kids in children_by_parent.values_mut() {
+        kids.sort_unstable();
+    }
     children_by_parent
 }
 

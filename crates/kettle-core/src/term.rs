@@ -1170,7 +1170,14 @@ impl Terminal {
     pub fn has_running_animation(&self) -> bool {
         self.anims
             .lock()
-            .map(|am| am.values().any(|e| e.state.running))
+            // Cycle 916 (file-by-file audit): require a DISPLAYABLE frame, not
+            // just the running flag. With all-zero gaps current_frame never
+            // advances, yet a bare `running` check kept the UI scheduling a
+            // ~30fps redraw forever for an animation that can never change.
+            .map(|am| {
+                am.values()
+                    .any(|e| e.state.running && e.gaps.iter().any(|&g| g > 0))
+            })
             .unwrap_or(false)
     }
 

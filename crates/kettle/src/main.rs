@@ -1184,9 +1184,20 @@ fn main() -> anyhow::Result<()> {
         record: cli
             .record
             .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from)),
+        // Cycle 916 (file-by-file audit): bool-PARSE the env var — `is_some()`
+        // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
+        // enabling raw keystroke (password) capture into the trace. Only an
+        // explicit truthy value enables it. (dev-record feature only.)
         #[cfg(feature = "dev-record")]
         record_raw_input: cli.record_raw_input
-            || std::env::var_os("KETTLE_RECORD_RAW_INPUT").is_some(),
+            || std::env::var("KETTLE_RECORD_RAW_INPUT")
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(false),
     })
 }
 

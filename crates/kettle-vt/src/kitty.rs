@@ -771,8 +771,12 @@ fn inflate_bounded(compressed: &[u8], cap: u64) -> Option<Vec<u8>> {
 
 fn decode(control: &str, b64: &str) -> Option<ImageData> {
     let kv = parse_control(control);
+    // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace;
+    // `.trim()` only strips the ends. Strip all ASCII whitespace so a line-wrapped
+    // single-shot kitty payload still decodes (the chunked m=1 path is fine).
+    let cleaned: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let raw = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
+        .decode(&cleaned)
         .ok()?;
     let raw = if kv.get("o").map(|s| s == "z").unwrap_or(false) {
         inflate_bounded(&raw, crate::image::MAX_IMAGE_BYTES)?

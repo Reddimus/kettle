@@ -151,8 +151,14 @@ pub fn is_safe_url(uri: &str) -> bool {
 /// and reject any backslash / `file:////` / percent-encoded traversal that could
 /// smuggle an authority back in.
 fn is_local_file_url(uri: &str) -> bool {
-    let Some(rest) = uri.strip_prefix("file://") else {
-        return false;
+    // Cycle 916 (file-by-file audit): the scheme is matched case-insensitively
+    // upstream (is_safe_url lowercases it before the `file` arm), so accept
+    // `FILE://` / `File://` here too — a case-sensitive strip rejected valid
+    // uppercase-scheme local files while the authority/traversal checks below
+    // (which already use a lowercased copy) stayed intact.
+    let rest = match uri.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("file://") => &uri[7..],
+        _ => return false,
     };
     let lowered = uri.to_ascii_lowercase();
     if uri.contains("..")

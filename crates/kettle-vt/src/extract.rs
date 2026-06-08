@@ -292,12 +292,20 @@ impl Extractor {
         let result = match mode {
             Mode::Dcs => {
                 // Sixel: params then 'q' then data.
-                if let Some(qpos) = seq.iter().position(|&c| c == b'q') {
-                    sixel::decode(&seq[qpos + 1..])
+                // Cycle 916 (file-by-file audit): a Sixel DCS is `P1;P2;P3 q
+                // <data>` — the bytes before `q` are only digits / `;`. Requiring
+                // that prefix shape stops other DCS strings whose body contains a
+                // `q` (DECRQSS `$q…`, XTGETTCAP `+q…`) from being swallowed as
+                // tiny spurious images; those now forward verbatim (R::None).
+                match seq
+                    .iter()
+                    .position(|&c| c == b'q')
+                    .filter(|&q| seq[..q].iter().all(|&c| c.is_ascii_digit() || c == b';'))
+                {
+                    Some(qpos) => sixel::decode(&seq[qpos + 1..])
                         .map(|i| R::Img(Placed::plain(i)))
-                        .unwrap_or(R::None)
-                } else {
-                    R::None
+                        .unwrap_or(R::None),
+                    None => R::None,
                 }
             }
             Mode::Apc => {

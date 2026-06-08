@@ -316,6 +316,13 @@ impl LuaEngine {
             // fails the gauntlet rather than silently widening the
             // surface.
         }
+        // Cycle 916 (file-by-file audit): cap the VM heap. The instruction-budget
+        // hook below only fires on Lua bytecode dispatch, so a single native call
+        // (`string.rep('X', 1<<32)`, unbounded table growth) allocates before any
+        // check can fire — this turns runaway allocation into a recoverable Lua
+        // error instead of an OOM-abort of kettle. 256 MiB is far above any sane
+        // plugin yet bounds a hostile/buggy one.
+        lua.set_memory_limit(256 << 20)?;
         // Cycle 900 (audit): install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
         // top-level invocation exceeds `max_hook_fires` fires it errors out,

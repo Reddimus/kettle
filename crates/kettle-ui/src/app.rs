@@ -3957,10 +3957,17 @@ impl App {
         let rect = self.focused_rect(self.area())?;
         let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
         let (row, col) = (p.line.0.max(0) as usize, p.column.0);
-        // Clamp to the pane's geometric grid (same cell size `px_to_point`
-        // used): a click in the right/bottom padding rounds up to `cols`/`rows`,
-        // one past the edge, which a mouse-tracking app mis-renders.
-        let (cols, rows) = self.grid_of(rect);
+        // Clamp to the pane's geometric grid (same cell size AND titlebar inset
+        // `px_to_point` used): a click in the right/bottom padding rounds up to
+        // `cols`/`rows`, one past the edge, which a mouse-tracking app
+        // mis-renders. Cycle 916 (file-by-file audit): clamp against the INSET
+        // grid (the size the split pane's PTY was actually given by resize_all) —
+        // the zero-inset `grid_of` left the row ceiling ~1 too high in a
+        // titlebar'd split, so a bottom-edge click reported one row past the
+        // PTY's last valid row to mouse-tracking TUIs.
+        let titlebar_h =
+            self.pane_titlebar_inset(self.mux.layout(self.mux.active, self.area()).len());
+        let (cols, rows) = self.grid_of_inset(rect, titlebar_h);
         Some((
             row.min(rows.saturating_sub(1)),
             col.min(cols.saturating_sub(1)),
@@ -9094,6 +9101,13 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.cursor.y as f32,
                             );
                             self.mux.set_split_ratio(self.mux.active, &path, ratio);
+                            // Cycle 916 (file-by-file audit): the layout-tree
+                            // ratio changed, but each pane's PTY grid is resized
+                            // only by resize_all (the keyboard resize path reaches
+                            // it via handle_action's tail). Without this the child
+                            // TUIs keep their old cols/rows — rendering clipped —
+                            // until some unrelated event fires a resize.
+                            self.resize_all();
                             if let Some(w) = &self.window {
                                 w.set_cursor(Self::resize_cursor_for(dir));
                                 w.request_redraw();

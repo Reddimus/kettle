@@ -2410,10 +2410,22 @@ impl Config {
                 // ignored. The fix is one-sided (docs+diagnostic);
                 // adding runtime support for 16..255 means a much
                 // bigger Theme/renderer refactor.
-                "palette" => v.split_once('=').is_some_and(|(i, h)| {
-                    i.trim().parse::<usize>().is_ok_and(|n| n < 16)
-                        && Rgb::parse(h.trim()).is_some()
-                }),
+                "palette" => {
+                    // Cycle 916 (file-by-file audit): parse_collect accepts BOTH
+                    // `palette = N=#hex` (single-slot override) AND `palette =
+                    // NAME` (a Terminator-style named palette via Theme::find_name
+                    // with `_`->` ` fallback). The diagnostic only knew the first
+                    // form, so a valid bare name was falsely flagged malformed —
+                    // the inverse of the silent-fallback trap this check exists for.
+                    if let Some((i, h)) = v.split_once('=') {
+                        i.trim().parse::<usize>().is_ok_and(|n| n < 16)
+                            && Rgb::parse(h.trim()).is_some()
+                    } else {
+                        let name = v.trim();
+                        Theme::find_name(name).is_some()
+                            || Theme::find_name(&name.replace('_', " ")).is_some()
+                    }
+                }
                 // Cycle 309: trigger patterns must be valid regex.
                 // Without this check, a malformed pattern like
                 // `trigger = [unclosed` parses (the config layer

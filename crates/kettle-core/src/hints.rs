@@ -42,7 +42,16 @@ fn res() -> &'static [(Kind, Regex)] {
             ),
             (
                 Kind::Ip,
-                Regex::new(r"\b\d{1,3}(?:\.\d{1,3}){3}\b").unwrap(),
+                // Cycle 916 (file-by-file audit): clamp each octet to 0..=255 (was
+                // `\d{1,3}`, which surfaced 999.999.999.999 and other out-of-range
+                // dotted numbers as IP quick-select targets). The `regex` crate
+                // has no lookaround, so a 5-group `1.2.3.4.5` can still match its
+                // first four octets — acceptable since the only Ip action is a
+                // clipboard copy (no network/open).
+                Regex::new(
+                    r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b",
+                )
+                .unwrap(),
             ),
             (
                 Kind::Hash,
@@ -61,18 +70,20 @@ use crate::url_trim::trim_trailing;
 pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
     let mut out: Vec<HintSpan> = Vec::new();
     for (row, line) in rows.iter().enumerate() {
-        // Byte offset -> char column for this line.
+        // Byte offset -> char column for this line. Cycle 916 (file-by-file
+        // audit): push each char's column exactly `len_utf8()` times (matching
+        // links.rs/search.rs) so a multi-byte char's continuation bytes map to
+        // ITS column, not the next one — the old `while v.len() <= b` attributed a
+        // trailing non-ASCII char's bytes to the following column, so
+        // double-clicking a token ending in e.g. `é` over-selected by one cell.
         let col_of_byte: Vec<usize> = {
             let mut v = Vec::with_capacity(line.len() + 1);
-            for (col, (b, ch)) in line.char_indices().enumerate() {
-                while v.len() <= b {
+            for (col, ch) in line.chars().enumerate() {
+                for _ in 0..ch.len_utf8() {
                     v.push(col);
                 }
-                let _ = ch;
             }
-            while v.len() <= line.len() {
-                v.push(line.chars().count());
-            }
+            v.push(line.chars().count()); // sentinel for the end-exclusive byte
             v
         };
         let mut taken: Vec<(usize, usize)> = Vec::new(); // byte ranges claimed
