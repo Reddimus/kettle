@@ -1467,18 +1467,23 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     if !bak.exists() {
         std::fs::write(&bak, &existing)?;
     }
-    // Drop any existing `keybind` line whose trigger (the part before the first
-    // `=` in the value) equals this one, case-insensitively — re-rebinding the
-    // same chord should overwrite, not stack.
-    let want = trigger.trim().to_ascii_lowercase();
+    // Drop any existing `keybind` line whose trigger is the SAME chord — a
+    // re-rebind should overwrite, not stack. Cycle 913 (audit): compare
+    // SEMANTICALLY via `parse_trigger` (and split the value on the LAST `=`, like
+    // apply_keybind + the cycle-832 diagnostic), so the editor's canonical
+    // `Ctrl+Equal` and a hand-written `ctrl+=` count as the same trigger, and a
+    // literal `=` chord (`ctrl+==action`) de-dups correctly. The old first-`=`
+    // string compare missed both and accumulated a stale duplicate line.
+    let want_trig = keybinds::parse_trigger(trigger.trim());
     let mut out: Vec<String> = Vec::with_capacity(existing.lines().count() + 2);
     for line in existing.lines() {
         let drop = parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
+            && want_trig.is_some()
             && line
                 .split_once('=')
-                .and_then(|(_, v)| v.split_once('='))
-                .map(|(t, _)| t.trim().to_ascii_lowercase() == want)
-                .unwrap_or(false);
+                .and_then(|(_, v)| v.rsplit_once('='))
+                .and_then(|(t, _)| keybinds::parse_trigger(t.trim()))
+                == want_trig;
         if !drop {
             out.push(line.to_string());
         }
@@ -1907,7 +1912,7 @@ impl Config {
     /// `--check-config` diagnostic used to validate only 8 of these, so a typo
     /// in any of the other ~90 (`borderless = treu`, `login-shell = yse`)
     /// passed validation and then silently kept the default at runtime. Kept in
-    /// lockstep with `parse_collect` by `bool_keys_round_trip_through_diagnostic`.
+    /// lockstep with `parse_collect` by `bool_and_enum_typos_are_all_flagged`.
     const BOOL_KEYS: &'static [&'static str] = &[
         "allow-bold",
         "allow_bold",
@@ -7111,6 +7116,45 @@ tab-bar-width = 200\n";
             "re-binding the same chord must not stack lines: {text2:?}"
         );
         assert!(text2.contains("keybind = Ctrl+Alt+R=new_tab"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cycle 913 (audit): `append_keybind` de-dups SEMANTICALLY — re-binding the
+    /// same chord written in a different case (or a literal `=` chord) overwrites
+    /// the old line instead of stacking a stale duplicate. The old first-`=`
+    /// string compare missed these.
+    #[test]
+    fn append_keybind_dedupes_by_semantic_trigger() {
+        let dir = tempdir_for("keybind-sem");
+        let path = dir.join("config");
+        // Existing line uses lower-case; the rebind uses canonical case —
+        // different STRING, same CHORD.
+        std::fs::write(&path, "keybind = ctrl+alt+r=split_right\n").unwrap();
+        super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").expect("rebind");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let trig = super::keybinds::parse_trigger("Ctrl+Alt+R").unwrap();
+        // Exactly one keybind line resolves to this chord (the old case-variant
+        // line was de-duped, not stacked).
+        let count = text
+            .lines()
+            .filter(|l| {
+                l.trim_start().starts_with("keybind")
+                    && l.split_once('=')
+                        .and_then(|(_, v)| v.rsplit_once('='))
+                        .and_then(|(t, _)| super::keybinds::parse_trigger(t.trim()))
+                        .as_ref()
+                        == Some(&trig)
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "case-variant chord must de-dup, not stack: {text:?}"
+        );
+        let cfg = super::Config::parse_text(&text);
+        assert_eq!(
+            cfg.keybinds.get(&trig),
+            super::Action::from_name("new_tab").as_ref()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

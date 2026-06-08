@@ -13,11 +13,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `--screenshot` and `--screenshot-menu` are mutually exclusive (clap
     `conflicts_with`) instead of silently dropping one; and a whitespace-only
     `-e`/`--exec` program name (`kettle -e ""`) fails loudly at the CLI surface.
-    Test: `cli_screenshot_flags_are_mutually_exclusive`. Remaining low-severity
-    audit items — per-frame Vec pooling, `append_keybind` `=`-hygiene,
-    `images::prune` wiring (memory is already bounded by the 512-placement cap),
-    the `BOOL_KEYS` forward-only test, and the app.rs god-object extraction —
-    stay tracked for a future cycle.
+    Test: `cli_screenshot_flags_are_mutually_exclusive`.
+
+  - **Config (cycle 914, audit tail).** `append_keybind` (the interactive keybind
+    editor's persistence) now de-dups SEMANTICALLY via `parse_trigger` and splits
+    the value on the LAST `=` like `apply_keybind` — so re-binding a chord written
+    in a different case (`ctrl+alt+r` vs `Ctrl+Alt+R`) or a literal `=` chord
+    (`ctrl+==action`) overwrites the old line instead of stacking a stale
+    duplicate (the old first-`=` string compare missed both). Test:
+    `append_keybind_dedupes_by_semantic_trigger`; plus a stale `BOOL_KEYS`
+    doc-reference corrected. Remaining tracked low-severity audit items —
+    per-frame Vec pooling (bounded/low-impact perf), `images::prune` wiring
+    (memory already bounded by the 512-placement cap), and the app.rs god-object
+    extraction (a multi-cycle incremental refactor) — deferred for a future cycle.
 
 ## [2.12.0] — 2026-06-08
 
