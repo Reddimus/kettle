@@ -1016,6 +1016,14 @@ impl Renderer {
         // every other UI element. The menu's text is rendered by
         // `menu_text_renderer` after this pass so the labels land on
         // top of the panel bg. Cycle 251.
+        //
+        // Cycle 915 (audit): the four per-frame buffers below (menu_q / over /
+        // img_items / live) are INTENTIONALLY allocated fresh each frame, unlike
+        // the pooled `quad_scratch` / `span_scratch`. They are small and usually
+        // near-empty (no open context menu, a handful of panes, no cell images),
+        // so the allocation is trivial; high-water pooling is reserved for the
+        // large per-cell `quads` / `spans` buffers where it actually pays off.
+        // The asymmetry is deliberate, not an oversight.
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
