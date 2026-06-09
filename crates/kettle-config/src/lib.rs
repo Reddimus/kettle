@@ -1186,8 +1186,13 @@ pub struct Config {
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
     pub font_features: Vec<FontFeature>,
-    pub search_foreground: Rgb,
-    pub search_background: Rgb,
+    /// Cycle 920: `None` = derive from the active theme (so the search /
+    /// quick-select highlight matches whatever theme is set, incl. the Catppuccin
+    /// Mocha default — `search_background` falls back to `theme.palette[3]`, the
+    /// theme's yellow; `search_foreground` to `theme.background`). An explicit
+    /// `search-foreground`/`search-background` config value overrides.
+    pub search_foreground: Option<Rgb>,
+    pub search_background: Option<Rgb>,
     pub keybinds: Bindings,
     /// Shell override; `None` uses `$SHELL` / platform default.
     pub shell: Option<String>,
@@ -1656,8 +1661,8 @@ impl Default for Config {
             word_delimiters: String::new(),
             font_ligatures: true,
             font_features: Vec::new(),
-            search_foreground: Rgb::new(0x1a, 0x1b, 0x26),
-            search_background: Rgb::new(0xe0, 0xaf, 0x68),
+            search_foreground: None, // cycle 920: derive from theme.background
+            search_background: None, // cycle 920: derive from theme.palette[3]
             keybinds: keybinds::defaults(),
             shell: None,
             ssh_hosts: Vec::new(),
@@ -2640,12 +2645,12 @@ impl Config {
                 }
                 "search-foreground" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.search_foreground = c;
+                        cfg.search_foreground = Some(c);
                     }
                 }
                 "search-background" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.search_background = c;
+                        cfg.search_background = Some(c);
                     }
                 }
                 "scrollback-limit" | "scrollback" => {

@@ -4,6 +4,28 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  **Cycle 920 — UI chrome colors derive from the theme.** A focused
+  adversarially-verified audit of every UI/UX color (render passes + config
+  color defaults) found that while most chrome already cascades through the
+  theme, a few elements were baked to legacy literals that clashed with the
+  Catppuccin Mocha default (and every other theme). Now theme-derived so they
+  match whatever theme is set; explicit `*-color` config overrides still win:
+
+  - **Search-match + quick-select highlight** no longer use a hardcoded
+    TokyoNight amber (`#e0af68`) / bg (`#1a1b26`). `search-foreground` /
+    `search-background` became `Option<Rgb>` defaulting to the theme (the
+    background falls back to `theme.palette[3]` — the theme's yellow; the
+    foreground to `theme.background`), so the *active* highlight now matches its
+    theme-derived *inactive* sibling instead of clashing beside it.
+  - **Per-pane titlebars (non-focused states)** dropped their Terminator/legacy
+    literals: the broadcast bar mirrors the focused accent cascade
+    (`→ theme.palette[4]`), the inactive bar uses the theme surface
+    (`theme.palette[8]`), and the title/close-glyph text derives from
+    `theme.cursor_text` / `theme.foreground` so it stays readable on the
+    now-theme-colored bars (fixes black-on-dark + white-on-light contrast).
+
 ## [2.15.1] — 2026-06-09
 
   Post-v2.15.0 patch: a whole-codebase audit batch (cycle 919) + the cycle-918

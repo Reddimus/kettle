@@ -1588,7 +1588,11 @@ impl Renderer {
                         hl.width as f32 * cw,
                         ch,
                         if hl.active {
-                            cfg.search_background
+                            // Cycle 920: the active match follows the theme's
+                            // yellow (Mocha #f9e2af) unless overridden, so it
+                            // matches the inactive highlight's theme.selection_bg
+                            // instead of a hardcoded TokyoNight amber.
+                            cfg.search_background.unwrap_or(theme.palette[3])
                         } else {
                             theme.selection_background
                         },
@@ -1606,7 +1610,7 @@ impl Renderer {
                         if hint.dim {
                             theme.palette[8]
                         } else {
-                            cfg.search_background
+                            cfg.search_background.unwrap_or(theme.palette[3])
                         },
                         if hint.dim { 0.6 } else { 0.96 },
                     ));
@@ -2162,15 +2166,18 @@ impl Renderer {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, rh) = pv.rect;
                 // Cycle 387: matching fg variant for the three states.
+                // Cycle 920: derive from the theme so the title text stays
+                // readable + on-theme. The focused + broadcast bars are the
+                // theme's (light) blue `palette[4]`, so their text is the dark
+                // `theme.cursor_text`; the inactive bar is the dark `palette[8]`
+                // surface, so its text is the light `theme.foreground`. Explicit
+                // `title-*-fg-color` config still overrides.
                 let fg = if pv.focused {
-                    cfg.title_transmit_fg_color
-                        .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
+                    cfg.title_transmit_fg_color.unwrap_or(theme.cursor_text)
                 } else if tabbar.broadcast {
-                    cfg.title_receive_fg_color
-                        .unwrap_or(Rgb::new(0xff, 0xff, 0xff))
+                    cfg.title_receive_fg_color.unwrap_or(theme.cursor_text)
                 } else {
-                    cfg.title_inactive_fg_color
-                        .unwrap_or(Rgb::new(0x00, 0x00, 0x00))
+                    cfg.title_inactive_fg_color.unwrap_or(theme.foreground)
                 };
                 // Cycle 385: text-area position mirrors the
                 // cycle-385 bar position so the title text follows
@@ -2236,8 +2243,10 @@ impl Renderer {
                 let (cx, _, ccw, _) = s.close;
                 let hovered = tabbar.hovered_close_idx == Some(s.idx);
                 let close_fg = if hovered {
-                    // Hover: white-ish for contrast on the red chip.
-                    Rgb::new(0xff, 0xff, 0xff)
+                    // Cycle 920: dark glyph (theme.cursor_text) on the theme-red
+                    // close chip (palette[1]) — higher contrast than white on the
+                    // Mocha pink-red, and tracks the theme instead of a literal.
+                    theme.cursor_text
                 } else {
                     // Rest: dim chrome — readable but secondary.
                     theme.palette[8]
@@ -2332,7 +2341,9 @@ impl Renderer {
         }
         // Hint labels over the focused pane (chips drawn above as quads).
         if let Some((frx, fry, frw, frh)) = focus_origin {
-            let lab = cfg.search_foreground;
+            // Cycle 920: hint-label text follows the theme background (dark on
+            // the theme-yellow chip) unless overridden.
+            let lab = cfg.search_foreground.unwrap_or(theme.background);
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
@@ -3293,9 +3304,12 @@ fn build_rich_spans<'a>(
 /// `title_transmit_bg_color = #hex` still wins — anyone who pinned the
 /// Terminator look keeps it.
 ///
-/// Receive (broadcast) and inactive fall back to their pre-cycle-710
-/// defaults: the broadcast blue is already accent-derived and the
-/// inactive gray is neutral enough across themes.
+/// Cycle 920: receive (broadcast) and inactive now ALSO derive from the theme
+/// (they were hardcoded Terminator/legacy literals — `#0076c9` blue and
+/// `#c0bebf` grey — that clashed with a dark theme like the Catppuccin Mocha
+/// default). Broadcast mirrors the focused cascade (accent → `palette[4]`);
+/// inactive falls back to the theme's surface `palette[8]`. Explicit
+/// `title-*-bg-color` config still wins.
 ///
 /// Pure so the cascade is drift-guarded without standing up wgpu.
 pub(crate) fn pick_titlebar_bg(
@@ -3311,10 +3325,10 @@ pub(crate) fn pick_titlebar_bg(
             .unwrap_or(theme.palette[4])
     } else if broadcast {
         cfg.title_receive_bg_color
-            .unwrap_or(Rgb::new(0x00, 0x76, 0xc9))
+            .or(cfg.accent_color)
+            .unwrap_or(theme.palette[4])
     } else {
-        cfg.title_inactive_bg_color
-            .unwrap_or(Rgb::new(0xc0, 0xbe, 0xbf))
+        cfg.title_inactive_bg_color.unwrap_or(theme.palette[8])
     }
 }
 
@@ -4902,33 +4916,41 @@ mod pick_titlebar_bg_tests {
         assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), pinned);
     }
 
-    /// Unfocused + non-broadcast = inactive gray. No cascade change
-    /// here — pinning the pre-cycle-710 behavior.
+    /// Cycle 920: unfocused + non-broadcast derives from the theme's surface
+    /// `palette[8]` (was a hardcoded `#c0bebf` grey that clashed with dark
+    /// themes like the Catppuccin Mocha default). An explicit
+    /// `title-inactive-bg-color` still wins.
     #[test]
-    fn unfocused_titlebar_falls_back_to_inactive_gray() {
+    fn unfocused_titlebar_derives_from_theme_surface() {
         let theme = Theme::by_name("Default");
         let mut cfg = Config::default();
         cfg.title_inactive_bg_color = None;
         assert_eq!(
             pick_titlebar_bg(&cfg, &theme, false, false),
-            Rgb::new(0xc0, 0xbe, 0xbf)
+            theme.palette[8]
         );
         let pinned = Rgb::new(0x33, 0x33, 0x33);
         cfg.title_inactive_bg_color = Some(pinned);
         assert_eq!(pick_titlebar_bg(&cfg, &theme, false, false), pinned);
     }
 
-    /// Unfocused + broadcast = receive blue. No cascade change here —
-    /// pinning pre-cycle-710 behavior.
+    /// Cycle 920: unfocused + broadcast mirrors the focused cascade
+    /// (`title-receive-bg-color → accent-color → theme.palette[4]`) — was a
+    /// hardcoded `#0076c9` Terminator blue. An explicit value still wins.
     #[test]
-    fn broadcast_titlebar_falls_back_to_receive_blue() {
+    fn broadcast_titlebar_derives_from_theme_accent() {
         let theme = Theme::by_name("Default");
         let mut cfg = Config::default();
         cfg.title_receive_bg_color = None;
+        cfg.accent_color = None;
         assert_eq!(
             pick_titlebar_bg(&cfg, &theme, false, true),
-            Rgb::new(0x00, 0x76, 0xc9)
+            theme.palette[4]
         );
+        // accent_color wins over the theme fallback.
+        let accent = Rgb::new(0x12, 0x34, 0x56);
+        cfg.accent_color = Some(accent);
+        assert_eq!(pick_titlebar_bg(&cfg, &theme, false, true), accent);
     }
 }
 

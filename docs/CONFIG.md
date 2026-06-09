@@ -36,7 +36,7 @@ keys). The file is **watched and reloaded live**.
 | `cursor-color` | color | from theme | |
 | `selection-background` / `selection-foreground` | color | from theme | |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
-| `search-foreground` / `search-background` | color | amber on dark | Search highlight |
+| `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
 | `scrollback` | int / `infinite` | `10000` | Lines of history; `0`, `infinite` or `unlimited` = effectively unbounded |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `background-opacity` | float | `1.0` | 0..1 |
