@@ -4,10 +4,11 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.15.1] — 2026-06-09
 
-  Post-v2.15.0 follow-ups (cycles 918 tail + 919 audit), folding into the next
-  release.
+  Post-v2.15.0 patch: a whole-codebase audit batch (cycle 919) + the cycle-918
+  tail. Fixes the v2.15.0 session-restore data-loss path, ships the Catppuccin
+  signature mauve icon, and syncs the docs.
 
   **Cycle 919 — whole-codebase production-grade audit** (8 dimensions —
   Rust safety, complexity/memory, testing, UI/UX states, cross-platform incl.
