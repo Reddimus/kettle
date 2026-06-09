@@ -1155,6 +1155,13 @@ pub struct Config {
     /// dismissable notification. Opt-out (`update-check = false`); never runs on
     /// the first launch or in packaged builds. Notify-only — never installs.
     pub update_check: bool,
+    /// Cycle 918: restore the previous session's tabs/splits/working-dirs on
+    /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
+    /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
+    /// opens FRESH (a single pane in the default cwd). Opt in with
+    /// `restore-session = true` (or the `--restore` flag) to continue where you
+    /// left off. The session is always SAVED so opt-in restore has state to load.
+    pub restore_session: bool,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -1642,6 +1649,7 @@ impl Default for Config {
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
             update_check: true,
+            restore_session: false, // cycle 918: fresh-by-default; opt in to restore
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
@@ -1814,10 +1822,26 @@ impl Config {
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Option<PathBuf> {
         let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
+        // `XDG_CONFIG_HOME` is the explicit cross-platform override on every OS.
+        // Cycle 918 (config split-brain): the per-OS fallback then differs.
+        // On Windows the canonical per-user dir is `%APPDATA%\kettle` — a stray
+        // `HOME` (git-bash / MSYS / WSL-interop all export one) must NOT redirect
+        // the GUI to `~/.config`, or a Start-menu launch (no HOME) and a shell
+        // launch (HOME set) read DIFFERENT config + session files (the user hit
+        // exactly this: a `~/.config/kettle/session.json` with a stale theme while
+        // `%APPDATA%` had the right one). On Unix, `HOME/.config` is the standard
+        // XDG fallback. A Windows user who genuinely wants `~/.config` sets
+        // `XDG_CONFIG_HOME` (honored above on all platforms).
+        let os_fallback = || {
+            if cfg!(windows) {
+                var("APPDATA").map(PathBuf::from)
+            } else {
+                var("HOME").map(|h| PathBuf::from(h).join(".config"))
+            }
+        };
         let base = var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .or_else(|| var("APPDATA").map(PathBuf::from))?;
+            .or_else(os_fallback)?;
         Some(base.join("kettle").join("config"))
     }
 
@@ -2004,6 +2028,8 @@ impl Config {
         "title_hide_sizetext",
         "title_use_system_font",
         "update-check",
+        "restore-session",
+        "restore_session",
         "urgent-bell",
         "urgent_bell",
         "use-custom-command",
@@ -3368,6 +3394,13 @@ impl Config {
                         cfg.update_check = b;
                     }
                 }
+                // Cycle 918: opt IN to restoring the last session on launch
+                // (off by default — fresh windows, mainstream behavior).
+                "restore-session" | "restore_session" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.restore_session = b;
+                    }
+                }
                 "scroll-on-keystroke" | "scroll-on-input" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.scroll_on_keystroke = b;
@@ -4124,6 +4157,22 @@ tab-bar-width = 200\n";
         }
     }
 
+    /// Cycle 918: session restore is OPT-IN (fresh windows by default, like
+    /// mainstream terminals). Pin the default + that the bool key parses both
+    /// spellings, so a regression to always-restore is caught.
+    #[test]
+    fn restore_session_defaults_off_and_parses() {
+        assert!(
+            !Config::default().restore_session,
+            "session restore must be OFF by default (fresh windows)"
+        );
+        assert!(Config::parse_text("restore-session = true\n").restore_session);
+        assert!(Config::parse_text("restore_session = true\n").restore_session);
+        assert!(!Config::parse_text("restore-session = false\n").restore_session);
+        // It is in BOOL_KEYS so `--check-config` validates it.
+        assert!(Config::BOOL_KEYS.contains(&"restore-session"));
+    }
+
     #[test]
     fn default_is_catppuccin_mocha() {
         // Cycle 917 (#5): the shipped default is Catppuccin Mocha (the darkest
@@ -4164,8 +4213,9 @@ tab-bar-width = 200\n";
             Config::default_path_from(from(&[("XDG_CONFIG_HOME", "/x")])),
             Some(PathBuf::from("/x").join("kettle").join("config")),
         );
-        // XDG_CONFIG_HOME empty, HOME set → HOME-based path
-        // ($HOME/.config/kettle/config), absolute.
+        // Cycle 918 (config split-brain): the non-XDG fallback is now per-OS.
+        // On Unix, XDG empty + HOME set → `$HOME/.config/kettle/config`.
+        #[cfg(not(windows))]
         assert_eq!(
             Config::default_path_from(from(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])),
             Some(
@@ -4175,11 +4225,34 @@ tab-bar-width = 200\n";
                     .join("config"),
             ),
         );
-        // Both empty, APPDATA set (Windows) → APPDATA-based path.
-        // PathBuf::join uses the platform separator (`/` on Linux/Mac,
-        // `\` on Windows); build the expected value the same way
-        // rather than hardcoding either form so the assertion holds on
-        // every CI runner.
+        // On Windows, a stray HOME is IGNORED (it would split-brain the GUI vs a
+        // shell launch); APPDATA is the canonical per-user dir. This is the exact
+        // regression a git-bash/WSL `HOME` caused.
+        #[cfg(windows)]
+        {
+            // HOME set but no APPDATA → None (HOME must NOT be used on Windows).
+            assert_eq!(
+                Config::default_path_from(from(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])),
+                None,
+                "Windows must not fall back to HOME/.config (config split-brain)"
+            );
+            // HOME set AND APPDATA set → APPDATA wins, HOME ignored.
+            assert_eq!(
+                Config::default_path_from(from(&[
+                    ("HOME", r"C:\Users\me"),
+                    ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+                ])),
+                Some(
+                    PathBuf::from(r"C:\Users\me\AppData\Roaming")
+                        .join("kettle")
+                        .join("config"),
+                ),
+            );
+        }
+        // XDG empty + APPDATA set → APPDATA-based path ON WINDOWS (Unix has no
+        // APPDATA fallback, so it yields None there). PathBuf::join uses the
+        // platform separator so the expected value matches on each runner.
+        #[cfg(windows)]
         assert_eq!(
             Config::default_path_from(from(&[
                 ("XDG_CONFIG_HOME", ""),
@@ -4192,7 +4265,17 @@ tab-bar-width = 200\n";
                     .join("config"),
             ),
         );
-        // All three empty → None (rather than the pre-cycle relative
+        // XDG set → wins on EVERY OS (the explicit cross-platform override),
+        // even with a Windows-style APPDATA also present.
+        assert_eq!(
+            Config::default_path_from(from(&[
+                ("XDG_CONFIG_HOME", "/x"),
+                ("HOME", "/h"),
+                ("APPDATA", r"C:\u\AppData\Roaming"),
+            ])),
+            Some(PathBuf::from("/x").join("kettle").join("config")),
+        );
+        // All set-but-empty → None (rather than the pre-cycle relative
         // `"kettle/config"`).
         assert_eq!(
             Config::default_path_from(from(&[

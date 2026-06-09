@@ -100,6 +100,11 @@ pub struct Options {
     /// the tab with adopted fds (running shells preserved).
     /// Unix-only.
     pub tab_handoff_fd: Option<i32>,
+    /// Cycle 918: `--restore` — restore the previous session (tabs/splits/dirs)
+    /// for THIS launch, regardless of the `restore-session` config default
+    /// (which is off). A one-shot "continue where I left off" without editing
+    /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
+    pub restore: bool,
     /// Cycle 875: developer session-recorder output path (`--record PATH`).
     /// Writes an asciicast-compatible trace. Only present in `dev-record`
     /// feature builds — absent from released / packaged binaries.

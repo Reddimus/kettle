@@ -213,6 +213,14 @@ see
 .B Action::SaveLayoutAs " / " Action::RestoreLayout
 for in-window save/restore.
 .TP
+.B \-\-restore
+Restore the previous session (tabs, splits, working directories)
+for this launch. By default kettle opens a fresh window \(em a single
+pane in the default working directory, matching mainstream terminals.
+Use this flag for a one-shot "continue where I left off" without setting
+.B restore-session = true
+in the config.
+.TP
 .BI \-\-accent \ COLOR
 Tint this window's chrome (peacock parity) with the
 named or hex color, so multiple kettle windows are visually

@@ -5580,7 +5580,11 @@ impl App {
                 self.context_menu = None;
                 self.cfg.theme_name = name.clone();
                 self.cfg.theme = kettle_config::Theme::by_name(&name);
-                self.save_session();
+                // Cycle 918: theme is config-governed — persist to the config
+                // file (not the session). A session-pinned theme used to OVERRIDE
+                // the config/compile-time default on restore, so a default change
+                // (or a fresh-config user) never saw the new theme.
+                self.persist_pref("theme", &name);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -6634,7 +6638,7 @@ impl App {
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
                 self.cfg.theme_name = name.to_string();
                 self.cfg.theme = kettle_config::Theme::by_name(name);
-                self.save_session(); // persist so the choice sticks
+                self.persist_pref("theme", name); // cycle 918: config-governed
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -6647,7 +6651,7 @@ impl App {
                 ) {
                     self.cfg.theme_name = next.clone();
                     self.cfg.theme = kettle_config::Theme::by_name(&next);
-                    self.save_session();
+                    self.persist_pref("theme", &next); // cycle 918: config-governed
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -7223,7 +7227,11 @@ impl App {
 
     fn save_session(&self) {
         let mut s = self.mux.snapshot();
-        s.theme = Some(self.cfg.theme_name.clone());
+        // Cycle 918: theme is config-governed (persisted to the config file via
+        // `persist_pref`), NOT stored in the session. A session-pinned theme used
+        // to OVERRIDE the config/compile-time default on restore, so a default
+        // change (or a fresh-config user) silently kept the old theme.
+        s.theme = None;
         // Cycle 291: when launched with `--layout NAME`, save to the
         // named-layout file instead of the default session.json. Lets
         // the user maintain distinct workspaces ("dev", "ops", "docs")
@@ -8089,15 +8097,12 @@ impl App {
                         self.persist_pref("window-padding-y", &new_val);
                     }
                     self.reload_config();
-                    // Cycle 880: `theme` is the one Settings key also mirrored in
-                    // the session file. persist+reload only wrote the config, so
-                    // on an unclean exit (crash/kill/reboot) before the next
-                    // save_session, startup's session-theme override would revert
-                    // this pick. Sync the session now, like the NextTheme /
-                    // context-menu SetTheme / ToggleLightDark paths do.
-                    if key_str == "theme" {
-                        self.save_session();
-                    }
+                    // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid
+                    // is gone. It existed only to defend against startup's
+                    // session-theme override (now removed) reverting a Settings
+                    // pick after an unclean exit. The pick is durably written to
+                    // the config `theme =` line by `persist_pref` above, which is
+                    // the single source of truth on restart.
                 }
             }
             _ => {}
@@ -8806,40 +8811,31 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             } else if let Some(path) = self.startup.tab_handoff.as_deref() {
                 crate::session::Session::load_tab_handoff(path)
+            } else if let Some(name) = self.startup.layout.as_deref() {
+                // `--layout NAME` is an explicit named-workspace restore.
+                crate::session::Session::load_layout(name)
+            } else if self.startup.restore || self.cfg.restore_session {
+                // Cycle 918: the default last-session restore is OPT-IN now —
+                // fresh windows by default, matching every mainstream terminal
+                // (GNOME Terminal, Windows Terminal, kitty, Alacritty, WezTerm,
+                // iTerm2). Enable "continue where I left off" with `--restore`
+                // (one-shot) or `restore-session = true` (config). The session is
+                // still SAVED on exit, so there is state to restore when opted in.
+                crate::session::Session::load()
             } else {
-                match self.startup.layout.as_deref() {
-                    Some(name) => crate::session::Session::load_layout(name),
-                    None => crate::session::Session::load(),
-                }
+                None
             };
             match loaded {
                 Some(s) if !s.is_empty() => {
-                    // A theme picked at runtime last session sticks until
-                    // the user changes it again or reloads the config.
-                    if let Some(name) = s.theme.as_deref()
-                        && !name.eq_ignore_ascii_case(&self.cfg.theme_name)
-                        // Case-insensitive — `Theme::by_name` is already
-                        // case-insensitive (cycle 0), and a session
-                        // written by an older kettle (or hand-edited)
-                        // might hold a lowercase theme name that the
-                        // pre-cycle-152 `contains(&name)` would reject
-                        // verbatim despite the theme existing. Match
-                        // `by_name`'s semantics here so the check
-                        // agrees with the apply.
-                        && let Some(canonical) = kettle_config::Theme::find_name(name)
-                    {
-                        // Cycle 177 (companion to 176): store the
-                        // *canonical* name from the bundled set so
-                        // `--check-config` and runtime palette agree
-                        // after restore too. A session file written by
-                        // an older kettle (pre-176) might hold a typo'd
-                        // or all-lowercase theme name; using
-                        // `find_name`'s canonical return keeps the
-                        // restore in lock-step with parse_collect's
-                        // cycle-176 behavior.
-                        self.cfg.theme_name = canonical.to_string();
-                        self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                    }
+                    // Cycle 918: the theme is NO LONGER applied from the session.
+                    // It is config-governed (the config `theme =` line, with the
+                    // compile-time default as fallback), persisted via
+                    // `persist_pref`. Applying a session-stored theme here used to
+                    // OVERRIDE the config/default on every restore, so a user with
+                    // any prior session kept the old theme even after the default
+                    // changed (the exact "theme didn't update to Catppuccin" bug).
+                    // `s.theme` is ignored (kept on the struct only for back-compat
+                    // parsing of older session.json files).
                     let proxy = self.proxy.clone();
                     let mk = move || -> kettle_core::Waker {
                         let p = proxy.clone();

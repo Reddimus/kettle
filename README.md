@@ -72,9 +72,10 @@ and **WezTerm** into one tool.
 - **Drag-and-drop files** — drop any file onto the window and its
   shell-quoted path is inserted at the cursor (with a trailing space, so
   `cat ` + drop + Enter works). Honors broadcast mode.
-- **Session restore** — the tab/split tree and each pane's working directory
-  are saved and restored across launches; new tabs/splits also inherit the
-  focused pane's current directory (OSC 7).
+- **Session restore (opt-in)** — new windows open fresh by default (like every
+  mainstream terminal); enable `restore-session = true` (or pass `--restore`) to
+  reopen the previous tab/split tree and per-pane working directories on launch.
+  New tabs/splits always inherit the focused pane's current directory (OSC 7).
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
   `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
   persist across sessions.

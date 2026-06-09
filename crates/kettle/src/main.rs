@@ -204,6 +204,14 @@ struct Cli {
     #[arg(long, value_name = "NAME", verbatim_doc_comment)]
     layout: Option<String>,
 
+    /// Restore the previous session (tabs, splits, working dirs) for this
+    /// launch. kettle opens a FRESH window by default (a single pane in the
+    /// default cwd), like every mainstream terminal; pass `--restore` for a
+    /// one-shot "continue where I left off" without setting
+    /// `restore-session = true` in your config.
+    #[arg(long, verbatim_doc_comment)]
+    restore: bool,
+
     /// Restore a tab from a JSON handoff file written by another
     /// kettle process. Used by Action::MoveTabToNewWindow on
     /// platforms without SCM_RIGHTS (Windows + Wayland) — the
@@ -1175,6 +1183,7 @@ fn main() -> anyhow::Result<()> {
         cwd: cli.working_directory,
         config: config_path,
         layout: cli.layout,
+        restore: cli.restore,
         accent_override,
         remote_file,
         lua_script: cli.lua_script,

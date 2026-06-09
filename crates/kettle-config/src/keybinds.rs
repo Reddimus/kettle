@@ -675,6 +675,15 @@ pub fn action_names() -> Vec<&'static str> {
         "open-update",
         "dismiss_update",
         "dismiss-update",
+        // Cycle 918: these two bindable actions had `from_name` aliases + tests
+        // but were omitted from the discovery list, so `kettle --list-actions`
+        // silently hid them. The reverse-coverage drift guard below now catches
+        // any future omission.
+        "insert_name",
+        "insert_pane_name",
+        "insert_term_name",
+        "open_cwd",
+        "open_cwd_in_file_manager",
     ];
     v.sort_unstable();
     v
@@ -1482,6 +1491,20 @@ mod tests {
                 Action::from_name(n).is_some(),
                 "action_names returned {n:?} but from_name rejects it"
             );
+        }
+        // Cycle 918 reverse guard: these two bindable actions were accepted by
+        // `from_name` (each with a round-trip test) yet missing from
+        // `action_names()`, so `kettle --list-actions` silently hid them. Pin
+        // them so the omission can't recur. (The general reverse-coverage check —
+        // every Action variant has a listed spelling — would need an Action
+        // iterator/strum; this targeted guard covers the gap that actually bit.)
+        for must in ["insert_pane_name", "open_cwd_in_file_manager"] {
+            assert!(
+                names.contains(&must),
+                "{must:?} is bindable (from_name accepts it) but absent from \
+                 action_names() — `--list-actions` would hide it"
+            );
+            assert!(Action::from_name(must).is_some());
         }
         // Also pin `goto_tab:N` (the only parametric form). It isn't
         // in `action_names` because N is unbounded, but it must parse.

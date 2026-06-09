@@ -399,15 +399,28 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
                     && a[1..].contains('c'))
         }),
         // PowerShell: -Command / -c (prefix-abbreviated, case-insensitive) or
-        // -File both run and exit.
-        "pwsh" | "powershell" => rest.iter().any(|a| {
-            let stripped = a
-                .strip_prefix('-')
-                .or_else(|| a.strip_prefix('/'))
-                .unwrap_or(a);
-            let lower = stripped.to_ascii_lowercase();
-            !lower.is_empty() && ("command".starts_with(&lower) || "file".starts_with(&lower))
-        }),
+        // -File both run and exit — UNLESS -NoExit keeps the session open.
+        "pwsh" | "powershell" => {
+            let norm = |a: &String| {
+                a.strip_prefix('-')
+                    .or_else(|| a.strip_prefix('/'))
+                    .unwrap_or(a)
+                    .to_ascii_lowercase()
+            };
+            // Cycle 918: `-NoExit` keeps the session interactive even alongside
+            // `-Command`/`-File`, so such an invocation is NOT one-shot. Match its
+            // prefix-abbreviations (`-noe`…`-noexit`) without colliding with
+            // `-NoLogo`/`-NoProfile` (which differ at the 3rd letter).
+            let noexit = rest.iter().any(|a| {
+                let s = norm(a);
+                s.len() >= 3 && "noexit".starts_with(&s)
+            });
+            !noexit
+                && rest.iter().any(|a| {
+                    let s = norm(a);
+                    !s.is_empty() && ("command".starts_with(&s) || "file".starts_with(&s))
+                })
+        }
         // cmd: `/c` runs then exits; `/k` runs then STAYS interactive (allowed).
         "cmd" => rest
             .iter()
@@ -1442,6 +1455,9 @@ mod tests {
             &["zsh"],
             &["pwsh"],
             &["pwsh", "-NoLogo"],
+            // -NoExit keeps the session interactive even with -Command/-File.
+            &["pwsh", "-NoExit", "-Command", "x"],
+            &["pwsh", "-noe", "-c", "x"],
             &["cmd"],
             &["cmd", "/k", "x"],
             &["wsl"],

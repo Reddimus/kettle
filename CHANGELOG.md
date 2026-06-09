@@ -4,6 +4,53 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.15.0] — 2026-06-09
+
+  Session/theme UX overhaul + a small audit batch, all from live use on the
+  maintainer's machines. Cycle 918. The headline: kettle now opens **fresh
+  windows by default** (like every mainstream terminal) and the **theme is
+  config-governed**, fixing a class of "my setting didn't take" surprises.
+
+  - **Session restore is opt-in (fresh windows by default).** Previously every
+    launch — including a second concurrent instance — restored the full split
+    tree + working dirs from `session.json`, so opening a new window cloned your
+    layout and two windows raced to write the session. That is non-standard:
+    GNOME Terminal, Windows Terminal, kitty, Alacritty, WezTerm, and iTerm2 all
+    open a fresh window (single pane, default cwd). kettle now matches them. Opt
+    in to "continue where you left off" with `restore-session = true` (config) or
+    `--restore` (one-shot). The session is still saved on exit, and `--layout
+    NAME` / tab-handoff remain explicit restore paths.
+  - **Theme is config-governed; a stale session no longer overrides it.** The
+    theme was persisted in `session.json` and *overrode* the config/compile-time
+    default on restore — so after the default changed (or for a user with any
+    prior session) the old theme stuck (the "theme didn't update to Catppuccin"
+    report). The theme now lives in the config `theme =` line (with the
+    compile-time default as fallback); every runtime theme change — the Settings
+    picker, the right-click Theme submenu, Next/PrevTheme, light/dark toggle —
+    persists there. The session no longer stores or applies a theme (the field is
+    kept only so older `session.json` files still parse).
+  - **Windows config-dir split-brain fixed.** `Config::default_path` fell back
+    `XDG_CONFIG_HOME → HOME/.config → APPDATA`. On Windows a stray `HOME` (git-bash
+    / MSYS / WSL-interop all export one) sent a shell-launched kettle to
+    `~/.config` while a Start-menu launch used `%APPDATA%` — two different config
+    + session files, so settings (and the theme) appeared to randomly not apply.
+    Windows now uses `%APPDATA%\kettle` for the non-XDG fallback (ignoring `HOME`,
+    a Unix idiom); `XDG_CONFIG_HOME` is still honored everywhere as the explicit
+    override. Unix behavior is unchanged.
+  - **`--list-actions` no longer hides bindable actions.** `insert_pane_name` and
+    `open_cwd_in_file_manager` had `from_name` aliases (and tests) but were absent
+    from the hand-maintained discovery list. Added, plus a reverse-coverage drift
+    guard so a future omission fails CI.
+  - **Background-image cache: clear on decode failure.** When the bg-image path
+    changed to one that fails to decode, the renderer kept showing the *previous*
+    wallpaper and re-attempted the failing decode every frame. It now caches the
+    failed (path, blur) key so a stale image never renders and the broken decode
+    isn't retried per-frame.
+  - **`pwsh -NoExit -Command …` is treated as interactive.** The cycle-917
+    one-shot-shell guard flagged any `-Command`/`-File` pwsh as non-interactive;
+    `-NoExit` keeps the session open, so such an invocation is now correctly
+    interactive (a benign false-positive that fell back to the pane's own shell).
+
 ## [2.14.0] — 2026-06-09
 
   Three user-reported Ubuntu bugs fixed (each reproduced with a failing test

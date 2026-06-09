@@ -521,7 +521,12 @@ pub struct Renderer {
     // ~256 MiB); it is freed (`= None`) when the config moves away from
     // `background-type = image` so a large wallpaper doesn't sit resident
     // for the rest of the session after the user turns it off.
-    bg_image_cache: Option<(String, u32, kettle_core::ImageData)>,
+    //
+    // Cycle 918: the inner `Option<ImageData>` is `None` when the current
+    // (path, blur) was tried and FAILED to decode. Caching the failed key
+    // (a) stops rendering the previous wallpaper after the path changes to a
+    // broken one, and (b) stops re-attempting the failing decode every frame.
+    bg_image_cache: Option<(String, u32, Option<kettle_core::ImageData>)>,
 
     /// `Arc<str>` so `render_frame_with_status`'s per-frame
     /// `self.font_family.clone()` (needed to satisfy the borrow checker while
@@ -1056,18 +1061,22 @@ impl Renderer {
                 .as_ref()
                 .map(|(p, b, _)| p != &want || *b != blur_radius)
                 .unwrap_or(true);
-            if need_reload
-                && let Some(decoded) = bg_image::decode_bg_image_with_blur(&want, blur_radius)
-            {
-                use std::sync::Arc;
-                let data = kettle_core::ImageData {
-                    width: decoded.width,
-                    height: decoded.height,
-                    rgba: Arc::new(decoded.rgba),
-                };
-                self.bg_image_cache = Some((want.clone(), blur_radius, data));
+            if need_reload {
+                // Cycle 918: store the (path, blur) key even when decode fails
+                // (inner `None`). Without this the stale wallpaper kept rendering
+                // for a now-broken path AND `need_reload` stayed true, re-decoding
+                // the failing file every frame.
+                let decoded = bg_image::decode_bg_image_with_blur(&want, blur_radius).map(|d| {
+                    use std::sync::Arc;
+                    kettle_core::ImageData {
+                        width: d.width,
+                        height: d.height,
+                        rgba: Arc::new(d.rgba),
+                    }
+                });
+                self.bg_image_cache = Some((want.clone(), blur_radius, decoded));
             }
-            if let Some((_, _, data)) = self.bg_image_cache.as_ref() {
+            if let Some((_, _, Some(data))) = self.bg_image_cache.as_ref() {
                 // Cycle 390 (Terminator parity, bg-image Bucket-D
                 // sub-cycle 5): UV-mode variants. background-image-mode
                 // controls how the decoded image fills the surface.
@@ -5119,7 +5128,7 @@ mod pane_buffer_lifecycle_tests {
     fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
         let src = include_str!("lib.rs");
         assert!(
-            src.contains("Option<(String, u32, kettle_core::ImageData)>"),
+            src.contains("Option<(String, u32, Option<kettle_core::ImageData>)>"),
             "bg_image_cache must key on (path, blur_radius) so a blur toggle \
              reloads even when the path is unchanged"
         );
@@ -5132,6 +5141,19 @@ mod pane_buffer_lifecycle_tests {
                 && src.contains("self.bg_image_cache = None;"),
             "the decoded wallpaper must be freed when background-type leaves \
              image / the path is cleared"
+        );
+        // Cycle 918: on a needed reload the key is stored UNCONDITIONALLY (inner
+        // None on decode failure), and only a successfully-decoded entry renders.
+        // Together these stop a stale wallpaper rendering for a broken new path
+        // and stop re-decoding the failing file every frame.
+        assert!(
+            src.contains("self.bg_image_cache = Some((want.clone(), blur_radius, decoded));"),
+            "a failed decode must still cache the (path, blur) key to avoid a \
+             per-frame re-decode of the broken path"
+        );
+        assert!(
+            src.contains("if let Some((_, _, Some(data))) = self.bg_image_cache.as_ref()"),
+            "only a successfully-decoded cache entry may render (no stale image)"
         );
     }
 
