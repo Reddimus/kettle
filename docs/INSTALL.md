@@ -178,7 +178,7 @@ To bootstrap a commented starter config in the right spot for your OS:
 ```sh
 # Linux / WSL    — ~/.config/kettle/config (or $XDG_CONFIG_HOME/kettle/config)
 # macOS          — ~/.config/kettle/config (kettle uses XDG paths, not ~/Library)
-# Windows        — ~/.config/kettle/config if HOME is set, else %APPDATA%\kettle\config
+# Windows        — %APPDATA%\kettle\config (a stray HOME is ignored; set XDG_CONFIG_HOME for ~/.config)
 # (always run `kettle --config-path` to see the exact resolved location)
 # Easiest + cross-platform safe — creates the directory, writes the file,
 # won't overwrite an existing config:

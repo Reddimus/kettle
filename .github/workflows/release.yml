@@ -24,6 +24,44 @@ jobs:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - uses: actions/checkout@v6
+      # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # consistency gate runs HERE in the single-Linux pretest — before any
+      # per-OS package build — so a version mismatch fails fast and BLOCKS all
+      # platform builds. Previously it lived in the package matrix gated on
+      # `runner.os == 'Linux'`, so macOS/Windows could build + upload artifacts
+      # while only the Linux leg caught the mismatch (a partial-release risk).
+      - name: Tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG consistency
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          # `github.ref_name` for a tag push is the bare tag string
+          # (e.g. `v1.3.9`). Strip the leading `v`.
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $TAG_VER but Cargo.toml says $CARGO_VER"
+            echo "::error::either retag with v$CARGO_VER or bump Cargo.toml to $TAG_VER first"
+            exit 1
+          fi
+          # Cycle 286/765: CHANGELOG.md must carry the dated '## [X.Y.Z] —
+          # YYYY-MM-DD' section for this version (matches scripts/release.sh).
+          if ! grep -qE "^## \[${TAG_VER}\] — [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
+            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER] — YYYY-MM-DD' section"
+            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' (with the date) before tagging"
+            exit 1
+          fi
+          # Cycle 550: flake.nix's hardcoded version must match (release.sh
+          # auto-bumps it; a forgotten bump should fail the release, not ship a
+          # Nix derivation with wrong metadata).
+          if [ -f flake.nix ]; then
+            FLAKE_VER=$(awk -F\" '/^          version = / { print $2; exit }' flake.nix)
+            if [ -n "$FLAKE_VER" ] && [ "$TAG_VER" != "$FLAKE_VER" ]; then
+              echo "::error::tag $GITHUB_REF_NAME but flake.nix says $FLAKE_VER"
+              echo "::error::scripts/release.sh auto-bumps this — re-run it or edit flake.nix"
+              exit 1
+            fi
+          fi
+          echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
         run: |
@@ -75,76 +113,11 @@ jobs:
             experimental: true
     steps:
       - uses: actions/checkout@v6
-      # Guard against tagging drift — if someone tags `v1.3.10` but
-      # forgot to bump `Cargo.toml` from `1.3.9`, the artifacts here
-      # would end up with mixed versions (macOS .app bundle would say
-      # 1.3.9 via the cycle-159 Info.plist patch; the binary's own
-      # `--version` output would also say 1.3.9; only the tag would
-      # claim 1.3.10). Fail fast before any build kicks off so the
-      # fix is a tag retag, not a publish-then-yank.
-      - name: Tag ↔ Cargo.toml ↔ CHANGELOG consistency
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
-        shell: bash
-        run: |
-          # `github.ref_name` for a tag push is the bare tag string
-          # (e.g. `v1.3.9`). Strip the leading `v`.
-          TAG_VER="${GITHUB_REF_NAME#v}"
-          CARGO_VER=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
-          if [ "$TAG_VER" != "$CARGO_VER" ]; then
-            echo "::error::tag $GITHUB_REF_NAME implies version $TAG_VER but Cargo.toml says $CARGO_VER"
-            echo "::error::either retag with v$CARGO_VER or bump Cargo.toml to $TAG_VER first"
-            exit 1
-          fi
-          # Cycle 286: also verify CHANGELOG.md has a section for this
-          # version. A release without a CHANGELOG entry leaves users
-          # who hit `kettle --version` then look at the project's
-          # release notes wondering what changed. Auto-generated
-          # release notes from softprops cover commit messages but
-          # not the human-curated [Unreleased] → [vX.Y.Z] promotion
-          # which is what the repo's Keep-a-Changelog format relies
-          # on.
-          # Cycle 765: enforce the full '## [X.Y.Z] — YYYY-MM-DD' form, matching
-          # scripts/release.sh's check. The looser '^## \[ver\]' pattern would
-          # accept an undated '## [2.2.1]' heading, shipping a release whose
-          # CHANGELOG entry is missing its date.
-          if ! grep -qE "^## \[${TAG_VER}\] — [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
-            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER] — YYYY-MM-DD' section"
-            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' (with the date) before tagging"
-            exit 1
-          fi
-          # Cycle 550: also assert flake.nix's hardcoded version
-          # matches. The Nix-side string drifted 39 releases (cycle
-          # 549 catch); scripts/release.sh now auto-bumps it, but
-          # a forgotten flake.nix bump should fail the release
-          # workflow, not silently ship a Nix derivation with wrong
-          # metadata.
-          if [ -f flake.nix ]; then
-            FLAKE_VER=$(awk -F\" '/^          version = / { print $2; exit }' flake.nix)
-            if [ -n "$FLAKE_VER" ] && [ "$TAG_VER" != "$FLAKE_VER" ]; then
-              echo "::error::tag $GITHUB_REF_NAME but flake.nix says $FLAKE_VER"
-              echo "::error::scripts/release.sh auto-bumps this — re-run it or edit flake.nix"
-              exit 1
-            fi
-          fi
-          # Cycle 558: PKGBUILD + kettle.rb template gates from
-          # cycle 553 were REVERTED. The original intent (catch
-          # forgotten packaging-template bumps) was sound, but
-          # creates a circular dependency:
-          #   - release.sh can't auto-bump them because their
-          #     sha256sums require post-CI artifacts (the
-          #     kettle-{linux,macos}-*.sha256 sidecars).
-          #   - The sidecars only exist AFTER release.yml uploads
-          #     them — which can't happen if a pre-flight gate
-          #     fails on the bump.
-          # The cycle 553 strict-equality gate blocked v1.43.0
-          # release artifacts entirely because PKGBUILD/kettle.rb
-          # carry the previous release's sha256s by design (the
-          # "trail by one" pattern: template at v(N-1) is the
-          # last KNOWN-GOOD AUR/Homebrew target). The cycle 549/
-          # 551/552 reactive bumps remain the right cadence —
-          # update templates when the maintainer re-publishes to
-          # AUR/tap, not on every tag push.
-          echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
+      # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # consistency gate moved to the `pretest` job (single Linux, runs before
+      # any per-OS build) so a version mismatch blocks ALL platform builds,
+      # rather than letting macOS/Windows publish artifacts while only the Linux
+      # package leg caught it (partial-release risk). See the `pretest` job above.
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
         if: runner.os == 'Linux'

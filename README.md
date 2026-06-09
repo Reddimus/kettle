@@ -249,7 +249,7 @@ Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 kettle reads `$XDG_CONFIG_HOME/kettle/config` (Ghostty syntax). Example:
 
 ```ini
-theme = TokyoNight Night
+theme = Catppuccin Mocha
 font-family = JetBrainsMono Nerd Font
 font-size = 13
 background-opacity = 1.0

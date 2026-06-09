@@ -398,8 +398,10 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
                     && a.len() >= 2
                     && a[1..].contains('c'))
         }),
-        // PowerShell: -Command / -c (prefix-abbreviated, case-insensitive) or
-        // -File both run and exit — UNLESS -NoExit keeps the session open.
+        // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
+        // prefix-abbreviated, case-insensitive) all run and exit — UNLESS
+        // -NoExit keeps the session open. Cycle 919 (audit L3) added
+        // -EncodedCommand (`pwsh -e <base64>` is how tools spawn one-shots).
         "pwsh" | "powershell" => {
             let norm = |a: &String| {
                 a.strip_prefix('-')
@@ -418,7 +420,10 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
             !noexit
                 && rest.iter().any(|a| {
                     let s = norm(a);
-                    !s.is_empty() && ("command".starts_with(&s) || "file".starts_with(&s))
+                    !s.is_empty()
+                        && ("command".starts_with(&s)
+                            || "file".starts_with(&s)
+                            || "encodedcommand".starts_with(&s))
                 })
         }
         // cmd: `/c` runs then exits; `/k` runs then STAYS interactive (allowed).
@@ -1436,6 +1441,10 @@ mod tests {
             &["pwsh", "-c", "x"],
             &["pwsh", "-File", "s.ps1"],
             &["powershell.exe", "-co", "x"],
+            // Cycle 919 (audit L3): -EncodedCommand / -e / -enc run a one-shot.
+            &["pwsh", "-EncodedCommand", "AGUA"],
+            &["pwsh", "-e", "AGUA"],
+            &["pwsh", "-enc", "AGUA"],
             &["cmd", "/c", "x"],
             &["wsl", "ls"],
             &["wsl", "-e", "bash", "-c", "x"],
@@ -1458,6 +1467,13 @@ mod tests {
             // -NoExit keeps the session interactive even with -Command/-File.
             &["pwsh", "-NoExit", "-Command", "x"],
             &["pwsh", "-noe", "-c", "x"],
+            &["pwsh", "-NoExit", "-EncodedCommand", "AGUA"],
+            // -ExecutionPolicy (-ep/-ex) is NOT one-shot — it shares the leading
+            // 'e' with -EncodedCommand but diverges at index 1 ("ex"/"ep" are not
+            // a prefix of "encodedcommand"), so a bare `pwsh -ExecutionPolicy
+            // Bypass` stays interactive.
+            &["pwsh", "-ExecutionPolicy", "Bypass"],
+            &["pwsh", "-ep", "Bypass"],
             &["cmd"],
             &["cmd", "/k", "x"],
             &["wsl"],

@@ -445,16 +445,22 @@ fn session_log_path(
 /// are set (CI / container envs). Pure modulo the env-var reader
 /// fn so tests can pin the env.
 fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path::PathBuf> {
-    if let Some(p) = get("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+    let var = |k: &str| get(k).filter(|s| !s.is_empty());
+    // XDG_CACHE_HOME is the explicit cross-platform override.
+    if let Some(p) = var("XDG_CACHE_HOME") {
         return Some(std::path::PathBuf::from(p));
     }
-    if let Some(home) = get("HOME").filter(|s| !s.is_empty()) {
-        return Some(std::path::PathBuf::from(home).join(".cache"));
+    // Cycle 919 (audit L1): per-OS fallback, matching `default_path_from`. On
+    // Windows the canonical per-user cache dir is `%LOCALAPPDATA%`; a stray
+    // `HOME` (git-bash / MSYS / WSL-interop export one) must NOT redirect
+    // screenshots / crash logs to `~/.cache` — the same config-dir split-brain
+    // that bit the config path (a shell launch vs a Start-menu launch would
+    // disagree). On Unix, `HOME/.cache` is the standard XDG fallback.
+    if cfg!(windows) {
+        var("LOCALAPPDATA").map(std::path::PathBuf::from)
+    } else {
+        var("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
     }
-    if let Some(p) = get("LOCALAPPDATA").filter(|s| !s.is_empty()) {
-        return Some(std::path::PathBuf::from(p));
-    }
-    None
 }
 
 /// Cycle 620 (Terminator parity, terminatorlib/config.py:88
@@ -5584,7 +5590,14 @@ impl App {
                 // file (not the session). A session-pinned theme used to OVERRIDE
                 // the config/compile-time default on restore, so a default change
                 // (or a fresh-config user) never saw the new theme.
-                self.persist_pref("theme", &name);
+                // Cycle 919 (audit L4): notify if it can't be written, so the
+                // pick isn't silently lost on the next launch.
+                if !self.persist_pref("theme", &name) {
+                    fire_notify(
+                        "kettle: theme not saved",
+                        "Applied for this session — couldn't write it to your config file.",
+                    );
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -5802,7 +5815,11 @@ impl App {
     /// kill the menu dispatch; the in-memory toggle still applied,
     /// so the user's next session will pick up the runtime change
     /// once it persists.
-    fn persist_pref(&self, key: &str, value: &str) {
+    /// Cycle 919 (audit L4): returns `true` iff the value was written to the
+    /// config file. Callers of user-initiated changes (theme picks, Settings)
+    /// notify the user on `false` so a change that's live this session but lost
+    /// on restart isn't silent.
+    fn persist_pref(&self, key: &str, value: &str) -> bool {
         let Some(path) = self
             .config_path
             .clone()
@@ -5811,7 +5828,7 @@ impl App {
             log::warn!(
                 "persist_pref: no config path resolved (set $XDG_CONFIG_HOME or pass --config)"
             );
-            return;
+            return false;
         };
         match kettle_config::persist_config_toggle(&path, key, value) {
             Ok(bak) => {
@@ -5820,12 +5837,14 @@ impl App {
                     path.display(),
                     bak.display()
                 );
+                true
             }
             Err(e) => {
                 log::warn!(
                     "persist_pref: failed to write {key} = {value} to {}: {e}",
                     path.display()
                 );
+                false
             }
         }
     }
@@ -6638,7 +6657,13 @@ impl App {
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
                 self.cfg.theme_name = name.to_string();
                 self.cfg.theme = kettle_config::Theme::by_name(name);
-                self.persist_pref("theme", name); // cycle 918: config-governed
+                if !self.persist_pref("theme", name) {
+                    // cycle 918: config-governed; cycle 919 (L4): notify on failure
+                    fire_notify(
+                        "kettle: theme not saved",
+                        "Applied for this session — couldn't write it to your config file.",
+                    );
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -6651,7 +6676,13 @@ impl App {
                 ) {
                     self.cfg.theme_name = next.clone();
                     self.cfg.theme = kettle_config::Theme::by_name(&next);
-                    self.persist_pref("theme", &next); // cycle 918: config-governed
+                    if !self.persist_pref("theme", &next) {
+                        // cycle 918: config-governed; cycle 919 (L4): notify on failure
+                        fire_notify(
+                            "kettle: theme not saved",
+                            "Applied for this session — couldn't write it to your config file.",
+                        );
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -7236,9 +7267,16 @@ impl App {
         // named-layout file instead of the default session.json. Lets
         // the user maintain distinct workspaces ("dev", "ops", "docs")
         // without each one clobbering the others on close.
+        // Cycle 919 (audit M1): only write the DEFAULT session.json when this
+        // launch is in restore mode — symmetric with the opt-in load gate. A
+        // fresh (non-opted-in) window must NOT overwrite the saved layout that
+        // `--restore` / `restore-session = true` exists to recover.
         match &self.startup.layout {
             Some(name) => s.save_layout(name),
-            None => s.save(),
+            None if should_restore_session(self.startup.restore, self.cfg.restore_session) => {
+                s.save()
+            }
+            None => {}
         }
     }
 
@@ -8088,7 +8126,14 @@ impl App {
                             crate::settings::next_value(&self.cfg, field, dir),
                         )
                     };
-                    self.persist_pref(key_str, &new_val);
+                    // Cycle 919 (audit L4): notify if the Settings change can't
+                    // be written — it's live this session but lost on restart.
+                    if !self.persist_pref(key_str, &new_val) {
+                        fire_notify(
+                            "kettle: setting not saved",
+                            "Applied for this session — couldn't write it to your config file.",
+                        );
+                    }
                     // Cycle 856 (audit): the single "Window padding" control is
                     // meant to set *uniform* padding, but persisted only the X
                     // axis — leaving `window-padding-y` at its default produced
@@ -8449,6 +8494,19 @@ fn to_mods(m: ModifiersState) -> Mods {
 /// (Normal / Maximise / Fullscreen) is revealed once it has content.
 fn should_reveal_after_first_frame(state: kettle_config::WindowState) -> bool {
     !matches!(state, kettle_config::WindowState::Hidden)
+}
+
+/// Cycle 919 (audit M1/M2): is the default last-session (`session.json`) active
+/// for THIS launch? Drives BOTH the startup restore gate (whether to `load()`)
+/// and the `save_session` gate (whether to `save()` the default session). They
+/// MUST agree: cycle 918 made *load* opt-in (fresh windows by default) but left
+/// *save* unconditional, so a fresh, non-opted-in window silently overwrote the
+/// saved layout that `--restore` exists to recover — data loss against the
+/// feature's own contract. Routing both through this one predicate keeps them
+/// symmetric. `--layout NAME` is independent (its own file, explicit intent) and
+/// always saves/loads regardless.
+fn should_restore_session(startup_restore: bool, cfg_restore_session: bool) -> bool {
+    startup_restore || cfg_restore_session
 }
 
 /// Cycle 812 (audit #10): how long to let the synchronous GPU adapter+device
@@ -8814,7 +8872,7 @@ impl ApplicationHandler<UserEvent> for App {
             } else if let Some(name) = self.startup.layout.as_deref() {
                 // `--layout NAME` is an explicit named-workspace restore.
                 crate::session::Session::load_layout(name)
-            } else if self.startup.restore || self.cfg.restore_session {
+            } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
                 // Cycle 918: the default last-session restore is OPT-IN now —
                 // fresh windows by default, matching every mainstream terminal
                 // (GNOME Terminal, Windows Terminal, kitty, Alacritty, WezTerm,
@@ -10333,7 +10391,7 @@ mod tests {
     use super::{
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
         find_menu_row_y, modal_swallows_pointer, rank_layouts, selection_kind,
-        should_reveal_after_first_frame, typeahead_match,
+        should_restore_session, should_reveal_after_first_frame, typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -10349,6 +10407,65 @@ mod tests {
         assert!(should_reveal_after_first_frame(WindowState::Maximise));
         assert!(should_reveal_after_first_frame(WindowState::Fullscreen));
         assert!(!should_reveal_after_first_frame(WindowState::Hidden));
+    }
+
+    /// Cycle 919 (audit M1/M2): the default-session restore is opt-in. The same
+    /// predicate gates BOTH the startup `load()` and the `save()` so they can't
+    /// drift apart (cycle 918 shipped a load-gated/save-unconditional asymmetry
+    /// that let a fresh window clobber the saved layout). (F,F) — the default —
+    /// means do NOT touch session.json; any opt-in (`--restore` one-shot OR
+    /// `restore-session = true`) turns both load and save back on.
+    #[test]
+    fn restore_session_gate_truth_table() {
+        assert!(
+            !should_restore_session(false, false),
+            "fresh default: no load, no save"
+        );
+        assert!(should_restore_session(true, false), "--restore one-shot");
+        assert!(
+            should_restore_session(false, true),
+            "restore-session = true"
+        );
+        assert!(should_restore_session(true, true));
+    }
+
+    /// Cycle 919 (audit M2) drift guard: in `resumed()`, the explicit restore
+    /// paths (`--tab-handoff-fd`, `--tab-handoff`, `--layout`) must all be
+    /// resolved BEFORE the opt-in default-session branch, so an explicit launch
+    /// target can never be overridden by a stale `session.json`. A future
+    /// re-order of the if/else-if chain would silently break that precedence;
+    /// this pins it at the source level.
+    #[test]
+    fn explicit_restore_paths_precede_default_session() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        // The LOAD gate specifically (`} else if should_restore_session(...)`) —
+        // distinct from the save gate's `None if should_restore_session(...)`,
+        // which uses the same args and appears earlier in the file.
+        let gate = src
+            .find("else if should_restore_session(self.startup.restore")
+            .expect(
+                "the load gate is `} else if should_restore_session(self.startup.restore, ...)`",
+            );
+        let before = &src[..gate];
+        for marker in [
+            "self.startup.tab_handoff_fd",
+            "self.startup.tab_handoff.as_deref()",
+            "self.startup.layout.as_deref()",
+        ] {
+            assert!(
+                before.contains(marker),
+                "{marker} must be resolved BEFORE the opt-in default-session branch \
+                 (explicit launch targets outrank a stale session)"
+            );
+        }
+        // And the SAVE side must be gated by the same predicate (no clobber).
+        assert!(
+            src.contains(
+                "None if should_restore_session(self.startup.restore, self.cfg.restore_session)"
+            ),
+            "save_session must gate the default session.json write behind \
+             should_restore_session — symmetric with the load gate (audit M1)"
+        );
     }
 
     /// Cycle 786 drift guard (audit A1/A2): a mouse press / wheel is swallowed
@@ -12188,26 +12305,48 @@ mod tests {
             cache_dir_from_env(f).as_deref(),
             Some(std::path::Path::new("/x/cache"))
         );
-        // Empty XDG falls through to HOME/.cache.
-        let f = |k: &str| match k {
-            "XDG_CACHE_HOME" => Some(String::new()),
-            "HOME" => Some("/h".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            cache_dir_from_env(f).as_deref(),
-            Some(std::path::Path::new("/h/.cache"))
-        );
-        // Windows-ish fallback when XDG + HOME both unset.
-        let f = |k: &str| match k {
-            "LOCALAPPDATA" => Some(r"C:\Users\u\AppData\Local".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            cache_dir_from_env(f).as_deref(),
-            Some(std::path::Path::new(r"C:\Users\u\AppData\Local"))
-        );
-        // None of the env vars set → None.
+        // Cycle 919 (audit L1): the non-XDG fallback is per-OS, mirroring the
+        // config-dir resolver. On Unix, empty XDG falls through to HOME/.cache.
+        #[cfg(not(windows))]
+        {
+            let f = |k: &str| match k {
+                "XDG_CACHE_HOME" => Some(String::new()),
+                "HOME" => Some("/h".to_string()),
+                _ => None,
+            };
+            assert_eq!(
+                cache_dir_from_env(f).as_deref(),
+                Some(std::path::Path::new("/h/.cache"))
+            );
+        }
+        // On Windows the cache dir is %LOCALAPPDATA%, and a stray HOME is IGNORED
+        // (the config-dir split-brain class — a shell launch must not disagree
+        // with a Start-menu launch).
+        #[cfg(windows)]
+        {
+            // HOME set but no LOCALAPPDATA → None (HOME must not be used).
+            let f = |k: &str| match k {
+                "XDG_CACHE_HOME" => Some(String::new()),
+                "HOME" => Some("/h".to_string()),
+                _ => None,
+            };
+            assert_eq!(
+                cache_dir_from_env(f),
+                None,
+                "Windows must not fall back to HOME/.cache"
+            );
+            // HOME AND LOCALAPPDATA set → LOCALAPPDATA wins, HOME ignored.
+            let f = |k: &str| match k {
+                "HOME" => Some(r"C:\Users\u".to_string()),
+                "LOCALAPPDATA" => Some(r"C:\Users\u\AppData\Local".to_string()),
+                _ => None,
+            };
+            assert_eq!(
+                cache_dir_from_env(f).as_deref(),
+                Some(std::path::Path::new(r"C:\Users\u\AppData\Local"))
+            );
+        }
+        // None of the env vars set → None (every OS).
         assert!(cache_dir_from_env(|_| None).is_none());
     }
 

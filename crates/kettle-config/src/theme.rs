@@ -195,6 +195,25 @@ fn set(slot: &mut Rgb, v: &str) {
 mod tests {
     use super::Theme;
 
+    /// Cycle 919 (audit L6): `Theme::default()` is a hand-transcribed copy of the
+    /// bundled `Catppuccin Mocha` (cycle 917 made it the shipped default). Pin
+    /// that the hard-coded fallback matches the bundled theme byte-for-byte, so a
+    /// typo in the literal palette can't silently diverge the compile-time
+    /// default from what `theme = Catppuccin Mocha` resolves to. (Theme has no
+    /// PartialEq, so compare the Debug fingerprint — the file's convention.)
+    #[test]
+    fn default_matches_bundled_catppuccin_mocha() {
+        assert!(
+            Theme::find_name("Catppuccin Mocha").is_some(),
+            "the bundled Catppuccin Mocha theme must exist (the default resolves to it)"
+        );
+        assert_eq!(
+            format!("{:?}", Theme::default()),
+            format!("{:?}", Theme::by_name("Catppuccin Mocha")),
+            "Theme::default() must equal the bundled Catppuccin Mocha palette"
+        );
+    }
+
     #[test]
     fn cycle_wraps_and_is_reversible() {
         let names = Theme::list();

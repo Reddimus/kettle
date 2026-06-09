@@ -51,8 +51,11 @@ pub struct STab {
 pub struct Session {
     pub tabs: Vec<STab>,
     pub active: usize,
-    /// Theme chosen at runtime (`next_theme`/`prev_theme`); restored on
-    /// launch so a picked theme sticks. `default` so old files still load.
+    /// LEGACY back-compat field. Cycle 919 (audit L7): the theme is now
+    /// CONFIG-governed — every runtime theme change is persisted to the config
+    /// `theme =` line via `persist_pref`, and `save_session` writes this as
+    /// `None` while restore IGNORES it. Kept only so older `session.json` files
+    /// (which stored a theme here) still deserialize. `default` so absent is OK.
     #[serde(default)]
     pub theme: Option<String>,
 }

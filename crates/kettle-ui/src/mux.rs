@@ -3589,6 +3589,54 @@ mod node_tests {
         assert_eq!(tab.focus, 2);
     }
 
+    /// Cycle 919 (audit L5): the cycle-917 stale-focus retry. When `tab.focus`
+    /// points at a leaf NOT in the tree (a focus-desync), `split_leaf` no-ops on
+    /// the stale id; `insert_split` must repair focus to `first_leaf()`, retry,
+    /// graft the new pane, and return true — instead of the old silent no-op that
+    /// orphaned the just-spawned pane (a leaked PTY). The existing test always
+    /// has focus on a valid leaf, so it never exercised this branch.
+    #[test]
+    fn insert_split_repairs_stale_focus_and_grafts() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 99, // stale: not a leaf in the tree
+            zoomed: true,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        };
+        assert!(
+            super::insert_split(&mut tab, 2, Dir::Horizontal),
+            "stale focus must be repaired + the split grafted (returns true)"
+        );
+        assert_eq!(tab.focus, 2, "focus moves to the newly-grafted pane");
+        assert!(!tab.zoomed, "zoom exited");
+        let mut rects = Vec::new();
+        tab.root.layout((0.0, 0.0, 100.0, 50.0), &mut rects);
+        let ids: Vec<u64> = rects.iter().map(|(id, _)| *id).collect();
+        assert!(
+            ids.contains(&1) && ids.contains(&2),
+            "both leaves present: {ids:?}"
+        );
+    }
+
+    /// Cycle 919 (audit L5) drift guard: every split caller that may graft a
+    /// freshly-spawned pane must REAP it (`self.panes.remove(&new_id)`) if the
+    /// graft fails, instead of leaking the PTY/child. There are three such
+    /// callers (`split`, `split_with`, `duplicate_focused_pane`); `>= 3` lets a
+    /// future fourth variant be added without silently skipping the reap (it
+    /// would have to add the reap to keep the count, or fail this guard).
+    #[test]
+    fn split_callers_reap_orphaned_pane_on_graft_failure() {
+        let src = include_str!("mux.rs");
+        let reaps = src.matches("self.panes.remove(&new_id)").count();
+        assert!(
+            reaps >= 3,
+            "expected >= 3 orphan-reap sites (split / split_with / duplicate_focused_pane); found {reaps}"
+        );
+    }
+
     #[test]
     fn zoom_collapses_layout_to_focused_pane() {
         let mut m = Mux::new();

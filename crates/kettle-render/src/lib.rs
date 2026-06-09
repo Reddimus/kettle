@@ -527,6 +527,12 @@ pub struct Renderer {
     // (a) stops rendering the previous wallpaper after the path changes to a
     // broken one, and (b) stops re-attempting the failing decode every frame.
     bg_image_cache: Option<(String, u32, Option<kettle_core::ImageData>)>,
+    /// Cycle 919 (audit L2): when the current bg-image (path, blur) FAILED to
+    /// decode, the earliest `Instant` to retry — throttling self-heal to ≥3s so
+    /// a broken/corrupt path isn't re-decoded every frame. `None` once a decode
+    /// succeeds (the loaded wallpaper never re-decodes) or while no bg image is
+    /// configured.
+    bg_image_retry_at: Option<std::time::Instant>,
 
     /// `Arc<str>` so `render_frame_with_status`'s per-frame
     /// `self.font_family.clone()` (needed to satisfy the borrow checker while
@@ -731,6 +737,7 @@ impl Renderer {
             menu_text_renderer,
             imgs,
             bg_image_cache: None,
+            bg_image_retry_at: None,
             font_family: cfg.font_family.as_str().into(),
             font_size,
             metrics,
@@ -1056,11 +1063,24 @@ impl Renderer {
             // Cycle 892 (audit): reload when the path OR the blur radius
             // changes. Before, blur lived outside the cache key, so toggling
             // `background-blur` on a still-loaded image was silently ignored.
-            let need_reload = self
-                .bg_image_cache
-                .as_ref()
-                .map(|(p, b, _)| p != &want || *b != blur_radius)
-                .unwrap_or(true);
+            let need_reload = match self.bg_image_cache.as_ref() {
+                None => true,
+                // Reload when the (path, blur) key changed, OR — cycle 919 (audit
+                // L2) — when the cached entry is a FAILED decode (inner `None`)
+                // and the throttle has elapsed: a transient read error / an
+                // in-place file fix self-heals, but THROTTLED (≥3s between
+                // attempts) so a broken or corrupt path is NOT re-decoded every
+                // frame (the per-frame thrash cycle 918 removed). A successful
+                // decode clears the throttle, so the happy path never re-decodes.
+                Some((p, b, img)) => {
+                    p != &want
+                        || *b != blur_radius
+                        || (img.is_none()
+                            && self
+                                .bg_image_retry_at
+                                .is_none_or(|t| std::time::Instant::now() >= t))
+                }
+            };
             if need_reload {
                 // Cycle 918: store the (path, blur) key even when decode fails
                 // (inner `None`). Without this the stale wallpaper kept rendering
@@ -1074,6 +1094,13 @@ impl Renderer {
                         rgba: Arc::new(d.rgba),
                     }
                 });
+                // Cycle 919 (audit L2): on failure, throttle the next retry; on
+                // success, clear it so the loaded wallpaper never re-decodes.
+                self.bg_image_retry_at = if decoded.is_none() {
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3))
+                } else {
+                    None
+                };
                 self.bg_image_cache = Some((want.clone(), blur_radius, decoded));
             }
             if let Some((_, _, Some(data))) = self.bg_image_cache.as_ref() {
@@ -1170,6 +1197,7 @@ impl Renderer {
             // an up-to-256-MiB wallpaper isn't pinned for the rest of the
             // session. Re-enabling re-decodes via the need_reload path above.
             self.bg_image_cache = None;
+            self.bg_image_retry_at = None; // cycle 919 (L2): reset the self-heal throttle
         }
 
         // Cycle 296: status-bar background. The text is uploaded
@@ -5133,7 +5161,7 @@ mod pane_buffer_lifecycle_tests {
              reloads even when the path is unchanged"
         );
         assert!(
-            src.contains("p != &want || *b != blur_radius"),
+            src.contains("p != &want") && src.contains("*b != blur_radius"),
             "need_reload must compare blur radius, not just the path"
         );
         assert!(
@@ -5141,6 +5169,15 @@ mod pane_buffer_lifecycle_tests {
                 && src.contains("self.bg_image_cache = None;"),
             "the decoded wallpaper must be freed when background-type leaves \
              image / the path is cleared"
+        );
+        // Cycle 919 (audit L2): a FAILED decode self-heals on a THROTTLE — the
+        // reload condition includes `img.is_none()` gated on `bg_image_retry_at`,
+        // so a transient error / in-place fix recovers without re-decoding a
+        // broken path every frame.
+        assert!(
+            src.contains("img.is_none()") && src.contains("self.bg_image_retry_at"),
+            "a failed bg-image decode must retry (img.is_none()) but throttled \
+             via bg_image_retry_at — self-heal without per-frame thrash"
         );
         // Cycle 918: on a needed reload the key is stored UNCONDITIONALLY (inner
         // None on decode failure), and only a successfully-decoded entry renders.

@@ -14,20 +14,21 @@ Numeric keys with documented ranges
 `scroll-multiplier`, `minimum-contrast`, `cursor-blink-interval`) clamp at
 parse-time *and* flag out-of-range values via `--check-config`.
 
-Config path: kettle probes `$XDG_CONFIG_HOME/kettle/config`, then
-`~/.config/kettle/config` (whenever `HOME` is set — including on Windows under
-Git Bash / WSL-host / many dev setups), then `%APPDATA%\kettle\config` on Windows
-as the last fallback. So on a Windows box with `HOME` set the config lives at
-`~/.config/kettle/config`, not `%APPDATA%`. Always run `kettle --config-path` for
-the authoritative resolved location, or `kettle --check-config` to validate it
-(resolved settings + any unrecognized keys). The file is **watched and reloaded
-live**.
+Config path: kettle first probes `$XDG_CONFIG_HOME/kettle/config` (honored on
+every OS). Failing that, the fallback is per-OS: on Unix/macOS
+`~/.config/kettle/config`, and on Windows `%APPDATA%\kettle\config`. On Windows a
+stray `HOME` (Git Bash / MSYS / WSL-interop all export one) is **intentionally
+ignored** so a Start-menu launch and a shell launch read the same config — set
+`XDG_CONFIG_HOME` if you genuinely want `~/.config` on Windows. Always run
+`kettle --config-path` for the authoritative resolved location, or
+`kettle --check-config` to validate it (resolved settings + any unrecognized
+keys). The file is **watched and reloaded live**.
 
 ## Keys
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `theme` | string | `TokyoNight Night` | Any bundled theme (`kettle --list-themes`) |
+| `theme` | string | `Catppuccin Mocha` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the Settings picker, the right-click Theme submenu, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
@@ -65,6 +66,7 @@ live**.
 | `command-notify-threshold-ms` (`command-notify-threshold`) | int ms | `5000` | Minimum command duration before kettle fires a desktop notification when an OSC 133 D (CommandEnd) event arrives **while the window is unfocused**. `0` disables. Requires shell integration (`kettle --shell-integration bash >> ~/.bashrc` or equivalent) — without OSC 133 the shell never emits the event. Clamped `[0, 86_400_000]` (0..1 day). Terminator parity: `command_notify.py` plugin |
 | `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
 | `update-check` (`check-for-updates`) | bool | `true` | Check GitHub at most once/day for a newer kettle release and show a dismissable notification (click the banner to open the release page). Notify-only — kettle never downloads or installs. Never runs on the first launch or in packaged builds; opt out with `false`. A one-shot `kettle --check-update` checks on demand |
+| `restore-session` (`restore_session`) | bool | `false` | Reopen the previous session (tabs, splits, working dirs) on launch. **Off by default** — like every mainstream terminal, a new window/instance opens fresh (a single pane in the default cwd). The session is always *saved* on exit only when this is on (or `--restore` is passed), so a fresh window never clobbers a saved layout. `--restore` is the one-shot equivalent; `--layout NAME` restores a named workspace independently |
 | `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back (Alacritty `scrolling.history.scroll_on_input`) |
 | `scroll-on-output` | bool | `false` | Jump back to the bottom when new output arrives while scrolled back. Off by default so reading old output isn't interrupted by a chatty background job (Alacritty `scrolling.history.scroll_on_output`) |
 | `mouse-hide-while-typing` (`mouse-hide`) | bool | `true` | Hide the OS mouse cursor while the user is typing; re-shown on the next mouse movement (Alacritty `mouse.hide_when_typing`, kitty `hide_mouse_when_typing`) |

@@ -509,8 +509,14 @@ overrides the install root.
 User config file (Linux). See CONFIGURATION above.
 .TP
 .I ~/.local/share/kettle/sessions/
-Per-window session JSON (atomic write-then-rename); restored on next
-launch with the same window id. Failures are logged via
+Per-window session JSON (atomic write-then-rename). Always saved on exit
+in restore mode; replayed on the next launch only when restore is opted
+in via
+.B restore-session = true
+or the
+.B \-\-restore
+flag (off by default \(em a new window opens fresh). Failures are logged
+via
 .BR log::warn! .
 .TP
 .I ~/.local/bin/kettle

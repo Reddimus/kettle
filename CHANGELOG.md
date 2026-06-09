@@ -6,7 +6,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-  Post-v2.15.0 follow-ups (cycle 918 tail), folding into the next release:
+  Post-v2.15.0 follow-ups (cycles 918 tail + 919 audit), folding into the next
+  release.
+
+  **Cycle 919 — whole-codebase production-grade audit** (8 dimensions —
+  Rust safety, complexity/memory, testing, UI/UX states, cross-platform incl.
+  macOS code, docs, CI/CD+install, architecture — each finding adversarially
+  verified; 20 confirmed, 0 high/critical, false positives filtered):
+
+  - **Fresh window no longer clobbers the saved session (the one real bug).**
+    v2.15.0 made session *load* opt-in but left *save* unconditional, so a fresh
+    (non-opted-in) window overwrote the very `session.json` that `--restore` /
+    `restore-session = true` exists to recover. Both gates now route through one
+    `should_restore_session` predicate (load and save agree) + a truth-table test
+    + a source-order drift guard pinning that `--layout`/tab-handoff outrank a
+    stale session.
+  - **Cache dir split-brain fixed** to match the config dir: on Windows
+    `cache_dir_from_env` now uses `%LOCALAPPDATA%` and ignores a stray `HOME`, so
+    screenshots/crash logs don't land in `~/.cache` on a shell launch.
+  - **`pwsh -EncodedCommand` / `-e` classified one-shot** (tools spawn
+    `pwsh -e <base64>`), so splitting such a foreground pane falls back to the
+    pane's shell instead of cloning a dead pane; `-ExecutionPolicy` stays
+    interactive.
+  - **Background-image self-heal (throttled).** A failed decode now retries at
+    most every ~3 s, so a transient read error / in-place file fix recovers —
+    without the per-frame re-decode of a broken path.
+  - **Runtime theme/setting persistence failures now notify** instead of being
+    silent (the change is live this session but would be lost on restart).
+  - Tests + drift guards added for the cycle-917 `insert_split` stale-focus retry
+    + caller orphan-reap, and a `Theme::default()` == bundled-Catppuccin-Mocha
+    fingerprint guard.
+  - Docs synced for the cycle-918 behavior changes (CONFIG.md theme default +
+    `restore-session` key, ARCHITECTURE.md restore-is-opt-in + diagram, README /
+    man page / example-config), and the release.yml version-consistency gate
+    moved into the single-Linux `pretest` job (fails fast, blocks all platform
+    builds on a version mismatch instead of letting macOS/Windows publish first).
+
+  **Cycle 918 tail:**
 
   - **App icon → Catppuccin signature mauve.** The icon was already the Mocha
     palette but used Mocha's ANSI blue `#89b4fa` for the window border/caret,

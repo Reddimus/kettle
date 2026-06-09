@@ -340,8 +340,12 @@ In-process foundation: `Mux::serialize_tab` +
 ### Session restore
 
 Per-pane working directory + tab/split tree are captured live as the
-user works, atomically written to `session.json`, and replayed on the
-next launch:
+user works and atomically written to `session.json`. Replay on the next
+launch is **opt-in**: by default a new window opens fresh (a single pane
+in the default cwd, like every mainstream terminal), and the
+session is *saved* only in restore mode so a fresh window never clobbers
+a saved layout. Set `restore-session = true` (or pass `--restore` for a
+one-shot) to "continue where you left off":
 
 ```mermaid
 sequenceDiagram
@@ -362,7 +366,8 @@ sequenceDiagram
     Mux->>FS: tempfile write
     FS->>FS: rename → session.json (atomic;<br/>notify-watcher ignores temp)
 
-    Note over App,FS: Next launch
+    Note over App,FS: Next launch — restore is opt-in
+    App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
     App->>FS: read session.json
     FS-->>App: tab tree + per-pane cwd
     App->>Mux: rehydrate split layout
