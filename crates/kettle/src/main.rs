@@ -23,6 +23,10 @@
 
 use clap::Parser;
 
+// Cycle 922 (agent-first A1): headless `kettle exec` engine. Bin-side, no
+// kettle-ui/winit dependency (a source-scan drift guard pins that).
+mod exec;
+
 /// Version string shown by `kettle --version`. Concatenates the
 /// `Cargo.toml` version with the git SHA captured by `build.rs` (or
 /// the empty string when we're not in a git checkout — source
@@ -343,6 +347,52 @@ struct Cli {
     /// arguments (hyphenated flags for the program are passed through).
     #[arg(short = 'e', long = "exec", num_args = 1.., allow_hyphen_values = true, value_name = "CMD")]
     exec: Vec<String>,
+
+    /// Agent-first subcommands (cycle 922+). `kettle exec` runs a command
+    /// headlessly under a real PTY and streams its output to stdout (no GUI);
+    /// `kettle ctl` / `kettle mcp` drive a running kettle programmatically.
+    /// All of kettle's existing flags are the GUI launcher; the subcommands
+    /// are the non-interactive / control surface.
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+/// Agent-first subcommands. Each is a self-contained non-GUI entry point that
+/// returns early from `main` before any winit/GPU work.
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// Run a command under a real PTY, headlessly, and stream its output to
+    /// stdout (the non-interactive counterpart to the GUI). Propagates the
+    /// child's exit code; 124 on `--timeout`, 125 on an internal error.
+    Exec(ExecArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ExecArgs {
+    /// Terminal width in columns (default: probe the console, else 80).
+    #[arg(long)]
+    cols: Option<u16>,
+    /// Terminal height in rows (default: probe the console, else 24).
+    #[arg(long)]
+    rows: Option<u16>,
+    /// Working directory for the child (default: inherit).
+    #[arg(short = 'd', long = "cwd", value_name = "DIR")]
+    cwd: Option<std::path::PathBuf>,
+    /// Kill the child and exit 124 after this many seconds.
+    #[arg(long, value_name = "SECS")]
+    timeout: Option<f64>,
+    /// Strip ANSI escape sequences — emit plain text (good for assertions).
+    #[arg(long, conflicts_with = "json")]
+    strip_ansi: bool,
+    /// Emit one JSON object per line (start / output / title / exit events).
+    #[arg(long)]
+    json: bool,
+    /// Also record the session to an asciicast (.cast) file.
+    #[arg(long, value_name = "PATH")]
+    record: Option<std::path::PathBuf>,
+    /// The command (and its arguments) to run.
+    #[arg(required = true, num_args = 1.., allow_hyphen_values = true, value_name = "CMD", last = false, trailing_var_arg = true)]
+    argv: Vec<String>,
 }
 
 /// Restore SIGPIPE to its default behavior on Unix. Rust's runtime sets
@@ -582,6 +632,46 @@ fn main() -> anyhow::Result<()> {
     // default filter it stays out of the way.
     log::info!("kettle {KETTLE_VERSION} starting");
     let cli = Cli::parse();
+
+    // Cycle 922 (agent-first): subcommands are self-contained non-GUI entry
+    // points. Dispatch BEFORE any GUI flag handling / config-path checks and
+    // exit with the subcommand's own code — `kettle exec`'s exit code is the
+    // child's, so it must drive `std::process::exit`, not `return Ok(())`.
+    if let Some(cmd) = cli.cmd {
+        match cmd {
+            Cmd::Exec(args) => {
+                let mode = if args.json {
+                    exec::OutputMode::Json
+                } else if args.strip_ansi {
+                    exec::OutputMode::StripAnsi
+                } else {
+                    exec::OutputMode::Raw
+                };
+                // Default geometry: probe the attached console, else 80×24.
+                let probed = exec::default_size_probe();
+                let cols = args.cols.unwrap_or_else(|| probed.map(|(c, _)| c).unwrap_or(80));
+                let rows = args.rows.unwrap_or_else(|| probed.map(|(_, r)| r).unwrap_or(24));
+                let opts = exec::ExecOpts {
+                    argv: args.argv,
+                    cols,
+                    rows,
+                    cwd: args.cwd,
+                    timeout: args.timeout.map(std::time::Duration::from_secs_f64),
+                    mode,
+                    record: args.record,
+                    // stdin forwarding is deferred to a follow-up: the pump
+                    // works on Unix PTYs but on Windows `std::io::Stdin`'s
+                    // console translation over a pipe handle drops the bytes
+                    // before they reach the child, and ConPTY does not turn a
+                    // conin pipe-close into EOF for ReadConsole-based readers.
+                    // The agent-critical paths (run a command, capture output,
+                    // propagate the exit code) need no stdin. See docs/AGENT.md.
+                    forward_stdin: false,
+                };
+                std::process::exit(exec::run_exec(opts));
+            }
+        }
+    }
 
     // Explicit `--config PATH` must point at a regular file. Every
     // downstream branch silently fell back to `Config::default()`

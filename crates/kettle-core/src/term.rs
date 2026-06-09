@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
 use anyhow::Result;
@@ -1362,6 +1363,16 @@ impl Terminal {
         }
     }
 
+    /// Cycle 922 (agent-first A1): a cloneable, `Send + Sync` handle to the
+    /// PTY's write side. `Terminal` itself is not `Sync` (it owns the
+    /// `Send`-only master), so a worker thread (e.g. `kettle exec`'s stdin
+    /// pump) can't share the whole engine — but it CAN hold a `PtyWriter` to
+    /// feed input. The handle keeps writing valid bytes even after the
+    /// `Terminal` is dropped (Drop swaps the writer for a discard sink).
+    pub fn writer_handle(&self) -> PtyWriter {
+        PtyWriter(self.writer.clone())
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize, cell_w: u16, cell_h: u16) {
         if cols == 0 || rows == 0 {
             return;
@@ -1395,6 +1406,90 @@ impl Terminal {
             .and_then(|mut c| c.try_wait().ok().flatten())
             .is_some()
     }
+
+    /// Cycle 922 (agent-first A1): kill the child immediately (best-effort).
+    /// Used by `kettle exec --timeout` when the deadline fires. Already-exited
+    /// returns `Err` internally, which we swallow. The reader thread sees EOF
+    /// when the master closes on drop, so no extra teardown is needed here.
+    pub fn kill(&self) {
+        if let Ok(mut c) = self.child.lock() {
+            let _ = c.kill();
+        }
+    }
+
+    /// Cycle 921 (agent-first A1): the child's exit status, if it has exited
+    /// (non-blocking `try_wait`). `child_exited` discards the status; the
+    /// headless `kettle exec` path needs it to propagate the child's exit code
+    /// to its own process exit. `None` while the child is still running (or if
+    /// the child handle is poisoned). On Unix, portable-pty maps signal death
+    /// into the code (e2e pins the observed mapping); callers clamp to 0..=255
+    /// before `std::process::exit` on Unix.
+    pub fn child_exit_code(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .ok()
+            .and_then(|mut c| c.try_wait().ok().flatten())
+            .map(|st| st.exit_code())
+    }
+
+    /// Cycle 921 (agent-first A1/A2): a plain-text snapshot of the grid — up to
+    /// `scrollback_lines` of history (newest history first in document order)
+    /// followed by the full active screen. One lock acquisition; per-line
+    /// trailing whitespace trimmed; `scrollback_lines` hard-capped at 10_000 so
+    /// a hostile/buggy caller can't ask for an unbounded join. Shared by the
+    /// control server's `read_screen`, `run_command` output slicing, and any
+    /// future scripting surface — the single sanctioned grid-scrape.
+    pub fn screen_text(&self, scrollback_lines: usize) -> Option<ScreenText> {
+        let t = self.term.lock().ok()?;
+        Some(screen_text_of(&t, scrollback_lines))
+    }
+}
+
+/// Pure body of [`Terminal::screen_text`], factored on a raw `Term` so the
+/// no-PTY conformance harness can exercise it without spawning a child.
+pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenText {
+    const MAX_SCROLLBACK_LINES: usize = 10_000;
+    let grid = t.grid();
+    let cols = grid.columns();
+    let rows = grid.screen_lines();
+    let history_size = grid.history_size();
+    let display_offset = grid.display_offset();
+    let take = scrollback_lines.min(history_size).min(MAX_SCROLLBACK_LINES);
+    let mut text = String::with_capacity((take + rows) * (cols + 1));
+    let mut line = String::with_capacity(cols);
+    for r in -(take as i32)..rows as i32 {
+        line.clear();
+        for c in 0..cols {
+            line.push(grid[Point::new(Line(r), Column(c))].c);
+        }
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    let cur = grid.cursor.point;
+    ScreenText {
+        text,
+        cols,
+        rows,
+        history_size,
+        display_offset,
+        cursor: (cur.line.0.max(0) as usize, cur.column.0),
+    }
+}
+
+/// Cycle 921 (agent-first): the result of [`Terminal::screen_text`] — the
+/// joined plain text plus the grid geometry an agent needs to interpret it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenText {
+    /// History tail + active screen, newline-joined, per-line right-trimmed.
+    pub text: String,
+    pub cols: usize,
+    pub rows: usize,
+    /// Total scrollback lines available (not how many were returned).
+    pub history_size: usize,
+    /// Current scroll position (0 = at the bottom).
+    pub display_offset: usize,
+    /// Cursor (row in the active screen, col).
+    pub cursor: (usize, usize),
 }
 
 impl Drop for Terminal {
@@ -1470,8 +1565,37 @@ impl EventProxy {
     }
 }
 
-/// The kitty image-id bits a placeholder cell's foreground color carries:
-/// a 256-palette index is the low byte, a truecolor spec is the low 24
+/// Cycle 922 (agent-first A1): a cloneable, thread-safe handle to a PTY's write
+/// side, obtained from [`Terminal::writer_handle`]. Lets a worker thread feed
+/// input to the child without sharing the (non-`Sync`) `Terminal`.
+#[derive(Clone)]
+pub struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl PtyWriter {
+    /// Write all of `bytes` to the PTY (best-effort; a poisoned lock or a
+    /// closed PTY is silently dropped, same policy as `Terminal::write`).
+    pub fn write(&self, bytes: &[u8]) {
+        if let Ok(mut w) = self.0.lock() {
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
+        }
+    }
+
+    /// Cycle 922 (agent-first A1): close the PTY's input side, signalling EOF to
+    /// the child's stdin WITHOUT killing it. Swapping the real writer `Box` for
+    /// a discard sink drops the underlying master-write descriptor (the write
+    /// end of the child's stdin pipe / ConPTY conin), so a read-until-EOF child
+    /// (`cat`, `sort`, `wc`) sees end-of-input and exits. This is the correct
+    /// PTY EOF mechanism — injecting a Ctrl+D/Ctrl+Z byte does NOT work under
+    /// Windows ConPTY. After this, further `write`s are no-ops (the child has
+    /// its full input + EOF). Used by `kettle exec`'s stdin pump on stdin EOF.
+    pub fn close(&self) {
+        if let Ok(mut w) = self.0.lock() {
+            let _ = std::mem::replace(&mut *w, Box::new(NullWrite));
+        }
+    }
+}
+
 /// Cycle 625 (Terminator parity, `plugins/logger.py` extension):
 /// strip ANSI escape sequences from a byte slice. Handles:
 ///   - CSI (Control Sequence Introducer): `ESC [ params final`
@@ -1537,6 +1661,8 @@ pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The kitty image-id bits a placeholder cell's foreground color carries:
+/// a 256-palette index is the low byte, a truecolor spec is the low 24
 /// bits, and the 16 ANSI named colors map to indices 0..=15
 /// (`graphics-protocol.rst:589`). Non-id named slots (default fg/bg/cursor)
 /// have no id → 0.
@@ -1993,6 +2119,41 @@ mod conformance {
         );
     }
 
+    /// Cycle 921 (agent-first A1/A2): `screen_text_of` is the single sanctioned
+    /// grid scrape behind the control server's `read_screen` and `run_command`
+    /// output slicing. Pin: document order (history first, then active screen),
+    /// per-line right-trim, the scrollback request capped by available history,
+    /// and the reported geometry/cursor.
+    #[test]
+    fn screen_text_returns_history_then_screen_with_geometry() {
+        use crate::term::screen_text_of;
+        // 4 visible rows; feed 8 lines so 4 spill into scrollback.
+        let (mut t, mut p) = harness(20, 4);
+        feed(
+            &mut t,
+            &mut p,
+            b"h0\r\nh1   \r\nh2\r\nh3\r\nv0\r\nv1\r\nv2\r\nv3",
+        );
+        // No scrollback requested → active screen only, right-trimmed lines.
+        let s = screen_text_of(&t, 0);
+        assert_eq!((s.cols, s.rows), (20, 4));
+        assert_eq!(s.history_size, 4);
+        assert_eq!(s.display_offset, 0, "not scrolled");
+        assert_eq!(s.text, "v0\nv1\nv2\nv3\n");
+        // Cursor sits after "v3" on the last active row.
+        assert_eq!(s.cursor, (3, 2));
+
+        // Request more history than exists → clamped to the 4 available, with
+        // history in document order BEFORE the active screen, trailing spaces
+        // trimmed ("h1   " → "h1").
+        let s = screen_text_of(&t, 999);
+        assert_eq!(s.text, "h0\nh1\nh2\nh3\nv0\nv1\nv2\nv3\n");
+
+        // A partial request returns only the NEWEST history tail.
+        let s = screen_text_of(&t, 2);
+        assert_eq!(s.text, "h2\nh3\nv0\nv1\nv2\nv3\n");
+    }
+
     /// Cycle 917 (#3, user-reported on native Ubuntu): hyperlink/URL detection
     /// must scan the VISIBLE viewport, not the active screen, when scrolled back.
     /// `links()` indexed `grid[Line(row)]` for `row in 0..screen_lines` — always
@@ -2079,7 +2240,7 @@ mod conformance {
     }
 
     /// Cycle 911 (e2e harness): replay an asciicast v2 trace — the format
-    /// `dev_record.rs` writes — through the REAL VT pipeline and assert the grid
+    /// `record.rs` writes — through the REAL VT pipeline and assert the grid
     /// reflects it. This is the `.cast` record→replay regression path: a captured
     /// Claude Code / Codex / tmux session can be re-fed deterministically (no
     /// PTY, no auth) to guard rendering, selection, and SGR handling.
@@ -2110,6 +2271,47 @@ mod conformance {
                 .contains(Flags::BOLD),
             "replayed SGR bold must reach the grid"
         );
+    }
+
+    /// Cycle 924 (agent-first A1): the full record→replay round trip through the
+    /// PROMOTED `kettle_core::record::Recorder` — the same recorder that backs
+    /// `kettle exec --record` and the GUI's `--record`. Record output via the
+    /// real Recorder to a `.cast`, parse it back, replay through the grid, and
+    /// assert it reconstructs. Pins that the recorder's on-disk format stays
+    /// replayable (sibling of `replays_asciicast_v2_output_into_grid`).
+    #[test]
+    fn recorder_output_round_trips_through_replay() {
+        use crate::record::Recorder;
+        use std::io::Read;
+        let path = std::env::temp_dir().join(format!("kettle-rr-{}.cast", std::process::id()));
+        {
+            let mut rec = Recorder::start(&path, 20, 4, false).expect("start recorder");
+            rec.record_output(b"hello ");
+            rec.record_output(b"\x1b[1mworld\x1b[0m");
+            rec.record_output(b"\r\nsecond line");
+            rec.finish();
+        }
+        let mut cast = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut cast)
+            .unwrap();
+        let (mut t, mut p) = harness(20, 4);
+        for line in cast.lines().skip(1) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("event is valid JSON");
+            if v[1] == "o" {
+                feed(&mut t, &mut p, v[2].as_str().unwrap_or("").as_bytes());
+            }
+        }
+        assert_eq!(row_text(&t, 0), "hello world");
+        assert_eq!(row_text(&t, 1), "second line");
+        assert!(
+            t.grid()[Point::new(Line(0), Column(6))]
+                .flags
+                .contains(Flags::BOLD),
+            "recorded+replayed SGR bold must reach the grid"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Cycle 912 (R1 render completion): locks the contract kettle-render relies
@@ -3267,6 +3469,78 @@ mod teardown_tests {
             *ring.back().unwrap(),
             MAX_PROMPT_MARKS as i64 + 499 // newest kept
         );
+    }
+
+    /// Cycle 921 (agent-first A1): `child_exit_code` must surface the child's
+    /// real exit status once it exits — `kettle exec` propagates it as its own
+    /// process exit code. Spawns a real PTY child that exits 3 and polls.
+    #[test]
+    fn child_exit_code_propagates_real_status() {
+        // Each argv token is space-free so CommandBuilder quoting can't change
+        // the command line shape on either OS.
+        #[cfg(windows)]
+        let argv: Vec<String> = ["cmd.exe", "/c", "exit", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        #[cfg(unix)]
+        let argv: Vec<String> = ["/bin/sh", "-c", "exit 3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // Soft-skip in a PTY-less sandbox (existing teardown pattern).
+                eprintln!("skipping child_exit_code_propagates_real_status: no PTY ({e})");
+                return;
+            }
+        };
+        // The headless run loop MUST forward `PtyWrite` (DA1/DSR/XTGETTCAP
+        // query answers) back to the PTY — exactly what `kettle exec` does.
+        // Without it the child can park forever under ConPTY: Windows'
+        // pseudoconsole withholds the child's clean teardown until the terminal
+        // answers its startup cursor-position probe (`ESC[6n`), so `try_wait`
+        // never reports an exit. This loop is the canonical A1 drain.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut saw_exit_event = false;
+        let code = loop {
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    // Answer the child's terminal queries so it can finish.
+                    TermEvent::PtyWrite(s) => term.write(s.as_bytes()),
+                    TermEvent::Exit | TermEvent::ChildExit(_) => saw_exit_event = true,
+                    _ => {}
+                }
+            }
+            if let Some(c) = term.child_exit_code() {
+                break c;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit within 15s (reader Exit event seen: {saw_exit_event})"
+            );
+            std::thread::sleep(Duration::from_millis(15));
+        };
+        let _ = saw_exit_event;
+        assert_eq!(code, 3, "exit status must propagate verbatim");
+        assert!(term.child_exited(), "child_exited agrees once code is known");
     }
 
     /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose
