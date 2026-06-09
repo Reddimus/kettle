@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  kettle terminal icon — TokyoNight Night palette to match the default
+  kettle terminal icon — Catppuccin Mocha palette to match the default
   theme. Shapes only (no embedded fonts) so it renders identically on
   every host without typeface fallback surprises.
 
@@ -10,26 +10,26 @@
   size from the 22px panel icon down to the 256px launcher tile.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- Outer window: TokyoNight bg #1a1b26, blue accent border #7aa2f7. -->
+  <!-- Outer window: Catppuccin Mocha base #1e1e2e, blue accent border #89b4fa. -->
   <rect x="32" y="32" width="448" height="448" rx="64" ry="64"
-        fill="#1a1b26" stroke="#7aa2f7" stroke-width="20"/>
+        fill="#1e1e2e" stroke="#89b4fa" stroke-width="20"/>
 
   <!-- Title bar: subtle tinted strip + divider line. -->
   <path d="M 96 32 H 416 A 64 64 0 0 1 480 96 V 96 H 32 V 96 A 64 64 0 0 1 96 32 Z"
-        fill="#7aa2f7" fill-opacity="0.16"/>
+        fill="#89b4fa" fill-opacity="0.16"/>
   <line x1="40" y1="96" x2="472" y2="96"
-        stroke="#7aa2f7" stroke-width="3" stroke-opacity="0.55"/>
+        stroke="#89b4fa" stroke-width="3" stroke-opacity="0.55"/>
 
-  <!-- Traffic-light dots (TokyoNight red/yellow/green). -->
-  <circle cx="80"  cy="64" r="12" fill="#f7768e"/>
-  <circle cx="120" cy="64" r="12" fill="#e0af68"/>
-  <circle cx="160" cy="64" r="12" fill="#9ece6a"/>
+  <!-- Traffic-light dots (Catppuccin Mocha red/yellow/green). -->
+  <circle cx="80"  cy="64" r="12" fill="#f38ba8"/>
+  <circle cx="120" cy="64" r="12" fill="#f9e2af"/>
+  <circle cx="160" cy="64" r="12" fill="#a6e3a1"/>
 
-  <!-- Prompt chevron `>` in TokyoNight fg #c0caf5. -->
+  <!-- Prompt chevron `>` in Catppuccin Mocha text #cdd6f4. -->
   <polyline points="156,200 260,288 156,376"
-            fill="none" stroke="#c0caf5" stroke-width="36"
+            fill="none" stroke="#cdd6f4" stroke-width="36"
             stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Underscore caret `_` in blue accent #7aa2f7. -->
-  <rect x="296" y="358" width="120" height="28" rx="8" fill="#7aa2f7"/>
+  <!-- Underscore caret `_` in blue accent #89b4fa. -->
+  <rect x="296" y="358" width="120" height="28" rx="8" fill="#89b4fa"/>
 </svg>

@@ -48,7 +48,7 @@ and **WezTerm** into one tool.
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
 - **Every Ghostty theme bundled** (500+, from iTerm2-Color-Schemes), default
-  **TokyoNight Night**. Ghostty-compatible `key = value` config with live
+  **Catppuccin Mocha**. Ghostty-compatible `key = value` config with live
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
   setup.
@@ -176,7 +176,7 @@ three platforms.
 ## First launch
 
 1. **Run `kettle`** (or launch it from your app menu / Start menu). It
-   opens with the **TokyoNight Night** theme and the bundled JetBrains
+   opens with the **Catppuccin Mocha** theme and the bundled JetBrains
    Mono Nerd Font — zero setup. On Windows it starts **PowerShell 7+**.
 2. **Right-click any pane → Preferences ▸** to toggle the scrollbar,
    cursor blink, bell, copy-on-select and font size — changes persist

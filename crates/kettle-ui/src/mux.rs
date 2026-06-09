@@ -1198,8 +1198,18 @@ impl Mux {
         let (argv, cwd) = self.clone_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
-        if let Some(tab) = self.tabs.get_mut(a) {
-            insert_split(tab, new_id, dir);
+        let grafted = self
+            .tabs
+            .get_mut(a)
+            .map(|tab| insert_split(tab, new_id, dir))
+            .unwrap_or(false);
+        if !grafted {
+            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // tree had no leaf to attach to). Reap the just-spawned pane rather
+            // than leaking its PTY, and surface a real error — this path was a
+            // silent `Ok(())` that left an orphaned pane behind.
+            self.panes.remove(&new_id);
+            anyhow::bail!("split failed: no pane available to attach the new split");
         }
         Ok(())
     }
@@ -1227,8 +1237,18 @@ impl Mux {
         }
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
-        if let Some(tab) = self.tabs.get_mut(a) {
-            insert_split(tab, new_id, dir);
+        let grafted = self
+            .tabs
+            .get_mut(a)
+            .map(|tab| insert_split(tab, new_id, dir))
+            .unwrap_or(false);
+        if !grafted {
+            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // tree had no leaf to attach to). Reap the just-spawned pane rather
+            // than leaking its PTY, and surface a real error — this path was a
+            // silent `Ok(())` that left an orphaned pane behind.
+            self.panes.remove(&new_id);
+            anyhow::bail!("split failed: no pane available to attach the new split");
         }
         Ok(())
     }
@@ -1393,8 +1413,29 @@ impl Mux {
         }
     }
 
-    /// Move focus to the nearest pane in a direction (by center distance).
+    /// Move focus to the pane immediately **adjacent** in a direction, the way
+    /// tmux / Terminator do: among panes that border the focused pane on the
+    /// pressed side AND overlap it on the perpendicular axis, pick the smallest
+    /// primary-axis gap, tie-broken by perpendicular center proximity.
+    ///
+    /// Cycle 917 (#1, user-reported on native Ubuntu): the old rule ranked
+    /// candidates purely by Euclidean distance between pane **centers**, gated
+    /// only by "candidate center is on the requested side". In a nested layout a
+    /// **diagonal** pane whose center happened to be closer than a directly
+    /// bordering pane's center would win — focus "jumped to a diagonal pane" and
+    /// "skipped the adjacent one" (and a Right press could even select an
+    /// up-and-to-the-right pane whose center merely had a larger x). Comparing
+    /// pane **edges** with a required perpendicular overlap fixes both: a pane
+    /// that only shares a corner (zero overlap) is never a neighbor.
+    ///
+    /// No-op when nothing borders the focused pane in that direction. Zoomed
+    /// tabs no-op implicitly: `layout` returns only the focused pane while
+    /// zoomed, so the candidate loop is empty.
     pub fn focus_dir(&mut self, area: Rect, dx: i32, dy: i32) {
+        // `layout` rounds split seams with `.round()`, so a shared border between
+        // adjacent panes can drift by up to ~1px; admit that slack on the side
+        // test and clamp a tiny negative gap to 0.
+        const EPS: f32 = 1.0;
         let a = self.active;
         let rects = self.layout(a, area);
         let Some(tab) = self.tabs.get_mut(a) else {
@@ -1403,26 +1444,65 @@ impl Mux {
         let Some(&(_, (fx, fy, fw, fh))) = rects.iter().find(|(id, _)| *id == tab.focus) else {
             return;
         };
+        let (fl, fr, ft, fb) = (fx, fx + fw, fy, fy + fh);
         let (fcx, fcy) = (fx + fw / 2.0, fy + fh / 2.0);
-        let mut best: Option<(f32, u64)> = None;
+
+        // best = (primary-axis gap, perpendicular center distance, id);
+        // smaller gap wins, ties broken by smaller perpendicular distance.
+        let mut best: Option<(f32, f32, u64)> = None;
         for (id, (x, y, w, h)) in &rects {
             if *id == tab.focus {
                 continue;
             }
-            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
-            let ok = (dx > 0 && cx > fcx)
-                || (dx < 0 && cx < fcx)
-                || (dy > 0 && cy > fcy)
-                || (dy < 0 && cy < fcy);
-            if !ok {
-                continue;
-            }
-            let d = (cx - fcx).powi(2) + (cy - fcy).powi(2);
-            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
-                best = Some((d, *id));
+            let (l, r, t, b) = (*x, *x + *w, *y, *y + *h);
+            let (cx, cy) = (*x + *w / 2.0, *y + *h / 2.0);
+
+            let (gap, perp) = if dx < 0 {
+                if r > fl + EPS {
+                    continue; // must lie to the LEFT (its right edge at/before our left)
+                }
+                if fb.min(b) - ft.max(t) <= 0.0 {
+                    continue; // no vertical overlap → diagonal, not a neighbor
+                }
+                ((fl - r).max(0.0), (cy - fcy).abs())
+            } else if dx > 0 {
+                if l < fr - EPS {
+                    continue;
+                }
+                if fb.min(b) - ft.max(t) <= 0.0 {
+                    continue;
+                }
+                ((l - fr).max(0.0), (cy - fcy).abs())
+            } else if dy < 0 {
+                if b > ft + EPS {
+                    continue; // must lie ABOVE (its bottom edge at/before our top)
+                }
+                if fr.min(r) - fl.max(l) <= 0.0 {
+                    continue; // no horizontal overlap
+                }
+                ((ft - b).max(0.0), (cx - fcx).abs())
+            } else {
+                if t < fb - EPS {
+                    continue;
+                }
+                if fr.min(r) - fl.max(l) <= 0.0 {
+                    continue;
+                }
+                ((t - fb).max(0.0), (cx - fcx).abs())
+            };
+
+            let better = match best {
+                None => true,
+                // A small slack keeps two real neighbors whose gaps differ only
+                // by rounding in the same tier so the perpendicular tie-break
+                // (closest to the focused pane's cross-axis center) decides.
+                Some((bg, bp, _)) => gap < bg - 1e-3 || ((gap - bg).abs() <= 1e-3 && perp < bp),
+            };
+            if better {
+                best = Some((gap, perp, *id));
             }
         }
-        if let Some((_, id)) = best {
+        if let Some((_, _, id)) = best {
             tab.focus = id;
         }
     }
@@ -1518,12 +1598,17 @@ impl Mux {
             match root.remove_leaf(focus) {
                 Ok(n) | Err(Some(n)) => {
                     tab.root = n;
-                    // `neighbor` is None only if the focus pane wasn't
-                    // in the tree (logic error) or the tree was a single
-                    // Leaf (handled by Err(None) below). Fall back to
-                    // first_leaf so a stale focus pointer doesn't crash
-                    // — same defensive shape as pre-cycle-602.
-                    tab.focus = neighbor.unwrap_or_else(|| tab.root.first_leaf());
+                    // Cycle 917 (#2 hardening): only repair focus when it's no
+                    // longer a leaf in the collapsed tree — the same guard
+                    // `reap_tabs` already has (mux.rs ~1809). close_focused always
+                    // removes the focused leaf so this normally fires; matching the
+                    // two close paths keeps focus on a valid leaf if that ever
+                    // changes. `neighbor` is None only on a single-Leaf tree
+                    // (handled by Err(None) below), so first_leaf is the safe
+                    // fallback against a stale focus pointer.
+                    if !tab.root.contains(tab.focus) {
+                        tab.focus = neighbor.unwrap_or_else(|| tab.root.first_leaf());
+                    }
                     self.panes.remove(&focus);
                 }
                 Err(None) => {
@@ -1693,8 +1778,18 @@ impl Mux {
         let (argv, cwd) = self.clone_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
-        if let Some(tab) = self.tabs.get_mut(a) {
-            insert_split(tab, new_id, dir);
+        let grafted = self
+            .tabs
+            .get_mut(a)
+            .map(|tab| insert_split(tab, new_id, dir))
+            .unwrap_or(false);
+        if !grafted {
+            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // tree had no leaf to attach to). Reap the just-spawned pane rather
+            // than leaking its PTY, and surface a real error — this path was a
+            // silent `Ok(())` that left an orphaned pane behind.
+            self.panes.remove(&new_id);
+            anyhow::bail!("split failed: no pane available to attach the new split");
         }
         Ok(())
     }
@@ -2030,12 +2125,25 @@ fn resolve_tab_title(
 /// treats `split` as "show me both" — tmux's `display-panes` UX
 /// after `split-window`, WezTerm's `SplitHorizontal/Vertical`. Pure so
 /// the contract is unit-testable without a real spawn.
-fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) {
+fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
     let focus = tab.focus;
     if tab.root.split_leaf(focus, new_id, dir) {
         tab.focus = new_id;
         tab.zoomed = false;
+        return true;
     }
+    // Cycle 917 (#2 hardening): `tab.focus` was stale — not a leaf in this tree
+    // (a focus-desync class of bug). Previously `split_leaf` silently no-op'd
+    // and the freshly-spawned pane was orphaned (leaked PTY + child) while the
+    // split still reported success. Repair focus to a real leaf and retry; the
+    // caller reaps the pane if even this fails, instead of leaking it.
+    let repaired = tab.root.first_leaf();
+    if tab.root.split_leaf(repaired, new_id, dir) {
+        tab.focus = new_id;
+        tab.zoomed = false;
+        return true;
+    }
+    false
 }
 
 fn shell_argv(cfg: &Config) -> Vec<String> {
@@ -2152,6 +2260,209 @@ mod node_tests {
         let solo = Node::Leaf(7);
         assert_eq!(solo.leaf_index_of(7), Some(0));
         assert_eq!(solo.nth_leaf(0), 7);
+    }
+
+    // ---- Cycle 917 (#1): directional pane-focus navigation scaffolding ----
+
+    /// A representative wide area (matches the user's HiDPI screenshot ratio).
+    const AREA: Rect = (0.0, 0.0, 2560.0, 1440.0);
+
+    fn push_tab(m: &mut Mux, root: Node, focus: u64) {
+        m.tabs.push(Tab {
+            root,
+            focus,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        m.active = m.tabs.len() - 1;
+    }
+    fn hsplit(ratio: f32, a: Node, b: Node) -> Node {
+        Node::Split {
+            dir: Dir::Horizontal,
+            ratio,
+            a: Box::new(a),
+            b: Box::new(b),
+        }
+    }
+    fn vsplit(ratio: f32, a: Node, b: Node) -> Node {
+        Node::Split {
+            dir: Dir::Vertical,
+            ratio,
+            a: Box::new(a),
+            b: Box::new(b),
+        }
+    }
+
+    /// The screenshot layout. Leaf ids: 1=left (full height), 2=top-wide,
+    /// 3=midleft (tall, left of the lower-right region), 4=midL, 5=midR
+    /// (the mid row of two), 6=botright (the focused pane).
+    fn screenshot_tree() -> Node {
+        hsplit(
+            0.5,
+            Node::Leaf(1),
+            vsplit(
+                0.33,
+                Node::Leaf(2),
+                hsplit(
+                    0.5,
+                    Node::Leaf(3),
+                    vsplit(
+                        0.5,
+                        hsplit(0.5, Node::Leaf(4), Node::Leaf(5)),
+                        Node::Leaf(6),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    /// The OLD Euclidean-center rule, inlined so a future revert to
+    /// center-distance fails this test (it documents exactly why it was wrong).
+    fn old_focus_dir(rects: &[(u64, Rect)], focus: u64, dx: i32, dy: i32) -> Option<u64> {
+        let (_, (fx, fy, fw, fh)) = *rects.iter().find(|(id, _)| *id == focus)?;
+        let (fcx, fcy) = (fx + fw / 2.0, fy + fh / 2.0);
+        let mut best: Option<(f32, u64)> = None;
+        for (id, (x, y, w, h)) in rects {
+            if *id == focus {
+                continue;
+            }
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            let ok = (dx > 0 && cx > fcx)
+                || (dx < 0 && cx < fcx)
+                || (dy > 0 && cy > fcy)
+                || (dy < 0 && cy < fcy);
+            if !ok {
+                continue;
+            }
+            let d = (cx - fcx).powi(2) + (cy - fcy).powi(2);
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, *id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    #[test]
+    fn focus_dir_screenshot_layout_picks_adjacent_not_diagonal() {
+        let mut m = Mux::new();
+        push_tab(&mut m, screenshot_tree(), 6);
+        let rects = m.layout(0, AREA);
+
+        // (a) Document the bug: the old center-distance rule jumps Left to the
+        // DIAGONAL midL (4) and Right to the up-right midR (5) — there is no real
+        // right neighbor of botright at all.
+        assert_eq!(
+            old_focus_dir(&rects, 6, -1, 0),
+            Some(4),
+            "old rule jumps Left to the diagonal midL (the reported bug)"
+        );
+        assert_eq!(
+            old_focus_dir(&rects, 6, 1, 0),
+            Some(5),
+            "old rule jumps Right to the up-right midR (phantom neighbor)"
+        );
+
+        // (b) The new edge+overlap rule moves to the true neighbors.
+        m.focus_dir(AREA, -1, 0);
+        assert_eq!(
+            m.tabs[0].focus, 3,
+            "Left -> the full-height pane bordering botright's left edge"
+        );
+        m.tabs[0].focus = 6;
+        m.focus_dir(AREA, 0, -1);
+        assert_eq!(
+            m.tabs[0].focus, 4,
+            "Up -> the pane directly above (midL wins the midL/midR tie via DFS order)"
+        );
+        m.tabs[0].focus = 6;
+        m.focus_dir(AREA, 1, 0);
+        assert_eq!(
+            m.tabs[0].focus, 6,
+            "Right -> nothing borders the right edge; no-op"
+        );
+        m.focus_dir(AREA, 0, 1);
+        assert_eq!(m.tabs[0].focus, 6, "Down -> nothing below; no-op");
+    }
+
+    #[test]
+    fn focus_dir_2x2_grid_moves_to_orthogonal_neighbor() {
+        // H{ V{A=1,C=2}, V{B=3,D=4} }: A=TL C=BL B=TR D=BR.
+        let tree = hsplit(
+            0.5,
+            vsplit(0.5, Node::Leaf(1), Node::Leaf(2)),
+            vsplit(0.5, Node::Leaf(3), Node::Leaf(4)),
+        );
+        let area = (0.0, 0.0, 200.0, 100.0);
+        let mut m = Mux::new();
+        push_tab(&mut m, tree, 4); // start at D (bottom-right)
+        m.focus_dir(area, 0, -1);
+        assert_eq!(m.tabs[0].focus, 3, "D Up -> B");
+        m.tabs[0].focus = 4;
+        m.focus_dir(area, -1, 0);
+        assert_eq!(m.tabs[0].focus, 2, "D Left -> C");
+        m.tabs[0].focus = 1; // A (top-left)
+        m.focus_dir(area, 1, 0);
+        assert_eq!(m.tabs[0].focus, 3, "A Right -> B");
+        m.tabs[0].focus = 1;
+        m.focus_dir(area, 0, 1);
+        assert_eq!(m.tabs[0].focus, 2, "A Down -> C");
+    }
+
+    #[test]
+    fn focus_dir_two_pane_split_and_edge_noops() {
+        let tree = hsplit(0.5, Node::Leaf(1), Node::Leaf(2)); // A | B
+        let area = (0.0, 0.0, 200.0, 100.0);
+        let mut m = Mux::new();
+        push_tab(&mut m, tree, 1);
+        m.focus_dir(area, 1, 0);
+        assert_eq!(m.tabs[0].focus, 2, "A Right -> B");
+        m.tabs[0].focus = 1;
+        for (dx, dy) in [(-1, 0), (0, -1), (0, 1)] {
+            m.focus_dir(area, dx, dy);
+            assert_eq!(m.tabs[0].focus, 1, "no neighbor that way -> stay on A");
+        }
+        m.tabs[0].focus = 2;
+        m.focus_dir(area, -1, 0);
+        assert_eq!(m.tabs[0].focus, 1, "B Left -> A");
+        m.tabs[0].focus = 2;
+        for (dx, dy) in [(1, 0), (0, -1), (0, 1)] {
+            m.focus_dir(area, dx, dy);
+            assert_eq!(m.tabs[0].focus, 2, "no neighbor that way -> stay on B");
+        }
+    }
+
+    #[test]
+    fn focus_dir_is_reversible_on_grid() {
+        let tree = hsplit(
+            0.5,
+            vsplit(0.5, Node::Leaf(1), Node::Leaf(2)),
+            vsplit(0.5, Node::Leaf(3), Node::Leaf(4)),
+        );
+        let area = (0.0, 0.0, 200.0, 100.0);
+        let mut m = Mux::new();
+        push_tab(&mut m, tree, 1); // A
+        m.focus_dir(area, 1, 0);
+        assert_eq!(m.tabs[0].focus, 3);
+        m.focus_dir(area, -1, 0);
+        assert_eq!(m.tabs[0].focus, 1, "Right then Left returns to A");
+        m.focus_dir(area, 0, 1);
+        assert_eq!(m.tabs[0].focus, 2);
+        m.focus_dir(area, 0, -1);
+        assert_eq!(m.tabs[0].focus, 1, "Down then Up returns to A");
+    }
+
+    #[test]
+    fn focus_dir_noop_when_zoomed() {
+        let mut m = Mux::new();
+        push_tab(&mut m, screenshot_tree(), 6);
+        m.tabs[0].zoomed = true; // layout returns only the focused pane
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            m.focus_dir(AREA, dx, dy);
+            assert_eq!(m.tabs[0].focus, 6, "zoomed: focus_dir must be a no-op");
+        }
     }
 
     /// Cycle 893 drift guard (audit). When a saved split-tree partially

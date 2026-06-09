@@ -4,6 +4,60 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.14.0] — 2026-06-09
+
+  Three user-reported Ubuntu bugs fixed (each reproduced with a failing test
+  first, then fixed), plus two requested changes: the new-tab shell dropdown is
+  hidden when only one shell exists, and **Catppuccin Mocha is now the default
+  theme + icon**. Cycle 917.
+
+  - **Directional pane navigation now matches Terminator/tmux (#1).**
+    `Mux::focus_dir` ranked candidate panes by Euclidean distance between pane
+    *centers*, so in a nested layout focus would jump to a *diagonal* pane and
+    skip the one directly adjacent (reproduced from the user's screenshot: from
+    the bottom-right pane, Left landed on the diagonal mid-left pane). Rewritten
+    to the standard edge-adjacency rule — only panes that border the focused
+    pane on the pressed side **and** overlap it on the perpendicular axis are
+    candidates; the smallest primary-axis gap wins, tie-broken by perpendicular
+    proximity. A corner-touching diagonal pane is never a neighbor. Five new
+    tests, including the exact screenshot tree with the old algorithm inlined to
+    pin the bug.
+  - **A split always yields a working interactive shell (#2).** Splitting a pane
+    running Claude Code (a `node` process) could spawn a new pane whose terminal
+    "never loaded": the clone-foreground-shell feature did a deepest-descendant
+    walk and would clone a transient non-interactive `sh -c "…"` helper that
+    `node`/`nvim` spawn for tools, which runs its command and exits instantly.
+    Detection now rejects one-shot invocations (`-c`/`-lc`/`-ic`,
+    `pwsh -Command`/`-File`, `cmd /c`, `wsl … <command>`) across shell families,
+    and the split boundary re-checks the contract — a non-interactive argv falls
+    back to cloning the pane's own launch shell, so a split can never produce a
+    dead pane. Hardened the split tree too: `insert_split` now repairs a stale
+    focus and reaps the just-spawned pane (instead of leaking it and reporting
+    success) if the graft fails, and `close_focused` gained the `contains(focus)`
+    guard `reap_tabs` already had. (A foreground-process-group `tcgetpgrp` check
+    is noted as a future refinement.)
+  - **Hyperlink underlines no longer ghost when scrolled (#3).**
+    `kettle_core::links()` scanned the active screen (`grid[Line(row)]`),
+    ignoring `display_offset`, so scrolling Claude Code up painted the active
+    screen's link underlines over the scrolled-back history ("leftover/ghost
+    underlines"). It now reads the visible viewport (`Line(row − display_offset)`)
+    — the sibling the cycle-912 decoration fix missed. Also fixes click-to-open
+    landing on a link while scrolled. Harness regression test.
+  - **New-tab `▾` dropdown hides when there's only one shell (#4).** On a stock
+    Ubuntu with just `bash`, the shell-picker arrow opened a pointless one-item
+    menu; it's now hidden (zero-width → dropped from the render pass and the
+    click hit-test) when `detect_shells()` finds ≤ 1 choice. Windows always has
+    multiple launch targets (cmd / pwsh / WSL) so the arrow stays there; the Unix
+    count is a cheap PATH probe cached per process.
+  - **Catppuccin Mocha is the default theme + icon (#5).** The shipped default
+    moves from TokyoNight Night to Catppuccin Mocha (the darkest Catppuccin
+    flavor) — `Theme::default()`, `Config::default()`, and the bundled-name
+    resolution. The window/launcher icon is recolored to match: the source SVG
+    and every raster (Linux hicolor PNGs, the macOS `.iconset`, the multi-res
+    Windows `.ico`, and the embedded winit window icon) regenerated in Catppuccin
+    Mocha. A user can still pick any of the 500+ bundled themes via `theme =`,
+    the Theme submenu, or `NextTheme`/`PrevTheme`.
+
 ## [2.13.0] — 2026-06-08
 
   Post-v2.12.0 batch: the cycle-912 audit tail (cycles 913–915) plus a literal

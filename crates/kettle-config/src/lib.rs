@@ -1,5 +1,5 @@
 //! kettle configuration: Ghostty-compatible `key = value` config, the bundled
-//! Ghostty theme set (TokyoNight Night default), the embedded Nerd Font,
+//! Ghostty theme set (Catppuccin Mocha default), the embedded Nerd Font,
 //! Terminator-compatible keybindings, and the fuzzy matcher / command-palette
 //! infrastructure the SSH launcher (Ctrl+Shift+S) and command palette
 //! (Ctrl+Shift+K) reuse.
@@ -1536,8 +1536,10 @@ impl Default for Config {
             font_family_italic: None,
             font_family_bold_italic: None,
             font_size: 13.0,
-            theme_name: "TokyoNight Night".to_string(),
-            theme: Theme::by_name("TokyoNight Night"),
+            // Cycle 917 (#5, user-requested): Catppuccin Mocha is the shipped
+            // default theme (the darkest Catppuccin flavor).
+            theme_name: "Catppuccin Mocha".to_string(),
+            theme: Theme::by_name("Catppuccin Mocha"),
             scrollback: 10_000,
             padding_x: 8.0,
             padding_y: 8.0,
@@ -4123,12 +4125,14 @@ tab-bar-width = 200\n";
     }
 
     #[test]
-    fn default_is_tokyonight_night() {
+    fn default_is_catppuccin_mocha() {
+        // Cycle 917 (#5): the shipped default is Catppuccin Mocha (the darkest
+        // Catppuccin flavor). Values matched to `assets/themes/Catppuccin Mocha`.
         let c = Config::default();
-        assert_eq!(c.theme_name, "TokyoNight Night");
-        assert_eq!(c.theme.background, Rgb::new(0x1a, 0x1b, 0x26));
-        assert_eq!(c.theme.foreground, Rgb::new(0xc0, 0xca, 0xf5));
-        assert_eq!(c.theme.palette[4], Rgb::new(0x7a, 0xa2, 0xf7));
+        assert_eq!(c.theme_name, "Catppuccin Mocha");
+        assert_eq!(c.theme.background, Rgb::new(0x1e, 0x1e, 0x2e));
+        assert_eq!(c.theme.foreground, Rgb::new(0xcd, 0xd6, 0xf4));
+        assert_eq!(c.theme.palette[4], Rgb::new(0x89, 0xb4, 0xfa));
         assert_eq!(c.font_family, font::FAMILY);
     }
 
@@ -4225,13 +4229,13 @@ tab-bar-width = 200\n";
         let c = Config::parse_text("theme = dracula\n");
         assert_eq!(c.theme_name, "Dracula", "case-insensitive → canonical case");
         // Typo: name doesn't match any bundled theme. cfg.theme falls
-        // back to TokyoNight Night (Theme::default()); cfg.theme_name
-        // ALSO stays at "TokyoNight Night" so the diagnostic agrees
-        // with the runtime palette. The malformed-value warning still
+        // back to the default (Catppuccin Mocha, Theme::default());
+        // cfg.theme_name ALSO stays at "Catppuccin Mocha" so the diagnostic
+        // agrees with the runtime palette. The malformed-value warning still
         // surfaces the typo separately so the user notices.
         let c = Config::parse_text("theme = TokyoNitght Night\n");
-        assert_eq!(c.theme_name, "TokyoNight Night");
-        assert_eq!(c.theme.background, Rgb::new(0x1a, 0x1b, 0x26));
+        assert_eq!(c.theme_name, "Catppuccin Mocha");
+        assert_eq!(c.theme.background, Rgb::new(0x1e, 0x1e, 0x2e));
         // And the diagnostic still flags it.
         let malformed = Config::detect_malformed_values("theme = TokyoNitght Night\n");
         assert!(

@@ -31,6 +31,14 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
+    // Cycle 917 (#3, user-reported on native Ubuntu): scan the VISIBLE viewport,
+    // not the active screen. A visible viewport row `row` maps to grid line
+    // `row - display_offset` (alacritty addresses history with NEGATIVE lines);
+    // `grid[Line(row)]` always read the active (bottom) screen, so scrolling
+    // Claude Code up returned the active screen's links and the renderer painted
+    // their underlines over the scrolled-back history ("leftover/ghost
+    // underlines"). Mirrors the cycle-912 decoration/selection conversion.
+    let off = grid.display_offset() as i32;
     let mut out: Vec<Link> = Vec::new();
     // Cycle 762: reuse the URL-scan scratch buffers across every viewport row
     // instead of allocating a String + Vec per row each time links are
@@ -39,6 +47,7 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
 
     for row in 0..rows {
+        let gl = row as i32 - off; // visible viewport row -> grid-absolute line
         // Cycle 781: this row's OSC 8 links occupy `out[osc8_start..osc8_end]`.
         // The autodetect overlap check below scans only that slice instead of
         // all-rows `out`, turning an O(total_links)-per-match scan (→ O(n²) on a
@@ -48,12 +57,12 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
         // OSC 8 runs: consecutive cells sharing a hyperlink URI.
         let mut c = 0usize;
         while c < cols {
-            let cell = &grid[Point::new(Line(row as i32), Column(c))];
+            let cell = &grid[Point::new(Line(gl), Column(c))];
             if let Some(h) = cell.hyperlink() {
                 let uri = h.uri().to_string();
                 let start = c;
                 while c < cols {
-                    let cc = &grid[Point::new(Line(row as i32), Column(c))];
+                    let cc = &grid[Point::new(Line(gl), Column(c))];
                     match cc.hyperlink() {
                         Some(h2) if h2.uri() == uri => c += 1,
                         _ => break,
@@ -77,7 +86,7 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
         text.clear();
         col_of_byte.clear();
         for col in 0..cols {
-            let ch = grid[Point::new(Line(row as i32), Column(col))].c;
+            let ch = grid[Point::new(Line(gl), Column(col))].c;
             for _ in 0..ch.len_utf8() {
                 col_of_byte.push(col);
             }

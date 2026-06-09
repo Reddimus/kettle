@@ -375,6 +375,87 @@ fn is_known_shell(prog: &str) -> bool {
     )
 }
 
+/// Cycle 917 (#2, user-reported on native Ubuntu): is this shell invocation a
+/// ONE-SHOT / non-interactive command rather than an interactive session? A
+/// foreground `node` (Claude Code) or `nvim` routinely spawns transient
+/// `sh -c "…"` / `bash -c "…"` helpers; cloning one into a split spawns a shell
+/// that runs the command and exits immediately, leaving a blank/dead pane
+/// ("new pane but no terminal would load"). Only an interactive shell should be
+/// cloned. Matched per shell family because the one-shot flag grammar differs.
+fn is_noninteractive_shell(argv: &[String]) -> bool {
+    let base = argv0_basename(argv.first().map(String::as_str).unwrap_or(""));
+    let rest = argv.get(1..).unwrap_or(&[]);
+    match base.as_str() {
+        // POSIX-ish: `-c`, a combined short cluster containing `c` (`-ic`,
+        // `-lc`), or `--command`/`--commands`. `-i`/`-l`/`-il` stay interactive.
+        "bash" | "zsh" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "fish" | "nu" | "elvish"
+        | "xonsh" => rest.iter().any(|a| {
+            a == "-c"
+                || a == "--command"
+                || a == "--commands"
+                || (a.starts_with('-')
+                    && !a.starts_with("--")
+                    && a.len() >= 2
+                    && a[1..].contains('c'))
+        }),
+        // PowerShell: -Command / -c (prefix-abbreviated, case-insensitive) or
+        // -File both run and exit.
+        "pwsh" | "powershell" => rest.iter().any(|a| {
+            let stripped = a
+                .strip_prefix('-')
+                .or_else(|| a.strip_prefix('/'))
+                .unwrap_or(a);
+            let lower = stripped.to_ascii_lowercase();
+            !lower.is_empty() && ("command".starts_with(&lower) || "file".starts_with(&lower))
+        }),
+        // cmd: `/c` runs then exits; `/k` runs then STAYS interactive (allowed).
+        "cmd" => rest
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("-c")),
+        // wsl: bare or option-only is interactive; a positional command, `-e`,
+        // or `--` followed by a command runs and exits.
+        "wsl" => wsl_runs_command(rest),
+        _ => false,
+    }
+}
+
+/// Whether a `wsl …` argv tail (everything after argv[0]) carries a command to
+/// run (→ exits) rather than launching an interactive login shell. Value-taking
+/// options (`-d`/`-u`/`--cd`/`--shell-type`) consume their argument so a distro
+/// name or directory isn't mistaken for a command — notably kettle's own
+/// injected `wsl --cd <dir>` (see `launch_cwd`) stays interactive.
+fn wsl_runs_command(rest: &[String]) -> bool {
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        if a == "--" || a == "-e" || a == "--exec" {
+            return i + 1 < rest.len();
+        }
+        if matches!(
+            a,
+            "-d" | "--distribution" | "-u" | "--user" | "--cd" | "--shell-type"
+        ) {
+            i += 2; // skip the option AND its value
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1; // a boolean flag (e.g. --system)
+            continue;
+        }
+        return true; // first bare positional = a command to run
+    }
+    false
+}
+
+/// Cycle 917 (#2): is `argv` a clonable INTERACTIVE shell? A split clones the
+/// pane's detected foreground shell only when this holds; otherwise the caller
+/// falls back to the pane's own launch shell, so a split can never spawn a
+/// dead/one-shot pane. Public so the UI can assert the same contract at the
+/// split boundary.
+pub fn shell_launch_is_interactive(argv: &[String]) -> bool {
+    argv.first().map(|p| is_known_shell(p)).unwrap_or(false) && !is_noninteractive_shell(argv)
+}
+
 /// Cycle 888: find the DEEPEST known-shell descendant of `child_pid` — the shell
 /// the user has effectively entered (e.g. `pwsh → wsl.exe`). Returns its argv +
 /// cwd to relaunch in a split. BFS by depth; the deepest shell wins (the most
@@ -397,9 +478,15 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
     }
     let mut best: Option<(u32, u32)> = None; // (depth, pid) of the deepest shell
     while let Some((pid, depth)) = queue.pop_front() {
+        // Cycle 917 (#2): a candidate must be a known shell AND an INTERACTIVE
+        // invocation — a deeper `sh -c "…"` helper (spawned by node/claude/nvim)
+        // is rejected so the split never clones a one-shot that exits instantly.
         let is_shell = tree
             .argv_of(pid)
-            .and_then(|a| a.first().map(|p| is_known_shell(p)))
+            .map(|a| {
+                a.first().map(|p| is_known_shell(p)).unwrap_or(false)
+                    && !is_noninteractive_shell(&a)
+            })
             .unwrap_or(false);
         if is_shell && best.map(|(d, _)| depth > d).unwrap_or(true) {
             best = Some((depth, pid));
@@ -1269,6 +1356,104 @@ mod tests {
         let mut tree = MockProcessTree::new();
         tree.add(1, None, &["pwsh.exe"]);
         assert_eq!(find_foreground_shell(1, &mut tree), None);
+    }
+
+    /// Cycle 917 (#2, user-reported on native Ubuntu): a foreground `node`
+    /// (Claude Code) or `nvim` spawns transient `sh -c "…"` helpers. The detector
+    /// must NOT clone a one-shot helper into a split — doing so spawns a shell
+    /// that runs the command and exits immediately, leaving a blank/dead pane
+    /// ("new pane but no terminal would load"). With no INTERACTIVE shell
+    /// descendant, it returns None so the caller clones the pane's real shell.
+    #[test]
+    fn foreground_shell_ignores_node_spawned_sh_dash_c_helper() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash", "-l"]); // pane's login shell (BFS starts at its children)
+        tree.add(200, Some(100), &["node", "/usr/bin/claude"]); // Claude Code CLI
+        tree.add(300, Some(200), &["sh", "-c", "rg --json foo"]); // transient tool helper
+        assert_eq!(
+            find_foreground_shell(100, &mut tree),
+            None,
+            "a node-spawned `sh -c` helper must not be cloned into a split"
+        );
+    }
+
+    /// Combined short-flag cluster `-ic` is still one-shot (the `c` runs a
+    /// command); `-i`/`-l`/`-il` alone stay interactive (covered in the table).
+    #[test]
+    fn foreground_shell_ignores_combined_dash_ic_oneshot() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["zsh"]);
+        tree.add(200, Some(100), &["nvim"]);
+        tree.add(300, Some(200), &["bash", "-ic", "lazygit"]);
+        assert_eq!(find_foreground_shell(100, &mut tree), None);
+    }
+
+    /// A genuinely interactive nested shell is still detected, and a DEEPER
+    /// one-shot helper under it is skipped in favor of the interactive ancestor.
+    #[test]
+    fn foreground_shell_skips_deeper_oneshot_for_interactive() {
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        tree.add_cwd(2, Some(1), &["wsl.exe"], "C:\\proj"); // interactive (depth 1)
+        tree.add(3, Some(2), &["bash", "-c", "git status"]); // one-shot (depth 2, skipped)
+        assert_eq!(
+            find_foreground_shell(1, &mut tree),
+            Some(ShellLaunch {
+                argv: vec!["wsl.exe".to_string()],
+                cwd: Some("C:\\proj".to_string()),
+            }),
+            "the interactive wsl ancestor wins over a deeper one-shot bash -c"
+        );
+    }
+
+    /// Truth table for the one-shot predicate across shell families.
+    #[test]
+    fn is_noninteractive_shell_truth_table() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // One-shot → rejected.
+        for a in [
+            &["sh", "-c", "x"][..],
+            &["bash", "-c", "x"],
+            &["bash", "-lc", "x"],
+            &["bash", "-ic", "x"],
+            &["zsh", "--command", "x"],
+            &["fish", "--command", "x"],
+            &["nu", "-c", "x"],
+            &["pwsh", "-Command", "x"],
+            &["pwsh", "-c", "x"],
+            &["pwsh", "-File", "s.ps1"],
+            &["powershell.exe", "-co", "x"],
+            &["cmd", "/c", "x"],
+            &["wsl", "ls"],
+            &["wsl", "-e", "bash", "-c", "x"],
+            &["wsl", "-d", "Ubuntu", "--", "htop"],
+        ] {
+            assert!(
+                is_noninteractive_shell(&argv(a)),
+                "{a:?} should be one-shot/non-interactive"
+            );
+        }
+        // Interactive → kept.
+        for a in [
+            &["bash"][..],
+            &["bash", "-i"],
+            &["bash", "-l"],
+            &["bash", "-il"],
+            &["zsh"],
+            &["pwsh"],
+            &["pwsh", "-NoLogo"],
+            &["cmd"],
+            &["cmd", "/k", "x"],
+            &["wsl"],
+            &["wsl", "-d", "Ubuntu"],
+            &["wsl", "--cd", "/home/me"],
+            &["wsl", "--cd", "/home/me", "-d", "Ubuntu"],
+        ] {
+            assert!(
+                !is_noninteractive_shell(&argv(a)),
+                "{a:?} should be interactive"
+            );
+        }
     }
 
     /// Cycle 730 drift guard: ssh as a direct child of the pane's

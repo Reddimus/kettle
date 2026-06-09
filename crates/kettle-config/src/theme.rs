@@ -20,34 +20,35 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        // TokyoNight Night — the shipped default. Matched verbatim to the
-        // bundled theme file; resolved from the bundle at startup, this is only
-        // the hard fallback.
+        // Cycle 917 (#5, user-requested): Catppuccin Mocha — the darkest
+        // Catppuccin flavor — is now the shipped default. Matched verbatim to the
+        // bundled `assets/themes/Catppuccin Mocha` file; resolved from the bundle
+        // at startup, this struct is only the hard fallback.
         Theme {
             palette: [
-                Rgb::new(0x15, 0x16, 0x1e),
-                Rgb::new(0xf7, 0x76, 0x8e),
-                Rgb::new(0x9e, 0xce, 0x6a),
-                Rgb::new(0xe0, 0xaf, 0x68),
-                Rgb::new(0x7a, 0xa2, 0xf7),
-                Rgb::new(0xbb, 0x9a, 0xf7),
-                Rgb::new(0x7d, 0xcf, 0xff),
-                Rgb::new(0xa9, 0xb1, 0xd6),
-                Rgb::new(0x41, 0x48, 0x68),
-                Rgb::new(0xf7, 0x76, 0x8e),
-                Rgb::new(0x9e, 0xce, 0x6a),
-                Rgb::new(0xe0, 0xaf, 0x68),
-                Rgb::new(0x7a, 0xa2, 0xf7),
-                Rgb::new(0xbb, 0x9a, 0xf7),
-                Rgb::new(0x7d, 0xcf, 0xff),
-                Rgb::new(0xc0, 0xca, 0xf5),
+                Rgb::new(0x45, 0x47, 0x5a),
+                Rgb::new(0xf3, 0x8b, 0xa8),
+                Rgb::new(0xa6, 0xe3, 0xa1),
+                Rgb::new(0xf9, 0xe2, 0xaf),
+                Rgb::new(0x89, 0xb4, 0xfa),
+                Rgb::new(0xf5, 0xc2, 0xe7),
+                Rgb::new(0x94, 0xe2, 0xd5),
+                Rgb::new(0xa6, 0xad, 0xc8),
+                Rgb::new(0x58, 0x5b, 0x70),
+                Rgb::new(0xf3, 0x77, 0x99),
+                Rgb::new(0x89, 0xd8, 0x8b),
+                Rgb::new(0xeb, 0xd3, 0x91),
+                Rgb::new(0x74, 0xa8, 0xfc),
+                Rgb::new(0xf2, 0xae, 0xde),
+                Rgb::new(0x6b, 0xd7, 0xca),
+                Rgb::new(0xba, 0xc2, 0xde),
             ],
-            background: Rgb::new(0x1a, 0x1b, 0x26),
-            foreground: Rgb::new(0xc0, 0xca, 0xf5),
-            cursor: Rgb::new(0xc0, 0xca, 0xf5),
-            cursor_text: Rgb::new(0x1a, 0x1b, 0x26),
-            selection_background: Rgb::new(0x28, 0x34, 0x57),
-            selection_foreground: Rgb::new(0xc0, 0xca, 0xf5),
+            background: Rgb::new(0x1e, 0x1e, 0x2e),
+            foreground: Rgb::new(0xcd, 0xd6, 0xf4),
+            cursor: Rgb::new(0xf5, 0xe0, 0xdc),
+            cursor_text: Rgb::new(0x1e, 0x1e, 0x2e),
+            selection_background: Rgb::new(0x58, 0x5b, 0x70),
+            selection_foreground: Rgb::new(0xcd, 0xd6, 0xf4),
         }
     }
 }
@@ -92,7 +93,7 @@ impl Theme {
     ];
 
     /// Parse a theme from Ghostty-syntax text (`palette = N=#hex`, etc.).
-    /// Unspecified fields keep the default (TokyoNight Night) value.
+    /// Unspecified fields keep the default (Catppuccin Mocha) value.
     pub fn parse(text: &str) -> Theme {
         let mut t = Theme::default();
         for e in parse::parse(text) {
@@ -119,7 +120,7 @@ impl Theme {
     }
 
     /// Look up a bundled theme by name (case-insensitive). Returns the default
-    /// (TokyoNight Night) if not found.
+    /// (Catppuccin Mocha) if not found.
     pub fn by_name(name: &str) -> Theme {
         // `eq_ignore_ascii_case` compares in place — no per-element
         // `to_ascii_lowercase` String alloc (this runs on every theme keypress
@@ -159,7 +160,7 @@ impl Theme {
     pub fn cycle(current: &str, forward: bool) -> &'static str {
         let n = BUNDLED_THEMES.len();
         if n == 0 {
-            return "TokyoNight Night";
+            return "Catppuccin Mocha";
         }
         // Case-insensitive + trimmed, mirroring `by_name`, so a config
         // like `theme = tokyonight night` still cycles from here. Operate on

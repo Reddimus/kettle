@@ -1364,6 +1364,25 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
     (surface_w - plus_w - arrow_w).max(plus_w)
 }
 
+/// Cycle 917 (#4, user-requested): should the new-tab `▾` shell-dropdown arrow
+/// be shown? Hidden when there's only one shell to choose — e.g. a stock Ubuntu
+/// with just `bash` — so the arrow never opens a pointless one-item menu. On
+/// Windows there are always multiple launch targets (cmd / pwsh / WSL distros)
+/// and counting them would mean spawning `wsl.exe` (a bounded but ~2s call), so
+/// the arrow always shows there. The Unix count is a cheap PATH probe, cached
+/// process-wide since the installed shells don't change during a session.
+fn new_tab_dropdown_visible() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        static MULTI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MULTI.get_or_init(|| kettle_core::term::detect_shells().len() > 1)
+    }
+}
+
 /// Cycle 708 (Terminator parity, `layoutlauncher.py`): rank saved
 /// layouts against the user-typed query. Empty query returns
 /// every layout in original (alphabetical) order; non-empty query
@@ -2469,6 +2488,14 @@ impl App {
         };
         self.remote_scanner.refresh();
         let mut shell = self.remote_scanner.foreground_shell(pid)?;
+        // Cycle 917 (#2): assert the interactive-shell contract at the boundary.
+        // The detector already rejects one-shot helpers, but re-checking here
+        // means a split can never clone a non-interactive argv into a dead pane —
+        // `None` routes the caller to `Mux::split`, which clones the pane's own
+        // launch shell (falling back to the configured default).
+        if !kettle_remote::shell_launch_is_interactive(&shell.argv) {
+            return None;
+        }
         // Prefer the pane's OSC 7-reported cwd — where the user actually is (e.g.
         // the WSL bash dir) — over the detected process's cwd, which Windows
         // sysinfo typically can't read for `wsl.exe` (it returned None, so the
@@ -2802,7 +2829,15 @@ impl App {
         // button (arrow + plus), not just `plus_w`, or the last tab segment
         // overlaps it.
         let plus_w = height;
-        let arrow_w = height;
+        // Cycle 917 (#4): hide the ▾ shell-dropdown when only one shell is
+        // available (e.g. stock Ubuntu = just bash). A zero-width arrow drops it
+        // from both the render pass (`new_tab_menu.2 > 0.0`) and the click
+        // hit-test, and the `+` button reclaims the space.
+        let arrow_w = if new_tab_dropdown_visible() {
+            height
+        } else {
+            0.0
+        };
         let button_w = plus_w + arrow_w;
         // Cycle 821: the drag-to-reorder handler derives its strip width from
         // the same helper, so the two can't disagree on where segments end.

@@ -1702,6 +1702,22 @@ mod detect_shells_tests {
             vec![("Shell".to_string(), vec!["/bin/sh".to_string()])]
         );
     }
+
+    /// Cycle 917 (#4): the new-tab `▾` dropdown is gated on `detect_shells().len()
+    /// > 1`. A stock Ubuntu (`$SHELL=/bin/bash`, only bash on PATH) must produce
+    /// exactly ONE choice so the dropdown is hidden; adding zsh makes it two so
+    /// the dropdown reappears. Pins the gate's input.
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shells_unix_single_shell_gates_dropdown_off() {
+        let only_bash = |e: &str| e == "bash";
+        let one = super::detect_shells_unix(Some("/bin/bash".to_string()), only_bash);
+        assert_eq!(one.len(), 1, "one shell (bash) → dropdown hidden");
+
+        let bash_and_zsh = |e: &str| matches!(e, "bash" | "zsh");
+        let two = super::detect_shells_unix(Some("/bin/bash".to_string()), bash_and_zsh);
+        assert!(two.len() >= 2, "bash + zsh → dropdown shown");
+    }
 }
 
 #[cfg(test)]
@@ -1974,6 +1990,53 @@ mod conformance {
             fixed.trim(),
             buggy.trim(),
             "display_offset conversion must change which row is copied"
+        );
+    }
+
+    /// Cycle 917 (#3, user-reported on native Ubuntu): hyperlink/URL detection
+    /// must scan the VISIBLE viewport, not the active screen, when scrolled back.
+    /// `links()` indexed `grid[Line(row)]` for `row in 0..screen_lines` — always
+    /// the active (bottom) screen regardless of `display_offset` — so scrolling
+    /// Claude Code up painted the active screen's link underlines over the
+    /// scrolled-back history ("leftover/ghost underlines from another scroll
+    /// position"). The fix reads `Line(row - display_offset)`, matching the
+    /// cycle-912 decoration/selection conversion. This is the sibling that fix
+    /// missed.
+    #[test]
+    fn links_while_scrolled_read_visible_viewport_not_active_screen() {
+        use alacritty_terminal::grid::Scroll;
+        // 4 visible rows; feed 8 lines so 4 spill into scrollback. A URL sits in
+        // history (L1) and a DIFFERENT URL on the active screen (L5).
+        let (mut t, mut p) = harness(40, 4);
+        feed(
+            &mut t,
+            &mut p,
+            b"top\r\nx http://hist.test/1 y\r\nl2\r\nl3\r\nl4\r\nz http://active.test/2 w\r\nl6\r\nl7",
+        );
+        // Bottom (offset 0): visible rows are l4 / active / l6 / l7.
+        let bottom = crate::links::links(&t);
+        assert!(
+            bottom.iter().any(|k| k.uri.contains("active.test")),
+            "at the bottom the active-screen URL is the visible one: {bottom:?}"
+        );
+
+        // Scroll back 3 → visible top = L1 ("x http://hist.test/1 y").
+        t.scroll_display(Scroll::Delta(3));
+        assert_eq!(t.grid().display_offset(), 3, "scrolled back 3 lines");
+        let scrolled = crate::links::links(&t);
+        // The VISIBLE history link is found, at viewport row 0...
+        assert!(
+            scrolled
+                .iter()
+                .any(|k| k.uri.contains("hist.test") && k.row == 0),
+            "visible history link must be detected at viewport row 0: {scrolled:?}"
+        );
+        // ...and the now-offscreen active-screen link is NOT reported (the ghost
+        // underline the user saw). Pre-fix this failed both ways: `links()` read
+        // the active screen and returned the active.test URL, never hist.test.
+        assert!(
+            !scrolled.iter().any(|k| k.uri.contains("active.test")),
+            "offscreen active-screen URL must not be underlined over history: {scrolled:?}"
         );
     }
 
