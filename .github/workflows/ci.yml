@@ -369,8 +369,15 @@ jobs:
           # Cycle 318: pivoted from grep-on-output (flaky on Windows
           # bash where the if-condition's pipe semantics differed)
           # to a direct exit-code check.
-          mkdir -p ~/.config/kettle/profiles
-          echo 'font-size = not_a_number' > ~/.config/kettle/profiles/cibad.config
+          # Cycle 918: pin the config dir via XDG_CONFIG_HOME (the cross-platform
+          # override, honored on every OS). kettle now uses %APPDATA% on Windows
+          # and deliberately ignores a stray HOME (the config split-brain fix), so
+          # a profile written under ~/.config would NOT be found by the Windows
+          # binary. Using XDG_CONFIG_HOME — set to the same $HOME/.config the test
+          # already wrote to — keeps this smoke platform-independent.
+          export XDG_CONFIG_HOME="$HOME/.config"
+          mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
+          echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
           # --profile picks up the file → check-config exits non-zero:
           out=$(cargo run -q -p kettle -- --profile cibad --check-config 2>&1) && \
               { echo "::error::--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
@@ -388,7 +395,7 @@ jobs:
               echo "$out"
               exit 1
           fi
-          rm -f ~/.config/kettle/profiles/cibad.config
+          rm -f "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
           # Cycle 229: --shell-integration <bash|zsh|fish> emits the
           # embedded shell-integration/kettle.{bash,zsh,fish} snippet.
           # Verify each shell's snippet emits something non-trivial
