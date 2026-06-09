@@ -4,6 +4,28 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  Post-v2.15.0 follow-ups (cycle 918 tail), folding into the next release:
+
+  - **App icon → Catppuccin signature mauve.** The icon was already the Mocha
+    palette but used Mocha's ANSI blue `#89b4fa` for the window border/caret,
+    which reads almost identically to the old TokyoNight blue — so it looked
+    unchanged. Recolored the border + caret to Catppuccin's flagship mauve
+    `#cba6f7` (a core Mocha color) so the theming is unmistakable; regenerated
+    all 19 rasters + the multi-resolution `.ico` from the SVG.
+  - **`install.ps1` refreshes the Windows icon cache** (`ie4uinit -show`) after
+    writing `kettle.ico`, so a re-install with a changed icon shows immediately
+    instead of Explorer serving the stale cached bitmap (the "icon didn't update"
+    symptom). The repo/installed/embedded assets were already correct — this is
+    the cache-invalidation that was missing.
+  - **CI `--profile` smoke pins `XDG_CONFIG_HOME`.** The v2.15.0 Windows
+    config-dir change (use `%APPDATA%`, ignore a stray `HOME`) meant the smoke's
+    `~/.config` test profile wasn't found by the Windows binary; it now sets the
+    cross-platform `XDG_CONFIG_HOME` override so the test is OS-independent.
+  - **Hero/showcase screenshots regenerated** for the Catppuccin Mocha default
+    (they render the default theme via `--screenshot`); captions updated.
+
 ## [2.15.0] — 2026-06-09
 
   Session/theme UX overhaul + a small audit batch, all from live use on the
