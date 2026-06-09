@@ -17,7 +17,7 @@ A fast, GPU-accelerated terminal emulator written in Rust — combining
 the best ideas of **Ghostty**, **Terminator**, **kitty**, **Alacritty**
 and **WezTerm** into one tool.
 
-![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
+![kettle — Catppuccin Mocha, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
 <!-- Hero regenerated with the real renderer (no mockups), same offscreen path as
      the UX showcase:  kettle --screenshot docs/images/kettle-hero.png --cols 120 --rows 32

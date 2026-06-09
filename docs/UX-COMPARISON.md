@@ -12,11 +12,11 @@ source file and line it came from — kettle borrows liberally and credits.
 
 ## kettle today (rendered offscreen via `kettle --screenshot`)
 
-![kettle showcase — TokyoNight Night, redesigned tab bar, vertical split](images/kettle-showcase.png)
+![kettle showcase — Catppuccin Mocha, redesigned tab bar, vertical split](images/kettle-showcase.png)
 
 The frame above is produced by `kettle --screenshot docs/images/kettle-showcase.png
 --cols 100 --rows 30`, driving the **actual** renderer: bundled JetBrains
-Mono Nerd Font, the TokyoNight Night theme, the redesigned tab bar (active-tab
+Mono Nerd Font, the Catppuccin Mocha theme, the redesigned tab bar (active-tab
 accent bar, per-tab `✕`, trailing `+`), and a focus-bordered vertical split.
 
 ### Reference terminals (best-effort, this CI image)
