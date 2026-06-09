@@ -1703,10 +1703,10 @@ mod detect_shells_tests {
         );
     }
 
-    /// Cycle 917 (#4): the new-tab `▾` dropdown is gated on `detect_shells().len()
-    /// > 1`. A stock Ubuntu (`$SHELL=/bin/bash`, only bash on PATH) must produce
-    /// exactly ONE choice so the dropdown is hidden; adding zsh makes it two so
-    /// the dropdown reappears. Pins the gate's input.
+    /// Cycle 917 (#4): the new-tab `▾` dropdown is gated on `detect_shells()`
+    /// returning more than one choice. A stock Ubuntu (`$SHELL=/bin/bash`, only
+    /// bash on PATH) must produce exactly ONE choice so the dropdown is hidden;
+    /// adding zsh makes it two so the dropdown reappears. Pins the gate's input.
     #[cfg(not(windows))]
     #[test]
     fn detect_shells_unix_single_shell_gates_dropdown_off() {
