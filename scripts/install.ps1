@@ -252,6 +252,16 @@ $lnk.Description = "Fast, GPU-accelerated terminal emulator"
 $lnk.Save()
 Write-Output "  created Start menu shortcut: $shortcutPath"
 
+# Cycle 918: refresh the Windows icon cache. Explorer caches launcher icons by
+# path, and an in-place `kettle.ico` overwrite raises no change notification, so
+# a re-install with a CHANGED icon (e.g. the Catppuccin Mocha re-theme) would
+# otherwise keep showing the stale bitmap in Start / search / taskbar until the
+# cache rebuilds on its own. `ie4uinit -show` is the light, non-admin refresh;
+# wrapped so a failure (older/newer Windows flag differences) never aborts the
+# install. A full rebuild (clear %LOCALAPPDATA%\IconCache.db + restart Explorer)
+# is only needed in the rare case this doesn't take.
+try { & (Join-Path $env:SystemRoot 'System32\ie4uinit.exe') -show 2>$null } catch {}
+
 # Add/Remove Programs entry. Per-user (HKCU); no admin required.
 New-Item -Path $uninstallKey -Force | Out-Null
 $exeForVersion = Join-Path $Prefix "kettle.exe"
