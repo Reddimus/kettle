@@ -2858,6 +2858,28 @@ impl Renderer {
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
 
+        // Cycle 939 (Terminator parity, cursor_fg_color / cursor_bg_color): a
+        // focused SOLID block cursor renders the block in `theme.cursor`
+        // (cursor-color / cursor-bg-color) with the glyph UNDER it recolored to
+        // `theme.cursor_text` (cursor-fg-color) — the standard "inverted cursor"
+        // model. Identify that grid-absolute cell so the span builder recolors
+        // exactly its glyph. Only the full Block shape covers the glyph (beam /
+        // underline leave it visible, so they aren't recolored).
+        let recolor_cursor_cell: Option<(i32, usize)> = {
+            let cp = content.cursor.point;
+            let cvrow = cp.line.0 + display_off;
+            if pv.focused
+                && window_focused
+                && cursor_visible
+                && content.cursor.shape == EShape::Block
+                && (0..screen_rows).contains(&cvrow)
+            {
+                Some((cp.line.0, cp.column.0))
+            } else {
+                None
+            }
+        };
+
         for indexed in content.display_iter {
             let point = indexed.point;
             let cell = indexed.cell;
@@ -2915,6 +2937,10 @@ impl Renderer {
             // index. No-op when bold isn't set.
             if bold && cfg.bold_is_bright {
                 fg = color::bright_for_bold(fg, theme);
+            }
+            // Recolor the glyph sitting under a focused solid block cursor.
+            if recolor_cursor_cell == Some((row, col)) {
+                fg = theme.cursor_text;
             }
 
             if bg != default_bg {
@@ -3082,8 +3108,11 @@ impl Renderer {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
                     EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                    // Engine variants we draw as a solid block.
-                    EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 0.55, ch, 0.0),
+                    // Cycle 939: a focused block cursor is SOLID (was a 0.55
+                    // translucent tint) — the glyph under it is recolored to
+                    // `theme.cursor_text` in the span builder, the standard
+                    // inverted-cursor model + Terminator cursor_fg/bg parity.
+                    EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 1.0, ch, 0.0),
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
             }

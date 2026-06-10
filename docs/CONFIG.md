@@ -33,7 +33,8 @@ keys). The file is **watched and reloaded live**.
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
-| `cursor-color` | color | from theme | |
+| `cursor-color` | color | from theme | The cursor BLOCK color. `cursor-bg-color` (Terminator `cursor_bg_color`) is an alias |
+| `cursor-fg-color` | color | from theme | The color of the glyph UNDER the cursor (Terminator `cursor_fg_color`). A focused block cursor renders solid in the block color with the glyph recolored to this — the standard inverted-cursor model |
 | `selection-background` / `selection-foreground` | color | from theme | |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |

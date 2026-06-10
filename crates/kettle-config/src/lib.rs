@@ -2297,6 +2297,10 @@ impl Config {
                 | "foreground-color"
                 | "foreground_color"
                 | "cursor-color"
+                | "cursor-bg-color"
+                | "cursor_bg_color"
+                | "cursor-fg-color"
+                | "cursor_fg_color"
                 | "selection-background"
                 | "selection-foreground"
                 | "search-foreground"
@@ -2694,9 +2698,19 @@ impl Config {
                         cfg.theme.foreground = c;
                     }
                 }
-                "cursor-color" => {
+                // `cursor-color` / Terminator's `cursor_bg_color` set the cursor
+                // BLOCK color; `cursor-fg-color` / `cursor_fg_color` set the
+                // color of the glyph UNDER the cursor (theme.cursor_text). The
+                // focused block cursor renders solid in the block color with the
+                // under-glyph recolored — the standard terminal model.
+                "cursor-color" | "cursor-bg-color" | "cursor_bg_color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
                         cfg.theme.cursor = c;
+                    }
+                }
+                "cursor-fg-color" | "cursor_fg_color" => {
+                    if let Some(c) = Rgb::parse(&e.value) {
+                        cfg.theme.cursor_text = c;
                     }
                 }
                 "selection-background" => {
@@ -5197,6 +5211,32 @@ tab-bar-width = 200\n";
         assert_eq!(
             Config::parse_text("agent-server = yolo").agent_server,
             AgentServer::Off
+        );
+    }
+
+    /// Cycle 939 (Terminator parity): `cursor_bg_color` (the block) aliases
+    /// `cursor-color` → theme.cursor; `cursor_fg_color` (the glyph under the
+    /// cursor) → theme.cursor_text. Both spellings validate as colors.
+    #[test]
+    fn cursor_fg_bg_color_split() {
+        let c = Config::parse_text("cursor-bg-color = #112233\ncursor-fg-color = #445566");
+        assert_eq!(c.theme.cursor, crate::color::Rgb::new(0x11, 0x22, 0x33));
+        assert_eq!(
+            c.theme.cursor_text,
+            crate::color::Rgb::new(0x44, 0x55, 0x66)
+        );
+        // Terminator snake_case spellings work too.
+        let c = Config::parse_text("cursor_bg_color = #aabbcc\ncursor_fg_color = #ddeeff");
+        assert_eq!(c.theme.cursor, crate::color::Rgb::new(0xaa, 0xbb, 0xcc));
+        assert_eq!(
+            c.theme.cursor_text,
+            crate::color::Rgb::new(0xdd, 0xee, 0xff)
+        );
+        // Both validate clean; a bad value is diagnosed.
+        assert!(Config::detect_malformed_values("cursor-fg-color = #445566\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("cursor-bg-color = nope\n").len(),
+            1
         );
     }
 
