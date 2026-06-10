@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.16.0] — 2026-06-09
 
   **Agent-first kettle — AI agents work great with kettle both interactively
   and programmatically.** Three new non-GUI entry points, all opt-in; the
@@ -32,6 +32,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - A pane an agent has attached shows a configurable titlebar badge
     (`agent-badge`, default `"[agent] "`). Every connection + mutating method is
     logged and annotated in the dev-record trace.
+
+  **Whole-codebase production review (76 agents, adversarially verified — 40
+  confirmed findings fixed)** hardened the new agent surface and caught latent
+  bugs in mature code. Highlights: `run_command` now returns the real captured
+  output (it sliced the wrong grid region — empty for any command whose output
+  fit on screen — and now submits with CR, the Enter key under ConPTY); the MCP
+  `kettle_run` tool always bounds the child with a timeout (a non-exiting child
+  can't wedge the server); the Windows control pipe uses
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` (refuses to bind onto a squatted name); the
+  NDJSON readers enforce the 1 MiB line cap incrementally; the recorder stitches
+  multibyte UTF-8 split across PTY reads; plus pre-existing fixes
+  (`hints::labels` hung on a single-char alphabet; `wsl ~` / `--distribution-id`
+  shell-classification; `extract_tab` active-index; scaled-zoom stale font).
 
   **Cycle 920 — UI chrome colors derive from the theme.** A focused
   adversarially-verified audit of every UI/UX color (render passes + config
