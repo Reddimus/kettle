@@ -213,13 +213,22 @@ mixed case → case-sensitive). Different model. Note in audit; not a gap.
 
 ### `terminatorlib/terminal_popup_menu.py` — right-click menu
 
-Items: Copy, Paste, Set Window Title, Split Auto/Horiz/Vert (if not
-zoomed), Open Tab, Close, Zoom/Maximize/Restore, Grouping submenu (if
-titlebar hidden), Read-only toggle, Show scrollbar toggle, Preferences,
-Theme presets.
+Items: Open link / Copy address (when clicked on a URL), Copy, Paste,
+Set Window Title, Split Auto/Horiz/Vert (if not zoomed), Open Tab,
+Close, Zoom/Maximize/Restore, Grouping submenu (if titlebar hidden),
+Read-only toggle, Show scrollbar toggle, Preferences, Theme presets.
 
-kettle ✅ context menu (cycle-245+). Theme-preset submenu not yet —
-Bucket C.
+kettle ✅ context menu (cycle-245+). Theme-preset submenu ✅ (cycle 685-688
+Theme ▸ / Profile ▸ flyouts). **Read-only toggle ✅ (cycle 941)** —
+right-click "Read only" check item + `toggle_read_only` keybind/palette
+action; per-pane `Pane::feed_input` gate drops keystroke / paste / IME /
+drag-drop / Lua / remote.cmd / agent input (VTE `input-enabled`
+semantics: protocol replies keep flowing), `[RO]` titlebar badge, agent
+`send_text`/`run_command` get an explicit `read_only` error. **Open link /
+Copy address ✅ (cycle 941)** — URL-aware leading rows when the
+right-click lands on a detected hyperlink; Open routes through the
+cycle-374 `open_url` chain (Lua URL handlers → custom_url_handler →
+system open), Copy puts the address on the clipboard.
 
 ### `terminatorlib/prefseditor.py` — preferences GUI
 

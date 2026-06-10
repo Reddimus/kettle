@@ -97,6 +97,9 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Previous theme", PrevTheme),
         ("Toggle light/dark theme", ToggleLightDark),
         ("Toggle session log (pane → file)", ToggleSessionLog),
+        // Cycle 941 Terminator parity ("Read only"): drop user input to the
+        // focused pane while letting its output keep flowing.
+        ("Toggle read-only (focused pane)", TogglePaneReadOnly),
         ("Take screenshot (focused pane)", TakeScreenshot),
         ("Create / edit broadcast group", CreateGroup),
         ("Group every pane in this tab", GroupTab),
@@ -258,6 +261,7 @@ mod tests {
             PrevTheme,
             ToggleLightDark,
             ToggleSessionLog,
+            TogglePaneReadOnly,
             TakeScreenshot,
             CreateGroup,
             GroupTab,
@@ -404,6 +408,7 @@ mod tests {
                 | OpenSettings
                 | OpenUpdate
                 | DismissUpdate
+                | TogglePaneReadOnly
                 | GotoTab(_) => {}
             }
         }

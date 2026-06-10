@@ -158,6 +158,29 @@ pub struct Pane {
     /// targeted this pane (a mutating method or `subscribe`). Drives the
     /// titlebar agent badge; cleared when the last attached connection drops.
     pub agent_attached: bool,
+    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Read only"): when
+    /// true, user input (keystrokes / paste / broadcast) is dropped before it
+    /// reaches this pane's PTY — the child keeps producing output, but the pane
+    /// can't be typed into. Toggled via `Action::TogglePaneReadOnly` or the
+    /// right-click "Read only" item; shown as `[RO]` in the titlebar.
+    pub read_only: bool,
+}
+
+impl Pane {
+    /// Cycle 941 (Terminator parity): write user-originated input (keystroke /
+    /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
+    /// toggle. Returns `true` when the bytes were written. VTE
+    /// `feed_child` + `input-enabled` semantics: read-only blocks the *user*
+    /// (and anything acting as the user — Lua send_text, remote.cmd, agent
+    /// `send_text`/`run_command`), NOT the terminal protocol; replies like
+    /// focus/mouse reports and DSR keep flowing through `term.write` directly.
+    pub fn feed_input(&self, bytes: &[u8]) -> bool {
+        if self.read_only {
+            return false;
+        }
+        self.term.write(bytes);
+        true
+    }
 }
 
 /// Cycle 912 (audit): pure reap predicate. A pane is removed when explicitly
@@ -858,6 +881,7 @@ impl Mux {
                 argv: argv.to_vec(),
                 remote_context: None,
                 agent_attached: false,
+                read_only: false,
             },
         );
         Ok(id)
@@ -1963,8 +1987,21 @@ impl Mux {
         let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
-                p.term.write(bytes);
+                // Cycle 941: a read-only pane drops user input (keystroke /
+                // paste / broadcast). The child still produces output.
+                p.feed_input(bytes);
             }
+        }
+    }
+
+    /// Cycle 941: toggle the focused pane's read-only state; returns the new
+    /// value (or `false` if there's no focused pane).
+    pub fn toggle_focused_read_only(&mut self) -> bool {
+        if let Some(p) = self.focused() {
+            p.read_only = !p.read_only;
+            p.read_only
+        } else {
+            false
         }
     }
 
@@ -2070,7 +2107,8 @@ impl Mux {
                 } else {
                     raw.get_or_insert_with(|| crate::input::paste_payload(text, false))
                 };
-                p.term.write(bytes);
+                // Cycle 941: paste is user input — read-only panes drop it.
+                p.feed_input(bytes);
             }
         }
     }

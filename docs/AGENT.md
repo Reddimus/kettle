@@ -139,6 +139,10 @@ exit code. **Without shell integration** there is no marker, so the call returns
 `{timed_out: true, …}` after `timeout_s` (default 15) with a hint to run
 `kettle --shell-integration <shell>`. Output is still captured either way.
 
+A pane the user has toggled **Read only** (right-click menu /
+`toggle_read_only`) rejects `send_text` and `run_command` with the `read_only`
+error code — the agent is input like any other, and the user's lock wins.
+
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
 `agent_attached`, and `lag` (when a slow subscriber's queue overflowed).
 

@@ -285,6 +285,9 @@ pub enum Action {
     /// Cycle 342 Terminator parity (key_toggle_scrollbar): runtime
     /// show/hide of the scrollbar without editing config.
     ToggleScrollbar,
+    /// Cycle 941 Terminator parity (terminal_popup_menu.py "Read only"): toggle
+    /// the focused pane's read-only state — user input is dropped while on.
+    TogglePaneReadOnly,
     /// Cycle 342 Terminator parity (key_edit_window_title): open an
     /// inline overlay to edit the window title (OSC 0/2 equivalent).
     EditWindowTitle,
@@ -591,6 +594,7 @@ pub fn action_names() -> Vec<&'static str> {
         "rotate_cw",
         "rotate_ccw",
         "toggle_scrollbar",
+        "toggle_read_only",
         "edit_window_title",
         "edit_tab_title",
         "edit_terminal_title",
@@ -818,6 +822,11 @@ impl Action {
             "rotate_cw" | "rotate-cw" => RotateCw,
             "rotate_ccw" | "rotate-ccw" => RotateCcw,
             "toggle_scrollbar" | "toggle-scrollbar" => ToggleScrollbar,
+            "toggle_read_only"
+            | "toggle-read-only"
+            | "read_only"
+            | "read-only"
+            | "toggle_pane_read_only" => TogglePaneReadOnly,
             "edit_window_title" | "edit-window-title" => EditWindowTitle,
             "edit_tab_title" | "edit-tab-title" => EditTabTitle,
             "edit_terminal_title"

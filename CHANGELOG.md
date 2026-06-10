@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  **Terminator-parity sweep (full re-audit of the Terminator codebase against
+  kettle; cycles 938-941).** A file-by-file review of GNOME Terminator
+  (keybindings, config DEFAULTS, popup menu, CLI, plugins) found kettle at
+  ~95% parity with a finite gap list — now closed:
+
+  - **CLI window-state flags** (Terminator's option set): `-m/--maximise`
+    (alias `--maximize`), `-f/--fullscreen`, `-b/--borderless`, `-H/--hidden`,
+    and `-T/--title <t>` (pins the window title). Plus `--list-layouts` and
+    `--list-profiles` to enumerate saved layouts/profiles from scripts.
+  - **`cursor-fg-color` / `cursor-bg-color`** (Terminator's cursor color
+    split): the block cursor is now a solid box that recolors the glyph under
+    it (the standard inverted-cursor model every mainstream terminal uses —
+    previously a 0.55-alpha translucent block), and the two keys control the
+    recolored-glyph / box colors independently (`cursor-color` stays as the
+    bg alias).
+  - **Keybind-name aliases** so a Terminator config drops in unchanged:
+    `page_up`/`page-up` (+ `_down`, `line` variants), `switch_to_tab_N`,
+    `toggle_read_only` / `read_only`. **`search-wrap`** (default `true`)
+    matches Terminator's wrap-around search toggle.
+  - **Per-pane read-only** (Terminator's right-click "Read only"): a
+    check item in the context menu, a `toggle_read_only` keybind action, and
+    a command-palette row. While on, the pane drops *user* input — keystrokes,
+    paste, drag-drop, broadcast, Lua `send_text`, `remote.cmd`, and agent
+    `send_text`/`run_command` (those reply with a `read_only` error) — through
+    a single `Pane::feed_input` gate (VTE `input-enabled` semantics: protocol
+    replies like focus/mouse reports keep flowing), while the running
+    program's output keeps rendering. The titlebar shows `[RO]`.
+  - **URL-aware context menu** (Terminator's "Open link" / "Copy address"):
+    right-clicking a detected hyperlink now leads the menu with **Open
+    Link** / **Copy Link Address**. The URL is captured at menu-open time so
+    fresh output scrolling the grid can't retarget the click; Open routes
+    through the same guarded chain as Ctrl+click (Lua URL handlers →
+    `custom-url-handler` → system open).
+
   **Theme-aware UI accent + Peacock `accent-color = auto`.** The UI chrome
   accent (active-tab strip, focused-pane border, per-pane titlebars, settings/
   menu highlights, status bar) now derives from a new theme-level **`accent`**:

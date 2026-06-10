@@ -1044,16 +1044,26 @@ fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
     h.finish()
 }
 
-/// Cycle 934 (agent-first A4): the per-pane titlebar label, prefixed with the
-/// `agent-badge` when an agent control connection has the pane attached. Pure
-/// (unit-tested). An empty badge or an unattached pane returns the title
-/// unchanged (zero cost for the common case).
-fn agent_title(badge: &str, attached: bool, title: &str) -> String {
-    if attached && !badge.is_empty() {
-        format!("{badge}{title}")
-    } else {
-        title.to_string()
+/// Cycle 934 (agent-first A4) + cycle 941 (Terminator parity "Read only"):
+/// the per-pane titlebar label, composed from the pane's state badges —
+/// `[RO] ` while the pane is read-only (input dropped before the PTY), then
+/// the `agent-badge` when an agent control connection has the pane attached.
+/// Pure (unit-tested). No badges → the title unchanged (zero cost for the
+/// common case).
+fn compose_pane_title(badge: &str, attached: bool, read_only: bool, title: &str) -> String {
+    let agent = attached && !badge.is_empty();
+    if !read_only && !agent {
+        return title.to_string();
     }
+    let mut out = String::new();
+    if read_only {
+        out.push_str("[RO] ");
+    }
+    if agent {
+        out.push_str(badge);
+    }
+    out.push_str(title);
+    out
 }
 
 /// Map a click count + the Alt modifier to a selection type: double =
@@ -1166,6 +1176,15 @@ enum ContextMenuClick {
     /// the new-tab `▾` dropdown). Dispatch calls `Mux::new_tab_with` with the
     /// focused tab's current working directory.
     NewTabWithArgv(Vec<String>),
+    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
+    /// "Copy address"): a click on one of the URL-aware leading rows.
+    /// `copy: true` puts the address on the clipboard; `copy: false` opens it
+    /// through the cycle-374 `open_url` chain (Lua handler →
+    /// custom_url_handler → system open, `is_safe_url`-guarded).
+    Url {
+        url: String,
+        copy: bool,
+    },
 }
 
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -1253,6 +1272,16 @@ enum ContextMenuItem {
     NewTabShell {
         label: String,
         argv: Vec<String>,
+    },
+    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
+    /// "Copy address"): URL-aware leading rows, present only when the
+    /// right-click landed on a detected hyperlink. The URL is captured at
+    /// menu-open time so a subsequent output scroll can't retarget the click.
+    /// Clicking dispatches `ContextMenuClick::Url { url, copy }`.
+    UrlItem {
+        label: &'static str,
+        url: String,
+        copy: bool,
     },
 }
 
@@ -1472,6 +1501,7 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
             ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
+            ContextMenuItem::UrlItem { label, .. } => *label,
             ContextMenuItem::Separator => "",
         })
         .collect();
@@ -1523,6 +1553,7 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
         }
+        ContextMenuItem::UrlItem { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
         _ => false,
     })
 }
@@ -1671,6 +1702,8 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // Cycle 805: new-tab ▾ shell choices are always clickable + keyboard-
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
+            // Cycle 941: the URL-aware "Open Link" / "Copy Link Address" rows.
+            | ContextMenuItem::UrlItem { .. }
     )
 }
 
@@ -1713,6 +1746,10 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
         ContextMenuItem::NewTabShell { argv, .. } => {
             Some(ContextMenuClick::NewTabWithArgv(argv.clone()))
         }
+        ContextMenuItem::UrlItem { url, copy, .. } => Some(ContextMenuClick::Url {
+            url: url.clone(),
+            copy: *copy,
+        }),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
         | ContextMenuItem::Separator => None,
@@ -3519,7 +3556,8 @@ impl App {
             .contains(kettle_core::TermMode::BRACKETED_PASTE);
         let bytes = input::paste_payload(text, bracketed);
         if let Some(p) = self.mux.focused() {
-            p.term.write(&bytes);
+            // Cycle 941: paste is user input — a read-only pane drops it.
+            p.feed_input(&bytes);
         }
     }
 
@@ -4750,7 +4788,12 @@ impl App {
                         g,
                         Some(*id) == focus,
                         imgs,
-                        agent_title(&self.cfg.agent_badge, p.agent_attached, &p.title),
+                        compose_pane_title(
+                            &self.cfg.agent_badge,
+                            p.agent_attached,
+                            p.read_only,
+                            &p.title,
+                        ),
                         cols,
                         rows,
                         false,
@@ -5014,6 +5057,9 @@ impl App {
             .focused()
             .map(|p| p.group_name.as_ref().is_some_and(|g| !g.is_empty()))
             .unwrap_or(false);
+        // Cycle 941 (Terminator parity, terminal_popup_menu.py "Read only"):
+        // checked while the focused pane drops user input.
+        let read_only = self.mux.focused().map(|p| p.read_only).unwrap_or(false);
         vec![
             ContextMenuItem::Item {
                 label: "Copy",
@@ -5045,6 +5091,16 @@ impl App {
             ContextMenuItem::Item {
                 label: "New Tab",
                 action: Action::NewTab,
+                enabled: true,
+            },
+            // Cycle 941 (Terminator parity): per-pane read-only toggle. The
+            // check marker mirrors the Preferences-submenu convention
+            // ("✓ on / off"); dispatch goes through the same
+            // `Action::TogglePaneReadOnly` the keybind uses.
+            ContextMenuItem::Separator,
+            ContextMenuItem::DynamicItem {
+                label: format!("{}Read only", if read_only { "✓ " } else { "  " }),
+                action: Action::TogglePaneReadOnly,
                 enabled: true,
             },
             // Cycle 683 (named-groups sub-cycle 7): right-click
@@ -5320,7 +5376,28 @@ impl App {
     /// and-left rather than rendering off-screen).
     fn open_context_menu(&mut self, px: f32, py: f32) {
         self.close_all_modals();
-        let mut items = self.context_menu_items();
+        // Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
+        // "Copy address"): when the right-click landed on a detected
+        // hyperlink, lead with the URL rows. The URL is captured NOW — fresh
+        // output scrolling the grid between open and click must not retarget
+        // the action. `update_links` is keyed (cycle 803) so this is a no-op
+        // when the viewport hasn't changed since the last scan.
+        self.update_links();
+        let mut items = Vec::new();
+        if let Some(url) = self.link_at_cursor().map(|l| l.uri.clone()) {
+            items.push(ContextMenuItem::UrlItem {
+                label: "Open Link",
+                url: url.clone(),
+                copy: false,
+            });
+            items.push(ContextMenuItem::UrlItem {
+                label: "Copy Link Address",
+                url,
+                copy: true,
+            });
+            items.push(ContextMenuItem::Separator);
+        }
+        items.extend(self.context_menu_items());
         // Cycle 611: append config-file menu items (if any).
         self.append_config_menu_items(&mut items);
         // Cycle 375: append Lua-supplied items (if any).
@@ -5376,16 +5453,22 @@ impl App {
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::ThemeChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
-                | ContextMenuItem::NewTabShell { .. } => row_h,
+                | ContextMenuItem::NewTabShell { .. }
+                | ContextMenuItem::UrlItem { .. } => row_h,
             })
             .sum();
         let max_chars = items
             .iter()
             .filter_map(|it| match it {
                 ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
+                // Cycle 941: count DynamicItem labels too — the hit-test twin
+                // (`context_menu_geometry`) already did, so the anchor clamp
+                // here used to underestimate the panel the renderer draws.
+                ContextMenuItem::DynamicItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
                 ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
+                ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
                 // Cycle 684: submenu rows show "label ▸" so the
                 // max-width budget needs +2 for the suffix.
                 ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
@@ -5676,10 +5759,11 @@ impl App {
             ContextMenuClick::ConfigCommand(command) => {
                 self.context_menu = None;
                 // Cycle 611 (Terminator parity): write `CMD\n` to the PTY.
+                // Cycle 941: acts as the user — a read-only pane drops it.
                 if let Some(p) = self.mux.focused() {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
-                    p.term.write(&bytes);
+                    p.feed_input(&bytes);
                 }
             }
             ContextMenuClick::SetTheme(name) => {
@@ -5713,6 +5797,22 @@ impl App {
                 self.context_menu = None;
                 self.open_tab_with_argv(&argv);
             }
+            // Cycle 941 (Terminator parity): the URL-aware leading rows.
+            // Open routes through the cycle-374 `open_url` chain (Lua URL
+            // handlers → custom_url_handler → system open, with the
+            // `is_safe_url` guard); Copy puts the address on the clipboard.
+            ContextMenuClick::Url { url, copy } => {
+                self.context_menu = None;
+                if copy {
+                    if let Some(cb) = &mut self.clipboard
+                        && let Err(e) = cb.set_text(url)
+                    {
+                        log::warn!("clipboard set_text failed (link address copy): {e}");
+                    }
+                } else {
+                    self.open_url(&url);
+                }
+            }
         }
     }
 
@@ -5744,7 +5844,8 @@ impl App {
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::ThemeChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
-                | ContextMenuItem::NewTabShell { .. } => row_h,
+                | ContextMenuItem::NewTabShell { .. }
+                | ContextMenuItem::UrlItem { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 // Cycle 890: shared mapper — the same row→click table the
@@ -5801,6 +5902,8 @@ impl App {
                 // Cycle 805: count shell-dropdown labels so this hit-test width
                 // matches the panel `show_context_menu` actually rendered.
                 ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
+                // Cycle 941: same for the URL-aware leading rows.
+                ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -5874,6 +5977,13 @@ impl App {
                 // Cycle 805: new-tab ▾ shell choice — a normal clickable row.
                 ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
                     label: label.clone(),
+                    separator: false,
+                    enabled: true,
+                },
+                // Cycle 941: URL-aware leading rows ("Open Link" /
+                // "Copy Link Address") — normal clickable rows.
+                ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                    label: (*label).to_string(),
                     separator: false,
                     enabled: true,
                 },
@@ -6388,7 +6498,8 @@ impl App {
             // continuation (multi-line readline prompts).
             Action::SendNewline => {
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(b"\n");
+                    // Cycle 941: typed-input semantics — read-only drops it.
+                    p.feed_input(b"\n");
                 }
             }
             // Cycle 696 Terminator parity (`key_preferences` /
@@ -7116,6 +7227,17 @@ impl App {
                     w.request_redraw();
                 }
             }
+            // Cycle 941 (Terminator parity): toggle the focused pane's read-only
+            // state. While on, user input (keystrokes / paste / broadcast) is
+            // dropped before it reaches the PTY; the child keeps producing
+            // output. A `[RO]` titlebar badge shows the state.
+            Action::TogglePaneReadOnly => {
+                let _ = self.mux.toggle_focused_read_only();
+                // The `[RO]` titlebar badge reflects the new state.
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             // Cycle 345: broadcast zoom. kettle's font-size is
             // window-wide (not per-pane like VTE's per-terminal
             // scale), so zoom-all has the same effect as the
@@ -7149,7 +7271,7 @@ impl App {
                     .map(|i| i + 1)
                     .unwrap_or(1);
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(idx.to_string().as_bytes());
+                    p.feed_input(idx.to_string().as_bytes());
                 }
             }
             Action::InsertPanePadded => {
@@ -7159,7 +7281,7 @@ impl App {
                     .map(|i| i + 1)
                     .unwrap_or(1);
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(format!("{idx:02}").as_bytes());
+                    p.feed_input(format!("{idx:02}").as_bytes());
                 }
             }
             // Cycle 606 Terminator parity (`insert_term_name.py`
@@ -7172,7 +7294,7 @@ impl App {
             Action::InsertPaneName => {
                 if let Some(p) = self.mux.focused() {
                     let title = p.title.clone();
-                    p.term.write(title.as_bytes());
+                    p.feed_input(title.as_bytes());
                 }
             }
             // Cycle 607 Terminator parity (`dir_open.py` plugin →
@@ -7970,7 +8092,16 @@ impl App {
         let Some(p) = self.mux.panes.get(&pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
-        p.term.write(text.as_bytes());
+        // Cycle 941: an agent acts as the user — the per-pane read-only
+        // toggle (Terminator parity) blocks it like any other input, with an
+        // explicit error instead of a silent drop.
+        if !p.feed_input(text.as_bytes()) {
+            return Response::err(
+                req.id,
+                ec::READ_ONLY,
+                "pane is read-only (user toggled 'Read only')",
+            );
+        }
         log::info!(
             "agent-server: send_text conn={conn_id} pane={pane} ({} bytes)",
             text.len()
@@ -8101,7 +8232,17 @@ impl App {
             if !line.ends_with('\r') && !line.ends_with('\n') {
                 line.push('\r');
             }
-            p.term.write(line.as_bytes());
+            // Cycle 941: an agent acts as the user — the per-pane read-only
+            // toggle (Terminator parity) blocks it, with an explicit error
+            // (no PendingRun is registered; nothing was written).
+            if !p.feed_input(line.as_bytes()) {
+                let _ = reply.send(Response::err(
+                    req.id,
+                    ec::READ_ONLY,
+                    "pane is read-only (user toggled 'Read only')",
+                ));
+                return;
+            }
         }
         log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
         self.ctl_attach(conn_id, pane);
@@ -8265,7 +8406,8 @@ impl App {
             if let Some(payload) = line.strip_prefix("send-text ") {
                 let decoded = payload.replace("\\n", "\n");
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(decoded.as_bytes());
+                    // Cycle 941: remote.cmd acts as the user — read-only drops it.
+                    p.feed_input(decoded.as_bytes());
                 }
             } else if line == "toggle-window" {
                 // Cycle 303 + 319: tri-state Quake dropdown toggle.
@@ -9611,7 +9753,8 @@ impl ApplicationHandler<UserEvent> for App {
             && let Some(p) = self.mux.focused()
         {
             let bytes = std::mem::take(&mut self.pending_lua_send);
-            p.term.write(&bytes);
+            // Cycle 941: Lua send_text acts as the user — read-only drops it.
+            p.feed_input(&bytes);
         }
         // Cycle 326 Lua scripting: drain any `kettle.exec_action(name)`
         // dispatches the startup script queued. Done after the
@@ -10573,7 +10716,8 @@ impl ApplicationHandler<UserEvent> for App {
                         .contains(kettle_core::TermMode::BRACKETED_PASTE);
                     let bytes = input::paste_payload(&text, bracketed);
                     if let Some(p) = self.mux.focused() {
-                        p.term.write(&bytes);
+                        // Cycle 941: drag-drop is user input — read-only drops it.
+                        p.feed_input(&bytes);
                     }
                 }
                 if let Some(w) = &self.window {
@@ -10919,17 +11063,21 @@ impl ApplicationHandler<UserEvent> for App {
                             self.mux.broadcast_scroll_to_bottom();
                         }
                     } else if let Some(p) = self.mux.focused() {
-                        p.term.write(&bytes);
-                        // Yank back to the bottom *if* the user wants it
-                        // (Ghostty/Alacritty default `scroll-on-keystroke`).
-                        // Disabling lets you pin the viewport while typing —
-                        // useful for ed-style line editors and code reading
-                        // sessions where you're typing search terms while
-                        // the screen stays put.
-                        if self.cfg.scroll_on_keystroke
-                            && let Ok(mut t) = p.term.term.lock()
-                        {
-                            t.scroll_display(Scroll::Bottom);
+                        // Cycle 941: a read-only pane (Terminator parity)
+                        // drops the keystroke — and skips the scroll snap,
+                        // since nothing was typed.
+                        if p.feed_input(&bytes) {
+                            // Yank back to the bottom *if* the user wants it
+                            // (Ghostty/Alacritty default `scroll-on-keystroke`).
+                            // Disabling lets you pin the viewport while typing —
+                            // useful for ed-style line editors and code reading
+                            // sessions where you're typing search terms while
+                            // the screen stays put.
+                            if self.cfg.scroll_on_keystroke
+                                && let Ok(mut t) = p.term.term.lock()
+                            {
+                                t.scroll_display(Scroll::Bottom);
+                            }
                         }
                     }
                 }
@@ -11804,18 +11952,34 @@ mod tests {
         assert!(capped_crab.chars().take(60).all(|c| c == '🦀'));
     }
 
-    /// Cycle 934 (agent-first A4): the per-pane titlebar agent badge.
+    /// Cycle 934 (agent-first A4) + cycle 941 (read-only): the per-pane
+    /// titlebar badges, composed by `compose_pane_title`.
     #[test]
-    fn agent_title_prefixes_badge_only_when_attached() {
-        use super::agent_title;
-        // Unattached: title unchanged regardless of badge.
-        assert_eq!(agent_title("[agent] ", false, "bash"), "bash");
-        // Attached: badge prefixed.
-        assert_eq!(agent_title("[agent] ", true, "bash"), "[agent] bash");
-        // Empty badge disables the prefix even when attached.
-        assert_eq!(agent_title("", true, "bash"), "bash");
+    fn pane_title_badges_compose_from_state() {
+        use super::compose_pane_title;
+        // No badges: title unchanged regardless of the configured badge text.
+        assert_eq!(compose_pane_title("[agent] ", false, false, "bash"), "bash");
+        // Agent attached: badge prefixed.
+        assert_eq!(
+            compose_pane_title("[agent] ", true, false, "bash"),
+            "[agent] bash"
+        );
+        // Empty badge disables the agent prefix even when attached.
+        assert_eq!(compose_pane_title("", true, false, "bash"), "bash");
         // Custom badge glyph.
-        assert_eq!(agent_title("🤖 ", true, "vim"), "🤖 vim");
+        assert_eq!(compose_pane_title("🤖 ", true, false, "vim"), "🤖 vim");
+        // Read-only: `[RO] ` prefixed.
+        assert_eq!(
+            compose_pane_title("[agent] ", false, true, "bash"),
+            "[RO] bash"
+        );
+        // Both: read-only leads, then the agent badge.
+        assert_eq!(
+            compose_pane_title("[agent] ", true, true, "bash"),
+            "[RO] [agent] bash"
+        );
+        // Read-only with an empty agent badge still shows `[RO]`.
+        assert_eq!(compose_pane_title("", true, true, "bash"), "[RO] bash");
     }
 
     #[test]
@@ -12523,6 +12687,30 @@ mod tests {
                 0
             ),
             Some(ContextMenuClick::NewTabWithArgv(_))
+        ));
+        // Cycle 941: URL-aware rows → Url { copy } carrying the captured
+        // address, for both the Open and Copy flavors.
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::UrlItem {
+                    label: "Open Link",
+                    url: "https://example.com".into(),
+                    copy: false
+                },
+                0
+            ),
+            Some(ContextMenuClick::Url { copy: false, .. })
+        ));
+        assert!(matches!(
+            item_to_click(
+                &ContextMenuItem::UrlItem {
+                    label: "Copy Link Address",
+                    url: "https://example.com".into(),
+                    copy: true
+                },
+                0
+            ),
+            Some(ContextMenuClick::Url { copy: true, .. })
         ));
         // Non-dispatchable rows → None (disabled item + separator).
         assert!(
