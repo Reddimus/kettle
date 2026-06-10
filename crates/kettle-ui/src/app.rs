@@ -1029,6 +1029,21 @@ fn cap_title_for_status_bar(title: &str, max: usize) -> String {
     out
 }
 
+/// Cycle 937 (Peacock): a STABLE per-window seed for `accent-color = auto`,
+/// hashed from the window's working directory (the launch `-d DIR`, else the
+/// process cwd). Same project → same seed → same accent across launches;
+/// different projects → different accents. Pure given the cwd.
+fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let dir = cwd
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut h);
+    h.finish()
+}
+
 /// Cycle 934 (agent-first A4): the per-pane titlebar label, prefixed with the
 /// `agent-badge` when an agent control connection has the pane attached. Pure
 /// (unit-tested). An empty badge or an unattached pane returns the title
@@ -2237,6 +2252,10 @@ impl App {
         if let Some(rgb) = startup.accent_override {
             initial_cfg.accent_color = Some(rgb);
         }
+        // Cycle 937 (Peacock): seed the per-window accent variation from this
+        // window's working directory, so `accent-color = auto` gives a window
+        // in a different project a different (but per-project stable) accent.
+        initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
         // was set, init a LuaEngine + run the script once. Failures
@@ -7624,7 +7643,7 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        let new = self
+        let mut new = self
             .config_path
             .as_deref()
             .map(Config::load_from)
@@ -7648,6 +7667,13 @@ impl App {
         // even mid-throttle.
         self.compiled_triggers = compile_triggers(&new.triggers);
         self.last_trigger_fire = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        // Cycle 937: the accent seed is a runtime per-window value (not in the
+        // config file), so carry it across a reload + re-apply the --accent
+        // override (launch-time intent survives a reload).
+        new.accent_seed = self.cfg.accent_seed;
+        if let Some(rgb) = self.startup.accent_override {
+            new.accent_color = Some(rgb);
+        }
         self.cfg = new;
         // Cycle 936: a config reload may have changed the font size, so the
         // saved pre-scaled-zoom size is stale — drop it (see the font-size

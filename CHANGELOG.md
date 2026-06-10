@@ -4,6 +4,20 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  **Theme-aware UI accent + Peacock `accent-color = auto`.** The UI chrome
+  accent (active-tab strip, focused-pane border, per-pane titlebars, settings/
+  menu highlights, status bar) now derives from a new theme-level **`accent`**:
+  Catppuccin Mocha sets it to its signature **mauve `#cba6f7`** — the same color
+  as the app icon — so the whole window reads as one accent instead of the icon
+  being mauve while the chrome stayed ANSI-blue. Themes that don't declare an
+  `accent` keep their `palette[4]` (blue), so nothing changes for them. A new
+  **`accent-color = auto`** is VS Code Peacock parity: it varies the accent by
+  *working directory*, so a kettle window opened in a different project is a
+  visibly different (but per-project stable) color — handy for telling several
+  windows apart. An explicit `accent-color = <hex>` or `--accent` still wins.
+
 ## [2.16.0] — 2026-06-09
 
   **Agent-first kettle — AI agents work great with kettle both interactively

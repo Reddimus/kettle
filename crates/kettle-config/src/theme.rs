@@ -16,6 +16,14 @@ pub struct Theme {
     pub cursor_text: Rgb,
     pub selection_background: Rgb,
     pub selection_foreground: Rgb,
+    /// Cycle 937: the theme's UI-chrome accent (focus border, active tab,
+    /// status bar). Catppuccin Mocha sets this to its *signature* mauve
+    /// (#cba6f7) — the same color as the app icon — because mauve is a named
+    /// Catppuccin color that is NOT in the 16-slot ANSI palette, so the chrome
+    /// can't derive it otherwise. Themes that don't declare an `accent` default
+    /// it to `palette[4]` (their ANSI blue, the conventional focus color), so
+    /// nothing changes for them. A user `accent-color = …` still overrides.
+    pub accent: Rgb,
 }
 
 impl Default for Theme {
@@ -49,6 +57,8 @@ impl Default for Theme {
             cursor_text: Rgb::new(0x1e, 0x1e, 0x2e),
             selection_background: Rgb::new(0x58, 0x5b, 0x70),
             selection_foreground: Rgb::new(0xcd, 0xd6, 0xf4),
+            // Catppuccin Mocha signature mauve (matches the app icon).
+            accent: Rgb::new(0xcb, 0xa6, 0xf7),
         }
     }
 }
@@ -96,6 +106,12 @@ impl Theme {
     /// Unspecified fields keep the default (Catppuccin Mocha) value.
     pub fn parse(text: &str) -> Theme {
         let mut t = Theme::default();
+        // Cycle 937: track whether the theme declared its own accent. Ghostty
+        // theme files don't define one, so a theme that doesn't (every bundled
+        // theme except our Catppuccin Mocha, which carries an `accent` line)
+        // gets `palette[4]` — its ANSI blue — as the conventional focus accent,
+        // rather than inheriting the default's mauve.
+        let mut explicit_accent = false;
         for e in parse::parse(text) {
             match e.key.as_str() {
                 "palette" => {
@@ -113,8 +129,19 @@ impl Theme {
                 "cursor-text" => set(&mut t.cursor_text, &e.value),
                 "selection-background" => set(&mut t.selection_background, &e.value),
                 "selection-foreground" => set(&mut t.selection_foreground, &e.value),
+                // kettle extension: the chrome accent (focus border / active tab
+                // / status bar). Catppuccin Mocha sets it to its signature mauve.
+                "accent" => {
+                    if let Some(rgb) = Rgb::parse(e.value.trim()) {
+                        t.accent = rgb;
+                        explicit_accent = true;
+                    }
+                }
                 _ => {}
             }
+        }
+        if !explicit_accent {
+            t.accent = t.palette[4];
         }
         t
     }
@@ -194,6 +221,27 @@ fn set(slot: &mut Rgb, v: &str) {
 #[cfg(test)]
 mod tests {
     use super::Theme;
+    use crate::color::Rgb;
+
+    /// Cycle 937: the theme's UI accent. Catppuccin Mocha = signature mauve
+    /// (matches the icon); a theme that declares no `accent` line gets its ANSI
+    /// blue `palette[4]`; an explicit `accent = #hex` line is honored.
+    #[test]
+    fn theme_accent_is_mocha_mauve_else_palette4() {
+        // Default (Mocha) → mauve.
+        assert_eq!(Theme::default().accent, Rgb::new(0xcb, 0xa6, 0xf7));
+        // The bundled Mocha carries the accent line, so by_name matches default.
+        assert_eq!(
+            Theme::by_name("Catppuccin Mocha").accent,
+            Rgb::new(0xcb, 0xa6, 0xf7)
+        );
+        // A theme WITHOUT an accent line → its palette[4] (ANSI blue).
+        let t = Theme::parse("palette = 4=#001122\nbackground = #000000\n");
+        assert_eq!(t.accent, Rgb::new(0x00, 0x11, 0x22));
+        // An explicit accent line is honored over palette[4].
+        let t = Theme::parse("palette = 4=#001122\naccent = #aabbcc\n");
+        assert_eq!(t.accent, Rgb::new(0xaa, 0xbb, 0xcc));
+    }
 
     /// Cycle 919 (audit L6): `Theme::default()` is a hand-transcribed copy of the
     /// bundled `Catppuccin Mocha` (cycle 917 made it the shipped default). Pin

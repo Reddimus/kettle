@@ -1164,6 +1164,18 @@ pub struct Config {
     /// the high-priority state isn't confused with a workspace
     /// identity color.
     pub accent_color: Option<Rgb>,
+    /// Cycle 937 (Peacock parity): `accent-color = auto` — derive a distinct
+    /// chrome accent per *working directory*, so a new kettle window in a
+    /// different project is a visually different color (VS Code Peacock style)
+    /// while a given project stays consistent across launches. Off by default;
+    /// an explicit `accent-color = <hex>` or `--accent` always wins over it.
+    pub accent_auto: bool,
+    /// Cycle 937: runtime-only seed for `accent_auto` (a hash of the window's
+    /// startup working directory). Set by the App at launch, NOT parsed from the
+    /// config file; default 0 (the theme's signature accent for the home/seedless
+    /// case). Kept on `Config` so the renderer can resolve the accent from `cfg`
+    /// + `theme` alone without threading a separate parameter.
+    pub accent_seed: u64,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
     /// Cycle 252: an inactive tab whose unseen output went quiet for
@@ -1687,6 +1699,8 @@ impl Default for Config {
             split_divider_color: None,
             focused_split_color: None,
             accent_color: None,
+            accent_auto: false,
+            accent_seed: 0,
             cursor_blink_interval: 530,
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
@@ -1737,7 +1751,47 @@ fn decode_config_text(bytes: &[u8]) -> String {
     }
 }
 
+/// Cycle 937 (Peacock): pick a distinct, theme-appropriate accent for `seed`
+/// (a hash of the window's working directory). The candidate set is a spread of
+/// the theme's most distinct hues — including the theme's own signature accent —
+/// so adjacent projects land on visibly different colors while a given project
+/// is stable across launches. Pure.
+fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
+    let candidates = [
+        theme.accent,      // the signature (mauve on Mocha)
+        theme.palette[4],  // blue
+        theme.palette[2],  // green
+        theme.palette[3],  // yellow
+        theme.palette[1],  // red
+        theme.palette[6],  // cyan/teal
+        theme.palette[5],  // magenta/pink
+        theme.palette[13], // bright magenta
+    ];
+    candidates[(seed % candidates.len() as u64) as usize]
+}
+
 impl Config {
+    /// Cycle 937: the effective UI-chrome accent (focus border, active tab,
+    /// status bar), resolved in precedence:
+    ///   1. an explicit `accent-color = <hex>` / `--accent` (`accent_color`),
+    ///   2. `accent-color = auto` → a Peacock color varied by `accent_seed`
+    ///      (a hash of the window's working directory), so a window in a
+    ///      different project is a different color while one project stays
+    ///      consistent across launches,
+    ///   3. the THEME's signature accent (`theme.accent` — Catppuccin Mocha's
+    ///      mauve, matching the app icon; `palette[4]` for themes without one).
+    ///
+    /// Pure + theme-aware; the renderer calls this with the active theme.
+    pub fn resolved_accent(&self, theme: &Theme) -> crate::color::Rgb {
+        if let Some(c) = self.accent_color {
+            return c;
+        }
+        if self.accent_auto {
+            return peacock_accent(theme, self.accent_seed);
+        }
+        theme.accent
+    }
+
     /// Font family to use for a given style, falling back to `font_family`.
     pub fn family_for(&self, bold: bool, italic: bool) -> &str {
         let pick = match (bold, italic) {
@@ -2252,8 +2306,6 @@ impl Config {
                 | "split-divider-color-focused"
                 // Cycle 837 (audit): accent + per-pane titlebar colors were
                 // silently keeping the default on a typo too.
-                | "accent-color"
-                | "accent_color"
                 | "title-transmit-bg-color"
                 | "title_transmit_bg_color"
                 | "title-receive-bg-color"
@@ -2266,6 +2318,11 @@ impl Config {
                 | "title_receive_fg_color"
                 | "title-inactive-fg-color"
                 | "title_inactive_fg_color" => Rgb::parse(v).is_some(),
+                // Cycle 937: `accent-color` accepts a hex color OR the special
+                // `auto` (Peacock — vary by working directory).
+                "accent-color" | "accent_color" => {
+                    v.trim().eq_ignore_ascii_case("auto") || Rgb::parse(v).is_some()
+                }
                 // `keybind = <trigger>=<action>` — both halves have to
                 // parse (same predicate `apply_keybind` uses, just split
                 // so we know which half failed). A user typo on either
@@ -3415,8 +3472,13 @@ impl Config {
                     }
                 }
                 "accent-color" => {
-                    if let Some(c) = Rgb::parse(&e.value) {
+                    // `auto` = Peacock: vary the accent per working directory.
+                    if e.value.trim().eq_ignore_ascii_case("auto") {
+                        cfg.accent_auto = true;
+                        cfg.accent_color = None;
+                    } else if let Some(c) = Rgb::parse(&e.value) {
                         cfg.accent_color = Some(c);
+                        cfg.accent_auto = false;
                     }
                 }
                 "cursor-blink-interval" => {
@@ -5135,6 +5197,57 @@ tab-bar-width = 200\n";
         assert_eq!(
             Config::parse_text("agent-server = yolo").agent_server,
             AgentServer::Off
+        );
+    }
+
+    /// Cycle 937: accent resolution + Peacock. Default → the theme's signature
+    /// accent (Mocha mauve). `accent-color = auto` → a per-cwd Peacock color
+    /// (deterministic for a seed, spread across seeds). An explicit hex /
+    /// `--accent` wins over both.
+    #[test]
+    fn accent_resolution_and_peacock() {
+        let theme = Theme::default(); // Catppuccin Mocha, accent = mauve
+        let mauve = crate::color::Rgb::new(0xcb, 0xa6, 0xf7);
+
+        // Default config (no accent set) → the theme's signature accent.
+        let cfg = Config::default();
+        assert_eq!(cfg.resolved_accent(&theme), mauve);
+
+        // Explicit hex wins.
+        let cfg = Config::parse_text("accent-color = #112233");
+        assert!(!cfg.accent_auto);
+        assert_eq!(
+            cfg.resolved_accent(&theme),
+            crate::color::Rgb::new(0x11, 0x22, 0x33)
+        );
+
+        // `auto` parses to the Peacock flag (not a color), validates clean.
+        let cfg = Config::parse_text("accent-color = auto");
+        assert!(cfg.accent_auto);
+        assert!(cfg.accent_color.is_none());
+        assert!(Config::detect_malformed_values("accent-color = auto\n").is_empty());
+
+        // Peacock is deterministic per seed and spreads across seeds.
+        let mut cfg = Config::parse_text("accent-color = auto");
+        cfg.accent_seed = 0;
+        let a0 = cfg.resolved_accent(&theme);
+        assert_eq!(cfg.resolved_accent(&theme), a0, "same seed → same accent");
+        let mut colors: Vec<(u8, u8, u8)> = (0u64..8)
+            .map(|s| {
+                cfg.accent_seed = s;
+                let c = cfg.resolved_accent(&theme);
+                (c.r, c.g, c.b)
+            })
+            .collect();
+        colors.sort_unstable();
+        colors.dedup();
+        assert!(colors.len() >= 6, "Peacock spreads seeds across hues");
+
+        // An explicit hex still wins over auto.
+        cfg.accent_color = Some(crate::color::Rgb::new(0x0a, 0x0b, 0x0c));
+        assert_eq!(
+            cfg.resolved_accent(&theme),
+            crate::color::Rgb::new(0x0a, 0x0b, 0x0c)
         );
     }
 

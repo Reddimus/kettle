@@ -20,3 +20,4 @@ cursor-color = #f5e0dc
 cursor-text = #1e1e2e
 selection-background = #585b70
 selection-foreground = #cdd6f4
+accent = #cba6f7
