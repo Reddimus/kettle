@@ -280,9 +280,7 @@ pub fn run_exec_with(
                 // well-formed without leaking a clipboard to a headless child).
                 TermEvent::ClipboardLoad(_, fmt) => term.write(fmt("").as_bytes()),
                 TermEvent::Exit | TermEvent::ChildExit(_) => {
-                    if child_gone_at.is_none() {
-                        child_gone_at = Some(Instant::now());
-                    }
+                    child_gone_at.get_or_insert_with(Instant::now);
                 }
                 _ => {}
             }

@@ -116,7 +116,7 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
         }
     }
     // Newest first.
-    out.sort_by(|a, b| b.started_unix.cmp(&a.started_unix));
+    out.sort_by_key(|e| std::cmp::Reverse(e.started_unix));
     out
 }
 

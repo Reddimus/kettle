@@ -10911,8 +10911,7 @@ impl ApplicationHandler<UserEvent> for App {
         // (no output to wake us) still times out on time.
         self.check_pending_run_deadlines();
         if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
-            let ms = soonest.saturating_duration_since(now).as_millis() as u64;
-            let ms = ms.max(1).min(500);
+            let ms = (soonest.saturating_duration_since(now).as_millis() as u64).clamp(1, 500);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
         }
         match wait_ms {
