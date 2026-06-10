@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.17.0] — 2026-06-10
 
   **Terminator-parity sweep (full re-audit of the Terminator codebase against
   kettle; cycles 938-941).** A file-by-file review of GNOME Terminator
