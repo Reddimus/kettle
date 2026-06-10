@@ -2252,6 +2252,19 @@ impl App {
         if let Some(rgb) = startup.accent_override {
             initial_cfg.accent_color = Some(rgb);
         }
+        // Cycle 938 (Terminator parity): launch-time window-state CLI flags
+        // (`-m/-f/-H/-b/-T`) override the config for THIS launch — same
+        // "CLI flags are launch-time intent" precedent as --accent above.
+        if let Some(ws) = startup.window_state_override {
+            initial_cfg.window_state = ws;
+        }
+        if let Some(b) = startup.borderless_override {
+            initial_cfg.borderless = b;
+        }
+        if let Some(title) = startup.title_override.clone() {
+            // A literal title (no `{title}` placeholder) renders verbatim.
+            initial_cfg.window_title_format = title;
+        }
         // Cycle 937 (Peacock): seed the per-window accent variation from this
         // window's working directory, so `accent-color = auto` gives a window
         // in a different project a different (but per-project stable) accent.

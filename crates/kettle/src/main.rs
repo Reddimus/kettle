@@ -69,6 +69,16 @@ struct Cli {
     #[arg(long)]
     list_ssh_hosts: bool,
 
+    /// List saved layouts (`<config-dir>/layouts/*.json`, Terminator parity) and
+    /// exit. Launch one with `kettle --layout NAME`.
+    #[arg(long)]
+    list_layouts: bool,
+
+    /// List named config profiles (`<config-dir>/profiles/*.config`) and exit.
+    /// Launch one with `kettle --profile NAME`.
+    #[arg(long)]
+    list_profiles: bool,
+
     /// Print the resolved config path and exit.
     #[arg(long)]
     config_path: bool,
@@ -294,6 +304,31 @@ struct Cli {
     /// `accent-color` key when both are set.
     #[arg(long, value_name = "COLOR", verbatim_doc_comment)]
     accent: Option<String>,
+
+    /// Maximise the window at launch (Terminator `-m/--maximise`). Overrides the
+    /// `window-state` config for this launch. `--maximize` is an accepted alias.
+    #[arg(long = "maximise", short = 'm', visible_alias = "maximize")]
+    maximise: bool,
+
+    /// Fullscreen the window at launch (Terminator `-f/--fullscreen`). Overrides
+    /// the `window-state` config for this launch.
+    #[arg(long, short = 'f')]
+    fullscreen: bool,
+
+    /// Launch with no window borders/decorations (Terminator `-b/--borderless`).
+    /// Overrides the `borderless` config for this launch.
+    #[arg(long, short = 'b')]
+    borderless: bool,
+
+    /// Launch hidden (Terminator `-H/--hidden`) — useful for a Quake-style
+    /// dropdown: pair with a global hotkey bound to `kettle --toggle`.
+    #[arg(long = "hidden", short = 'H')]
+    hidden: bool,
+
+    /// Force the window title (Terminator `-T/--title`). Sets the title to this
+    /// literal text for the launch, overriding `window-title-format`.
+    #[arg(long = "title", short = 'T', value_name = "TEXT")]
+    title: Option<String>,
 
     /// Toggle the running kettle window's visibility (Quake /
     /// Yakuake / Tilda dropdown UX) via the remote-control IPC and
@@ -919,6 +954,23 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if cli.list_layouts {
+        // Companion to `--layout NAME` + the in-window layout picker (Alt+L):
+        // verify which saved layouts exist from the CLI. Honors `--config` /
+        // `--profile` only insofar as layouts live under the same config dir.
+        for name in kettle_ui::list_layouts() {
+            println!("{name}");
+        }
+        return Ok(());
+    }
+    if cli.list_profiles {
+        // Companion to `--profile NAME`: list the named config profiles under
+        // `<config-dir>/profiles/`.
+        for name in kettle_config::Config::list_profiles() {
+            println!("{name}");
+        }
+        return Ok(());
+    }
     if cli.list_actions {
         // Onboarding pair to `--list-keybinds`: that one shows what's
         // currently bound; this one shows what `keybind = trigger=…`
@@ -1324,6 +1376,20 @@ fn main() -> anyhow::Result<()> {
     // falls through to the config's accent-color (or palette[4]) —
     // same shape as the config parse arm, no hard fail.
     let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
+    // Cycle 938 (Terminator parity): the window-state CLI flags are mutually
+    // exclusive in practice; the most-immersive given wins.
+    let window_state_override = if cli.fullscreen {
+        Some(kettle_config::WindowState::Fullscreen)
+    } else if cli.maximise {
+        Some(kettle_config::WindowState::Maximise)
+    } else if cli.hidden {
+        Some(kettle_config::WindowState::Hidden)
+    } else {
+        None
+    };
+    // Only override to `true` when the flag is present — its absence must NOT
+    // force borderless off over a `borderless = true` config.
+    let borderless_override = cli.borderless.then_some(true);
     let remote_file = cli.remote_file.clone().or_else(default_remote_file);
     // Cycle 863 (audit): validate the internal handoff fd before it reaches
     // `UnixStream::from_raw_fd`. The source process always passes an inherited
@@ -1355,6 +1421,9 @@ fn main() -> anyhow::Result<()> {
             AgentServerArg::Full => kettle_config::AgentServer::Full,
         }),
         accent_override,
+        window_state_override,
+        borderless_override,
+        title_override: cli.title,
         remote_file,
         lua_script: cli.lua_script,
         tab_handoff: cli.tab_handoff,

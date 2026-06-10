@@ -123,6 +123,44 @@ from prior
 .B Ctrl+Shift+S
 launcher use.
 .TP
+.B \-\-list-layouts
+Print every saved layout name
+.RI ( "<config-dir>/layouts/*.json" ).
+Launch one with
+.BR "\-\-layout NAME" .
+.TP
+.B \-\-list-profiles
+Print every named config profile
+.RI ( "<config-dir>/profiles/*.config" ).
+Launch one with
+.BR "\-\-profile NAME" .
+.TP
+.B \-m ", " \-\-maximise ", " \-\-maximize
+Maximise the window at launch (Terminator parity). Overrides the
+.B window-state
+config for this launch.
+.TP
+.B \-f ", " \-\-fullscreen
+Fullscreen the window at launch. Overrides
+.B window-state
+for this launch.
+.TP
+.B \-b ", " \-\-borderless
+Launch with no window decorations. Overrides the
+.B borderless
+config for this launch.
+.TP
+.B \-H ", " \-\-hidden
+Launch hidden \(em useful for a Quake-style dropdown paired with a
+global hotkey bound to
+.BR "kettle \-\-toggle" .
+.TP
+.BI \-T \ "TEXT" ", " \-\-title \ "TEXT"
+Force the window title to
+.I TEXT
+for this launch, overriding
+.BR window-title-format .
+.TP
 .BI \-\-shell-integration \ "SHELL"
 Print the OSC 133 shell-integration snippet for
 .I SHELL

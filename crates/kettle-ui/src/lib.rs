@@ -76,6 +76,18 @@ pub struct Options {
     /// the `--accent COLOR` CLI flag. `None` = use whatever the
     /// resolved config says.
     pub accent_override: Option<kettle_config::Rgb>,
+    /// Cycle 938 (Terminator parity): `-m/--maximise`, `-f/--fullscreen`,
+    /// `-H/--hidden` override the `window-state` config for THIS launch (the
+    /// last flag wins; mirrors Terminator's window-state CLI flags). `None` =
+    /// use the config value.
+    pub window_state_override: Option<kettle_config::WindowState>,
+    /// Cycle 938: `-b/--borderless` overrides the `borderless` config for this
+    /// launch. `None` = use the config value.
+    pub borderless_override: Option<bool>,
+    /// Cycle 938: `-T/--title TEXT` forces the window title for this launch —
+    /// sets the title format to the literal string (no `{title}` placeholder),
+    /// matching Terminator's `--title`. `None` = use `window-title-format`.
+    pub title_override: Option<String>,
     /// Cycle 302 remote control. When set, App watches this path for
     /// command lines and dispatches them to the focused pane. Format:
     /// one command per line, e.g. `send-text echo hello\n`. The
@@ -134,6 +146,13 @@ pub fn run() -> anyhow::Result<()> {
 /// Launch kettle, applying first-tab CLI [`Options`].
 pub fn run_with(opts: Options) -> anyhow::Result<()> {
     App::run_with(opts)
+}
+
+/// Cycle 938 (Terminator parity): saved layout names (`<config-dir>/layouts/
+/// *.json`), for `kettle --list-layouts`. Thin public wrapper over the private
+/// session module so the bin crate can introspect without launching a window.
+pub fn list_layouts() -> Vec<String> {
+    session::Session::list_layouts()
 }
 
 /// Cycle 794: the synchronous `kettle --check-update` path. Does one GitHub
