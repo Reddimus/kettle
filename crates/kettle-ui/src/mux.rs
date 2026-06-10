@@ -154,6 +154,10 @@ pub struct Pane {
     /// pane title shows `format_remote_title(...)` and the right-
     /// click menu (sub-cycle 7) exposes a "Clone session" entry.
     pub remote_context: Option<kettle_remote::RemoteContext>,
+    /// Cycle 934 (agent-first A4): set while an agent control connection has
+    /// targeted this pane (a mutating method or `subscribe`). Drives the
+    /// titlebar agent badge; cleared when the last attached connection drops.
+    pub agent_attached: bool,
 }
 
 /// Cycle 912 (audit): pure reap predicate. A pane is removed when explicitly
@@ -853,6 +857,7 @@ impl Mux {
                 last_history: None,
                 argv: argv.to_vec(),
                 remote_context: None,
+                agent_attached: false,
             },
         );
         Ok(id)

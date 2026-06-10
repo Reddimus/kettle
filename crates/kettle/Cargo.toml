@@ -38,6 +38,9 @@ kettle-config.workspace = true
 # output-only here) in release builds — it's an audit feature, not dev-only.
 kettle-core = { workspace = true, features = ["asciicast"] }
 crossbeam-channel = "0.5.15"
+# Cycle 930 (agent-first A2): `kettle ctl` client + `kettle mcp` bridge connect
+# to a running kettle's control server over this crate's protocol + transport.
+kettle-ctl.workspace = true
 kettle-render.workspace = true
 kettle-ui.workspace = true
 log.workspace = true

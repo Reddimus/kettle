@@ -1,0 +1,38 @@
+[package]
+name = "kettle-ctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Cycle 925 (agent-first A2): the control-plane protocol + transport + client,
+# isolated in a UI-free leaf crate. The GUI App hosts the server (kettle-ui),
+# the bin hosts the `kettle ctl` client + `kettle mcp` bridge — but the wire
+# protocol, the platform transport (Unix socket / Windows named pipe), the
+# discovery registry, and the blocking client live HERE so the future
+# `kettle-muxd` daemon (docs/MUX-SERVER-DESIGN.md) can re-host the same server
+# side without breaking any client.
+description = "kettle: agent control-plane protocol, local-IPC transport (Unix socket / Windows named pipe), discovery registry, and blocking client"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Cycle 926: hand-rolled named-pipe server (CreateNamedPipeW / ConnectNamedPipe)
+# wrapped via File::from_raw_handle for plain Read/Write per connection. Chosen
+# over the `interprocess` crate for supply-chain leanness — the needed subset is
+# ~150 lines and matches the existing windows-sys precedent in the bin crate.
+# The Windows *client* needs no platform code (std opens `\\.\pipe\...`).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    # ConnectNamedPipe's signature references OVERLAPPED (Win32_System_IO).
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }

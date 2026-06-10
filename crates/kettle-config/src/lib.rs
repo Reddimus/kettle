@@ -340,6 +340,33 @@ pub enum ExitAction {
     Hold,
 }
 
+/// Cycle 928 (agent-first A2): whether kettle exposes its agent control server,
+/// and at what privilege. OFF by default — the server is a local-IPC surface
+/// that lets another process read the screen and (in `Full`) drive the panes,
+/// so it must be opt-in. See docs/AGENT.md for the threat model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentServer {
+    /// No control server is started (default).
+    #[default]
+    Off,
+    /// Read-only methods only (`get_state`, `list_*`, `read_screen`,
+    /// `subscribe`). Mutating methods are rejected with `read_only`.
+    ReadOnly,
+    /// All methods, including `send_text` and `run_command`.
+    Full,
+}
+
+impl AgentServer {
+    /// Whether any server should be started.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, AgentServer::Off)
+    }
+    /// Whether mutating methods are permitted.
+    pub fn allows_mutation(self) -> bool {
+        matches!(self, AgentServer::Full)
+    }
+}
+
 /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
 /// `ask_before_closing`): when to show the close-confirmation dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -841,6 +868,11 @@ pub struct Config {
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:118
     /// `exit_action`): what to do when the shell process exits.
     pub exit_action: ExitAction,
+    /// Cycle 928 (agent-first A2): the agent control server mode
+    /// (`off` | `read-only` | `full`). Default `off`. When enabled, kettle
+    /// starts a local-IPC control server an AI agent (or `kettle ctl`/`kettle
+    /// mcp`) can use to read the screen and drive panes. See docs/AGENT.md.
+    pub agent_server: AgentServer,
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -1106,6 +1138,10 @@ pub struct Config {
     /// active pane's OSC title or "kettle"), `{cwd}` (active pane's cwd
     /// or empty), `{tab}` (1-based active tab index).
     pub window_title_format: String,
+    /// Cycle 934 (agent-first A4): prefix shown on a per-pane titlebar while an
+    /// agent control connection has the pane attached. Default `"[agent] "`
+    /// (ASCII, no font-fallback risk). Empty disables the badge.
+    pub agent_badge: String,
     /// Template for each tab segment in the tab bar. Placeholders:
     /// `{n}` (1-based tab index), `{title}` (focused pane's title).
     pub tab_format: String,
@@ -1579,6 +1615,7 @@ impl Default for Config {
             colorterm: "truecolor".to_string(),
             login_shell: false,
             exit_action: ExitAction::Close,
+            agent_server: AgentServer::Off,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -1644,6 +1681,7 @@ impl Default for Config {
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
             window_title_format: "{title} — kettle".to_string(),
+            agent_badge: "[agent] ".to_string(),
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
             split_divider_color: None,
@@ -2286,6 +2324,10 @@ impl Config {
                 "exit-action" | "exit_action" => {
                     matches!(v.to_ascii_lowercase().as_str(), "close" | "restart" | "hold")
                 }
+                "agent-server" | "agent_server" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "off" | "read-only" | "read_only" | "readonly" | "full"
+                ),
                 "backspace-binding" | "backspace_binding" | "delete-binding"
                 | "delete_binding" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -2903,6 +2945,15 @@ impl Config {
                         _ => ExitAction::Close,
                     };
                 }
+                "agent-server" | "agent_server" => {
+                    cfg.agent_server = match e.value.to_ascii_lowercase().as_str() {
+                        "full" => AgentServer::Full,
+                        "read-only" | "read_only" | "readonly" => AgentServer::ReadOnly,
+                        // Explicit so `--check-config` distinguishes a typo from
+                        // the default (the validator above pins the value set).
+                        _ => AgentServer::Off,
+                    };
+                }
                 "ask-before-closing" | "ask_before_closing" => {
                     cfg.ask_before_closing = match e.value.to_ascii_lowercase().as_str() {
                         "always" => AskBeforeClosing::Always,
@@ -3341,6 +3392,10 @@ impl Config {
                     if !e.value.trim().is_empty() {
                         cfg.tab_format = e.value.clone();
                     }
+                }
+                "agent-badge" | "agent_badge" => {
+                    // Allow empty (disables the badge); take the value verbatim.
+                    cfg.agent_badge = e.value.clone();
                 }
                 "scrollbar" => {
                     cfg.scrollbar = match e.value.to_ascii_lowercase().as_str() {
@@ -5042,6 +5097,44 @@ tab-bar-width = 200\n";
         assert_eq!(
             Config::parse_text("exit-action = wat").exit_action,
             ExitAction::Close
+        );
+    }
+
+    /// Cycle 928 (agent-first A2): `agent-server` defaults OFF and parses the
+    /// three modes; a typo falls back to OFF (fail-safe — never silently
+    /// enable a control surface). The `--check-config` validator pins the value
+    /// set so a typo is reported, not silently defaulted.
+    #[test]
+    fn agent_server_defaults_off_and_parses() {
+        assert_eq!(Config::default().agent_server, AgentServer::Off);
+        assert!(!Config::default().agent_server.is_enabled());
+        assert_eq!(
+            Config::parse_text("agent-server = full").agent_server,
+            AgentServer::Full
+        );
+        assert!(
+            Config::parse_text("agent-server = full")
+                .agent_server
+                .allows_mutation()
+        );
+        assert_eq!(
+            Config::parse_text("agent-server = read-only").agent_server,
+            AgentServer::ReadOnly
+        );
+        assert!(
+            !Config::parse_text("agent-server = read-only")
+                .agent_server
+                .allows_mutation(),
+            "read-only must not permit mutation"
+        );
+        assert_eq!(
+            Config::parse_text("agent_server = readonly").agent_server,
+            AgentServer::ReadOnly
+        );
+        // Fail-safe: an unknown value never enables the server.
+        assert_eq!(
+            Config::parse_text("agent-server = yolo").agent_server,
+            AgentServer::Off
         );
     }
 

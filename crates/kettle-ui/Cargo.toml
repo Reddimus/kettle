@@ -43,6 +43,11 @@ crossbeam-channel = "0.5.15"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config.workspace = true
 kettle-core.workspace = true
+# Cycle 928 (agent-first A2): the App hosts the control server over kettle-ctl's
+# transport + protocol so an agent (or `kettle ctl`/`kettle mcp`) can read the
+# screen and drive panes. The protocol/transport live in the leaf crate so the
+# future kettle-muxd daemon can re-host the same server side.
+kettle-ctl.workspace = true
 kettle-render.workspace = true
 # Cycle 655 (sub-cycle 6 of TERMINATOR-REMOTE-DESIGN.md): SSH /
 # Docker / Podman / kubectl session detection. Carries the sysinfo

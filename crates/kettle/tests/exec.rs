@@ -179,6 +179,9 @@ fn exec_record_writes_replayable_asciicast() {
             .map(|v| v[2].as_str().unwrap_or("").contains("recmark-9z"))
             .unwrap_or(false)
     });
-    assert!(saw_marker, "recording missing the child output; file: {contents:?}");
+    assert!(
+        saw_marker,
+        "recording missing the child output; file: {contents:?}"
+    );
     let _ = std::fs::remove_file(&path);
 }

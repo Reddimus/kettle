@@ -1604,6 +1604,7 @@ dependencies = [
  "env_logger",
  "kettle-config",
  "kettle-core",
+ "kettle-ctl",
  "kettle-render",
  "kettle-ui",
  "libc",
@@ -1634,6 +1635,15 @@ dependencies = [
  "portable-pty",
  "regex",
  "serde_json",
+]
+
+[[package]]
+name = "kettle-ctl"
+version = "2.15.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1672,6 +1682,7 @@ dependencies = [
  "image",
  "kettle-config",
  "kettle-core",
+ "kettle-ctl",
  "kettle-remote",
  "kettle-render",
  "libc",

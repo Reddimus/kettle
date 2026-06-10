@@ -26,6 +26,9 @@ use clap::Parser;
 // Cycle 922 (agent-first A1): headless `kettle exec` engine. Bin-side, no
 // kettle-ui/winit dependency (a source-scan drift guard pins that).
 mod exec;
+// Cycle 930 (agent-first A2): `kettle ctl` — thin control-plane client over
+// kettle-ctl (discover a running server, call a method, or stream events).
+mod ctl_cli;
 
 /// Version string shown by `kettle --version`. Concatenates the
 /// `Cargo.toml` version with the git SHA captured by `build.rs` (or
@@ -216,6 +219,14 @@ struct Cli {
     #[arg(long, verbatim_doc_comment)]
     restore: bool,
 
+    /// Enable kettle's agent control server for this launch, overriding the
+    /// `agent-server` config. `off` (no server), `read-only` (read the screen /
+    /// list panes / subscribe), or `full` (also send text + run commands). The
+    /// server is a local-IPC surface `kettle ctl` / `kettle mcp` / an AI agent
+    /// can drive — OFF by default. See docs/AGENT.md.
+    #[arg(long, value_name = "MODE", verbatim_doc_comment)]
+    agent_server: Option<AgentServerArg>,
+
     /// Restore a tab from a JSON handoff file written by another
     /// kettle process. Used by Action::MoveTabToNewWindow on
     /// platforms without SCM_RIGHTS (Windows + Wayland) — the
@@ -357,6 +368,14 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
+/// `--agent-server MODE` values (cycle 928).
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum AgentServerArg {
+    Off,
+    ReadOnly,
+    Full,
+}
+
 /// Agent-first subcommands. Each is a self-contained non-GUI entry point that
 /// returns early from `main` before any winit/GPU work.
 #[derive(clap::Subcommand, Debug)]
@@ -365,6 +384,33 @@ enum Cmd {
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
     /// child's exit code; 124 on `--timeout`, 125 on an internal error.
     Exec(ExecArgs),
+    /// Drive a running kettle's agent control server: call a method (e.g.
+    /// `list_panes`, `read_screen`, `send_text`, `run_command`) or stream
+    /// events. The target kettle must run with `agent-server` enabled.
+    Ctl(CtlArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct CtlArgs {
+    /// The method to call (`get_state`, `list_tabs`, `list_panes`,
+    /// `read_screen`, `send_text`, `run_command`), or `events` to stream the
+    /// event feed.
+    method: String,
+    /// Target a specific pane id (else the focused pane).
+    #[arg(long)]
+    pane: Option<u64>,
+    /// Method parameters as a JSON object (merged with `--pane`).
+    #[arg(long, value_name = "JSON")]
+    json: Option<String>,
+    /// Text for `send_text`, or the command line for `run_command`.
+    #[arg(long)]
+    text: Option<String>,
+    /// Connect to a specific kettle pid (else the newest running server).
+    #[arg(long)]
+    pid: Option<u32>,
+    /// Print the raw JSON result instead of a pretty summary.
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -649,8 +695,12 @@ fn main() -> anyhow::Result<()> {
                 };
                 // Default geometry: probe the attached console, else 80×24.
                 let probed = exec::default_size_probe();
-                let cols = args.cols.unwrap_or_else(|| probed.map(|(c, _)| c).unwrap_or(80));
-                let rows = args.rows.unwrap_or_else(|| probed.map(|(_, r)| r).unwrap_or(24));
+                let cols = args
+                    .cols
+                    .unwrap_or_else(|| probed.map(|(c, _)| c).unwrap_or(80));
+                let rows = args
+                    .rows
+                    .unwrap_or_else(|| probed.map(|(_, r)| r).unwrap_or(24));
                 let opts = exec::ExecOpts {
                     argv: args.argv,
                     cols,
@@ -669,6 +719,9 @@ fn main() -> anyhow::Result<()> {
                     forward_stdin: false,
                 };
                 std::process::exit(exec::run_exec(opts));
+            }
+            Cmd::Ctl(args) => {
+                std::process::exit(ctl_cli::run_ctl(args));
             }
         }
     }
@@ -1274,6 +1327,11 @@ fn main() -> anyhow::Result<()> {
         config: config_path,
         layout: cli.layout,
         restore: cli.restore,
+        agent_server: cli.agent_server.map(|m| match m {
+            AgentServerArg::Off => kettle_config::AgentServer::Off,
+            AgentServerArg::ReadOnly => kettle_config::AgentServer::ReadOnly,
+            AgentServerArg::Full => kettle_config::AgentServer::Full,
+        }),
         accent_override,
         remote_file,
         lua_script: cli.lua_script,

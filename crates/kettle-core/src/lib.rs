@@ -54,7 +54,7 @@ pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{ImageData, Images, Placement};
 pub use links::{Link, links};
 pub use search::{CaseSensitivity, Match, search, search_with};
-pub use term::{PtyWriter, ScreenText, SharedTerm, Terminal};
+pub use term::{CommandFinished, PtyWriter, ScreenText, SharedTerm, Terminal};
 // Cycle 745: OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).
 pub use kettle_vt::Progress;

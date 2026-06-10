@@ -21,6 +21,11 @@
 //! `close_all_modals()` / `any_modal_open()` so they don't stack.
 
 mod app;
+// Cycle 928 (agent-first A2): in-process control server. The accept/reader/
+// writer threads run kettle-ctl's transport; the App drains requests on the
+// main thread via `UserEvent::Ctl`. Always compiled (gated at runtime by the
+// `agent-server` config, default off).
+mod ctl_server;
 mod input;
 mod lua;
 mod mux;
@@ -105,6 +110,10 @@ pub struct Options {
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,
+    /// Cycle 928 (agent-first A2): `--agent-server MODE` — override the
+    /// `agent-server` config for THIS launch (`off`|`read-only`|`full`). `None`
+    /// = use the config value (default off).
+    pub agent_server: Option<kettle_config::AgentServer>,
     /// Cycle 875: developer session-recorder output path (`--record PATH`).
     /// Writes an asciicast-compatible trace. Only present in `dev-record`
     /// feature builds — absent from released / packaged binaries.

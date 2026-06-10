@@ -30,6 +30,26 @@ struct SplitDrag {
     dir: Dir,
 }
 
+/// Cycle 929 (agent-first A2): an in-flight `run_command` awaiting its OSC-133
+/// completion. The control server wrote `cmd\n` to the pane; the next
+/// `CommandFinished` for that pane resolves the request with the exit code,
+/// duration, and the output captured since `start_line`. A deadline guards the
+/// no-shell-integration case (the command runs but no `CommandEnd` ever fires).
+struct PendingRun {
+    /// Connection that issued the run (for disconnect cleanup).
+    conn_id: u64,
+    /// Request id, echoed in the completion response.
+    req_id: u64,
+    /// Absolute scrollback line where the command's output begins, so the reply
+    /// can slice just this command's output out of the grid.
+    start_line: usize,
+    /// When the request gives up waiting for OSC-133 and replies `timed_out`.
+    deadline: std::time::Instant,
+    /// Where the completion response is sent (the connection thread is blocked
+    /// reading this until the command finishes or the deadline fires).
+    reply: crate::ctl_server::ReplyTx,
+}
+
 /// Cycle 904 (audit): grab tolerance (px) for the thin split divider line, so
 /// it's easy to hit with the mouse without pixel-perfect aim.
 const SPLIT_SEAM_TOL: f32 = 5.0;
@@ -43,6 +63,10 @@ pub enum UserEvent {
     /// One event per change (notify coalesces consecutive writes), so
     /// the main thread can batch-read all pending lines at once.
     RemoteCommand,
+    /// Cycle 928 (agent-first A2): the control server enqueued a message
+    /// (new connection / request / disconnect). The main thread drains the
+    /// server channel and dispatches each request against `self.mux`.
+    Ctl,
     /// Cycle 794: the background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
     /// UI can show a passive bottom banner. The banner is mouse-driven
@@ -1005,6 +1029,18 @@ fn cap_title_for_status_bar(title: &str, max: usize) -> String {
     out
 }
 
+/// Cycle 934 (agent-first A4): the per-pane titlebar label, prefixed with the
+/// `agent-badge` when an agent control connection has the pane attached. Pure
+/// (unit-tested). An empty badge or an unattached pane returns the title
+/// unchanged (zero cost for the common case).
+fn agent_title(badge: &str, attached: bool, title: &str) -> String {
+    if attached && !badge.is_empty() {
+        format!("{badge}{title}")
+    } else {
+        title.to_string()
+    }
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -1731,6 +1767,15 @@ pub struct App {
     mux: Mux,
     mods: ModifiersState,
     proxy: EventLoopProxy<UserEvent>,
+    /// Cycle 928 (agent-first A2): the in-process control server, present when
+    /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
+    /// zero-cost default path. Started in `resumed`, dropped on exit (which
+    /// unregisters the discovery entry).
+    ctl: Option<crate::ctl_server::CtlServer>,
+    /// Cycle 929 (agent-first A2): pending `run_command` correlations keyed by
+    /// pane id. A request writes `cmd\n`, records the start line + deadline
+    /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
+    pending_runs: std::collections::HashMap<u64, PendingRun>,
     clipboard: Option<arboard::Clipboard>,
     fullscreen: bool,
     cursor: PhysicalPosition<f64>,
@@ -2321,6 +2366,10 @@ impl App {
             },
             mods: ModifiersState::empty(),
             proxy,
+            // Cycle 928 (agent-first A2): server is started later in `resumed`
+            // (needs the pid + a live event-loop proxy for the waker).
+            ctl: None,
+            pending_runs: std::collections::HashMap::new(),
             // Cycle 754: surface why the clipboard is unavailable instead of a
             // silent `None`. On headless/SSH-without-X11-forwarding/sandboxed
             // Linux, arboard can't connect to a display server, and copy/paste
@@ -3545,6 +3594,11 @@ impl App {
         // this drain pass. Fired as LuaEvent::Output after the
         // values_mut iteration completes (to avoid borrow conflicts).
         let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+        // Cycle 929 (agent-first A2): collect OSC-133 CommandFinished events per
+        // pane so the App is the SINGLE drainer — `drain_command_finished_events`
+        // is destructive, so the command-notify, the run_command correlator, and
+        // event subscribers must all be fed from one place, AFTER this pane loop.
+        let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
         // Cycle 412: pane ids whose shell exited with cfg.exit_action
         // = Restart. Queued during the drain; appended to
         // self.pending_pane_restarts after the iteration so the
@@ -3717,35 +3771,15 @@ impl App {
                     _ => {}
                 }
             }
-            // Cycle 612 (Terminator parity, command_notify.py): drain
-            // OSC 133 D (CommandEnd) events from the reader thread.
-            // For each event, fire a desktop notification if:
-            //   - the kettle window isn't focused at this moment,
-            //   - the elapsed duration crosses the configured
-            //     threshold (0 disables; default 5 s).
-            // Active-pane filtering is intentionally NOT applied — a
-            // background pane finishing a long task is the most
-            // useful notification case (the user IS in another pane
-            // but won't see the result without switching). Window
-            // focus is enough.
-            if self.cfg.command_notify_threshold_ms > 0 {
-                for ev in pane.term.drain_command_finished_events() {
-                    let elapsed_ms = ev.duration.as_millis() as u64;
-                    if !self.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
-                        let secs = ev.duration.as_secs();
-                        let exit_text = match ev.exit_code {
-                            Some(0) => "✓ ok".to_string(),
-                            Some(code) => format!("✗ exit {code}"),
-                            None => String::new(),
-                        };
-                        let body = if exit_text.is_empty() {
-                            format!("pane {pane_id} command ran for {secs}s")
-                        } else {
-                            format!("pane {pane_id} • {secs}s • {exit_text}")
-                        };
-                        fire_notify("kettle: command finished", &body);
-                    }
-                }
+            // Cycle 612 / 929: drain OSC 133 D (CommandEnd) events ONCE here and
+            // defer processing to after the pane loop, where the App can fan a
+            // single drain out to the command-notify, the run_command
+            // correlator, and event subscribers (each consumer would otherwise
+            // race for the destructive drain). Always drain (not gated on the
+            // notify threshold) so a pending run_command still resolves when
+            // notifications are off.
+            for ev in pane.term.drain_command_finished_events() {
+                command_finished_local.push((pane_id, ev));
             }
         }
         if bell {
@@ -3799,6 +3833,40 @@ impl App {
                 eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
             }
             self.drain_lua_hook_commands("output hook");
+        }
+        // Cycle 929 (agent-first A2): fan out the OSC-133 CommandFinished events
+        // drained above — command-notify (existing behavior), the run_command
+        // correlator, and event subscribers all from this single place.
+        for (pane_id, ev) in command_finished_local {
+            // (a) Desktop notification for a long background command.
+            if self.cfg.command_notify_threshold_ms > 0 {
+                let elapsed_ms = ev.duration.as_millis() as u64;
+                if !self.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
+                    let secs = ev.duration.as_secs();
+                    let exit_text = match ev.exit_code {
+                        Some(0) => "✓ ok".to_string(),
+                        Some(code) => format!("✗ exit {code}"),
+                        None => String::new(),
+                    };
+                    let body = if exit_text.is_empty() {
+                        format!("pane {pane_id} command ran for {secs}s")
+                    } else {
+                        format!("pane {pane_id} • {secs}s • {exit_text}")
+                    };
+                    fire_notify("kettle: command finished", &body);
+                }
+            }
+            // (b) Resolve a pending run_command for this pane.
+            self.resolve_pending_run(pane_id, &ev);
+            // (c) Notify event subscribers.
+            self.ctl_broadcast(
+                "command_finished",
+                Some(pane_id),
+                serde_json::json!({
+                    "exit_code": ev.exit_code,
+                    "duration_ms": ev.duration.as_millis() as u64,
+                }),
+            );
         }
         // Cycle 412: stash the per-tick restart list on App so the
         // post-drain handler can process it with a fresh
@@ -4650,7 +4718,7 @@ impl App {
                         g,
                         Some(*id) == focus,
                         imgs,
-                        p.title.clone(),
+                        agent_title(&self.cfg.agent_badge, p.agent_attached, &p.title),
                         cols,
                         rows,
                         false,
@@ -7315,6 +7383,12 @@ impl App {
         if let Some(eng) = self.lua_engine.as_ref() {
             eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
         }
+        // Cycle 930 (agent-first A2): mirror the focus change to ctl subscribers.
+        self.ctl_broadcast(
+            "pane_focus",
+            Some(cur_id),
+            serde_json::json!({"previous": prev}),
+        );
     }
 
     /// Cycle 745: reflect the FOCUSED pane's OSC 9;4 progress onto the OS
@@ -7343,9 +7417,16 @@ impl App {
     /// can add a "dirty-title" bitset on Mux if pane counts
     /// grow into the thousands.
     fn poll_title_event(&mut self) {
-        let Some(eng) = self.lua_engine.as_ref() else {
+        // Cycle 930 (agent-first A2): also run when a ctl subscriber is present,
+        // so title changes reach agents even without a Lua engine.
+        let has_subscribers = self
+            .ctl
+            .as_ref()
+            .map(|c| c.has_subscribers())
+            .unwrap_or(false);
+        if self.lua_engine.is_none() && !has_subscribers {
             return;
-        };
+        }
         let mut changes: Vec<(u64, String)> = Vec::new();
         for (id, p) in self.mux.panes.iter() {
             let last = self.last_emitted_titles.get(id);
@@ -7355,7 +7436,10 @@ impl App {
         }
         for (id, title) in changes {
             self.last_emitted_titles.insert(id, title.clone());
-            eng.fire_event(&crate::LuaEvent::TitleChanged(id, title));
+            if let Some(eng) = self.lua_engine.as_ref() {
+                eng.fire_event(&crate::LuaEvent::TitleChanged(id, title.clone()));
+            }
+            self.ctl_broadcast("title", Some(id), serde_json::json!({"title": title}));
         }
         // Cycle 763: drop title state for panes that have closed so this map
         // can't grow unbounded over a long session of opening/closing panes
@@ -7584,6 +7668,475 @@ impl App {
     /// missing file is a no-op (notify-watcher can fire on the
     /// initial create event before the writer's content is visible;
     /// next event will catch it).
+    /// Cycle 928 (agent-first A2): drain the control-server channel and
+    /// dispatch each message on the main thread (the only place `self.mux` is
+    /// touched). Mirrors `drain_remote_commands` but with per-connection
+    /// replies + a connection table.
+    fn drain_ctl(&mut self) {
+        use crate::ctl_server::CtlServerMsg;
+        // Pull all pending messages first so we don't hold a `&self.ctl` borrow
+        // while calling `&mut self` handlers.
+        let mut msgs = Vec::new();
+        if let Some(ctl) = &self.ctl {
+            while let Some(m) = ctl.try_recv() {
+                msgs.push(m);
+            }
+        }
+        if msgs.is_empty() {
+            return;
+        }
+        for msg in msgs {
+            match msg {
+                CtlServerMsg::NewConn { conn_id, event_tx } => {
+                    if let Some(ctl) = &mut self.ctl {
+                        ctl.add_conn(conn_id, event_tx);
+                    }
+                    log::info!("agent-server: connection {conn_id} opened");
+                }
+                CtlServerMsg::BadRequest { reply, resp, .. } => {
+                    let _ = reply.send(resp);
+                }
+                CtlServerMsg::Request {
+                    conn_id,
+                    req,
+                    reply,
+                } => {
+                    self.handle_ctl_request(conn_id, &req, reply);
+                }
+                CtlServerMsg::Disconnect { conn_id } => {
+                    let panes = self
+                        .ctl
+                        .as_mut()
+                        .map(|c| c.remove_conn(conn_id))
+                        .unwrap_or_default();
+                    // Clear the agent badge for panes no connection holds now.
+                    for pane in panes {
+                        let still = self
+                            .ctl
+                            .as_ref()
+                            .map(|c| c.pane_is_attached(pane))
+                            .unwrap_or(false);
+                        if !still {
+                            self.set_pane_agent_attached(pane, false);
+                        }
+                    }
+                    // Drop any pending run owned by this connection.
+                    self.pending_runs
+                        .retain(|_, p: &mut PendingRun| p.conn_id != conn_id);
+                    log::info!("agent-server: connection {conn_id} closed");
+                }
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Dispatch one control request against the App and reply over `reply`.
+    /// Most methods reply immediately; `run_command` stores `reply` and resolves
+    /// it later (OSC-133 completion or the deadline).
+    fn handle_ctl_request(
+        &mut self,
+        conn_id: u64,
+        req: &kettle_ctl::protocol::Request,
+        reply: crate::ctl_server::ReplyTx,
+    ) {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let mode = self
+            .ctl
+            .as_ref()
+            .map(|c| c.mode())
+            .unwrap_or(kettle_config::AgentServer::Off);
+        // Annotate the dev-record trace with each agent action (cheap; the
+        // recorder only exists in dev-record builds with --record).
+        #[cfg(feature = "dev-record")]
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.record_marker(&format!("kettle:agent {} conn={conn_id}", req.method));
+        }
+        // Single mutation gate (a drift-guard test pins that every mutating
+        // method routes through this check).
+        let require_full = |id: u64, method: &str| -> Option<Response> {
+            (!mode.allows_mutation()).then(|| {
+                Response::err(
+                    id,
+                    ec::READ_ONLY,
+                    format!("method '{method}' requires agent-server=full"),
+                )
+            })
+        };
+        let resp = match req.method.as_str() {
+            "get_state" => Response::ok(req.id, self.ctl_get_state(mode)),
+            "list_tabs" => Response::ok(req.id, self.ctl_list_tabs()),
+            "list_panes" => Response::ok(req.id, self.ctl_list_panes()),
+            "read_screen" => self.ctl_read_screen(req),
+            "subscribe" => {
+                if let Some(c) = &mut self.ctl {
+                    c.set_subscribed(conn_id);
+                }
+                Response::ok(req.id, serde_json::json!({"subscribed": true}))
+            }
+            "send_text" => require_full(req.id, "send_text")
+                .unwrap_or_else(|| self.ctl_send_text(conn_id, req)),
+            "run_command" => {
+                if let Some(deny) = require_full(req.id, "run_command") {
+                    deny
+                } else {
+                    // Deferred: store `reply`; resolved on completion/deadline.
+                    self.ctl_run_command(conn_id, req, reply);
+                    return;
+                }
+            }
+            other => Response::err(
+                req.id,
+                ec::UNKNOWN_METHOD,
+                format!("unknown method '{other}'"),
+            ),
+        };
+        let _ = reply.send(resp);
+    }
+
+    /// `get_state`: version, theme, pid, server mode, focused pane.
+    fn ctl_get_state(&self, mode: kettle_config::AgentServer) -> serde_json::Value {
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "pid": std::process::id(),
+            "mode": format!("{mode:?}").to_lowercase(),
+            "theme": self.cfg.theme_name,
+            "tabs": self.mux.tabs.len(),
+            "focused_pane": self.mux.tabs.get(self.mux.active).map(|t| t.focus),
+        })
+    }
+
+    /// `list_tabs`: index, title, active flag, pane ids.
+    fn ctl_list_tabs(&self) -> serde_json::Value {
+        let titles = self.mux.tab_titles();
+        let tabs: Vec<_> = self
+            .mux
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                serde_json::json!({
+                    "index": i,
+                    "title": titles.get(i).cloned().unwrap_or_default(),
+                    "active": i == self.mux.active,
+                    "focused_pane": t.focus,
+                    "panes": t.root.leaf_ids(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "tabs": tabs })
+    }
+
+    /// `list_panes`: id, tab, title, cwd, size, focused, argv, child_pid,
+    /// agent_attached.
+    fn ctl_list_panes(&self) -> serde_json::Value {
+        let focused = self.mux.tabs.get(self.mux.active).map(|t| t.focus);
+        let mut panes = Vec::new();
+        for (ti, tab) in self.mux.tabs.iter().enumerate() {
+            for id in tab.root.leaf_ids() {
+                let Some(pane) = self.mux.panes.get(&id) else {
+                    continue;
+                };
+                let (cols, rows) = pane
+                    .term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|t| {
+                        use kettle_core::Dimensions;
+                        (t.columns(), t.screen_lines())
+                    })
+                    .unwrap_or((0, 0));
+                let attached = self
+                    .ctl
+                    .as_ref()
+                    .map(|c| c.pane_is_attached(id))
+                    .unwrap_or(false);
+                panes.push(serde_json::json!({
+                    "id": id,
+                    "tab": ti,
+                    "title": pane.title,
+                    "cwd": pane.term.current_dir(),
+                    "cols": cols,
+                    "rows": rows,
+                    "focused": Some(id) == focused,
+                    "argv": pane.argv,
+                    "child_pid": pane.term.child_pid(),
+                    "agent_attached": attached,
+                }));
+            }
+        }
+        serde_json::json!({ "panes": panes })
+    }
+
+    /// `read_screen`: a plain-text snapshot of a pane (default: focused).
+    fn ctl_read_screen(
+        &mut self,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let pane = match self.ctl_resolve_pane(&req.params) {
+            Ok(p) => p,
+            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+        };
+        let scrollback = req
+            .params
+            .get("scrollback_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let Some(p) = self.mux.panes.get(&pane) else {
+            return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
+        };
+        match p.term.screen_text(scrollback) {
+            Some(s) => Response::ok(
+                req.id,
+                serde_json::json!({
+                    "pane": pane,
+                    "text": s.text,
+                    "cols": s.cols,
+                    "rows": s.rows,
+                    "history_size": s.history_size,
+                    "display_offset": s.display_offset,
+                    "cursor": [s.cursor.0, s.cursor.1],
+                }),
+            ),
+            None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
+        }
+    }
+
+    /// `send_text`: write text to a pane's PTY (default: focused).
+    fn ctl_send_text(
+        &mut self,
+        conn_id: u64,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let pane = match self.ctl_resolve_pane(&req.params) {
+            Ok(p) => p,
+            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+        };
+        let Some(text) = req.params.get("text").and_then(|v| v.as_str()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing 'text' string");
+        };
+        let Some(p) = self.mux.panes.get(&pane) else {
+            return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
+        };
+        p.term.write(text.as_bytes());
+        log::info!(
+            "agent-server: send_text conn={conn_id} pane={pane} ({} bytes)",
+            text.len()
+        );
+        self.ctl_attach(conn_id, pane);
+        Response::ok(
+            req.id,
+            serde_json::json!({"pane": pane, "bytes": text.len()}),
+        )
+    }
+
+    /// Resolve the `pane` param to a pane id; default to the focused pane.
+    /// `Err` with a message when neither resolves.
+    fn ctl_resolve_pane(&self, params: &serde_json::Value) -> Result<u64, String> {
+        if let Some(p) = params.get("pane").and_then(|v| v.as_u64()) {
+            if self.mux.panes.contains_key(&p) {
+                return Ok(p);
+            }
+            return Err(format!("no pane with id {p}"));
+        }
+        self.mux
+            .tabs
+            .get(self.mux.active)
+            .map(|t| t.focus)
+            .filter(|f| self.mux.panes.contains_key(f))
+            .ok_or_else(|| "no focused pane".to_string())
+    }
+
+    /// Mark `conn_id` attached to `pane` + fire the badge transition once.
+    fn ctl_attach(&mut self, conn_id: u64, pane: u64) {
+        let newly = self
+            .ctl
+            .as_mut()
+            .map(|c| c.attach_pane(conn_id, pane))
+            .unwrap_or(false);
+        if newly {
+            self.set_pane_agent_attached(pane, true);
+        }
+    }
+
+    /// Cycle 934 (agent-first A4): flip a pane's agent badge + emit the
+    /// `agent_attached` event so subscribers + the titlebar update.
+    fn set_pane_agent_attached(&mut self, pane: u64, attached: bool) {
+        if let Some(p) = self.mux.panes.get_mut(&pane) {
+            if p.agent_attached == attached {
+                return;
+            }
+            p.agent_attached = attached;
+        }
+        self.ctl_broadcast(
+            "agent_attached",
+            Some(pane),
+            serde_json::json!({"attached": attached}),
+        );
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Cycle 930 (agent-first A2): broadcast an event to subscribed control
+    /// connections (no-op when the server is off / nobody subscribed).
+    fn ctl_broadcast(&self, kind: &str, pane: Option<u64>, data: serde_json::Value) {
+        if let Some(ctl) = &self.ctl
+            && ctl.has_subscribers()
+        {
+            ctl.broadcast(&kettle_ctl::protocol::Event::new(kind, pane, data));
+        }
+    }
+
+    /// `run_command`: write `cmd\n` to a pane and defer the reply (stored in a
+    /// `PendingRun`) until the next OSC-133 `CommandFinished` for that pane, or
+    /// the deadline. A bad request replies immediately over `reply`.
+    fn ctl_run_command(
+        &mut self,
+        conn_id: u64,
+        req: &kettle_ctl::protocol::Request,
+        reply: crate::ctl_server::ReplyTx,
+    ) {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let pane = match self.ctl_resolve_pane(&req.params) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, e));
+                return;
+            }
+        };
+        let Some(command) = req.params.get("command").and_then(|v| v.as_str()) else {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "missing 'command' string",
+            ));
+            return;
+        };
+        if self.pending_runs.contains_key(&pane) {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BUSY,
+                "a run_command is already pending on this pane",
+            ));
+            return;
+        }
+        let timeout_s = req
+            .params
+            .get("timeout_s")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(15.0)
+            .clamp(0.1, 600.0);
+        // Snapshot the output start line (current bottom of scrollback) so the
+        // reply can slice just this command's output.
+        let start_line = self
+            .mux
+            .panes
+            .get(&pane)
+            .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.rows))
+            .unwrap_or(0);
+        if let Some(p) = self.mux.panes.get(&pane) {
+            let mut line = command.to_string();
+            line.push('\n');
+            p.term.write(line.as_bytes());
+        }
+        log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
+        self.ctl_attach(conn_id, pane);
+        self.pending_runs.insert(
+            pane,
+            PendingRun {
+                conn_id,
+                req_id: req.id,
+                start_line,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_s),
+                reply,
+            },
+        );
+    }
+
+    /// Cycle 929: an OSC-133 `CommandFinished` arrived for `pane` — if a
+    /// `run_command` is pending there, reply with the exit code, duration, and
+    /// the output captured since the command started.
+    fn resolve_pending_run(&mut self, pane: u64, ev: &kettle_core::CommandFinished) {
+        let Some(run) = self.pending_runs.remove(&pane) else {
+            return;
+        };
+        let output = self.ctl_capture_output_since(pane, run.start_line);
+        let resp = kettle_ctl::protocol::Response::ok(
+            run.req_id,
+            serde_json::json!({
+                "pane": pane,
+                "exit_code": ev.exit_code,
+                "duration_ms": ev.duration.as_millis() as u64,
+                "timed_out": false,
+                "output": output,
+            }),
+        );
+        let _ = run.reply.send(resp);
+    }
+
+    /// Cycle 929: reply `timed_out` to any pending run whose deadline passed
+    /// (no OSC-133 completion — usually the shell lacks shell integration).
+    /// Called each event-loop tick from the redraw scheduler.
+    fn check_pending_run_deadlines(&mut self) {
+        if self.pending_runs.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let expired: Vec<u64> = self
+            .pending_runs
+            .iter()
+            .filter(|(_, p)| now >= p.deadline)
+            .map(|(&pane, _)| pane)
+            .collect();
+        for pane in expired {
+            let Some(run) = self.pending_runs.remove(&pane) else {
+                continue;
+            };
+            let output = self.ctl_capture_output_since(pane, run.start_line);
+            let resp = kettle_ctl::protocol::Response::ok(
+                run.req_id,
+                serde_json::json!({
+                    "pane": pane,
+                    "exit_code": serde_json::Value::Null,
+                    "timed_out": true,
+                    "output": output,
+                    "hint": "no OSC 133 command-end seen — enable shell integration \
+                             (kettle --shell-integration <shell>) for exit codes",
+                }),
+            );
+            let _ = run.reply.send(resp);
+        }
+    }
+
+    /// Capture a pane's output produced since absolute line `start_line` (the
+    /// lines a single `run_command` added). Best-effort; empty on a vanished
+    /// pane. Returns the last `total_now - start_line` grid lines, capped.
+    fn ctl_capture_output_since(&self, pane: u64, start_line: usize) -> String {
+        const CAP_LINES: usize = 10_000;
+        let Some(p) = self.mux.panes.get(&pane) else {
+            return String::new();
+        };
+        // Probe current geometry to know how many lines the command added.
+        let Some(probe) = p.term.screen_text(0) else {
+            return String::new();
+        };
+        let total_now = probe.history_size + probe.rows;
+        let lines_since = total_now.saturating_sub(start_line).min(CAP_LINES);
+        // Pull enough scrollback to cover those lines, then keep the tail.
+        let want_scrollback = lines_since.saturating_sub(probe.rows);
+        let Some(s) = p.term.screen_text(want_scrollback) else {
+            return String::new();
+        };
+        let all: Vec<&str> = s.text.lines().collect();
+        let keep = lines_since.min(all.len());
+        all[all.len() - keep..].join("\n")
+    }
+
     fn drain_remote_commands(&mut self) {
         let Some(path) = self.startup.remote_file.clone() else {
             return;
@@ -8777,6 +9330,10 @@ impl ApplicationHandler<UserEvent> for App {
             .record
             .clone()
             .map(|p| (p, startup.record_raw_input));
+        // Cycle 928 (agent-first A2): same — capture the `--agent-server`
+        // override before `startup` is consumed, so the control server start
+        // (further down, after the first paint) can read it.
+        let startup_agent_server = startup.agent_server;
         let has_override = startup.command.is_some() || startup.cwd.is_some();
         let restored = if has_override {
             let argv = startup.command.unwrap_or_default();
@@ -8916,6 +9473,34 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         self.resize_all();
+        // Cycle 928 (agent-first A2): start the control server now — right after
+        // the first pane exists, BEFORE the first GPU paint (which can take
+        // several seconds on a cold shader cache). The server only needs the
+        // pid + a live proxy for its waker, so binding it here makes the agent
+        // surface available as soon as the window comes up, not after the first
+        // frame. `--agent-server` (captured before `startup` was consumed)
+        // overrides the `agent-server` config; gated on `is_none()` so a
+        // re-resume doesn't double-bind.
+        if self.ctl.is_none() {
+            let mode = startup_agent_server.unwrap_or(self.cfg.agent_server);
+            if mode.is_enabled() {
+                let proxy = self.proxy.clone();
+                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                    let _ = proxy.send_event(UserEvent::Ctl);
+                });
+                let started_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.ctl = crate::ctl_server::CtlServer::start(
+                    mode,
+                    std::process::id(),
+                    env!("CARGO_PKG_VERSION"),
+                    started_unix,
+                    wake,
+                );
+            }
+        }
         // Cycle 325 Lua scripting: drain any `kettle.send_text(s)`
         // bytes the startup script queued, into the now-existing
         // focused pane's PTY. The pane is fresh; the shell will
@@ -9028,6 +9613,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ReloadConfig => self.reload_config(),
             UserEvent::RemoteCommand => self.drain_remote_commands(),
+            UserEvent::Ctl => self.drain_ctl(),
             UserEvent::UpdateAvailable { tag, url } => {
                 // Cycle 794: a newer release exists. Show the dismissable
                 // bottom-bar banner, fire one desktop toast, and nudge the
@@ -10319,6 +10905,16 @@ impl ApplicationHandler<UserEvent> for App {
             let ms = (remaining.as_millis() as u64).max(1);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
         }
+        // Cycle 929 (agent-first A2): reply `timed_out` to any pending
+        // run_command whose deadline has passed, and—while runs are pending—
+        // schedule a wake at the soonest deadline so a fully-silent command
+        // (no output to wake us) still times out on time.
+        self.check_pending_run_deadlines();
+        if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
+            let ms = soonest.saturating_duration_since(now).as_millis() as u64;
+            let ms = ms.max(1).min(500);
+            wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+        }
         match wait_ms {
             Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
                 now + std::time::Duration::from_millis(ms),
@@ -11105,6 +11701,20 @@ mod tests {
         assert_eq!(capped_crab.chars().count(), 61);
         // Every char before the `…` should still be a full crab.
         assert!(capped_crab.chars().take(60).all(|c| c == '🦀'));
+    }
+
+    /// Cycle 934 (agent-first A4): the per-pane titlebar agent badge.
+    #[test]
+    fn agent_title_prefixes_badge_only_when_attached() {
+        use super::agent_title;
+        // Unattached: title unchanged regardless of badge.
+        assert_eq!(agent_title("[agent] ", false, "bash"), "bash");
+        // Attached: badge prefixed.
+        assert_eq!(agent_title("[agent] ", true, "bash"), "[agent] bash");
+        // Empty badge disables the prefix even when attached.
+        assert_eq!(agent_title("", true, "bash"), "bash");
+        // Custom badge glyph.
+        assert_eq!(agent_title("🤖 ", true, "vim"), "🤖 vim");
     }
 
     #[test]

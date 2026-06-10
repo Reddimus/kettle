@@ -196,15 +196,16 @@ pub fn run_exec_with(
 
     // Optional asciicast (.cast) recording (output-only — exec never routes
     // keystrokes here; the audit trail is verbatim child output + resize).
-    let mut recorder = opts.record.as_ref().and_then(|p| {
-        match kettle_core::record::Recorder::start(p, opts.cols, opts.rows, false) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                let _ = writeln!(std::io::stderr(), "kettle exec: --record failed: {e}");
-                None
+    let mut recorder =
+        opts.record.as_ref().and_then(|p| {
+            match kettle_core::record::Recorder::start(p, opts.cols, opts.rows, false) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "kettle exec: --record failed: {e}");
+                    None
+                }
             }
-        }
-    });
+        });
 
     let mut out = Outputter::new(opts.mode);
     out.start(sink, opts.cols, opts.rows);
@@ -523,7 +524,10 @@ mod tests {
         let mut s = AnsiStripper::default();
         let mut out = Vec::new();
         s.push(b"hi\x1b", &mut out);
-        assert_eq!(out, b"hi", "incomplete trailing escape is held, not emitted");
+        assert_eq!(
+            out, b"hi",
+            "incomplete trailing escape is held, not emitted"
+        );
     }
 
     #[test]

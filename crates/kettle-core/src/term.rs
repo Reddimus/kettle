@@ -3540,7 +3540,10 @@ mod teardown_tests {
         };
         let _ = saw_exit_event;
         assert_eq!(code, 3, "exit status must propagate verbatim");
-        assert!(term.child_exited(), "child_exited agrees once code is known");
+        assert!(
+            term.child_exited(),
+            "child_exited agrees once code is known"
+        );
     }
 
     /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose

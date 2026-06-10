@@ -6,6 +6,7 @@ members = [
     "crates/kettle-vt",
     "crates/kettle-render",
     "crates/kettle-remote",
+    "crates/kettle-ctl",
     "crates/kettle-ui",
     "crates/kettle",
 ]
@@ -73,6 +74,7 @@ kettle-core = { path = "crates/kettle-core", version = "2.15.1" }
 kettle-vt = { path = "crates/kettle-vt", version = "2.15.1" }
 kettle-render = { path = "crates/kettle-render", version = "2.15.1" }
 kettle-remote = { path = "crates/kettle-remote", version = "2.15.1" }
+kettle-ctl = { path = "crates/kettle-ctl", version = "2.15.1" }
 kettle-ui = { path = "crates/kettle-ui", version = "2.15.1" }
 
 anyhow = "1"
