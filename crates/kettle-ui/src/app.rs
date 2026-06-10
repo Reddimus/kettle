@@ -1039,6 +1039,11 @@ fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
         .map(|p| p.to_path_buf())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
+    // Cycle 942 (audit): canonicalize so every spelling of the same project
+    // (`-d .`, `-d C:\proj`, a relative path, a trailing slash) hashes to the
+    // SAME seed — the documented "same project → same accent" stability.
+    // Falls back to the raw path when it doesn't resolve (nonexistent dir).
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     dir.hash(&mut h);
     h.finish()
@@ -1506,21 +1511,35 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
         })
         .collect();
     let mut claimed: std::collections::HashSet<char> = std::collections::HashSet::new();
-    let mut out: Vec<Option<(usize, char)>> = Vec::with_capacity(labels.len());
-    for label in labels {
-        let mut chosen: Option<(usize, char)> = None;
-        for (bi, c) in label.char_indices() {
-            if !c.is_ascii_alphabetic() {
+    let mut out: Vec<Option<(usize, char)>> = vec![None; labels.len()];
+    // Cycle 942 (audit): two rounds — the stable core rows claim their
+    // letters FIRST, the context-dependent UrlItem rows (only present when
+    // the right-click landed on a link) claim from what's left. Otherwise
+    // "Open Link" / "Copy Link Address" leading the menu stole 'c'/'o',
+    // silently remapping muscle-memory mnemonics ('p' fired Copy instead of
+    // Paste whenever the menu happened to open over a URL).
+    let round = |items: &[ContextMenuItem], idx: usize| -> usize {
+        usize::from(matches!(items[idx], ContextMenuItem::UrlItem { .. }))
+    };
+    for pass in 0..2 {
+        for (i, label) in labels.iter().enumerate() {
+            if round(items, i) != pass {
                 continue;
             }
-            let low = c.to_ascii_lowercase();
-            if !claimed.contains(&low) {
-                claimed.insert(low);
-                chosen = Some((bi, low));
-                break;
+            let mut chosen: Option<(usize, char)> = None;
+            for (bi, c) in label.char_indices() {
+                if !c.is_ascii_alphabetic() {
+                    continue;
+                }
+                let low = c.to_ascii_lowercase();
+                if !claimed.contains(&low) {
+                    claimed.insert(low);
+                    chosen = Some((bi, low));
+                    break;
+                }
             }
+            out[i] = chosen;
         }
-        out.push(chosen);
     }
     out
 }
@@ -2306,6 +2325,15 @@ impl App {
         // window's working directory, so `accent-color = auto` gives a window
         // in a different project a different (but per-project stable) accent.
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
+        // Cycle 942 (audit): seed the ToggleFullscreen tracking flag from the
+        // effective window-state (config `window-state = fullscreen` or `-f`).
+        // It used to start `false` unconditionally, so a fullscreen launch
+        // needed TWO ToggleFullscreen presses to exit (the first "entered"
+        // the state kettle was already in).
+        let start_fullscreen = matches!(
+            initial_cfg.window_state,
+            kettle_config::WindowState::Fullscreen
+        );
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
         // was set, init a LuaEngine + run the script once. Failures
@@ -2458,7 +2486,7 @@ impl App {
                     }
                 }
             },
-            fullscreen: false,
+            fullscreen: start_fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
             dragging_scrollbar: false,
@@ -4237,6 +4265,13 @@ impl App {
         if self.mods.shift_key() {
             return false;
         }
+        // Cycle 942 (audit, VTE input-enabled parity): a read-only pane gets
+        // no mouse-tracking reports either. Returning false falls through to
+        // kettle-local handling, so selection / scrollback still work for the
+        // user — the same degradation VTE applies when input is disabled.
+        if self.mux.focused().is_some_and(|p| p.read_only) {
+            return false;
+        }
         let (track, sgr) = input::mouse_tracking(self.focused_mode());
         if track == input::MouseTracking::Off {
             return false;
@@ -5383,8 +5418,16 @@ impl App {
         // the action. `update_links` is keyed (cycle 803) so this is a no-op
         // when the viewport hasn't changed since the last scan.
         self.update_links();
+        // Cycle 942 (audit): only offer the rows when the click is INSIDE the
+        // focused pane's rect. `cursor_cell` clamps out-of-rect coordinates to
+        // the nearest cell (xterm parity — right for mouse reports), which
+        // here could surface "Open Link" for a link the user never pointed at
+        // (right-click on chrome / another pane mapping into the focused grid).
+        let in_focused_pane = self
+            .focused_rect(self.area())
+            .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
-        if let Some(url) = self.link_at_cursor().map(|l| l.uri.clone()) {
+        if in_focused_pane && let Some(url) = self.link_at_cursor().map(|l| l.uri.clone()) {
             items.push(ContextMenuItem::UrlItem {
                 label: "Open Link",
                 url: url.clone(),
@@ -6666,10 +6709,14 @@ impl App {
                 // not just the focused one. The user pressing
                 // clear_history with broadcast on intends "clean
                 // slate for all the panes I'm typing into."
+                // Cycle 942 (audit): route through feed_input — both branches
+                // now agree that a read-only pane drops the clear (the
+                // broadcast branch inherited the gate from broadcast_write;
+                // the focused branch used to bypass it, a split-brain).
                 if self.mux.is_broadcast_on() {
                     self.mux.broadcast_write(b"\x1b[3J");
                 } else if let Some(p) = self.mux.focused() {
-                    p.term.write(b"\x1b[3J");
+                    p.feed_input(b"\x1b[3J");
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -6688,8 +6735,11 @@ impl App {
                 // modal floating over a freshly-reset terminal.
                 // Sweep them too so the chord really does mean
                 // "fresh start". Matches Alacritty's `Reset` action.
+                // Cycle 942 (audit): feed_input — injecting ESC c into a
+                // read-only pane's child (e.g. a locked agent TUI, where ESC
+                // is the interrupt key) is exactly what the toggle prevents.
                 if let Some(p) = self.mux.focused() {
-                    p.term.write(b"\x1bc");
+                    p.feed_input(b"\x1bc");
                 }
                 self.clear_selection_on_input();
                 // Cycle 111's modal sweep, extracted to a helper in
@@ -7467,9 +7517,12 @@ impl App {
                 // the existing PTY-write path; the engine handles
                 // them the same as cycle-X's separate Reset +
                 // ClearHistory actions.
-                if let Some(p) = self.mux.focused() {
-                    p.term.write(b"\x1bc");
-                    p.term.write(b"\x1b[3J");
+                // Cycle 942 (audit): feed_input, same read-only rule as the
+                // separate Reset + ClearHistory arms.
+                if let Some(p) = self.mux.focused()
+                    && p.feed_input(b"\x1bc")
+                {
+                    p.feed_input(b"\x1b[3J");
                 }
             }
         }
@@ -7809,6 +7862,21 @@ impl App {
         if let Some(rgb) = self.startup.accent_override {
             new.accent_color = Some(rgb);
         }
+        // Cycle 942 (audit): the cycle-938 launch-time window flags are the
+        // same "launch-time intent" — without re-applying, ANY live reload
+        // (including kettle's own theme/settings persistence writes) silently
+        // reverted a `-T` pinned title to `window-title-format` (and the
+        // -m/-f/-H/-b overrides out of `self.cfg`, which save_session and
+        // future window ops read).
+        if let Some(ws) = self.startup.window_state_override {
+            new.window_state = ws;
+        }
+        if let Some(b) = self.startup.borderless_override {
+            new.borderless = b;
+        }
+        if let Some(title) = self.startup.title_override.clone() {
+            new.window_title_format = title;
+        }
         self.cfg = new;
         // Cycle 936: a config reload may have changed the font size, so the
         // saved pre-scaled-zoom size is stale — drop it (see the font-size
@@ -8034,6 +8102,10 @@ impl App {
                     "argv": pane.argv,
                     "child_pid": pane.term.child_pid(),
                     "agent_attached": attached,
+                    // Cycle 942: surfaced so an agent can SEE the user's
+                    // read-only lock before a send_text/run_command bounces
+                    // with the `read_only` error code.
+                    "read_only": pane.read_only,
                 }));
             }
         }
@@ -11743,6 +11815,36 @@ mod tests {
         assert_eq!(mn[5], Some((2, 'b')));
         // "12345": no A-Z, None.
         assert_eq!(mn[6], None);
+    }
+
+    /// Cycle 942 (audit): the URL-aware leading rows claim their mnemonics
+    /// AFTER the stable core rows. Without the two-round pass, "Open Link" /
+    /// "Copy Link Address" leading the menu stole 'o'/'c', silently remapping
+    /// muscle-memory mnemonics whenever the right-click landed on a link
+    /// ('p' fired Copy instead of Paste).
+    #[test]
+    fn mnemonics_url_rows_claim_letters_last() {
+        let url = |label: &'static str, copy: bool| ContextMenuItem::UrlItem {
+            label,
+            url: "https://example.com".into(),
+            copy,
+        };
+        let menu = vec![
+            url("Open Link", false),
+            url("Copy Link Address", true),
+            ContextMenuItem::Separator,
+            item("Copy", true),
+            item("Paste", true),
+        ];
+        let mn = assign_mnemonics(&menu);
+        // Core rows keep their stable letters…
+        assert_eq!(mn[3], Some((0, 'c'))); // Copy = c (not stolen)
+        assert_eq!(mn[4], Some((0, 'p'))); // Paste = p (not stolen)
+        // …and the URL rows pick from what's left.
+        assert_eq!(mn[0], Some((0, 'o'))); // Open Link = o (free)
+        // "Copy Link Address": c, o, p taken → 'y' (byte 3).
+        assert_eq!(mn[1], Some((3, 'y')));
+        assert_eq!(mn[2], None); // separator
     }
 
     /// Cycle 715 drift guard. Typeahead prefix-match is case-

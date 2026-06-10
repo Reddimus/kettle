@@ -2050,12 +2050,17 @@ impl Mux {
     /// (typing reaches the remote shells but the local view of any
     /// scrolled-back pane stays pinned to history). Same scoping as
     /// `broadcast_write` — active tab's leaves only, never other tabs.
+    /// Cycle 942 (audit): skips read-only panes — their keystroke was dropped
+    /// by `feed_input`, so yanking their viewport would break the "no input,
+    /// no snap" rule the focused-pane path follows (a scrolled-back read-only
+    /// monitoring pane must stay where the user put it).
     pub fn broadcast_scroll_to_bottom(&mut self) {
         // Cycle 679 (named-groups sub-cycle 3): scope-aware
         // target set, same as broadcast_write / broadcast_paste.
         let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id)
+                && !p.read_only
                 && let Ok(mut t) = p.term.term.lock()
             {
                 t.scroll_display(kettle_core::Scroll::Bottom);

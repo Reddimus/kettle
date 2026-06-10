@@ -40,9 +40,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     through the same guarded chain as Ctrl+click (Lua URL handlers →
     `custom-url-handler` → system open).
 
+  **Adversarial review of the parity sweep (75 agents, cycle 942) — 14
+  distinct confirmed findings fixed before release.** Highlights: the
+  `-T/--title` (and `-m/-f/-b/-H`) launch overrides now survive a live config
+  reload (any reload — including kettle's own theme/settings persistence —
+  silently reverted them); `-H` now wins over `-m`/`-f` instead of being
+  dropped (Terminator applies hidden last); launching fullscreen no longer
+  desyncs `ToggleFullscreen` (one press exits); a wide (CJK/emoji) glyph
+  under the solid block cursor gets a two-cell block (its right half used to
+  recolor to an invisible color), and an OSC 12 runtime cursor color flips
+  the under-glyph to reverse-video; the read-only gate now also covers
+  Reset / Clear-scrollback / mouse-tracking reports (VTE input-enabled
+  parity) and read-only panes keep their scroll position under broadcast;
+  the URL menu rows no longer steal the menu's stable mnemonics ('p' fired
+  Copy over a link) and only appear for clicks inside the focused pane;
+  `search-wrap` is validated by `--check-config`; a config-level
+  `palette = 4=#hex` now carries a derived theme accent along; `accent-color
+  = auto` dedups its candidate hues and canonicalizes the cwd before
+  hashing; agents see a pane's `read_only` state in `list_panes`.
+
   **Theme-aware UI accent + Peacock `accent-color = auto`.** The UI chrome
   accent (active-tab strip, focused-pane border, per-pane titlebars, settings/
-  menu highlights, status bar) now derives from a new theme-level **`accent`**:
+  menu highlights) now derives from a new theme-level **`accent`**:
   Catppuccin Mocha sets it to its signature **mauve `#cba6f7`** — the same color
   as the app icon — so the whole window reads as one accent instead of the icon
   being mauve while the chrome stayed ANSI-blue. Themes that don't declare an

@@ -1762,7 +1762,7 @@ fn decode_config_text(bytes: &[u8]) -> String {
 /// so adjacent projects land on visibly different colors while a given project
 /// is stable across launches. Pure.
 fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
-    let candidates = [
+    let raw = [
         theme.accent,      // the signature (mauve on Mocha)
         theme.palette[4],  // blue
         theme.palette[2],  // green
@@ -1772,12 +1772,23 @@ fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
         theme.palette[5],  // magenta/pink
         theme.palette[13], // bright magenta
     ];
+    // Cycle 942 (audit): dedup preserving order. For a theme without an
+    // explicit `accent` line (most of the bundled set) `accent == palette[4]`,
+    // which would double blue's share of the spread and shrink the distinct-
+    // color pool; themes whose palette repeats hues (e.g. magenta == bright
+    // magenta) collapse those too.
+    let mut candidates: Vec<crate::color::Rgb> = Vec::with_capacity(raw.len());
+    for c in raw {
+        if !candidates.contains(&c) {
+            candidates.push(c);
+        }
+    }
     candidates[(seed % candidates.len() as u64) as usize]
 }
 
 impl Config {
     /// Cycle 937: the effective UI-chrome accent (focus border, active tab,
-    /// status bar), resolved in precedence:
+    /// titlebars, menu/settings highlights), resolved in precedence:
     ///   1. an explicit `accent-color = <hex>` / `--accent` (`accent_color`),
     ///   2. `accent-color = auto` → a Peacock color varied by `accent_seed`
     ///      (a hash of the window's working directory), so a window in a
@@ -2116,6 +2127,8 @@ impl Config {
         "scroll-on-output",
         "scroll-tabbar",
         "scroll_tabbar",
+        "search-wrap",
+        "search_wrap",
         "show-titlebar",
         "show_titlebar",
         "smart-copy",
@@ -3680,6 +3693,16 @@ impl Config {
         }
         for (i, c) in explicit_palette {
             if i < 16 {
+                // Cycle 942 (audit): a DERIVED accent (a theme without an
+                // explicit `accent` line snapshots `palette[4]` at parse
+                // time) must follow a config-level `palette = 4=#hex`
+                // override; an explicit theme accent (different from
+                // palette[4]) stays put. Equality is the derivation marker —
+                // and if a theme explicitly set accent == palette[4],
+                // following the override is indistinguishable from derived.
+                if i == 4 && cfg.theme.accent == cfg.theme.palette[4] {
+                    cfg.theme.accent = c;
+                }
                 cfg.theme.palette[i] = c;
             }
         }
@@ -5298,6 +5321,41 @@ tab-bar-width = 200\n";
         assert_eq!(
             cfg.resolved_accent(&theme),
             crate::color::Rgb::new(0x0a, 0x0b, 0x0c)
+        );
+    }
+
+    /// Cycle 942 (audit): a DERIVED theme accent (no explicit `accent` line →
+    /// snapshots `palette[4]` at parse time) follows a config-level
+    /// `palette = 4=#hex` override; an EXPLICIT theme accent stays put.
+    #[test]
+    fn derived_accent_follows_palette4_override() {
+        // A theme body without an `accent` line derives accent = palette[4].
+        let t = Theme::parse("palette = 4=#336699");
+        assert_eq!(t.accent, crate::color::Rgb::new(0x33, 0x66, 0x99));
+
+        // Mocha's accent is EXPLICIT (mauve ≠ palette[4]) — a config palette
+        // override must NOT hijack it.
+        let cfg = Config::parse_text("palette = 4=#102030");
+        let mauve = crate::color::Rgb::new(0xcb, 0xa6, 0xf7);
+        assert_eq!(
+            cfg.theme.palette[4],
+            crate::color::Rgb::new(0x10, 0x20, 0x30)
+        );
+        assert_eq!(cfg.theme.accent, mauve, "explicit accent stays");
+
+        // A derived accent follows the override through the REAL parse path:
+        // Dracula has no `accent` line, so its accent derives from palette[4]
+        // — and the config-level palette override must carry it along (the
+        // chrome accent used to silently stay the OLD blue).
+        let cfg = Config::parse_text("theme = Dracula\npalette = 4=#102030");
+        assert_eq!(
+            cfg.theme.palette[4],
+            crate::color::Rgb::new(0x10, 0x20, 0x30)
+        );
+        assert_eq!(
+            cfg.theme.accent,
+            crate::color::Rgb::new(0x10, 0x20, 0x30),
+            "derived accent follows a palette[4] override"
         );
     }
 

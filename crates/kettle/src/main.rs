@@ -1376,17 +1376,7 @@ fn main() -> anyhow::Result<()> {
     // falls through to the config's accent-color (or palette[4]) —
     // same shape as the config parse arm, no hard fail.
     let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
-    // Cycle 938 (Terminator parity): the window-state CLI flags are mutually
-    // exclusive in practice; the most-immersive given wins.
-    let window_state_override = if cli.fullscreen {
-        Some(kettle_config::WindowState::Fullscreen)
-    } else if cli.maximise {
-        Some(kettle_config::WindowState::Maximise)
-    } else if cli.hidden {
-        Some(kettle_config::WindowState::Hidden)
-    } else {
-        None
-    };
+    let window_state_override = window_state_from_flags(cli.maximise, cli.fullscreen, cli.hidden);
     // Only override to `true` when the flag is present — its absence must NOT
     // force borderless off over a `borderless = true` config.
     let borderless_override = cli.borderless.then_some(true);
@@ -1588,6 +1578,62 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
     rows.into_iter()
         .map(|(name, target)| format!("{name:<width$}  {target}"))
         .collect()
+}
+
+/// Cycle 938 (Terminator parity) + cycle 942 (audit): map the window-state
+/// CLI flags to an override. Fixed precedence: **hidden > fullscreen >
+/// maximise** — `-H` is the explicit "don't show me" intent (Quake-style
+/// background launch), so it must not be silently dropped when a script also
+/// passes `-m`/`-f` (Terminator applies hidden last for the same reason).
+/// Pure so the precedence is drift-guarded.
+fn window_state_from_flags(
+    maximise: bool,
+    fullscreen: bool,
+    hidden: bool,
+) -> Option<kettle_config::WindowState> {
+    if hidden {
+        Some(kettle_config::WindowState::Hidden)
+    } else if fullscreen {
+        Some(kettle_config::WindowState::Fullscreen)
+    } else if maximise {
+        Some(kettle_config::WindowState::Maximise)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod window_state_flag_tests {
+    use super::window_state_from_flags;
+    use kettle_config::WindowState;
+
+    /// Cycle 942 (audit): full truth table — in particular `-H` must win over
+    /// `-m`/`-f` (it used to be silently dropped when combined).
+    #[test]
+    fn hidden_wins_then_fullscreen_then_maximise() {
+        assert_eq!(window_state_from_flags(false, false, false), None);
+        assert_eq!(
+            window_state_from_flags(true, false, false),
+            Some(WindowState::Maximise)
+        );
+        assert_eq!(
+            window_state_from_flags(false, true, false),
+            Some(WindowState::Fullscreen)
+        );
+        assert_eq!(
+            window_state_from_flags(true, true, false),
+            Some(WindowState::Fullscreen)
+        );
+        for m in [false, true] {
+            for f in [false, true] {
+                assert_eq!(
+                    window_state_from_flags(m, f, true),
+                    Some(WindowState::Hidden),
+                    "-H wins over -m/-f (m={m}, f={f})"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

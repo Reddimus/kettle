@@ -77,9 +77,11 @@ pub struct Options {
     /// resolved config says.
     pub accent_override: Option<kettle_config::Rgb>,
     /// Cycle 938 (Terminator parity): `-m/--maximise`, `-f/--fullscreen`,
-    /// `-H/--hidden` override the `window-state` config for THIS launch (the
-    /// last flag wins; mirrors Terminator's window-state CLI flags). `None` =
-    /// use the config value.
+    /// `-H/--hidden` override the `window-state` config for THIS launch.
+    /// When several are given the precedence is fixed: hidden > fullscreen >
+    /// maximise (`-H` is the explicit "don't show me" intent and must not be
+    /// dropped; mirrors Terminator applying hidden last). `None` = use the
+    /// config value.
     pub window_state_override: Option<kettle_config::WindowState>,
     /// Cycle 938: `-b/--borderless` overrides the `borderless` config for this
     /// launch. `None` = use the config value.

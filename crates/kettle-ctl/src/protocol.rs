@@ -131,7 +131,10 @@ pub mod error_codes {
     pub const BAD_PARAMS: &str = "bad_params";
     /// The named pane does not exist (closed, or never existed).
     pub const NO_SUCH_PANE: &str = "no_such_pane";
-    /// A mutating method was called on a read-only server.
+    /// A mutating method was called on a read-only server, OR (cycle 941) the
+    /// target pane was toggled read-only by the user (right-click "Read only"
+    /// / `toggle_read_only`). The error message distinguishes the two; pane
+    /// state is also visible as the `read_only` field in `list_panes`.
     pub const READ_ONLY: &str = "read_only";
     /// A `run_command` is already pending on this pane.
     pub const BUSY: &str = "busy";

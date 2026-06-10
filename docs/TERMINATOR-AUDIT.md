@@ -369,7 +369,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`inactive_color_offset`~~ (dim unfocused term FG) | config.py | ✅ — `inactive-color-offset` + `inactive-bg-color-offset` config keys both parse (lib.rs:1944/1959) and apply in kettle-render (lib.rs:1218). Separate FG + BG offsets honored. | (covered) |
 | ~~`allow_bold`~~ | config.py | ✅ cycle-333 config key + **render-wired** (cycle-355): `let bold = cfg.allow_bold && flags.contains(Flags::BOLD)` suppresses the bold weight when false | cycle-355 |
 | ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 config key + **render-wired** (cycle-355): `if bold && cfg.bold_is_bright { fg = color::bright_for_bold(fg, theme) }` maps SGR-bold palette[0..8] → bright palette[8..16] | cycle-355 |
-| ~~`link_single_click`~~ | config.py | ✅ cycle-333 config key + **mouse-wired**: `want_open = cfg.link_single_click \|\| ctrl \|\| super` in the left-click handler opens the URL under the cursor on a bare click | (covered) |
+| ~~`link_single_click`~~ | config.py | ✅ cycle-333 config key + **mouse-wired**: `url_modifier = cfg.link_single_click \|\| ctrl \|\| super` in the left-click handler opens the URL under the cursor on a bare click | (covered) |
 | ~~`disable_mousewheel_zoom`~~ | config.py | ✅ cycle-334 — config key parsed; kettle has no Ctrl+wheel zoom feature today so the disable is a forward-compat stub | cycle-334 |
 | ~~`disable_mouse_paste`~~ | config.py | ✅ cycle-334 — config key parsed (mouse-handler wiring is a follow-up) | cycle-334 |
 | ~~`putty_paste_style`~~ | config.py | ✅ cycle-334 — config key parsed (right-click pastes; mouse-handler wiring is a follow-up) | cycle-334 |

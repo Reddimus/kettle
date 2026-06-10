@@ -2879,6 +2879,21 @@ impl Renderer {
                 None
             }
         };
+        // Cycle 942 (audit): an OSC 12 runtime cursor color moves the block
+        // out from under the theme's cursor/cursor_text pair, so the
+        // recolored glyph follows reverse-video (its own cell bg) instead of
+        // `theme.cursor_text` (which was tuned against `theme.cursor`).
+        // Resolved once; the cursor-draw below resolves the same slot.
+        let cursor_rt_override = color::resolve_query(258, theme, term_colors);
+        // Cycle 942 (audit): a wide (CJK/emoji) glyph under the cursor needs
+        // a TWO-cell block — recoloring the glyph to cursor_text while the
+        // 1-cell block covered only its left half left the right half drawn
+        // in cursor_text on the default bg (invisible on Mocha, where
+        // cursor_text == background). And a cursor parked on the SPACER half
+        // re-anchors to the lead glyph one cell left. Discovered during the
+        // cell walk (the display iterator is single-pass); `None` = narrow
+        // cell, draw as before.
+        let mut cursor_wide_quad: Option<(usize, f32)> = None;
 
         for indexed in content.display_iter {
             let point = indexed.point;
@@ -2939,8 +2954,20 @@ impl Renderer {
                 fg = color::bright_for_bold(fg, theme);
             }
             // Recolor the glyph sitting under a focused solid block cursor.
-            if recolor_cursor_cell == Some((row, col)) {
-                fg = theme.cursor_text;
+            // The second arm catches a cursor parked on the spacer half of a
+            // wide glyph: the glyph lives one cell LEFT (the WIDE_CHAR lead),
+            // and the block must cover both columns starting there.
+            let lead_of_cursor_spacer =
+                recolor_cursor_cell == Some((row, col + 1)) && flags.contains(Flags::WIDE_CHAR);
+            if recolor_cursor_cell == Some((row, col)) || lead_of_cursor_spacer {
+                if flags.contains(Flags::WIDE_CHAR) {
+                    cursor_wide_quad = Some((col, 2.0));
+                }
+                fg = if cursor_rt_override.is_some() {
+                    bg
+                } else {
+                    theme.cursor_text
+                };
             }
 
             if bg != default_bg {
@@ -3086,7 +3113,13 @@ impl Renderer {
             && pv.focused
             && cursor_visible;
         if draw_cursor {
-            let bx = ox + cp.column.0 as f32 * cw;
+            // Cycle 942: a wide glyph under a solid block cursor widens the
+            // block to both columns (and a spacer-parked cursor re-anchors to
+            // the lead glyph's cell). `cursor_wide_quad` is only ever set on
+            // the focused solid-Block path, so beam/underline/hollow shapes
+            // and unfocused windows are untouched.
+            let (bcol, bcells) = cursor_wide_quad.unwrap_or((cp.column.0, 1.0));
+            let bx = ox + bcol as f32 * cw;
             let by = oy + cvrow as f32 * ch;
             // OSC 12 cursor color override (stored in `term_colors[258]`)
             // takes precedence over the theme — same precedence rule the
@@ -3112,7 +3145,11 @@ impl Renderer {
                     // translucent tint) — the glyph under it is recolored to
                     // `theme.cursor_text` in the span builder, the standard
                     // inverted-cursor model + Terminator cursor_fg/bg parity.
-                    EShape::Block | EShape::HollowBlock | EShape::Hidden => (cw, 1.0, ch, 0.0),
+                    // Cycle 942: `bcells` widens it over a wide (CJK/emoji)
+                    // glyph so the recolored right half isn't left uncovered.
+                    EShape::Block | EShape::HollowBlock | EShape::Hidden => {
+                        (cw * bcells, 1.0, ch, 0.0)
+                    }
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
             }

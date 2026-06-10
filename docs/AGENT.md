@@ -128,7 +128,7 @@ kettle ctl get_state --pid 12345                        # target a specific kett
 |---|---|---|
 | `get_state` | read-only | version, pid, mode, theme, focused pane |
 | `list_tabs` | read-only | index, title, active, pane ids |
-| `list_panes` | read-only | id, tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached |
+| `list_panes` | read-only | id, tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | text + cursor + history (params: `pane`, `scrollback_lines`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
