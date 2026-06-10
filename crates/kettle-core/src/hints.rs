@@ -128,6 +128,12 @@ pub fn labels(n: usize, alphabet: &str) -> Vec<String> {
         return Vec::new();
     }
     let base = a.len();
+    // A single-character alphabet can't make `n` distinct FIXED-width labels —
+    // `base^width` is always 1, so the width search below would loop forever.
+    // Fall back to distinct INCREASING-length labels (`a`, `aa`, `aaa`, …).
+    if base == 1 {
+        return (0..n).map(|i| a[0].to_string().repeat(i + 1)).collect();
+    }
     let mut width = 1usize;
     while base.checked_pow(width as u32).is_none_or(|cap| cap < n) {
         width += 1;
@@ -213,5 +219,20 @@ mod tests {
         assert_eq!(labels(n, abc), labels(n, abc));
         // Degenerate alphabet → no labels (caller falls back).
         assert!(labels(5, "").is_empty());
+        // Cycle 936 (review): a single-character alphabet must NOT hang (the
+        // fixed-width search can't represent n>1) — fall back to distinct
+        // increasing-length labels.
+        assert_eq!(labels(1, "x"), vec!["x"]);
+        assert_eq!(labels(3, "x"), vec!["x", "xx", "xxx"]);
+        let single = labels(50, "x");
+        assert_eq!(single.len(), 50);
+        assert_eq!(
+            single
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            50,
+            "all distinct, no hang"
+        );
     }
 }

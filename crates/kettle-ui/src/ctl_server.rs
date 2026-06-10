@@ -180,9 +180,13 @@ impl CtlServer {
     /// attachment for the pane across ALL connections.
     pub fn attach_pane(&mut self, conn_id: u64, pane: u64) -> bool {
         let already = self.pane_is_attached(pane);
-        if let Some(c) = self.conns.get_mut(&conn_id) {
-            c.attached_panes.insert(pane);
-        }
+        // Only report a NEW attachment if we actually recorded one: an untracked
+        // connection (e.g. dropped at the cap) must never light a badge it can't
+        // later clear on disconnect.
+        let Some(c) = self.conns.get_mut(&conn_id) else {
+            return false;
+        };
+        c.attached_panes.insert(pane);
         !already
     }
 
@@ -223,26 +227,54 @@ impl Drop for CtlServer {
 }
 
 /// The accept loop: assign a connection id, create its event channel, and spawn
-/// ONE thread per connection that reads + writes on the same handle.
+/// ONE thread per connection that reads + writes on the same handle. A shared
+/// atomic counter enforces `MAX_CONNECTIONS` at the source — an over-cap
+/// connection is closed immediately (the socket/pipe handle dropped) rather
+/// than spawning a live thread that would sit idle holding the endpoint.
 fn accept_loop(listener: CtlListener, tx: Sender<CtlServerMsg>, wake: Arc<dyn Fn() + Send + Sync>) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut consecutive_errors = 0u32;
     loop {
         let conn = match listener.accept() {
-            Ok(s) => s,
+            Ok(s) => {
+                consecutive_errors = 0;
+                s
+            }
             Err(e) => {
-                log::debug!("agent-server: accept ended: {e}");
-                return;
+                // A single bad/abandoned client must not kill the accept thread.
+                // Tolerate transient errors with a short backoff; give up only
+                // after many consecutive failures (the listener is truly gone).
+                consecutive_errors += 1;
+                if consecutive_errors > 32 {
+                    log::warn!("agent-server: accept loop ending after repeated errors: {e}");
+                    return;
+                }
+                log::debug!("agent-server: accept error (transient): {e}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
             }
         };
+        // Hard connection cap: refuse (and close) once MAX_CONNECTIONS are live.
+        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            log::warn!("agent-server: connection cap ({MAX_CONNECTIONS}) reached; refusing");
+            drop(conn); // closes the socket / pipe handle
+            continue;
+        }
         let conn_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        active.fetch_add(1, Ordering::Relaxed);
         let (event_tx, event_rx) = crossbeam_channel::bounded::<Event>(EVENT_QUEUE_CAP);
         let _ = tx.send(CtlServerMsg::NewConn { conn_id, event_tx });
         wake();
         let ctx = tx.clone();
         let cwake = wake.clone();
+        let active_dec = active.clone();
         std::thread::Builder::new()
             .name(format!("kettle-ctl-{conn_id}"))
-            .spawn(move || connection_loop(conn, conn_id, ctx, cwake, event_rx))
+            .spawn(move || {
+                connection_loop(conn, conn_id, ctx, cwake, event_rx);
+                active_dec.fetch_sub(1, Ordering::Relaxed);
+            })
             .ok();
     }
 }
@@ -300,17 +332,43 @@ fn connection_loop(
             }
             if is_subscribe {
                 // Switch to event-only streaming for the rest of the
-                // connection's life (no more requests read on this handle).
-                while let Ok(ev) = event_rx.recv() {
-                    if write_line(&mut conn, &ev).is_err() {
-                        break 'outer;
+                // connection's life (no more requests read on this handle). Use
+                // a bounded recv so an IDLE subscriber whose client vanished is
+                // detected within the keepalive window: on timeout we write a
+                // harmless `ping` event; a failed write means the peer is gone,
+                // so we disconnect (bounding the ConnState+thread leak to the
+                // timeout rather than "until the next real event").
+                loop {
+                    match event_rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                        Ok(ev) => {
+                            if write_line(&mut conn, &ev).is_err() {
+                                break 'outer;
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            let ping = Event::new("ping", None, serde_json::Value::Null);
+                            if write_line(&mut conn, &ping).is_err() {
+                                break 'outer;
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'outer,
                     }
                 }
-                break 'outer;
             }
             continue;
         }
-        // Need more bytes.
+        // Need more bytes. Enforce the 1 MiB line cap incrementally so a client
+        // that never sends a newline can't grow `acc` without bound (DoS) — the
+        // protocol's MAX_LINE_BYTES is otherwise only checkable post-assembly.
+        if acc.len() > kettle_ctl::protocol::MAX_LINE_BYTES {
+            let resp = Response::err(
+                0,
+                kettle_ctl::protocol::error_codes::BAD_REQUEST,
+                "request line exceeds 1 MiB",
+            );
+            let _ = write_line(&mut conn, &resp);
+            break;
+        }
         match conn.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => acc.extend_from_slice(&buf[..n]),

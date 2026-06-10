@@ -23,8 +23,22 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub fn run_mcp() -> i32 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut lines = stdin.lock().lines();
-    while let Some(Ok(line)) = lines.next() {
+    let lines = stdin.lock().lines();
+    for item in lines {
+        // Don't let a non-UTF-8 line (InvalidData) or a transient read error
+        // masquerade as EOF and silently kill the server: report -32700 and
+        // keep going for malformed input; stop only on a genuine I/O error.
+        let line = match item {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                write_message(
+                    &mut stdout,
+                    &error_response(Value::Null, -32700, &format!("invalid utf-8: {e}")),
+                );
+                continue;
+            }
+            Err(_) => break,
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;

@@ -41,6 +41,10 @@ pub struct Recorder {
     /// Default false — bare printables are redacted to a generic class so a
     /// typed password never lands in the trace (`--record-raw-input` opts in).
     raw_input: bool,
+    /// Trailing bytes of an INCOMPLETE multibyte UTF-8 sequence carried over to
+    /// the next `record_output` chunk, so a codepoint split across two PTY reads
+    /// is decoded whole instead of being mangled into U+FFFD on each side.
+    utf8_carry: Vec<u8>,
 }
 
 impl Recorder {
@@ -57,6 +61,7 @@ impl Recorder {
             start: Instant::now(),
             disabled: false,
             raw_input,
+            utf8_carry: Vec::new(),
         })
     }
 
@@ -81,16 +86,56 @@ impl Recorder {
         }
     }
 
-    /// Record a chunk of terminal OUTPUT (`o`). Non-UTF-8 bytes become U+FFFD —
-    /// the trace stays valid asciicast / valid JSON, not byte-perfect.
+    /// Record a chunk of terminal OUTPUT (`o`). A multibyte codepoint split
+    /// across two PTY reads is carried over and decoded whole (not mangled into
+    /// U+FFFD on each side); genuinely-invalid bytes still become U+FFFD so the
+    /// trace stays valid asciicast / valid JSON.
     ///
     /// Privacy: this is VERBATIM and cannot be redacted — a terminal can't tell
     /// a secret from normal output, so anything printed/echoed on screen lands
     /// in the trace in cleartext. Review/scrub a `.cast` before sharing it (see
     /// docs/DEV-RECORD.md).
     pub fn record_output(&mut self, bytes: &[u8]) {
-        let text = String::from_utf8_lossy(bytes);
-        self.emit("o", &text);
+        if self.disabled {
+            return;
+        }
+        self.utf8_carry.extend_from_slice(bytes);
+        let mut out = String::new();
+        // Decode as much valid UTF-8 as possible; loop so a chunk that contains
+        // [valid][invalid][valid] emits all of it, retaining only a genuinely-
+        // incomplete trailing sequence for the next call.
+        loop {
+            match std::str::from_utf8(&self.utf8_carry) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.utf8_carry.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    // SAFETY: bytes up to `valid` are guaranteed valid UTF-8.
+                    out.push_str(unsafe {
+                        std::str::from_utf8_unchecked(&self.utf8_carry[..valid])
+                    });
+                    match e.error_len() {
+                        // Incomplete trailing sequence — keep it for the next chunk.
+                        None => {
+                            self.utf8_carry.drain(..valid);
+                            break;
+                        }
+                        // A genuinely-invalid run — emit one replacement, drop it,
+                        // and continue decoding the remainder.
+                        Some(n) => {
+                            out.push('\u{FFFD}');
+                            self.utf8_carry.drain(..valid + n);
+                        }
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            self.emit("o", &out);
+        }
     }
 
     /// Record a grid resize (`r`), data `"<cols>x<rows>"`.
@@ -117,8 +162,15 @@ impl Recorder {
         self.emit("m", label);
     }
 
-    /// Flush any buffered events. Called on close and from `Drop`.
+    /// Flush any buffered events. Called on close and from `Drop`. Emits any
+    /// trailing carried-over bytes (a genuinely-truncated final UTF-8 sequence)
+    /// as a U+FFFD so no output is silently dropped at end-of-stream.
     pub fn finish(&mut self) {
+        if !self.utf8_carry.is_empty() && !self.disabled {
+            let tail = String::from_utf8_lossy(&self.utf8_carry).into_owned();
+            self.utf8_carry.clear();
+            self.emit("o", &tail);
+        }
         let _ = self.writer.flush();
     }
 }
@@ -216,6 +268,45 @@ mod tests {
         );
         // Raw opt-in: literal characters are kept.
         assert_eq!(printable_token("abc", true), "abc");
+    }
+
+    /// Cycle 936 (review): a multibyte codepoint split across two
+    /// `record_output` chunks must decode whole, not mangle into U+FFFD halves.
+    #[test]
+    fn record_output_stitches_split_utf8_across_chunks() {
+        use std::io::Read;
+        let path =
+            std::env::temp_dir().join(format!("kettle-rec-utf8-{}.cast", std::process::id()));
+        {
+            let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
+            // "é" = 0xC3 0xA9; "中" = 0xE4 0xB8 0xAD. Split each across chunks.
+            rec.record_output(&[b'a', 0xC3]); // 'a' + first byte of 'é'
+            rec.record_output(&[0xA9, 0xE4, 0xB8]); // rest of 'é' + first 2 of '中'
+            rec.record_output(&[0xAD, b'b']); // last of '中' + 'b'
+            rec.finish();
+        }
+        let mut s = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        // Collect all `o` event payloads, concatenated.
+        let joined: String = s
+            .lines()
+            .skip(1)
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v[1] == "o")
+            .filter_map(|v| v[2].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            joined, "aé中b",
+            "split multibyte codepoints must reassemble whole"
+        );
+        assert!(
+            !joined.contains('\u{FFFD}'),
+            "no replacement chars: {joined:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

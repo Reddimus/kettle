@@ -198,6 +198,30 @@ palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with
 `Ctrl+Up` / `Ctrl+Down` after enabling [shell integration](SHELL-INTEGRATION.md)
 (bash / zsh / fish / **PowerShell**).
 
+### AI agents / MCP
+
+kettle ships an opt-in agent surface (`kettle exec` / `kettle ctl` /
+`kettle mcp`). To let Claude Code drive it as native tools, register the MCP
+server once:
+
+```sh
+claude mcp add kettle -- kettle mcp
+```
+
+…or, scoped to a single project, drop a `.mcp.json` at the repo root:
+
+```json
+{ "mcpServers": { "kettle": { "command": "kettle", "args": ["mcp"] } } }
+```
+
+`kettle` must resolve on PATH first. On Windows, `install.ps1` adds kettle to
+PATH but already-running shells keep their old snapshot — open a **fresh**
+shell before running `claude mcp add`. On Linux, make sure `~/.local/bin` is on
+PATH.
+
+See [docs/AGENT.md](AGENT.md) for the full surface (`kettle exec` headless
+one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
+
 ### Verifying a download (SHA-256)
 
 Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.15.1)

@@ -39,16 +39,21 @@ pub struct RegistryEntry {
 /// Resolve the registry directory, with the environment injected for tests.
 pub fn registry_dir_from(get: impl Fn(&str) -> Option<String>) -> PathBuf {
     let env = |k: &str| get(k).filter(|s| !s.is_empty());
+    // Fall back to the OS temp dir (a stable, absolute, per-user location) — NOT
+    // the relative CWD ".", which would put the registry under whatever
+    // directory the process happened to start in, so a server and a client
+    // launched from different CWDs would never find each other (and writing
+    // there pollutes arbitrary dirs). temp_dir keeps both sides in agreement.
     let base: PathBuf = if cfg!(windows) {
         env("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(std::env::temp_dir)
     } else {
         env("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .or_else(|| env("XDG_STATE_HOME").map(PathBuf::from))
             .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(std::env::temp_dir)
     };
     base.join("kettle").join("ctl")
 }
@@ -81,12 +86,25 @@ fn entry_path(dir: &std::path::Path, pid: u32) -> PathBuf {
 /// Write (or replace) this server's registry entry. Creates the dir `0700` on
 /// Unix. Returns the entry-file path so the server can unlink it on shutdown.
 pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        // Create the leaf dir 0700 from the start (DirBuilder applies the mode
+        // at creation) so there is no create-then-chmod window where it is
+        // briefly world-readable. Parents are created first without the mode
+        // (they are conventional XDG dirs); then re-assert 0700 on the leaf in
+        // case it already existed with looser perms.
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
     let path = entry_path(dir, entry.pid);
     let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)?;

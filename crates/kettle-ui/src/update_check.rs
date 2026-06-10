@@ -154,7 +154,16 @@ fn save_cache(cache: &UpdateCache) {
     let Ok(json) = serde_json::to_vec_pretty(cache) else {
         return;
     };
-    let tmp = p.with_extension(format!("tmp.{}", std::process::id()));
+    // PID + nanos uniquifier (mirrors session.rs's atomic-save scheme) so two
+    // near-simultaneous writers in the same process can't collide on one tmp.
+    let tmp = p.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     if std::fs::write(&tmp, &json).is_ok()
         && let Err(e) = std::fs::rename(&tmp, &p)
     {

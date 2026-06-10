@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use serde_json::Value;
 
 use crate::discovery;
-use crate::protocol::{Event, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{Event, MAX_LINE_BYTES, PROTOCOL_VERSION, Request, Response};
 use crate::transport::{self, CtlStream};
 
 /// A client error: a transport failure, or a structured server error.
@@ -109,20 +109,23 @@ impl Client {
         // Read response lines until we get the one matching `id` (events that
         // arrive before the response — if already subscribed — are skipped).
         loop {
-            let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf)?;
-            if n == 0 {
+            let Some(trimmed) = self.read_capped_line()? else {
                 return Err(CtlError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "server closed the connection",
                 )));
-            }
-            let trimmed = buf.trim_end();
+            };
             if trimmed.is_empty() {
                 continue;
             }
             // A response has an `id`; an event has an `event` field.
-            if let Ok(resp) = serde_json::from_str::<Response>(trimmed) {
+            if let Ok(resp) = serde_json::from_str::<Response>(&trimmed) {
+                if resp.v > PROTOCOL_VERSION {
+                    return Err(CtlError::Protocol(format!(
+                        "server response protocol v{} > supported v{PROTOCOL_VERSION}",
+                        resp.v
+                    )));
+                }
                 if resp.id != id {
                     continue;
                 }
@@ -146,19 +149,42 @@ impl Client {
     /// Returns `None` on clean EOF.
     pub fn next_event(&mut self) -> Result<Option<Event>, CtlError> {
         loop {
-            let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf)?;
-            if n == 0 {
+            let Some(trimmed) = self.read_capped_line()? else {
                 return Ok(None);
-            }
-            let trimmed = buf.trim_end();
+            };
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(ev) = serde_json::from_str::<Event>(trimmed) {
+            if let Ok(ev) = serde_json::from_str::<Event>(&trimmed) {
+                if ev.v > PROTOCOL_VERSION {
+                    return Err(CtlError::Protocol(format!(
+                        "server event protocol v{} > supported v{PROTOCOL_VERSION}",
+                        ev.v
+                    )));
+                }
                 return Ok(Some(ev));
             }
-            // Skip non-event lines (e.g. a late response).
+            // Skip non-event lines (e.g. a late response). Ignore a `ping`
+            // keepalive too (it parses as an Event and is returned; callers
+            // filter by kind).
         }
+    }
+
+    /// Read one NDJSON line, enforcing the protocol's `MAX_LINE_BYTES` cap so a
+    /// hostile/buggy server can't make the client buffer without bound. Returns
+    /// the trimmed line, or `None` on clean EOF.
+    fn read_capped_line(&mut self) -> Result<Option<String>, CtlError> {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        let n = (&mut self.reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if bytes.len() > MAX_LINE_BYTES && bytes.last() != Some(&b'\n') {
+            return Err(CtlError::Protocol("server line exceeds 1 MiB".into()));
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes).trim_end().to_string()))
     }
 }

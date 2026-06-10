@@ -6282,6 +6282,11 @@ impl App {
                     };
                     r.set_font_size(new);
                 }
+                // Cycle 936: the user changed the font OUTSIDE a scaled-zoom
+                // enter/exit, so the saved pre-zoom size is now stale — drop it
+                // so a later zoom-out keeps this new chosen size instead of
+                // reverting to the old one.
+                self.scaled_zoom_prev_font_size = None;
             }
             Action::StartSearch => {
                 // Cycle 154: close any other modal first so we don't
@@ -7644,6 +7649,10 @@ impl App {
         self.compiled_triggers = compile_triggers(&new.triggers);
         self.last_trigger_fire = std::time::Instant::now() - std::time::Duration::from_secs(60);
         self.cfg = new;
+        // Cycle 936: a config reload may have changed the font size, so the
+        // saved pre-scaled-zoom size is stale — drop it (see the font-size
+        // action arm) so a later zoom-out doesn't revert to the old size.
+        self.scaled_zoom_prev_font_size = None;
         self.resize_all();
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -8031,17 +8040,28 @@ impl App {
             .and_then(|v| v.as_f64())
             .unwrap_or(15.0)
             .clamp(0.1, 600.0);
-        // Snapshot the output start line (current bottom of scrollback) so the
-        // reply can slice just this command's output.
+        // Snapshot the output start line as the ABSOLUTE cursor line
+        // (history_size + cursor row), not history_size + rows. The command's
+        // output usually fits on the visible screen (no scrollback growth), so
+        // measuring by `rows` would make `total_now == start_line` and slice out
+        // nothing; the cursor advances as output is printed, so the absolute
+        // cursor line tracks the real content position whether or not it scrolls.
         let start_line = self
             .mux
             .panes
             .get(&pane)
-            .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.rows))
+            .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.cursor.0))
             .unwrap_or(0);
         if let Some(p) = self.mux.panes.get(&pane) {
             let mut line = command.to_string();
-            line.push('\n');
+            // Submit with a CARRIAGE RETURN, not a line feed: CR is the Enter
+            // key a shell's line editor acts on. Under Windows ConPTY only CR is
+            // delivered as Enter (a bare LF is typed but never executes); on a
+            // Unix PTY the line discipline's ICRNL maps CR→LF, so CR works on
+            // both. (A trailing newline already in `command` is left as-is.)
+            if !line.ends_with('\r') && !line.ends_with('\n') {
+                line.push('\r');
+            }
             p.term.write(line.as_bytes());
         }
         log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
@@ -8080,11 +8100,31 @@ impl App {
     }
 
     /// Cycle 929: reply `timed_out` to any pending run whose deadline passed
-    /// (no OSC-133 completion — usually the shell lacks shell integration).
+    /// (no OSC-133 completion — usually the shell lacks shell integration), and
+    /// (cycle 936) immediately resolve any pending run whose pane has CLOSED, so
+    /// the agent isn't blocked for the full timeout after a pane vanishes.
     /// Called each event-loop tick from the redraw scheduler.
     fn check_pending_run_deadlines(&mut self) {
         if self.pending_runs.is_empty() {
             return;
+        }
+        // A pending run whose pane no longer exists (closed/reaped) is resolved
+        // at once with an error, freeing the blocked connection thread.
+        let orphaned: Vec<u64> = self
+            .pending_runs
+            .keys()
+            .copied()
+            .filter(|pane| !self.mux.panes.contains_key(pane))
+            .collect();
+        for pane in orphaned {
+            if let Some(run) = self.pending_runs.remove(&pane) {
+                let resp = kettle_ctl::protocol::Response::err(
+                    run.req_id,
+                    kettle_ctl::protocol::error_codes::NO_SUCH_PANE,
+                    "pane closed before the command completed",
+                );
+                let _ = run.reply.send(resp);
+            }
         }
         let now = std::time::Instant::now();
         let expired: Vec<u64> = self
@@ -8115,26 +8155,40 @@ impl App {
 
     /// Capture a pane's output produced since absolute line `start_line` (the
     /// lines a single `run_command` added). Best-effort; empty on a vanished
-    /// pane. Returns the last `total_now - start_line` grid lines, capped.
+    /// pane.
+    ///
+    /// Slices the ABSOLUTE line range `[start_line, cursor]` out of the grid —
+    /// NOT "the last N grid lines". A fresh shell's content sits at the TOP of
+    /// the screen with blank rows below it, so taking the grid tail would return
+    /// those trailing blanks; addressing by absolute line lands on the real
+    /// content wherever it is. The cursor's absolute line is the end of the
+    /// content the command produced.
     fn ctl_capture_output_since(&self, pane: u64, start_line: usize) -> String {
         const CAP_LINES: usize = 10_000;
         let Some(p) = self.mux.panes.get(&pane) else {
             return String::new();
         };
-        // Probe current geometry to know how many lines the command added.
         let Some(probe) = p.term.screen_text(0) else {
             return String::new();
         };
-        let total_now = probe.history_size + probe.rows;
-        let lines_since = total_now.saturating_sub(start_line).min(CAP_LINES);
-        // Pull enough scrollback to cover those lines, then keep the tail.
-        let want_scrollback = lines_since.saturating_sub(probe.rows);
-        let Some(s) = p.term.screen_text(want_scrollback) else {
+        let hist = probe.history_size;
+        let cursor_abs = hist + probe.cursor.0; // absolute line of the cursor now
+        // History lines we must pull to reach `start_line` (0 when it's already
+        // on the active screen, the common case), capped.
+        let take = hist.saturating_sub(start_line).min(CAP_LINES);
+        let Some(s) = p.term.screen_text(take) else {
             return String::new();
         };
-        let all: Vec<&str> = s.text.lines().collect();
-        let keep = lines_since.min(all.len());
-        all[all.len() - keep..].join("\n")
+        let lines: Vec<&str> = s.text.lines().collect();
+        // The first returned line is absolute `hist - min(take, hist)`.
+        let first_abs = hist - take.min(hist);
+        let start_idx = start_line.saturating_sub(first_abs);
+        // Inclusive of the cursor line; clamp to what we actually have.
+        let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(lines.len());
+        if start_idx >= end_idx {
+            return String::new();
+        }
+        lines[start_idx..end_idx].join("\n")
     }
 
     fn drain_remote_commands(&mut self) {

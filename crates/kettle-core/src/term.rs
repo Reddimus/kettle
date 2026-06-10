@@ -1421,9 +1421,13 @@ impl Terminal {
     /// (non-blocking `try_wait`). `child_exited` discards the status; the
     /// headless `kettle exec` path needs it to propagate the child's exit code
     /// to its own process exit. `None` while the child is still running (or if
-    /// the child handle is poisoned). On Unix, portable-pty maps signal death
-    /// into the code (e2e pins the observed mapping); callers clamp to 0..=255
-    /// before `std::process::exit` on Unix.
+    /// the child handle is poisoned).
+    ///
+    /// portable-pty 0.9 does NOT decode Unix signal death into a 128+signo code
+    /// — its `ExitStatus::exit_code()` returns the raw `wait()` status's
+    /// "success" bit, so every signal death collapses to a generic non-zero
+    /// (code `1`), not the shell's `137` for SIGKILL etc. Callers clamp to
+    /// 0..=255 on Unix before `std::process::exit` regardless.
     pub fn child_exit_code(&self) -> Option<u32> {
         self.child
             .lock()

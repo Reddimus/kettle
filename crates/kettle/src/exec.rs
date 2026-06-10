@@ -305,7 +305,14 @@ pub fn run_exec_with(
             if let Some(mut r) = recorder.take() {
                 r.finish();
             }
-            let code = term.child_exit_code().map(clamp_code).unwrap_or(0);
+            // The VT `Exit` event can arrive a hair before the OS has reaped the
+            // child, so `child_exit_code()` may still be `None` here. Poll it
+            // briefly rather than defaulting to 0 (which would report a FAILED
+            // child as success); fall back to a non-zero sentinel only if the
+            // status never materializes.
+            let code = wait_for_exit_code(&term)
+                .map(clamp_code)
+                .unwrap_or(EXIT_INTERNAL);
             out.finish(sink, code, started.elapsed());
             return code;
         }
@@ -334,12 +341,75 @@ pub fn run_exec_with(
     }
 }
 
-/// Clamp a raw exit code to a process-exit-able range. On Unix `std::process::
-/// exit` takes the low 8 bits anyway; clamping makes the value we *log* honest
-/// and keeps signal-death (portable-pty maps it into the code) from printing a
-/// nonsense huge number.
+/// Map a child's raw exit code into the code this process should report.
+///
+/// On Unix `std::process::exit` only keeps the low 8 bits, and portable-pty
+/// folds signal death into the code there, so we mask to 0..=255 — the value we
+/// log then matches what the shell would see. On Windows the full 32-bit code
+/// is meaningful (children routinely exit with codes outside 0..=255, e.g.
+/// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we pass it through, saturating into
+/// `i32` rather than truncating to one byte.
 fn clamp_code(code: u32) -> i32 {
-    (code & 0xff) as i32
+    #[cfg(unix)]
+    {
+        (code & 0xff) as i32
+    }
+    #[cfg(windows)]
+    {
+        code.min(i32::MAX as u32) as i32
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        (code & 0xff) as i32
+    }
+}
+
+/// Poll the child's exit status for up to ~250 ms after its VT `Exit` event, to
+/// cover the brief window before the OS reaps it. `None` only if it never
+/// materializes (then the caller reports a non-zero sentinel, never a false 0).
+fn wait_for_exit_code(term: &Terminal) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        if let Some(c) = term.child_exit_code() {
+            return Some(c);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Decode the longest valid UTF-8 prefix of `carry` into `out`, retaining a
+/// genuinely-incomplete trailing sequence in `carry` for the next call (so a
+/// codepoint split across two PTY reads isn't mangled into U+FFFD halves);
+/// genuinely-invalid bytes become one U+FFFD.
+fn push_utf8_streaming(carry: &mut Vec<u8>, bytes: &[u8], out: &mut String) {
+    carry.extend_from_slice(bytes);
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(s) => {
+                out.push_str(s);
+                carry.clear();
+                return;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // SAFETY: bytes up to `valid` are valid UTF-8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&carry[..valid]) });
+                match e.error_len() {
+                    None => {
+                        carry.drain(..valid);
+                        return;
+                    }
+                    Some(n) => {
+                        out.push('\u{FFFD}');
+                        carry.drain(..valid + n);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render child output to stdout in the selected mode.
@@ -347,6 +417,9 @@ struct Outputter {
     mode: OutputMode,
     stripper: AnsiStripper,
     scratch: Vec<u8>,
+    /// Carry for an incomplete multibyte UTF-8 sequence split across reads
+    /// (JSON mode, where output is decoded to a string per chunk).
+    utf8_carry: Vec<u8>,
 }
 
 impl Outputter {
@@ -355,6 +428,7 @@ impl Outputter {
             mode,
             stripper: AnsiStripper::default(),
             scratch: Vec::with_capacity(8192),
+            utf8_carry: Vec::new(),
         }
     }
 
@@ -379,7 +453,11 @@ impl Outputter {
                 let _ = sink.flush();
             }
             OutputMode::Json => {
-                let data = String::from_utf8_lossy(bytes);
+                let mut data = String::new();
+                push_utf8_streaming(&mut self.utf8_carry, bytes, &mut data);
+                if data.is_empty() {
+                    return; // only an incomplete sequence so far — wait for more
+                }
                 let v = serde_json::json!({"v":1,"event":"output","data":data});
                 let _ = writeln!(sink, "{v}");
                 let _ = sink.flush();
@@ -562,10 +640,23 @@ mod tests {
     }
 
     #[test]
-    fn clamp_code_takes_low_byte() {
+    fn clamp_code_per_platform() {
+        // Small codes pass through on every platform.
         assert_eq!(clamp_code(3), 3);
-        assert_eq!(clamp_code(256), 0);
-        assert_eq!(clamp_code(3221225786), (3221225786u32 & 0xff) as i32);
+        // Unix masks to the low 8 bits (process::exit + signal folding);
+        // Windows passes the full 32-bit code through (saturating into i32).
+        #[cfg(unix)]
+        {
+            assert_eq!(clamp_code(256), 0);
+            assert_eq!(clamp_code(3221225786), (3221225786u32 & 0xff) as i32);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(clamp_code(256), 256);
+            // 0xC0000005 (STATUS_ACCESS_VIOLATION) saturates into i32, not 0x05.
+            assert_eq!(clamp_code(0xC000_0005), i32::MAX);
+            assert_eq!(clamp_code(3), 3);
+        }
     }
 
     #[test]

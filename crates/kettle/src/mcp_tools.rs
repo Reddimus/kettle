@@ -18,7 +18,9 @@ pub fn tool_specs() -> Vec<Value> {
             "name": "kettle_run",
             "description": "Run a command headlessly under a real PTY (no window) and return its \
                 output and exit code. Use for one-shot commands; the child gets a real terminal \
-                so colored/TUI-aware programs behave normally. Output is ANSI-stripped by default.",
+                so colored/TUI-aware programs behave normally. Output is ANSI-stripped by default. \
+                The child gets no stdin; a long-running or interactive program is killed at the \
+                timeout (default 30s, max 600s) and reported as exit code 124.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -145,8 +147,17 @@ fn tool_kettle_run(args: &Value) -> Value {
     if argv.is_empty() {
         return error_result("kettle_run 'command' must be a non-empty string array");
     }
-    let cols = args.get("cols").and_then(|c| c.as_u64()).unwrap_or(80) as u16;
-    let rows = args.get("rows").and_then(|r| r.as_u64()).unwrap_or(24) as u16;
+    // Clamp before narrowing so an oversized value saturates instead of wrapping.
+    let cols = args
+        .get("cols")
+        .and_then(|c| c.as_u64())
+        .unwrap_or(80)
+        .min(u16::MAX as u64) as u16;
+    let rows = args
+        .get("rows")
+        .and_then(|r| r.as_u64())
+        .unwrap_or(24)
+        .min(u16::MAX as u64) as u16;
     let strip = args
         .get("strip_ansi")
         .and_then(|s| s.as_bool())
@@ -159,10 +170,16 @@ fn tool_kettle_run(args: &Value) -> Value {
             .get("cwd")
             .and_then(|c| c.as_str())
             .map(std::path::PathBuf::from),
-        timeout: args
-            .get("timeout_s")
-            .and_then(|t| t.as_f64())
-            .map(std::time::Duration::from_secs_f64),
+        // Always bound the run: the MCP server is single-threaded, so a child
+        // that never exits (interactive prompt, daemon) would wedge it forever.
+        // Default 30s, capped 0.1–600s (mirrors run_command). On expiry the
+        // child is killed and exec reports 124.
+        timeout: Some(std::time::Duration::from_secs_f64(
+            args.get("timeout_s")
+                .and_then(|t| t.as_f64())
+                .unwrap_or(30.0)
+                .clamp(0.1, 600.0),
+        )),
         mode: if strip {
             OutputMode::StripAnsi
         } else {

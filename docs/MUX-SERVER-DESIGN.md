@@ -1,8 +1,13 @@
 # Detachable mux server — design
 
-> Status: design only (cycle 329). Implementation is a genuine multi-week
-> thread; this doc is the architecture + sub-cycle roadmap so the work can
-> land as a series of small, testable cycles instead of one heroic push.
+> Status: the standalone **`kettle-muxd` daemon is unimplemented**. The
+> protocol / transport / discovery / client **seam** it depends on, however,
+> has already shipped in the **kettle-ctl** crate (the agent control plane —
+> see [AGENT.md](AGENT.md)). What remains is the daemon itself: the binary that
+> re-hosts the server side and owns PTYs cross-process. That is a genuine
+> multi-week thread; this doc is the architecture + sub-cycle roadmap so the
+> work can land as a series of small, testable cycles instead of one heroic
+> push.
 
 ## What it is
 
@@ -101,6 +106,7 @@ Each is multi-day. Combined: multi-week.
 | `kettle-ui::Mux` (tab/split tree) | Stays in the server |
 | `kettle-ui::App` (winit event loop + renderer integration) | Stays in the client |
 | `kettle-render` (wgpu + glyphon) | Stays in the client |
+| `kettle-ctl` (control-plane protocol / transport / discovery / client) | Already factored out — UI-free; the daemon would re-host its server side |
 
 The split is roughly along the "what knows about PTYs" line.
 
@@ -211,13 +217,24 @@ These each matter for users invested in kettle's specific features.
 ## What ships now
 
 - This document.
-- Nothing else. The implementation is real multi-week work and
-  shipping a non-functional `--serve` flag would mislead users.
+- The **kettle-ctl** crate — the agent control plane (see
+  [AGENT.md](AGENT.md)). It already provides the protocol + transport +
+  discovery + client **seam** this design reserves, including the discovery
+  registry's reserved `kind` field (`"gui"` today, `"muxd"` later) that a
+  future `kettle-muxd` daemon would re-host. Its NDJSON request / response /
+  event protocol is the natural client / control layer for the daemon; the
+  binary length-prefixed `PaneOutput` frame sketched below would remain a
+  muxd-internal high-bandwidth stream where the NDJSON line protocol is the
+  wrong fit. This partially satisfies the "hand-roll the wire protocol"
+  sub-cycle in the roadmap table below — the request / response / event shape
+  exists; the high-rate binary framing does not.
+- The standalone `kettle-muxd` daemon — **not yet**. The implementation is
+  real multi-week work and shipping a non-functional `--serve` flag would
+  mislead users.
 
-The cycle-327 tmux-cc parser is the closest existing piece (it
-already does the "parse a control protocol from a byte stream"
-shape this design needs); future cycle-330+ can use it as a
-template for `kettle-mux-proto`.
+The tmux-cc parser is the closest existing parser piece (it already does the
+"parse a control protocol from a byte stream" shape this design needs) and can
+serve as a template for the high-bandwidth `PaneOutput` framing.
 
 ## See also
 

@@ -1661,11 +1661,19 @@ impl Mux {
         if idx >= self.tabs.len() {
             return None;
         }
-        // Bound the active idx so it points at a still-existing tab.
-        if self.active >= idx && self.active > 0 {
+        let tab = self.tabs.remove(idx);
+        // Keep `active` valid + consistent with close_tab_at/reap_tabs: shift
+        // left only when a tab strictly BEFORE active was removed; when the
+        // active tab itself is removed the right neighbor slides into the slot
+        // so focus moves RIGHT (active stays put), clamping if it ran off the
+        // end (removing the last tab).
+        if self.active > idx {
             self.active -= 1;
         }
-        Some(self.tabs.remove(idx))
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len().saturating_sub(1);
+        }
+        Some(tab)
     }
 
     /// Cycle 398 (companion to extract_tab): insert a Tab into

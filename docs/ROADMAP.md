@@ -1399,6 +1399,22 @@ breakdown.
 - [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
       -D warnings` passes on `kettle-render` and `kettle-vt` after
       fixing 3 intra-doc link + bare-URL warnings.
+- [x] **Agent-first kettle** (v2.16.0) — three opt-in non-GUI entry
+      points, control surface OFF by default: `kettle exec -- <argv…>`
+      (headless one-shot under a real PTY; propagates the child exit
+      code — 124 on `--timeout`, 125 on an internal error — with
+      `--strip-ansi` / `--json` / `--record` output modes); the control
+      server + `kettle ctl` (`agent-server = off|read-only|full`,
+      local-IPC only — a Unix socket `0600` / Windows named pipe;
+      `get_state` / `list_tabs` / `list_panes` / `read_screen` /
+      `subscribe` read-only plus `send_text` / `run_command` in full,
+      OSC-133-correlated exit codes); and `kettle mcp` (a stdio MCP server
+      exposing `kettle_run` + list/read/send/run tools, with a
+      `--self-test` CI guard). The UI-free **kettle-ctl** crate hosts the
+      protocol / transport / discovery / client, and a pane driven by an
+      agent shows the agent-attach titlebar badge (`agent-badge`). See
+      [`docs/AGENT.md`](AGENT.md). This also ships the long-tracked
+      headless / pipe "future feature" as `kettle exec`.
 
 ## Next (in priority order)
 
@@ -1417,7 +1433,21 @@ features list. What's left is genuinely-multi-week threads + polish.
 - [ ] Detachable mux server (WezTerm parity) — a SEPARATE `kettle-muxd`
       binary that owns PTYs cross-process per `docs/MUX-SERVER-DESIGN.md`.
       Distinct from the cycles 397-410 detachable-tabs work (which is
-      same-process source → fork → target). Multi-week.
+      same-process source → fork → target). Multi-week. The
+      protocol / transport / discovery / client **seam** the daemon
+      depends on already shipped in the **kettle-ctl** crate (the
+      discovery registry reserves a `kind` field — `"gui"` today,
+      `"muxd"` later); what remains is the standalone daemon that
+      re-hosts the server side and owns PTYs cross-process.
+- [ ] **stdin forwarding for `kettle exec`** — the agent-critical paths
+      (run a command, capture output, propagate the exit code) need no
+      stdin, so `echo y | kettle exec -- prog` does not pipe stdin to the
+      child today. The pump works on Unix PTYs; the outstanding piece is
+      Windows ConPTY conin EOF for `ReadConsole`-based readers (`sort`,
+      `more`). See `docs/AGENT.md` Limitations.
+- [ ] **`send_keys` (named keys / chords) + a live-grid `screenshot`
+      control method** for `kettle ctl` / the MCP surface (per
+      `docs/AGENT.md` Future work).
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
       adoption (sub-cycle 7 final piece of detachable tabs). Internal
       optimization that preserves running shells across cross-window

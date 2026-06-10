@@ -1,7 +1,7 @@
 .\" kettle.1 - manual page for kettle terminal emulator
 .\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
 .\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
-.TH KETTLE 1 "2026-05-21" "kettle" "User Commands"
+.TH KETTLE 1 "2026-06-09" "kettle" "User Commands"
 .
 .SH NAME
 kettle \- fast, cross-platform, GPU-accelerated terminal emulator
@@ -9,8 +9,20 @@ kettle \- fast, cross-platform, GPU-accelerated terminal emulator
 .SH SYNOPSIS
 .B kettle
 .RI [ OPTIONS ]
-.RI [ \-\-\ COMMAND
-.RI [ ARGS... ]]
+.RI [ \-e
+.IR PROGRAM " [" ARGS... ]]
+.br
+.B kettle exec
+.RI [ OPTIONS ]
+.B \-\-
+.IR CMD ...
+.br
+.B kettle ctl
+.I METHOD
+.RI [ OPTIONS ]
+.br
+.B kettle mcp
+.RI [ \-\-self\-test ]
 .
 .SH DESCRIPTION
 .B kettle
@@ -276,6 +288,77 @@ Check the GitHub releases API once for a newer kettle version, print the result,
 and exit. Honors the
 .B update\-check = false
 opt-out and never runs on first launch.
+.
+.SH SUBCOMMANDS
+The bare
+.B kettle
+command (above) is the GUI launcher. These subcommands are the
+non-interactive / agent control surface; each returns before any window or GPU
+work. See
+.B docs/AGENT.md
+for the full reference and threat model.
+.TP
+.B kettle exec \fR[\fIOPTIONS\fR] \fB\-\- \fICMD\fR...
+Run
+.I CMD
+under a real PTY, headlessly, and stream its output to stdout (the
+non-interactive counterpart to the GUI). Propagates the child's exit code;
+.B 124
+on
+.BR \-\-timeout ,
+.B 125
+on an internal error. Options:
+.B \-\-cols
+.IR N " / " \fB\-\-rows\fP " " N
+(terminal size; default: probe the console, else 80x24),
+.B \-\-cwd
+.IR DIR " (also " \fB\-d\fP " " DIR ;
+working directory, default inherit),
+.BI \-\-timeout " SECS"
+(kill + exit 124 after
+.IR SECS ),
+.B \-\-strip\-ansi
+(emit plain text — good for assertions),
+.B \-\-json
+(one JSON object per line: start / output / title / exit), and
+.BI \-\-record " PATH"
+(also save an asciicast trace). stdin is not forwarded to the child.
+.TP
+.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
+Drive a running kettle's agent control server.
+.I METHOD
+is one of
+.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " send_text ", " run_command ,
+or
+.B events
+to stream the event feed. The target kettle must run with
+.B agent\-server
+enabled (see
+.BR \-\-agent\-server ).
+.B \-\-pane
+targets a specific pane (else the focused pane);
+.B \-\-json
+passes method parameters as a JSON object;
+.B \-\-text
+is the text for
+.B send_text
+or the command line for
+.BR run_command ;
+.B \-\-pid
+selects a specific kettle (else the newest running server); and
+.B \-\-raw
+prints the raw JSON result instead of a pretty summary.
+.TP
+.B kettle mcp \fR[\fB\-\-self\-test\fR]
+Run a Model Context Protocol server over stdio, exposing kettle as native agent
+tools (run a command, drive a running kettle). Register with Claude Code:
+.B claude mcp add kettle \-\- kettle mcp\fR.
+.B \-\-self\-test
+runs an in-process handshake +
+.B tools/list
++ one
+.B kettle_run
+and exits, for CI.
 .
 .SH KEY BINDINGS
 Defaults (every binding remappable via

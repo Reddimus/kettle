@@ -9,11 +9,14 @@ cwd, images, clipboard, title) flow back to the UI.
 
 ```mermaid
 graph TD
-    bin["kettle (bin)<br/>CLI · entry"] --> ui
+    bin["kettle (bin)<br/>CLI · entry · exec/ctl/mcp subcommands"] --> ui
+    bin --> ctl
     ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
     ui --> core
     ui --> cfg
     ui --> remote
+    ui --> ctl
+    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery registry · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · reader thread<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
@@ -21,6 +24,45 @@ graph TD
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
 ```
+
+## Agent control plane
+
+The agent-first surface (see [AGENT.md](AGENT.md) for the full reference) is
+the eighth workspace member, **kettle-ctl** — a UI-free crate that owns the
+control-plane protocol (NDJSON request/response/event), the local-IPC transport
+(a Unix domain socket or a Windows named pipe), the discovery registry, and a
+blocking client. It is **off by default**: nothing binds a socket or writes a
+registry entry unless the operator opts in (`agent-server = read-only|full`, or
+`--agent-server <mode>`).
+
+```mermaid
+graph LR
+    bin2["kettle (bin)"] --> exec["kettle exec<br/>headless one-shot<br/>(real PTY, no window)"]
+    bin2 --> ctlcli["kettle ctl<br/>kettle-ctl client"]
+    bin2 --> mcp["kettle mcp<br/>MCP bridge over stdio"]
+    ctlcli --> ipc["local IPC<br/>(Unix socket /<br/>Windows named pipe)"]
+    mcp --> ipc
+    ipc --> srv["control SERVER<br/>(hosted in kettle-ui)"]
+    srv -->|UserEvent::Ctl| app["App main thread<br/>(self.mux)"]
+    reg["discovery registry<br/>reserved kind field<br/>(\"gui\" today, \"muxd\" later)"] -.-> ipc
+```
+
+Two roles split cleanly across the bin and the GUI:
+
+- The **GUI (kettle-ui)** hosts the control **server**. Requests arriving over
+  the transport are dispatched on the App main thread via `UserEvent::Ctl`, so
+  they observe and mutate the same `self.mux` the renderer reads — no separate
+  lock on the pane tree.
+- The **bin (kettle)** hosts the three opt-in entry points: `kettle exec` (a
+  headless one-shot that runs a command under a real PTY and streams its output
+  to stdout, no GUI), `kettle ctl` (the kettle-ctl client that drives a running
+  kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
+  as native agent tools).
+
+The discovery registry reserves a `kind` field — `"gui"` today — as the
+forward-compat seam for the optional `kettle-muxd` session daemon (see
+[MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)): when `kettle-muxd` lands it can
+re-host the same server side as `kind = "muxd"` without breaking any client.
 
 ## Per-pane data flow
 

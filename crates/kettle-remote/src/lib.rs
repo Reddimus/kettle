@@ -451,13 +451,25 @@ fn wsl_runs_command(rest: &[String]) -> bool {
         }
         if matches!(
             a,
-            "-d" | "--distribution" | "-u" | "--user" | "--cd" | "--shell-type"
+            "-d" | "--distribution"
+                | "--distribution-id"
+                | "-u"
+                | "--user"
+                | "--cd"
+                | "--shell-type"
         ) {
             i += 2; // skip the option AND its value
             continue;
         }
         if a.starts_with('-') {
             i += 1; // a boolean flag (e.g. --system)
+            continue;
+        }
+        // `wsl ~` (and `~/…`) selects the home directory for an INTERACTIVE
+        // shell, not a command to run — skip it rather than treating it as a
+        // one-shot. (`wsl ~` alone then falls through to `false` = interactive.)
+        if a == "~" || a.starts_with("~/") || a.starts_with("~\\") {
+            i += 1;
             continue;
         }
         return true; // first bare positional = a command to run
@@ -1480,6 +1492,15 @@ mod tests {
             &["wsl", "-d", "Ubuntu"],
             &["wsl", "--cd", "/home/me"],
             &["wsl", "--cd", "/home/me", "-d", "Ubuntu"],
+            // Cycle 936 (review): `~` selects the home dir for an INTERACTIVE
+            // shell (not a command); `--distribution-id` takes a GUID value
+            // that must be consumed, not mistaken for a command.
+            &["wsl", "~"],
+            &[
+                "wsl",
+                "--distribution-id",
+                "{12345678-1234-1234-1234-123456789abc}",
+            ],
         ] {
             assert!(
                 !is_noninteractive_shell(&argv(a)),

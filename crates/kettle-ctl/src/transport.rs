@@ -132,10 +132,12 @@ mod imp {
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+    };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
     const PIPE_BUF: u32 = 64 * 1024;
@@ -146,14 +148,24 @@ mod imp {
 
     /// Create one named-pipe instance for `name`. Default security (null SA) =
     /// creator/owner + admins, matching the documented same-local-user threat
-    /// model.
-    fn create_instance(name_w: &[u16]) -> io::Result<HANDLE> {
+    /// model. `first` adds `FILE_FLAG_FIRST_PIPE_INSTANCE` so creating the FIRST
+    /// instance FAILS (ERROR_ACCESS_DENIED) if the name is already taken — this
+    /// is the squatting guard: a malicious local process that pre-created the
+    /// pipe to intercept the server's clients cannot, because `bind` refuses to
+    /// adopt an attacker-owned instance and surfaces the error instead.
+    fn create_instance(name_w: &[u16], first: bool) -> io::Result<HANDLE> {
+        let open_mode = PIPE_ACCESS_DUPLEX
+            | if first {
+                FILE_FLAG_FIRST_PIPE_INSTANCE
+            } else {
+                0
+            };
         // SAFETY: `name_w` is a valid NUL-terminated wide string; all other
         // args are constants. The returned handle is owned by us.
         let h = unsafe {
             CreateNamedPipeW(
                 name_w.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
+                open_mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,
                 PIPE_BUF,
@@ -185,7 +197,8 @@ mod imp {
     impl CtlListener {
         pub fn bind(endpoint: &str) -> io::Result<Self> {
             let name_w = wide(endpoint);
-            let pending = create_instance(&name_w)?;
+            // FIRST instance: fails if the name is squatted (the security guard).
+            let pending = create_instance(&name_w, true)?;
             Ok(Self {
                 name_w,
                 pending: Cell::new(pending),
@@ -193,33 +206,59 @@ mod imp {
         }
 
         pub fn accept(&self) -> io::Result<CtlStream> {
-            let handle = self.pending.get();
-            // Block until a client connects to the pending instance.
-            // SAFETY: `handle` is a valid pipe handle we own.
-            let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
-            // ConnectNamedPipe returns 0 with ERROR_PIPE_CONNECTED when a client
-            // connected between create + connect — that is success, not failure.
-            if connected == 0 {
-                let e = unsafe { GetLastError() };
-                if e != ERROR_PIPE_CONNECTED {
-                    return Err(io::Error::from_raw_os_error(e as i32));
+            // Retry-bounded so a transient ConnectNamedPipe failure on one
+            // instance (e.g. a client that connected then vanished) tears that
+            // instance down + recreates a fresh one instead of poisoning the
+            // accept loop forever.
+            for _ in 0..16 {
+                // Ensure a pending instance exists (a prior accept may have left
+                // none if creating the next one failed).
+                let mut handle = self.pending.get();
+                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                    handle = create_instance(&self.name_w, false)?;
+                    self.pending.set(handle);
                 }
+                // Block until a client connects.
+                // SAFETY: `handle` is a valid pipe handle we own.
+                let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
+                if connected == 0 {
+                    let e = unsafe { GetLastError() };
+                    // ERROR_PIPE_CONNECTED = a client connected between create +
+                    // connect — success, not failure.
+                    if e != ERROR_PIPE_CONNECTED {
+                        // Poisoned instance: disconnect + close + recreate, retry.
+                        unsafe {
+                            DisconnectNamedPipe(handle);
+                            CloseHandle(handle);
+                        }
+                        self.pending.set(create_instance(&self.name_w, false)?);
+                        continue;
+                    }
+                }
+                // Connected. Create the NEXT pending instance; if that fails,
+                // STILL return this (valid) client and leave `pending` invalid so
+                // the next accept() recreates it — don't abandon a live client.
+                match create_instance(&self.name_w, false) {
+                    Ok(next) => self.pending.set(next),
+                    Err(_) => self.pending.set(INVALID_HANDLE_VALUE),
+                }
+                // SAFETY: we own `handle` and transfer ownership to the File.
+                let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
+                return Ok(CtlStream::Windows(file));
             }
-            // Create the NEXT pending instance so the listener always has one
-            // waiting, then hand the connected handle to a File.
-            let next = create_instance(&self.name_w)?;
-            self.pending.set(next);
-            // SAFETY: we own `handle` and transfer ownership to the File.
-            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
-            Ok(CtlStream::Windows(file))
+            Err(io::Error::other("accept retries exhausted"))
         }
     }
 
     impl Drop for CtlListener {
         fn drop(&mut self) {
+            let h = self.pending.get();
+            if h.is_null() || h == INVALID_HANDLE_VALUE {
+                return; // no live pending instance (accept left none)
+            }
             // SAFETY: the pending handle is one we own and no longer use.
             unsafe {
-                CloseHandle(self.pending.get());
+                CloseHandle(h);
             }
         }
     }

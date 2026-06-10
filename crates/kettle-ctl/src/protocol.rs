@@ -139,10 +139,17 @@ pub mod error_codes {
     pub const INTERNAL: &str = "internal";
 }
 
-/// Parse one NDJSON request line. Enforces the size cap + version policy so the
-/// server never has to. Returns the request, or a ready-to-send error response
-/// when the line is malformed / a wrong version (with `id` recovered when
+/// Parse one ALREADY-BUFFERED NDJSON request line, validating the size cap +
+/// version policy. Returns the request, or a ready-to-send error response when
+/// the line is malformed / over-cap / a wrong version (with `id` recovered when
 /// possible so the client can still correlate the failure).
+///
+/// NOTE: this can only validate a line the caller has already assembled — it
+/// cannot bound the *assembly* itself. Every reader (the server's
+/// `connection_loop`, the client's `read_capped_line`) MUST therefore also
+/// enforce `MAX_LINE_BYTES` incrementally while reading bytes, so a peer that
+/// never sends a newline can't grow the read buffer without bound. This
+/// post-hoc check is the second line of defense, not the only one.
 pub fn parse_request_line(line: &str) -> Result<Request, Response> {
     if line.len() > MAX_LINE_BYTES {
         return Err(Response::err(
