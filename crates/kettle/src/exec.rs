@@ -135,6 +135,39 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
     run_exec_with(opts, &default_size_probe, &mut std::io::stdout().lock())
 }
 
+/// Cycle 932 (agent-first A3): run a command headlessly and CAPTURE its output
+/// in-process (instead of streaming to stdout) — the engine behind the
+/// `kettle_run` MCP tool. Returns `(exit_code, output)`; the output is the
+/// tail-capped (1 MiB) child output in the requested mode (strip-ansi
+/// recommended for agent assertions).
+pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
+    /// A sink that keeps only the last `cap` bytes (so an unbounded producer
+    /// can't exhaust memory; agents want "what just happened" anyway).
+    struct TailSink {
+        buf: Vec<u8>,
+        cap: usize,
+    }
+    impl Write for TailSink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.extend_from_slice(data);
+            if self.buf.len() > self.cap {
+                let drop = self.buf.len() - self.cap;
+                self.buf.drain(..drop);
+            }
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = TailSink {
+        buf: Vec::new(),
+        cap: 1024 * 1024,
+    };
+    let code = run_exec_with(opts, &default_size_probe, &mut sink);
+    (code, String::from_utf8_lossy(&sink.buf).into_owned())
+}
+
 /// Default console-size probe (real terminal dimensions when stdout is a TTY).
 pub fn default_size_probe() -> Option<(u16, u16)> {
     terminal_size_cols_rows()

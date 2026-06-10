@@ -29,6 +29,10 @@ mod exec;
 // Cycle 930 (agent-first A2): `kettle ctl` — thin control-plane client over
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
+// Cycle 931 (agent-first A3): `kettle mcp` — stdio MCP server exposing kettle as
+// native agent tools (run a command, drive a running kettle).
+mod mcp;
+mod mcp_tools;
 
 /// Version string shown by `kettle --version`. Concatenates the
 /// `Cargo.toml` version with the git SHA captured by `build.rs` (or
@@ -388,6 +392,17 @@ enum Cmd {
     /// `list_panes`, `read_screen`, `send_text`, `run_command`) or stream
     /// events. The target kettle must run with `agent-server` enabled.
     Ctl(CtlArgs),
+    /// Run a Model Context Protocol server over stdio, exposing kettle as native
+    /// agent tools. Register with Claude Code: `claude mcp add kettle -- kettle mcp`.
+    Mcp(McpArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct McpArgs {
+    /// Run an in-process self-test (initialize + tools/list + one kettle_run)
+    /// and exit, instead of serving stdio. Used as a CI guard.
+    #[arg(long)]
+    self_test: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -722,6 +737,13 @@ fn main() -> anyhow::Result<()> {
             }
             Cmd::Ctl(args) => {
                 std::process::exit(ctl_cli::run_ctl(args));
+            }
+            Cmd::Mcp(args) => {
+                std::process::exit(if args.self_test {
+                    mcp::self_test()
+                } else {
+                    mcp::run_mcp()
+                });
             }
         }
     }

@@ -221,6 +221,21 @@ Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
 in the config.
 .TP
+.BI \-\-agent\-server \ MODE
+Enable kettle's agent control server for this launch, overriding the
+.B agent\-server
+config key.
+.B MODE
+is one of
+.BR off ", " read\-only ", or " full .
+The server is a local\-IPC surface (Unix socket / Windows named pipe) that
+.BR "kettle ctl" ", " "kettle mcp" ", or an AI agent can drive: list panes,"
+read the screen, and (in
+.BR full )
+send text + run commands. OFF by default. See
+.B docs/AGENT.md
+for the threat model.
+.TP
 .BI \-\-accent \ COLOR
 Tint this window's chrome (peacock parity) with the
 named or hex color, so multiple kettle windows are visually
