@@ -843,6 +843,10 @@ pub struct Config {
     /// the bottom up (newest matches first) instead of the default
     /// top-down (oldest first).
     pub invert_search: bool,
+    /// Cycle 940 (Terminator parity): when true (default), scrollback search
+    /// wraps around — advancing past the last match returns to the first. When
+    /// false, Next stops at the last match and Previous stops at the first.
+    pub search_wrap: bool,
     /// Cycle 617 (Terminator parity, terminatorlib/config.py:117
     /// `case_sensitive`): scrollback-search case-sensitivity
     /// override. kettle's default is `smart` (ripgrep/vim:
@@ -1622,6 +1626,7 @@ impl Default for Config {
             putty_paste_style: false,
             smart_copy: true,
             invert_search: false,
+            search_wrap: true,
             search_case_sensitive: SearchCaseSensitivity::Smart,
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
@@ -2970,6 +2975,11 @@ impl Config {
                 "invert-search" | "invert_search" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.invert_search = b;
+                    }
+                }
+                "search-wrap" | "search_wrap" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.search_wrap = b;
                     }
                 }
                 "search-case-sensitive"

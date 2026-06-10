@@ -323,7 +323,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | `cursor_blink` | config.py | ✅ `cursor-style-blink` | cycle-X |
 | `palette` | config.py | ✅ `palette = N=#hex` per-index | cycle-X |
 | `foreground_color` / `background_color` | config.py | ✅ `foreground` / `background` | cycle-X |
-| `cursor_fg_color` / `cursor_bg_color` | config.py | ✅ `cursor-color` (single override; FG/BG split is B) | cycle-X |
+| ~~`cursor_fg_color` / `cursor_bg_color`~~ | config.py | ✅ cycle-939 — `cursor-bg-color`/`cursor_bg_color` alias `cursor-color` → theme.cursor (the block); `cursor-fg-color`/`cursor_fg_color` → theme.cursor_text (glyph under cursor). A focused block cursor renders SOLID with the under-glyph recolored (standard inverted-cursor model) | cycle-939 |
 | `font` | config.py | ✅ `font-family` + `font-size` | cycle-X |
 | `audible_bell` / `visible_bell` / `urgent_bell` | config.py | ✅ `bell = off/visual/attention/both` | cycle-X |
 | `background_color` opacity (via `background_darkness`) | config.py | ✅ `background-opacity` | cycle-X |
@@ -358,9 +358,9 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 |---|---|---|---|
 | ~~`tab_position = left` / `right` / `hidden`~~ | config.py | ✅ cycle-331 — `hidden` aliases to `tab-bar = off`; `left`/`right` accepted by parser + check-config but fall through to top with a log::warn (vertical tab bars are deferred Bucket C) | cycle-331 |
 | ~~`inactive_color_offset`~~ (dim unfocused term FG) | config.py | ✅ — `inactive-color-offset` + `inactive-bg-color-offset` config keys both parse (lib.rs:1944/1959) and apply in kettle-render (lib.rs:1218). Separate FG + BG offsets honored. | (covered) |
-| ~~`allow_bold`~~ | config.py | ✅ cycle-333 — bool config key (default true; kettle render-time behavior wiring in render layer is a follow-up sub-cycle but config + drift guard ship now) | cycle-333 |
-| ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 — bool config key (default false; xterm-convention SGR1→bright mapping; render-layer wiring is a follow-up) | cycle-333 |
-| ~~`link_single_click`~~ | config.py | ✅ cycle-333 — bool config key (default false; mouse-handler wiring is a follow-up) | cycle-333 |
+| ~~`allow_bold`~~ | config.py | ✅ cycle-333 config key + **render-wired** (cycle-355): `let bold = cfg.allow_bold && flags.contains(Flags::BOLD)` suppresses the bold weight when false | cycle-355 |
+| ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 config key + **render-wired** (cycle-355): `if bold && cfg.bold_is_bright { fg = color::bright_for_bold(fg, theme) }` maps SGR-bold palette[0..8] → bright palette[8..16] | cycle-355 |
+| ~~`link_single_click`~~ | config.py | ✅ cycle-333 config key + **mouse-wired**: `want_open = cfg.link_single_click \|\| ctrl \|\| super` in the left-click handler opens the URL under the cursor on a bare click | (covered) |
 | ~~`disable_mousewheel_zoom`~~ | config.py | ✅ cycle-334 — config key parsed; kettle has no Ctrl+wheel zoom feature today so the disable is a forward-compat stub | cycle-334 |
 | ~~`disable_mouse_paste`~~ | config.py | ✅ cycle-334 — config key parsed (mouse-handler wiring is a follow-up) | cycle-334 |
 | ~~`putty_paste_style`~~ | config.py | ✅ cycle-334 — config key parsed (right-click pastes; mouse-handler wiring is a follow-up) | cycle-334 |
@@ -417,7 +417,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`cell_width` / `cell_height`~~ (per-character cell scaling) | config.py | ✅ cycle 636 — multiplier applied to measured cell metrics at construction + on reload. New `Renderer::set_cell_scale(w, h)` setter (no-op when unchanged); `reload_config` picks it up alongside font-family/size changes. Range pre-clamped at parse to `[0.5, 3.0]`. | cycle-636 |
 | ~~`palette = solarized_dark`~~ (named preset) | config.py | A | cycle-692 — parser accepts `palette = NAME` (no `=` after) as an alias for `theme = NAME`. Direct bundled-name match first; underscore→space fallback handles Terminator's `solarized_dark` convention by falling back to e.g. "Solarized Darcula" / closest bundled match via cycle-176 `Theme::find_name`. Per-slot `palette = N=#hex` form (cycle X) unchanged. Drift guard `palette_named_preset_alias` covers 4 input shapes. | cycle-692 |
 | Multiple grouping modes + auto-cleanup | config.py | D | cycle-631 design in [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](TERMINATOR-NAMED-GROUPS-DESIGN.md) covers named groups. `autoclean_groups` (auto-remove groups when last member closes) is a natural extension — sub-cycle of the named-groups design. |
-| `use_custom_url_handler` + `custom_url_handler` | config.py | ❌ | new config key — external URL-open program |
+| ~~`use_custom_url_handler` + `custom_url_handler`~~ | config.py | ✅ — `open_url()` (`app.rs`) spawns `<custom_url_handler> <uri>` detached when `use_custom_url_handler` && non-empty, else falls through to the cross-platform `open` crate. Lua URL handlers (cycle-374) get first dispatch | (covered) |
 | ~~`backspace_binding` / `delete_binding`~~ (escape encoding) | config.py | ✅ — `BackspaceBinding` (lib.rs:246) + `DeleteBinding` (lib.rs:261) enums + parser arms + dispatched in `kettle-ui/src/app.rs:5884-5896` (ascii-del / control-h / escape-sequence). | (covered) |
 | ~~`background_image` + mode + align~~ | config.py | A | cycle-381 — `BgImage` module in `crates/kettle-render/src/bg_image.rs`; decode + cache via `bg_image_cache: Option<(String, kettle_core::ImageData)>`; rendered when `background_type = Image` && `background_image = <path>`. cycle-394 added implicit per-frame UV recompute (sub-cycle 8). | cycle-707 |
 

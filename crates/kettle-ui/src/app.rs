@@ -8411,10 +8411,19 @@ impl App {
                     //   Shift+Enter → next. Matches Terminator's "search
                     //   reverse" toggle.
                     let go_back = self.mods.shift_key() ^ self.cfg.invert_search;
-                    s.index = if go_back {
-                        (s.index + s.matches.len() - 1) % s.matches.len()
+                    let n = s.matches.len();
+                    // Cycle 940 (Terminator parity): `search-wrap = false` stops
+                    // at the ends instead of cycling around.
+                    s.index = if self.cfg.search_wrap {
+                        if go_back {
+                            (s.index + n - 1) % n
+                        } else {
+                            (s.index + 1) % n
+                        }
+                    } else if go_back {
+                        s.index.saturating_sub(1)
                     } else {
-                        (s.index + 1) % s.matches.len()
+                        (s.index + 1).min(n - 1)
                     };
                 }
             }

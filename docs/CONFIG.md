@@ -89,6 +89,7 @@ keys). The file is **watched and reloaded live**.
 | `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
 | `clear-select-on-copy` | bool | `false` | When `true`, the selection highlight is cleared right after a copy (some users prefer the selection to disappear once captured) |
 | `invert-search` | bool | `false` | When `true`, the in-pane search overlay opens at the bottom instead of the top |
+| `search-wrap` | bool | `true` | Terminator parity. When `true` (default), scrollback search wraps around (past the last match → the first). When `false`, Next stops at the last match and Previous at the first |
 | `backspace-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `ascii-del` | Byte(s) the Backspace key sends. `ascii-del` = `0x7f` (the modern default); `control-h` = `0x08` for hosts expecting the old binding |
 | `delete-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `escape-sequence` | Byte(s) the Delete key sends. `escape-sequence` = the standard `CSI 3~` |
 | `login-shell` | bool | `false` | Launch the shell as a login shell (`-l`). Ignored for `wsl.exe` (where `-l` means "list distros" — see the WSL note below) |

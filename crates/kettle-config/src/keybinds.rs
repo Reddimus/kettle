@@ -800,10 +800,13 @@ impl Action {
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
-            "scroll_page_up" => ScrollPageUp,
-            "scroll_page_down" => ScrollPageDown,
-            "scroll_line_up" => ScrollLineUp,
-            "scroll_line_down" => ScrollLineDown,
+            // Terminator spells these `page_up`/`page_down`/`line_up`/
+            // `line_down` (terminatorlib keybindings); accept both so a verbatim
+            // Terminator keybinding config imports cleanly.
+            "scroll_page_up" | "page_up" | "page-up" => ScrollPageUp,
+            "scroll_page_down" | "page_down" | "page-down" => ScrollPageDown,
+            "scroll_line_up" | "line_up" | "line-up" => ScrollLineUp,
+            "scroll_line_down" | "line_down" | "line-down" => ScrollLineDown,
             "scroll_to_top" => ScrollToTop,
             "scroll_to_bottom" => ScrollToBottom,
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
@@ -883,6 +886,17 @@ impl Action {
             // `tabs.len()` without an off-by-one dance.
             other => {
                 if let Some(rest) = other.strip_prefix("goto_tab:")
+                    && let Ok(n) = rest.parse::<u8>()
+                    && n >= 1
+                {
+                    return Some(GotoTab(n - 1));
+                }
+                // Terminator's `switch_to_tab_N` (1-based, N = 1..=10) — accept
+                // it as an alias of `goto_tab:N` so a verbatim Terminator config
+                // imports. `switch-to-tab-N` (kebab) is accepted too.
+                if let Some(rest) = other
+                    .strip_prefix("switch_to_tab_")
+                    .or_else(|| other.strip_prefix("switch-to-tab-"))
                     && let Ok(n) = rest.parse::<u8>()
                     && n >= 1
                 {
@@ -1732,6 +1746,43 @@ mod tests {
                 "alias {s:?} should parse to PrevTab"
             );
         }
+    }
+
+    /// Cycle 940 drift guard: Terminator's scroll/tab action spellings parse so
+    /// a verbatim Terminator keybinding config imports cleanly.
+    #[test]
+    fn from_name_accepts_terminator_scroll_and_tab_aliases() {
+        assert!(matches!(
+            Action::from_name("page_up"),
+            Some(Action::ScrollPageUp)
+        ));
+        assert!(matches!(
+            Action::from_name("page_down"),
+            Some(Action::ScrollPageDown)
+        ));
+        assert!(matches!(
+            Action::from_name("line_up"),
+            Some(Action::ScrollLineUp)
+        ));
+        assert!(matches!(
+            Action::from_name("line_down"),
+            Some(Action::ScrollLineDown)
+        ));
+        // switch_to_tab_N (1-based) == goto_tab:N == GotoTab(N-1).
+        assert!(matches!(
+            Action::from_name("switch_to_tab_1"),
+            Some(Action::GotoTab(0))
+        ));
+        assert!(matches!(
+            Action::from_name("switch_to_tab_9"),
+            Some(Action::GotoTab(8))
+        ));
+        assert!(matches!(
+            Action::from_name("switch-to-tab-3"),
+            Some(Action::GotoTab(2))
+        ));
+        // switch_to_tab_0 is invalid (tabs are 1-based, like goto_tab:N).
+        assert!(Action::from_name("switch_to_tab_0").is_none());
     }
 
     /// Cycle 640 drift guard: every alias for `take_screenshot`
