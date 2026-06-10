@@ -18,6 +18,12 @@ Released binaries (and anything built without the feature) contain **none** of
 the recorder code — no flag, no overhead, no attack surface. Recording is never
 on by default and never starts on first launch.
 
+> **Shared recorder.** The trace writer now lives in `kettle-core` behind the
+> `asciicast` feature, so it backs two front-ends: the GUI's `--record` (full
+> trace — output, input tokens, and `m` markers) and the new headless
+> `kettle exec --record run.cast` (output-only — no window, no keystroke or
+> marker channel). See [AGENT.md](AGENT.md) for `kettle exec`.
+
 ## What it captures
 
 | asciicast code | kettle records |
@@ -29,7 +35,10 @@ on by default and never starts on first launch.
 
 The `m` markers capture state the PTY output stream can't — kettle's own tab
 bar, overlays, and focus — across both **interactive** (tab add/close) and
-**non-interactive** (window focus) transitions.
+**non-interactive** (window focus) transitions. Agent control actions are
+annotated here too: while recording, each method an agent runs over the control
+server lands as a `kettle:agent <method> conn=N` marker (see
+[AGENT.md](AGENT.md)).
 
 ## Privacy
 

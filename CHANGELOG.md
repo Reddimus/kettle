@@ -6,6 +6,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  **Agent-first kettle — AI agents work great with kettle both interactively
+  and programmatically.** Three new non-GUI entry points, all opt-in; the
+  control surface is OFF by default. See [docs/AGENT.md](docs/AGENT.md).
+
+  - **`kettle exec -- <argv…>`** runs a command headlessly under a real PTY (full
+    VT emulation, no GPU/window) and streams its output to real stdout,
+    propagating the child's exit code (124 on `--timeout`, 125 internal). Output
+    modes: raw, `--strip-ansi` (plain text), `--json` (NDJSON events); optional
+    `--record <path.cast>`. The headless counterpart to the GUI. (The session
+    recorder was promoted into kettle-core behind an `asciicast` feature so the
+    GUI's `--record` and `kettle exec --record` share one implementation.)
+  - **Control server + `kettle ctl`.** `agent-server = off | read-only | full`
+    (config or `--agent-server`, default **off**) starts a local-IPC server (Unix
+    socket `0600` / Windows named pipe, current-user; no TCP) that `kettle ctl`,
+    `kettle mcp`, or an AI agent can drive: `get_state`, `list_tabs`,
+    `list_panes`, `read_screen`, `subscribe` (read-only) and `send_text`,
+    `run_command` (full). `run_command` correlates the shell's OSC 133 command-end
+    to report the exit code, with a `timed_out` + shell-integration hint fallback.
+  - **`kettle mcp`** is a Model Context Protocol server (stdio) exposing kettle as
+    native agent tools — `kettle_run` (headless one-shot), plus
+    `kettle_list_panes` / `kettle_read_screen` / `kettle_send_text` /
+    `kettle_run_command` against a running kettle. Register with Claude Code:
+    `claude mcp add kettle -- kettle mcp`. `kettle mcp --self-test` is a CI guard.
+  - A pane an agent has attached shows a configurable titlebar badge
+    (`agent-badge`, default `"[agent] "`). Every connection + mutating method is
+    logged and annotated in the dev-record trace.
+
   **Cycle 920 — UI chrome colors derive from the theme.** A focused
   adversarially-verified audit of every UI/UX color (render passes + config
   color defaults) found that while most chrome already cascades through the

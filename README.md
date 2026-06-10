@@ -260,6 +260,33 @@ keybind = ctrl+shift+t=new_tab
 See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 [`docs/kettle.example.config`](docs/kettle.example.config).
 
+## AI agents
+
+kettle is built to work with AI agents (Claude Code, Codex, …) **both ways** —
+run an agent *inside* a pane like any terminal program (always worked, nothing
+to configure), and let an agent *drive* kettle programmatically:
+
+```sh
+kettle exec -- echo ok           # headless one-shot: real PTY, output → stdout
+kettle --agent-server full       # opt-in control server (off by default)
+kettle ctl list_panes            # drive a running kettle: list/read/send/run
+kettle ctl read_screen           # read the focused pane's visible text
+claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude Code
+```
+
+- **`kettle exec -- <cmd>`** runs a command headlessly under a real PTY (full
+  VT emulation, no window) and streams its output to stdout, propagating the
+  child's exit code (`--strip-ansi` / `--json` output modes).
+- **`kettle --agent-server <mode>` + `kettle ctl <method>`** drives a *running*
+  kettle — list panes, read the screen, send text, run commands. The server is
+  **off by default**; `read-only` reads, `full` also sends/runs. Local IPC only
+  (Unix socket / Windows named pipe, current-user).
+- **`kettle mcp`** exposes all of the above as Model Context Protocol tools, so
+  Claude Code / Codex get kettle as native tools.
+
+See [docs/AGENT.md](docs/AGENT.md) for the full surface, methods, and security
+model.
+
 ## Documentation
 
 - [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — friendly first-run walkthrough (no jargon)
@@ -273,6 +300,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
+- [docs/AGENT.md](docs/AGENT.md) — driving kettle from AI agents (`kettle exec` / `kettle ctl` / `kettle mcp`)
 - [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) — OSC 133 prompt-mark hooks for bash / zsh / fish
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the audit-cycle pattern + how to land your first change
 

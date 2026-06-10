@@ -185,6 +185,20 @@ These need a real display and are run by hand (or on real hardware):
   [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md), then `Ctrl+Up`/`Ctrl+Down`
   to jump between prompt marks.
 - **Perf**: `cat` a ~100 MB file / fast `yes` stays responsive.
+- **Agent gauntlet** (run on **Windows + WSL**; see [AGENT.md](AGENT.md)):
+  - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
+    the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
+  - **Control server + `kettle ctl`**: launch `kettle --agent-server full`, then
+    cross-process `kettle ctl get_state` / `list_panes` / `send_text` /
+    `read_screen`. On Windows the GUI first-paint can take a few seconds — poll
+    the discovery registry until the entry appears before issuing `ctl`, and
+    capture `kettle ctl` output via a programmatic spawn (the GUI-subsystem
+    binary auto-detaches stdout from an interactive shell, so a piped invocation
+    from the same console shows nothing).
+  - **`kettle mcp`**: `kettle mcp --self-test` (in-process handshake +
+    `tools/list` + one `kettle_run`).
+  - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
+    kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
 
 ## Pattern: audit-driven cycles
 
