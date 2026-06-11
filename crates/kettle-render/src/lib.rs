@@ -431,10 +431,23 @@ pub struct PaneView<'a> {
     pub group_name: Option<&'a str>,
 }
 
+/// C3 (multi-window): the process-wide GPU objects shared by every window's
+/// Renderer. wgpu's Instance/Adapter/Device/Queue handles are internally
+/// ref-counted — `Clone` is a refcount bump, and one device happily serves N
+/// surfaces. Window 1 creates this inside `Renderer::new`; windows 2..N reuse
+/// it via the synchronous `Renderer::new_with_gpu` (no adapter/device
+/// request, no block_on, no GPU-init watchdog needed).
+#[derive(Clone)]
+pub struct GpuContext {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    gpu: GpuContext,
     config: wgpu::SurfaceConfiguration,
 
     font_system: FontSystem,
@@ -610,6 +623,58 @@ impl Renderer {
             })
             .await
             .map_err(|e| anyhow!("failed to create device: {e:?}"))?;
+        let gpu = GpuContext {
+            instance,
+            adapter,
+            device,
+            queue,
+        };
+        Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg)
+    }
+
+    /// C3 (multi-window): synchronous constructor for windows 2..N — reuses
+    /// the shared [`GpuContext`] instead of requesting an adapter/device, so
+    /// it never blocks the event loop (the ~1.5s async init and its hung-
+    /// driver watchdog are a window-1-only cost). Fails cleanly if the shared
+    /// adapter can't present to the new window's surface (e.g. a window on a
+    /// display driven by a different GPU) — the caller falls back to keeping
+    /// the tab where it was.
+    pub fn new_with_gpu<W>(
+        gpu: &GpuContext,
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        let surface = gpu.instance.create_surface(window)?;
+        if !gpu.adapter.is_surface_supported(&surface) {
+            return Err(anyhow!(
+                "the shared GPU adapter cannot present to the new window's surface"
+            ));
+        }
+        Self::with_gpu_and_surface(gpu.clone(), surface, width, height, scale, cfg)
+    }
+
+    /// Shared constructor tail: everything after a surface + GPU exist
+    /// (format/alpha selection, surface configure, font system, pipelines).
+    fn with_gpu_and_surface(
+        gpu: GpuContext,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+    ) -> Result<Renderer> {
+        let GpuContext {
+            adapter,
+            device,
+            queue,
+            ..
+        } = gpu.clone();
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -709,8 +774,7 @@ impl Renderer {
 
         Ok(Renderer {
             surface,
-            device,
-            queue,
+            gpu,
             config,
             font_system,
             swash,
@@ -750,6 +814,13 @@ impl Renderer {
         })
     }
 
+    /// C3 (multi-window): the shared GPU handles, for spawning another
+    /// window's Renderer via [`Renderer::new_with_gpu`]. Cloning the returned
+    /// context is a refcount bump.
+    pub fn gpu(&self) -> &GpuContext {
+        &self.gpu
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         // Cycle 394 (Terminator parity, bg-image Bucket-D sub-cycle 8):
         // explicit resize handler for the background-image render
@@ -777,10 +848,10 @@ impl Renderer {
         // user has unusually large geometry. Cycle 137 sibling to
         // cycle 119's `cap_axis_cells` (which fixed the same
         // class of bug on the `--screenshot` path).
-        let max = self.device.limits().max_texture_dimension_2d.max(1);
+        let max = self.gpu.device.limits().max_texture_dimension_2d.max(1);
         self.config.width = width.clamp(1, max);
         self.config.height = height.clamp(1, max);
-        self.surface.configure(&self.device, &self.config);
+        self.surface.configure(&self.gpu.device, &self.config);
     }
 
     pub fn surface_size(&self) -> (u32, u32) {
@@ -2106,7 +2177,7 @@ impl Renderer {
 
         // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
-            &self.queue,
+            &self.gpu.queue,
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
@@ -2491,8 +2562,8 @@ impl Renderer {
         }
 
         self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
+            &self.gpu.device,
+            &self.gpu.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
@@ -2503,8 +2574,8 @@ impl Renderer {
         // `menu_areas` is fine; glyphon's prepare handles a zero-area
         // batch as a no-op.
         self.menu_text_renderer.prepare(
-            &self.device,
-            &self.queue,
+            &self.gpu.device,
+            &self.gpu.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
@@ -2512,17 +2583,17 @@ impl Renderer {
             &mut self.swash,
         )?;
         self.quads
-            .upload(&self.device, &self.queue, [sw, sh], &quads);
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
         // Cycle 853: return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
         self.imgs
-            .upload(&self.device, &self.queue, [sw, sh], &img_items);
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
         self.imgs.gc(&live);
         self.overlay_quads
-            .upload(&self.device, &self.queue, [sw, sh], &over);
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
-            .upload(&self.device, &self.queue, [sw, sh], &menu_q);
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -2539,7 +2610,7 @@ impl Renderer {
             // the rarer fatal states (a fresh configure simply fails the same
             // way next frame rather than wedging).
             _ => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.gpu.device, &self.config);
                 return Ok(());
             }
         };
@@ -2547,6 +2618,7 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kettle-encoder"),
@@ -2601,7 +2673,7 @@ impl Renderer {
             self.menu_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
         // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
         // if a screenshot request is queued (cycle-654), copy the
         // surface texture to a staging buffer BEFORE present (after
@@ -2643,13 +2715,14 @@ impl Renderer {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-screenshot-readback"),
             size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kettle-screenshot-copy"),
@@ -2675,7 +2748,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = staging.slice(..);
         let done = Arc::new(AtomicBool::new(false));
@@ -2686,7 +2759,7 @@ impl Renderer {
             }
             done_set.store(true, Ordering::SeqCst);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
         if !done.load(Ordering::SeqCst) {
             return Err(anyhow!("screenshot readback timed out"));
         }
