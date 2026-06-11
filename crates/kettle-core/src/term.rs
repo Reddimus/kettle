@@ -170,6 +170,13 @@ pub struct Terminal {
     /// behavior (replayable via `cat <log>` in a terminal).
     pub log_strip_ansi: Arc<Mutex<bool>>,
     cell_px: Arc<Mutex<(u16, u16)>>,
+    /// C4 (multi-window): bumped by the reader thread once per PTY read it
+    /// processed (right before the wakeup fires). Lets a UI hosting several
+    /// windows answer "did THIS pane produce output since I last painted?"
+    /// without draining anything — a fan-out wakeup repaints only the windows
+    /// whose panes' generations moved. Plain text emits no `TermEvent`, so
+    /// the event channel can't answer that question.
+    out_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Cycle 743: pick Windows' default shell when the user configured no
@@ -782,6 +789,10 @@ impl Terminal {
         let log_strip_ansi_for_struct = log_strip_ansi.clone();
         // Cycle 742: teardown stop flag (see the `stop` struct field).
         let stop = Arc::new(AtomicBool::new(false));
+        // C4 (multi-window): per-pane output-generation counter (see the
+        // `out_gen` struct field).
+        let out_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let out_gen_reader = out_gen.clone();
 
         let reader_thread = {
             let term = term.clone();
@@ -1048,6 +1059,10 @@ impl Terminal {
                                         }
                                     }
                                 }
+                                // C4: bump BEFORE the wakeup so the UI's
+                                // generation check (Acquire) observes this
+                                // read's output when the wakeup lands.
+                                out_gen_reader.fetch_add(1, std::sync::atomic::Ordering::Release);
                                 (waker)();
                             }
                         }
@@ -1077,7 +1092,17 @@ impl Terminal {
             log_file: log_file_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
             cell_px,
+            out_gen,
         })
+    }
+
+    /// C4 (multi-window): monotone counter of PTY reads this pane's reader
+    /// thread has processed. A UI that recorded the value at its last paint
+    /// can answer "any output since?" without draining the event channel
+    /// (plain text emits no `TermEvent`). Bumped with `Release` before the
+    /// wakeup fires; read with `Acquire`.
+    pub fn output_generation(&self) -> u64 {
+        self.out_gen.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Last working directory reported via OSC 7, if any.

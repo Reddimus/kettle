@@ -1831,10 +1831,21 @@ pub struct App {
     /// Seq of the window that has (or most recently had) OS focus. Routes
     /// window-less events (UserEvent wakeups, remote/ctl/Lua commands).
     focused_seq: u64,
-    /// Next `WindowState::seq` to assign. Consumed by `open_window` (C4 of
-    /// the multi-window cycle); until then only written at construction.
-    #[allow(dead_code)]
+    /// Next `WindowState::seq` to assign (consumed by `open_window`).
     next_window_seq: u64,
+    /// C4: the shared GPU context, cached when window 1's renderer comes up
+    /// in `resumed`; `open_window` reuses it for the synchronous (no
+    /// adapter/device request) renderer init of windows 2..N.
+    gpu: Option<kettle_render::GpuContext>,
+    /// C4: set by any "this window is done" path (last tab closed, X button,
+    /// reap drained the panes) while its WindowState is checked out of the
+    /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
+    /// the window is dropped instead of reinserted, and the loop exits once
+    /// no windows remain.
+    pending_window_close: bool,
+    /// C4: Quit semantics — drop every window and exit, regardless of how
+    /// many are open.
+    quit_requested: bool,
     /// Cycle 875: developer session recorder (asciicast trace). `Some` only in
     /// a `dev-record` feature build when `--record PATH` / `KETTLE_RECORD` was
     /// given; compiled out entirely of shipped builds.
@@ -1922,6 +1933,37 @@ impl App {
         self.windows
             .values()
             .find_map(|w| (w.window.as_ref().map(|x| x.id()) == Some(wid)).then_some(w.seq))
+    }
+
+    /// C4: the dispatch wrappers' epilogue. Reinserts the checked-out window
+    /// — or, when the inner handler flagged a close (`pending_window_close`)
+    /// or a quit, drops it (panes' PTYs die with their Mux) and exits the
+    /// event loop once no windows remain. This is the ONLY place a window
+    /// close reaches `event_loop.exit()`, so "exit only when the map is
+    /// empty" holds by construction (drift-guarded in
+    /// `event_loop_exit_sites_are_allowlisted`).
+    fn finish_window_dispatch(&mut self, event_loop: &ActiveEventLoop, seq: u64, ws: WindowState) {
+        if self.quit_requested {
+            drop(ws);
+            self.windows.clear();
+            event_loop.exit();
+            return;
+        }
+        if self.pending_window_close {
+            self.pending_window_close = false;
+            drop(ws);
+            if self.windows.is_empty() {
+                event_loop.exit();
+            } else if self.focused_seq == seq
+                && let Some(&next) = self.windows.keys().next_back()
+            {
+                // Focus falls to the most recently opened remaining window;
+                // the OS will confirm with a Focused(true) shortly.
+                self.focused_seq = next;
+            }
+            return;
+        }
+        self.windows.insert(seq, ws);
     }
 
     /// Cycle 410: SCM_RIGHTS-based cross-process tab handoff.
@@ -2272,6 +2314,9 @@ impl App {
             windows,
             focused_seq: 1,
             next_window_seq: 2,
+            gpu: None,
+            pending_window_close: false,
+            quit_requested: false,
             #[cfg(feature = "dev-record")]
             recorder: None,
             proxy,
@@ -4421,6 +4466,14 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // C4: record the per-pane output generations this paint consumes —
+        // BEFORE drain_events pulls the channels, so output landing during
+        // the paint stays "unseen" and re-triggers a wakeup repaint (an
+        // extra frame beats a missed one).
+        ws.seen_output_gen.clear();
+        for (id, p) in &ws.mux.panes {
+            ws.seen_output_gen.insert(*id, p.term.output_generation());
+        }
         self.drain_events(ws);
         self.poll_remote_contexts(ws);
         self.poll_theme_schedule(ws);
@@ -5940,40 +5993,14 @@ impl App {
                 }
             }
             Action::NewWindow => {
-                // Spawn a *separate* kettle process so the user gets a real
-                // OS window, not just a new tab in this one. Detached so a
-                // crash here doesn't take the parent down; we forget the
-                // child handle on purpose (the OS reaps it). Falls back to
-                // a new tab if the current executable isn't resolvable,
-                // which keeps the keybind useful on weird platforms (snap,
-                // appimage with custom argv0) instead of silently failing.
-                //
-                // Inherit `--config FILE` (cycle 123). Without this the
-                // child loaded the *default* config path even though
-                // the parent was launched with `kettle --config
-                // /custom.conf` — the user's theme/font/keybinds
-                // appeared in their original window but not in any
-                // child window opened via Ctrl+Shift+I.
-                let spawned = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| {
-                        let mut cmd = std::process::Command::new(exe);
-                        if let Some(cfg_path) = &self.config_path {
-                            cmd.arg("--config").arg(cfg_path);
-                        }
-                        cmd.stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .ok()
-                    })
-                    .is_some();
-                if !spawned {
-                    // Cycle 425: NewWindow's fallback path creates a
-                    // tab in this process when current_exe isn't
-                    // resolvable. Plugins listening for tab_add
-                    // should see this just like Action::NewTab.
-                    // Cycle 802 (audit): log + gate the event on success.
+                // C4 (multi-window): open a real second window IN-PROCESS.
+                // Replaces the old spawn-a-separate-kettle-process behavior:
+                // tabs can now move live between windows, and the GPU device
+                // is shared. Falls back to a new tab if the window can't be
+                // created (degraded but useful, the cycle-425 precedent).
+                if let Err(_unopened) =
+                    self.open_window(event_loop, WindowOpen::Fresh { cwd: None }, None)
+                {
                     match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
                         Ok(()) => self.fire_tab_add_event(ws),
                         Err(e) => {
@@ -6062,7 +6089,7 @@ impl App {
                     self.fire_pane_close_event(id);
                 }
                 if was_last {
-                    event_loop.exit();
+                    self.pending_window_close = true;
                 } else {
                     // Cycle 735: explicit redraw + focus-event
                     // refresh after a successful close-pane. Pre-735
@@ -6137,7 +6164,7 @@ impl App {
                 // the shared fire_tab_close_event helper.
                 let closing_idx = ws.mux.active;
                 if ws.mux.close_tab() {
-                    event_loop.exit();
+                    self.pending_window_close = true;
                 }
                 self.fire_tab_close_event(closing_idx);
             }
@@ -6179,7 +6206,7 @@ impl App {
                 // multi-tab state from before close_window stays
                 // in session.json and silently restores.
                 self.save_session(ws);
-                event_loop.exit();
+                self.pending_window_close = true;
             }
             Action::NextTab => ws.mux.next_tab(),
             Action::PrevTab => ws.mux.prev_tab(),
@@ -7529,13 +7556,16 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         action: ConfirmAction,
-        event_loop: &winit::event_loop::ActiveEventLoop,
+        // C4: closes route through pending_window_close now, so the loop
+        // handle is unused — kept so the dispatch signature stays uniform
+        // with the other key handlers.
+        _event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
         match action {
             ConfirmAction::CloseWindow => {
                 ws.mux.close_window();
                 self.save_session(ws);
-                event_loop.exit();
+                self.pending_window_close = true;
             }
             ConfirmAction::CloseTab => {
                 // CloseTab dispatch (cycle X). Sub-cycle 6 wires
@@ -7548,7 +7578,7 @@ impl App {
                 // dialog deferred exit by a tick and painted an empty frame.
                 if ws.mux.close_tab() {
                     self.save_session(ws);
-                    event_loop.exit();
+                    self.pending_window_close = true;
                     return;
                 }
                 self.save_session(ws);
@@ -7568,7 +7598,7 @@ impl App {
                 // cache + focus id are stale until a frame is scheduled).
                 if was_last {
                     self.save_session(ws);
-                    event_loop.exit();
+                    self.pending_window_close = true;
                     return;
                 }
                 self.save_session(ws);
@@ -9244,56 +9274,113 @@ impl ApplicationHandler<UserEvent> for App {
     // Every per-window field lives on `WindowState` (window_state.rs). Each
     // handler removes the addressed window from the map, runs the inner
     // handler with disjoint `&mut self` (globals) + `&mut WindowState`
-    // borrows, then reinserts it. A panic mid-handler drops the entry, which
-    // is fine: kettle aborts on panic, nothing observes the missing window.
+    // borrows, then hands the entry to `finish_window_dispatch` — which
+    // reinserts it, or (C4) drops it when the inner handler flagged the
+    // window closed, exiting the loop once no windows remain. A panic
+    // mid-handler drops the entry, which is fine: kettle aborts on panic,
+    // nothing observes the missing window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let seq = self.focused_seq;
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
         };
         self.resumed_inner(&mut ws, event_loop);
-        self.windows.insert(seq, ws);
+        self.finish_window_dispatch(event_loop, seq, ws);
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
-        let seq = self.focused_seq;
-        let Some(mut ws) = self.windows.remove(&seq) else {
-            return;
-        };
-        self.user_event_inner(&mut ws, el, ev);
-        self.windows.insert(seq, ws);
+        match ev {
+            // C4: PTY wakeups carry no pane id and config reloads re-style
+            // everything — fan these out to every window. The Wakeup arm
+            // gates per window on the panes' output generations, so only
+            // windows with fresh output repaint.
+            UserEvent::Wakeup | UserEvent::ReloadConfig => {
+                let seqs: Vec<u64> = self.windows.keys().copied().collect();
+                for seq in seqs {
+                    let Some(mut ws) = self.windows.remove(&seq) else {
+                        continue;
+                    };
+                    self.user_event_inner(&mut ws, el, ev.clone());
+                    self.finish_window_dispatch(el, seq, ws);
+                }
+            }
+            // Ctl / remote / update-banner events act on the focused window.
+            _ => {
+                let seq = self.focused_seq;
+                let Some(mut ws) = self.windows.remove(&seq) else {
+                    return;
+                };
+                self.user_event_inner(&mut ws, el, ev);
+                self.finish_window_dispatch(el, seq, ws);
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        // Unknown WindowId (can't happen for a live window) falls back to the
-        // focused window — same effective routing as the pre-C1 single-window
-        // dispatch, which ignored the id entirely.
-        let seq = self.seq_of_window(id).unwrap_or(self.focused_seq);
+        // An unknown WindowId (a late event for an already-closed window)
+        // is dropped rather than misrouted to the focused window.
+        let Some(seq) = self.seq_of_window(id) else {
+            return;
+        };
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
         };
         self.window_event_inner(&mut ws, event_loop, event);
-        self.windows.insert(seq, ws);
+        self.finish_window_dispatch(event_loop, seq, ws);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // C4: every window ticks (reap, blink, coalesced-paint deadlines);
+        // the per-window wait requests merge to the EARLIEST deadline so one
+        // window's animation can't starve another's coalesced output flush.
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
+        let mut min_wait: Option<u64> = None;
         for seq in seqs {
             let Some(mut ws) = self.windows.remove(&seq) else {
                 continue;
             };
-            self.about_to_wait_inner(&mut ws, event_loop);
-            self.windows.insert(seq, ws);
+            let wait = self.about_to_wait_inner(&mut ws, event_loop);
+            self.finish_window_dispatch(event_loop, seq, ws);
+            if let Some(ms) = wait {
+                min_wait = Some(min_wait.map_or(ms, |w: u64| w.min(ms)));
+            }
+        }
+        if self.windows.is_empty() {
+            return;
+        }
+        match min_wait {
+            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(ms),
+            )),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
     // C1-DISPATCH-END
 }
 
+/// C4 (multi-window): how a new in-process window starts life.
+enum WindowOpen {
+    /// A fresh window with one shell tab (`Action::NewWindow`).
+    Fresh { cwd: Option<String> },
+    /// Adopt a tab detached from another window — the live tab move /
+    /// tear-off. PTYs keep running; nothing respawns.
+    // C4: constructed by C5 (MoveTabToNewWindow) and C6 (drag tear-off)
+    // later this cycle; the open_window arm consuming it is already live.
+    #[allow(dead_code)]
+    AdoptTab(crate::mux::DetachedTab),
+}
+
 impl App {
-    fn resumed_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
-        if ws.window.is_some() {
-            return;
-        }
+    /// C4: window attributes shared by window 1 (`resumed_inner`) and
+    /// windows 2..N (`open_window`), so a second window honors borderless /
+    /// always-on-top / hide-from-taskbar / geometry-hinting / WM_CLASS
+    /// exactly like the first. Always returns `visible(false)` — the
+    /// cycle-785 hidden-until-first-paint reveal (callers seed `window_shown`
+    /// from `should_reveal_after_first_frame`).
+    fn window_attributes(
+        &self,
+        state: kettle_config::WindowState,
+    ) -> winit::window::WindowAttributes {
         let mut attrs = Window::default_attributes()
             .with_title("kettle")
             // Cycle 752: show kettle's icon in the title bar / taskbar / Alt-Tab
@@ -9341,7 +9428,7 @@ impl App {
         }
         // Cycle 344 (Terminator parity, terminatorlib/config.py:75
         // `window_state`). Apply initial window state at creation.
-        match self.cfg.window_state {
+        match state {
             kettle_config::WindowState::Normal => {}
             kettle_config::WindowState::Maximise => {
                 attrs = attrs.with_maximized(true);
@@ -9392,23 +9479,12 @@ impl App {
                 .unwrap_or_else(|| "kettle".to_string());
             WindowAttributesExtX11::with_name(attrs, wm_class.clone(), wm_class)
         };
-        // Cycle 785: create the window hidden, then reveal it in `redraw` once
-        // the first frame is composited — so the user never sees an unpainted
-        // / "(Not Responding)" rectangle during the ~1.5s GPU adapter+device
-        // init that the `Renderer::new` `block_on` below stalls the event loop
-        // on. A configured `window_state = hidden` already set `with_visible
-        // (false)` above and must stay hidden, so `window_shown` starts `true`
-        // there (no reveal) and `false` for every visible state.
-        ws.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
-        let attrs = attrs.with_visible(false);
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                log::error!("failed to create window: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
+        attrs.with_visible(false)
+    }
+
+    /// C4: post-creation window setup shared by both window-creation paths.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn apply_post_create(&self, window: &Window) {
         // Cycle 694 (Terminator parity, terminatorlib/config.py:81
         // `sticky`): show window on every workspace. macOS exposes
         // this as a Window-level method via `WindowExtMacOS`, so
@@ -9427,7 +9503,7 @@ impl App {
         // objc2 — the same thing the dropped winit method did internally.
         #[cfg(target_os = "macos")]
         if self.cfg.sticky {
-            set_visible_on_all_spaces(&window);
+            set_visible_on_all_spaces(window);
         }
         // Cycle 754: X11/Wayland sticky needs a `_NET_WM_STATE_STICKY` atom
         // write that winit 0.30 doesn't expose; log (don't silently no-op) so
@@ -9440,6 +9516,142 @@ impl App {
                  window stays on its current workspace"
             );
         }
+    }
+
+    /// C4: open another OS window in this process — the multi-window core.
+    /// Returns the `WindowOpen` back on failure so an `AdoptTab` caller can
+    /// re-attach the tab to its source window instead of losing live PTYs.
+    fn open_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        open: WindowOpen,
+        pos: Option<winit::dpi::PhysicalPosition<i32>>,
+    ) -> Result<(), WindowOpen> {
+        let Some(gpu) = self.gpu.clone() else {
+            log::warn!("open_window: GPU context not ready (window 1 still initializing)");
+            return Err(open);
+        };
+        // A tear-off window opens Normal (it must be visible at the drop
+        // point); a fresh window honors the configured window-state except
+        // Hidden (an invisible NewWindow helps nobody).
+        let state = match (&open, self.cfg.window_state) {
+            (WindowOpen::AdoptTab(_), _) => kettle_config::WindowState::Normal,
+            (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
+            (_, s) => s,
+        };
+        let mut attrs = self.window_attributes(state);
+        if let Some(p) = pos {
+            attrs = attrs.with_position(p);
+        }
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                log::error!("open_window: window creation failed: {e}");
+                return Err(open);
+            }
+        };
+        self.apply_post_create(&window);
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        // Synchronous renderer init against the shared device — no block_on,
+        // no watchdog (those are window-1 costs; see Renderer::new_with_gpu).
+        let renderer = match Renderer::new_with_gpu(
+            &gpu,
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &self.cfg,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("open_window: renderer init failed: {e}");
+                return Err(open);
+            }
+        };
+        let seq = self.next_window_seq;
+        self.next_window_seq += 1;
+        // Same Mux construction flags as run_with — process-global decisions.
+        let mut mux = Mux::new();
+        mux.lua_output_subscribed = self.lua_engine.is_some();
+        #[cfg(feature = "dev-record")]
+        {
+            mux.lua_output_subscribed |= self.recorder.is_some();
+            mux.record_lossless = self.recorder.is_some();
+        }
+        let mut ws = WindowState::new(seq, false, mux);
+        ws.window_shown = !should_reveal_after_first_frame(state);
+        ws.renderer = Some(renderer);
+        ws.window = Some(window);
+        let area = self.area(&ws);
+        let (cols, rows) = self.grid_of(&ws, area);
+        let (cw, ch) = self.cell_px(&ws);
+        match open {
+            WindowOpen::Fresh { cwd } => {
+                if let Err(e) = ws.mux.new_tab_with(
+                    &self.cfg,
+                    cols,
+                    rows,
+                    cw,
+                    ch,
+                    self.waker(),
+                    &[],
+                    cwd.as_deref(),
+                ) {
+                    // `ws` (and its OS window) drop here; nothing was adopted.
+                    log::error!("open_window: shell spawn failed: {e}");
+                    return Err(WindowOpen::Fresh { cwd });
+                }
+            }
+            WindowOpen::AdoptTab(dt) => {
+                ws.mux.attach_tab(dt, None);
+            }
+        }
+        self.resize_all(&mut ws);
+        self.focused_seq = seq;
+        // First frame painted directly — RedrawRequested is not delivered to
+        // a never-shown window on Windows (the cycle-785 reveal dance).
+        self.redraw(&mut ws);
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        self.windows.insert(seq, ws);
+        Ok(())
+    }
+
+    /// C4: does any pane in this window have PTY output newer than the
+    /// window's last paint? (`Terminal::output_generation` vs the snapshot
+    /// `redraw` records.) Plain output emits no TermEvent, so this counter
+    /// is the only reliable per-window "new output" signal for the fan-out
+    /// wakeup.
+    fn window_has_new_output(&self, ws: &WindowState) -> bool {
+        ws.mux.panes.iter().any(|(id, p)| {
+            ws.seen_output_gen.get(id).copied().unwrap_or(0) != p.term.output_generation()
+        })
+    }
+
+    fn resumed_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
+        if ws.window.is_some() {
+            return;
+        }
+        // Cycle 785: create the window hidden, then reveal it in `redraw` once
+        // the first frame is composited — so the user never sees an unpainted
+        // / "(Not Responding)" rectangle during the ~1.5s GPU adapter+device
+        // init that the `Renderer::new` `block_on` below stalls the event loop
+        // on. A configured `window_state = hidden` already stays hidden via the
+        // attrs, so `window_shown` starts `true` there (no reveal) and `false`
+        // for every visible state.
+        ws.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
+        let attrs = self.window_attributes(self.cfg.window_state);
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                log::error!("failed to create window: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+        self.apply_post_create(&window);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Cycle 812 (audit #10): guard the synchronous GPU init against a hung
@@ -9495,6 +9707,8 @@ impl App {
                 return;
             }
         };
+        // C4: cache the shared GPU context for open_window (windows 2..N).
+        self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
         ws.window = Some(window);
 
@@ -9771,6 +9985,13 @@ impl App {
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::Wakeup => {
+                // C4: wakeups fan out to every window; skip windows whose
+                // panes produced no output since their last paint (plain
+                // text emits no TermEvent — the generation counter is the
+                // only reliable per-window signal).
+                if !self.window_has_new_output(ws) {
+                    return;
+                }
                 // Cycle 290: run output triggers before the redraw —
                 // a match fires window urgency so the user notices the
                 // event even if they're focused on another OS window.
@@ -9838,12 +10059,17 @@ impl App {
                 #[cfg(feature = "dev-record")]
                 {
                     self.flush_recorder_output(ws);
-                    if let Some(rec) = self.recorder.as_mut() {
+                    // C4: the recorder spans the whole session — finish it
+                    // only when the LAST window goes (this one is checked out
+                    // of the map, so empty == last).
+                    if self.windows.is_empty()
+                        && let Some(rec) = self.recorder.as_mut()
+                    {
                         rec.finish();
                     }
                 }
                 self.save_session(ws);
-                event_loop.exit();
+                self.pending_window_close = true;
             }
             WindowEvent::Resized(size) => {
                 // Cycle 841 (audit): minimizing a window delivers Resized(0, 0)
@@ -10253,7 +10479,7 @@ impl App {
                                 // already save; this one was missed.
                                 self.fire_tab_close_event(closing_idx);
                                 self.save_session(ws);
-                                event_loop.exit();
+                                self.pending_window_close = true;
                                 return;
                             }
                             self.fire_tab_close_event(closing_idx);
@@ -11023,7 +11249,14 @@ impl App {
         }
     }
 
-    fn about_to_wait_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
+    /// C4: returns the wake-up this window wants (ms; `None` = wait for
+    /// events). The dispatch wrapper merges every window's request to the
+    /// earliest deadline and sets the control flow once.
+    fn about_to_wait_inner(
+        &mut self,
+        ws: &mut WindowState,
+        _event_loop: &ActiveEventLoop,
+    ) -> Option<u64> {
         // Cycle 908: drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
@@ -11031,8 +11264,8 @@ impl App {
         self.flush_recorder_output(ws);
         if ws.mux.reap() && ws.window.is_some() {
             self.save_session(ws);
-            event_loop.exit();
-            return;
+            self.pending_window_close = true;
+            return None;
         }
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
@@ -11100,12 +11333,7 @@ impl App {
             let ms = (soonest.saturating_duration_since(now).as_millis() as u64).clamp(1, 500);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
         }
-        match wait_ms {
-            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
-                now + std::time::Duration::from_millis(ms),
-            )),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
-        }
+        wait_ms
     }
 }
 
@@ -11156,7 +11384,8 @@ mod modal_discipline_guard {
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
         assert!(
-            body.contains("if ws.mux.close_tab() {") && body.contains("event_loop.exit();"),
+            body.contains("if ws.mux.close_tab() {")
+                && body.contains("self.pending_window_close = true;"),
             "CloseTab dispatch must exit when close_tab() reports the last tab"
         );
         assert!(
@@ -11478,6 +11707,38 @@ mod tests {
         assert!(
             head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
             "the Resized handler must early-return on a 0-dimension size"
+        );
+    }
+
+    /// C4 (multi-window) drift guard. A window close must NOT exit the event
+    /// loop directly — it sets `pending_window_close` and the single funnel
+    /// (`finish_window_dispatch`) drops the window, exiting only when the
+    /// windows map is empty. The only legitimate direct exits are the funnel
+    /// itself (close + quit arms) and `resumed_inner`'s window-1 startup
+    /// failures (window create / renderer init / `-e` spawn / shell spawn),
+    /// where no other window can exist yet. A new `event_loop.exit()`
+    /// anywhere else reintroduces "closing one window kills them all".
+    #[test]
+    fn event_loop_exit_sites_are_allowlisted() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        // concat! so this test's own literals don't self-match the scan.
+        let exit_needle = concat!("event_loop", ".exit();");
+        let n_exits = src.matches(exit_needle).count();
+        assert_eq!(
+            n_exits, 6,
+            "expected exactly 6 event_loop.exit() sites (2 in \
+             finish_window_dispatch + 4 resumed_inner startup failures); a \
+             new one must route through pending_window_close instead"
+        );
+        // The close paths all flag instead of exiting: keybind CloseTab /
+        // ClosePane / CloseWindow, the three confirm-dialog arms, the OS
+        // close button, the tab-bar ✕ on the last tab, and the reap path.
+        let flag_needle = concat!("self.pending_window_close", " = true;");
+        let n_flags = src.matches(flag_needle).count();
+        assert!(
+            n_flags >= 9,
+            "expected the 9 window-close paths to set pending_window_close \
+             (found {n_flags})"
         );
     }
 

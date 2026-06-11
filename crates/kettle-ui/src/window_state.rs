@@ -142,6 +142,11 @@ pub(crate) struct WindowState {
     /// unpainted rectangle during GPU init; `redraw` reveals it on the first
     /// composited frame and flips this to `true`.
     pub(crate) window_shown: bool,
+    /// C4: per-pane `Terminal::output_generation` values as of this window's
+    /// last paint (snapshotted at the top of `redraw`, before drain_events).
+    /// The fan-out `UserEvent::Wakeup` compares against the live counters to
+    /// decide whether THIS window has anything new to paint.
+    pub(crate) seen_output_gen: std::collections::HashMap<u64, u64>,
 }
 
 impl WindowState {
@@ -196,6 +201,7 @@ impl WindowState {
             last_title: String::new(),
             pending_pane_restarts: Vec::new(),
             window_shown: false,
+            seen_output_gen: std::collections::HashMap::new(),
         }
     }
 }
