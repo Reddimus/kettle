@@ -698,6 +698,25 @@ pub fn compute_broadcast_targets(
     }
 }
 
+/// C2 (multi-window): process-global pane-id allocator. Pane ids must be
+/// unique across EVERY window's Mux — the agent control API (`kettle ctl
+/// --pane N`), Lua hooks, and `pending_runs` all address panes by bare id,
+/// and a live tab move (C5) carries its panes' ids into another window's Mux.
+/// A per-Mux counter would collide the moment a second window spawned a pane.
+/// Starts at 1 (id 0 is never a valid pane, matching the old per-Mux seed).
+static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A tab lifted out of one Mux, panes and all, ready to be attached to
+/// another (the C5 live tab move — PTYs keep running, nothing respawns).
+/// Pane ids stay valid across the move because they're process-global.
+// C2: consumed by the C5 MoveTabToNewWindow rewrite later this cycle; until
+// then only the mux tests exercise it (same staging as extract_tab had).
+#[allow(dead_code)]
+pub struct DetachedTab {
+    pub tab: Tab,
+    pub panes: Vec<(u64, Pane)>,
+}
+
 pub struct Mux {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
@@ -725,7 +744,6 @@ pub struct Mux {
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
     pub closed_tabs: std::collections::VecDeque<ClosedTab>,
-    next_id: u64,
 }
 
 impl Mux {
@@ -739,7 +757,6 @@ impl Mux {
             lua_output_subscribed: false,
             record_lossless: false,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
-            next_id: 1,
         }
     }
 
@@ -859,8 +876,7 @@ impl Mux {
             waker,
             output_tx,
         )?;
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let initial_title = initial_pane_title(argv);
         let output_rx = if self.lua_output_subscribed {
             Some(out_rx)
@@ -1711,6 +1727,54 @@ impl Mux {
         // Make the inserted tab active so the user sees the
         // transferred work immediately.
         self.active = pos;
+    }
+
+    /// C2 (multi-window): lift the tab at `idx` out of this Mux, LIVE —
+    /// the Tab struct plus its `Pane`s (PTYs, reader threads, scrollback,
+    /// everything) leave together, untouched. The C5 in-process tab move
+    /// feeds the result straight into another window's `attach_tab`.
+    ///
+    /// Composition contract: `extract_tab` handles the tabs-vec removal and
+    /// the active-index fixup (shift-left / clamp, drift-guarded by
+    /// `extract_and_insert_tab_roundtrip`); this adds the pane transfer.
+    /// Unlike `close_tab_at`, nothing is pushed to `closed_tabs` — the tab
+    /// isn't closing, it's moving. Returns `None` for an out-of-range idx.
+    // C2: consumed by C5 (MoveTabToNewWindow → open_window(AdoptTab)).
+    #[allow(dead_code)]
+    pub fn detach_tab(&mut self, idx: usize) -> Option<DetachedTab> {
+        let tab = self.extract_tab(idx)?;
+        let mut ids = Vec::new();
+        collect_ids(&tab.root, &mut ids);
+        let panes = ids
+            .into_iter()
+            .filter_map(|id| self.panes.remove(&id).map(|p| (id, p)))
+            .collect();
+        // The user lands on whichever tab slid into focus; mark it seen so
+        // its activity dot clears (same as every other tab-switch path).
+        self.touch_active_tab_seen();
+        Some(DetachedTab { tab, panes })
+    }
+
+    /// C2 (multi-window): attach a detached tab (panes and all) to this Mux
+    /// at `at` (clamped; `None` = append). The inserted tab becomes active —
+    /// `insert_tab` semantics — and is marked seen. Returns the index it
+    /// landed at. Pane ids can't collide: they're process-global
+    /// (`NEXT_PANE_ID`), and a detached tab's ids left their source map.
+    // C2: consumed by C4/C5 (open_window(AdoptTab) attaches into the new
+    // window's Mux).
+    #[allow(dead_code)]
+    pub fn attach_tab(&mut self, dt: DetachedTab, at: Option<usize>) -> usize {
+        for (id, p) in dt.panes {
+            debug_assert!(
+                !self.panes.contains_key(&id),
+                "pane id {id} already present in target Mux (global-id invariant broken)"
+            );
+            self.panes.insert(id, p);
+        }
+        let pos = at.unwrap_or(self.tabs.len()).min(self.tabs.len());
+        self.insert_tab(pos, dt.tab);
+        self.touch_active_tab_seen();
+        pos
     }
 
     /// Close the entire window: drop every pane in every tab. The caller
@@ -3786,5 +3850,67 @@ mod node_tests {
         m.insert_tab(99, mk(4));
         assert_eq!(m.tabs.len(), 4);
         assert_eq!(m.active, 3);
+    }
+
+    #[test]
+    fn detach_attach_tab_moves_between_muxes() {
+        // C2 (multi-window) drift guard: detach_tab → attach_tab moves a tab
+        // from one Mux to another with the same index semantics as the
+        // extract/insert pair it composes, does NOT snapshot to closed_tabs
+        // (the tab is moving, not closing), and the source's active index
+        // stays valid.
+        let mk = |id: u64| Tab {
+            root: Node::Leaf(id),
+            focus: id,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        };
+        let mut src = Mux::new();
+        src.tabs.push(mk(101));
+        src.tabs.push(mk(102));
+        src.tabs.push(mk(103));
+        src.active = 1; // detach the active tab itself
+        let dt = src.detach_tab(1).expect("detach");
+        assert_eq!(dt.tab.focus, 102);
+        // Panes vec is empty here (no real PTYs in this fixture) — the pane
+        // transfer itself is exercised by the C5 live-move e2e.
+        assert!(dt.panes.is_empty());
+        assert_eq!(src.tabs.len(), 2);
+        // Removing the active tab keeps focus position (right neighbor
+        // slides in), clamped — extract_tab semantics.
+        assert_eq!(src.active, 1);
+        assert!(
+            src.closed_tabs.is_empty(),
+            "a moved tab must not appear in the undo-close ring"
+        );
+
+        let mut dst = Mux::new();
+        dst.tabs.push(mk(201));
+        let at = dst.attach_tab(dt, None);
+        assert_eq!(at, 1, "None appends");
+        assert_eq!(dst.tabs.len(), 2);
+        assert_eq!(dst.active, 1, "the attached tab becomes active");
+        assert_eq!(dst.tabs[1].focus, 102);
+
+        // Out-of-range detach is None; attach at an oversized index clamps.
+        assert!(src.detach_tab(99).is_none());
+        let dt2 = src.detach_tab(0).expect("detach head");
+        let at2 = dst.attach_tab(dt2, Some(99));
+        assert_eq!(at2, 2, "oversized attach index clamps to append");
+    }
+
+    #[test]
+    fn pane_id_allocator_is_process_global() {
+        // C2 drift guard: pane ids come from the shared NEXT_PANE_ID static
+        // (never a per-Mux counter), so ids stay unique across every window's
+        // Mux — the agent API, Lua hooks, and pending_runs address panes by
+        // bare id, and a live tab move carries ids into another Mux. If this
+        // stops compiling because NEXT_PANE_ID is gone, per-Mux ids came back.
+        let a = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let b = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(b > a, "monotonic process-wide allocation");
     }
 }
