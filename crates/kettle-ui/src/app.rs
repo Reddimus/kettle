@@ -7175,6 +7175,16 @@ impl App {
                         // close event the process-handoff path fired
                         // (cycle 424).
                         self.fire_tab_close_event(closing_idx);
+                        // C8: agents subscribed to the event feed see moves.
+                        self.ctl_broadcast(
+                            "tab_moved",
+                            None,
+                            serde_json::json!({
+                                "from_window": ws.seq,
+                                "to_window": self.focused_seq,
+                                "tab": closing_idx,
+                            }),
+                        );
                         self.resize_all(ws);
                         if let Some(w) = &ws.window {
                             w.request_redraw();
@@ -7773,37 +7783,51 @@ impl App {
             "pid": std::process::id(),
             "mode": format!("{mode:?}").to_lowercase(),
             "theme": self.cfg.theme_name,
+            // `tabs` / `focused_pane` describe the FOCUSED window (back-
+            // compat); C8 adds the window dimension alongside.
             "tabs": ws.mux.tabs.len(),
             "focused_pane": ws.mux.tabs.get(ws.mux.active).map(|t| t.focus),
+            "windows": 1 + self.windows.len(),
+            "focused_window": self.focused_seq,
         })
     }
 
     /// `list_tabs`: index, title, active flag, pane ids.
     fn ctl_list_tabs(&self, ws: &WindowState) -> serde_json::Value {
-        let titles = ws.mux.tab_titles();
-        let tabs: Vec<_> = ws
-            .mux
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                serde_json::json!({
+        // C8 (multi-window): tabs across EVERY window, ordered by window seq.
+        // `index` and `active` are in-window values; `window` disambiguates.
+        let mut tabs = Vec::new();
+        for w in self.all_windows(ws) {
+            let titles = w.mux.tab_titles();
+            for (i, t) in w.mux.tabs.iter().enumerate() {
+                tabs.push(serde_json::json!({
+                    "window": w.seq,
                     "index": i,
                     "title": titles.get(i).cloned().unwrap_or_default(),
-                    "active": i == ws.mux.active,
+                    "active": i == w.mux.active,
                     "focused_pane": t.focus,
                     "panes": t.root.leaf_ids(),
-                })
-            })
-            .collect();
+                }));
+            }
+        }
         serde_json::json!({ "tabs": tabs })
     }
 
     /// `list_panes`: id, tab, title, cwd, size, focused, argv, child_pid,
     /// agent_attached.
     fn ctl_list_panes(&self, ws: &WindowState) -> serde_json::Value {
-        let focused = ws.mux.tabs.get(ws.mux.active).map(|t| t.focus);
+        // C8 (multi-window): panes across EVERY window; `tab` is the
+        // in-window tab index, `window` the owning window's seq, `focused`
+        // means focused WITHIN its window.
         let mut panes = Vec::new();
+        for w in self.all_windows(ws) {
+            self.ctl_list_panes_of(w, &mut panes);
+        }
+        serde_json::json!({ "panes": panes })
+    }
+
+    fn ctl_list_panes_of(&self, ws: &WindowState, panes: &mut Vec<serde_json::Value>) {
+        let focused = ws.mux.tabs.get(ws.mux.active).map(|t| t.focus);
         for (ti, tab) in ws.mux.tabs.iter().enumerate() {
             for id in tab.root.leaf_ids() {
                 let Some(pane) = ws.mux.panes.get(&id) else {
@@ -7826,6 +7850,7 @@ impl App {
                     .unwrap_or(false);
                 panes.push(serde_json::json!({
                     "id": id,
+                    "window": ws.seq,
                     "tab": ti,
                     "title": pane.title,
                     "cwd": pane.term.current_dir(),
@@ -7842,7 +7867,6 @@ impl App {
                 }));
             }
         }
-        serde_json::json!({ "panes": panes })
     }
 
     /// `read_screen`: a plain-text snapshot of a pane (default: focused).
@@ -7861,7 +7885,7 @@ impl App {
             .get("scrollback_lines")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
-        let Some(p) = ws.mux.panes.get(&pane) else {
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
         match p.term.screen_text(scrollback) {
@@ -7896,7 +7920,7 @@ impl App {
         let Some(text) = req.params.get("text").and_then(|v| v.as_str()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'text' string");
         };
-        let Some(p) = ws.mux.panes.get(&pane) else {
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
         // Cycle 941: an agent acts as the user — the per-pane read-only
@@ -7928,7 +7952,11 @@ impl App {
         params: &serde_json::Value,
     ) -> Result<u64, String> {
         if let Some(p) = params.get("pane").and_then(|v| v.as_u64()) {
-            if ws.mux.panes.contains_key(&p) {
+            // C8 (multi-window): an explicit pane id may live in ANY window
+            // (pane ids are process-global).
+            if ws.mux.panes.contains_key(&p)
+                || self.windows.values().any(|w| w.mux.panes.contains_key(&p))
+            {
                 return Ok(p);
             }
             return Err(format!("no pane with id {p}"));
@@ -7939,6 +7967,27 @@ impl App {
             .map(|t| t.focus)
             .filter(|f| ws.mux.panes.contains_key(f))
             .ok_or_else(|| "no focused pane".to_string())
+    }
+
+    /// C8 (multi-window): every window — the checked-out one plus the map —
+    /// ordered by seq, for the ctl read paths.
+    fn all_windows<'a>(&'a self, ws: &'a WindowState) -> Vec<&'a WindowState> {
+        let mut v: Vec<&WindowState> = std::iter::once(ws).chain(self.windows.values()).collect();
+        v.sort_by_key(|w| w.seq);
+        v
+    }
+
+    /// C8 (multi-window): borrow a pane wherever it lives — the checked-out
+    /// window or any other in the map (pane ids are process-global).
+    fn ctl_pane_ref<'a>(
+        ws: &'a WindowState,
+        windows: &'a std::collections::BTreeMap<u64, WindowState>,
+        id: u64,
+    ) -> Option<&'a crate::mux::Pane> {
+        ws.mux
+            .panes
+            .get(&id)
+            .or_else(|| windows.values().find_map(|w| w.mux.panes.get(&id)))
     }
 
     /// Mark `conn_id` attached to `pane` + fire the badge transition once.
@@ -7956,7 +8005,17 @@ impl App {
     /// Cycle 934 (agent-first A4): flip a pane's agent badge + emit the
     /// `agent_attached` event so subscribers + the titlebar update.
     fn set_pane_agent_attached(&mut self, ws: &mut WindowState, pane: u64, attached: bool) {
-        if let Some(p) = ws.mux.panes.get_mut(&pane) {
+        // C8 (multi-window): the pane may live in any window.
+        let in_ws = ws.mux.panes.contains_key(&pane);
+        {
+            let p = if in_ws {
+                ws.mux.panes.get_mut(&pane)
+            } else {
+                self.windows
+                    .values_mut()
+                    .find_map(|w| w.mux.panes.get_mut(&pane))
+            };
+            let Some(p) = p else { return };
             if p.agent_attached == attached {
                 return;
             }
@@ -7967,7 +8026,16 @@ impl App {
             Some(pane),
             serde_json::json!({"attached": attached}),
         );
-        if let Some(w) = &ws.window {
+        // Repaint the owning window so the titlebar badge updates.
+        let owner = if in_ws {
+            ws.window.as_ref()
+        } else {
+            self.windows
+                .values()
+                .find(|w| w.mux.panes.contains_key(&pane))
+                .and_then(|w| w.window.as_ref())
+        };
+        if let Some(w) = owner {
             w.request_redraw();
         }
     }
@@ -8028,13 +8096,10 @@ impl App {
         // measuring by `rows` would make `total_now == start_line` and slice out
         // nothing; the cursor advances as output is printed, so the absolute
         // cursor line tracks the real content position whether or not it scrolls.
-        let start_line = ws
-            .mux
-            .panes
-            .get(&pane)
+        let start_line = Self::ctl_pane_ref(ws, &self.windows, pane)
             .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.cursor.0))
             .unwrap_or(0);
-        if let Some(p) = ws.mux.panes.get(&pane) {
+        if let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) {
             let mut line = command.to_string();
             // Submit with a CARRIAGE RETURN, not a line feed: CR is the Enter
             // key a shell's line editor acts on. Under Windows ConPTY only CR is
@@ -8162,7 +8227,8 @@ impl App {
     /// content the command produced.
     fn ctl_capture_output_since(&self, ws: &WindowState, pane: u64, start_line: usize) -> String {
         const CAP_LINES: usize = 10_000;
-        let Some(p) = ws.mux.panes.get(&pane) else {
+        // C8: the pane may have moved to another window mid-run.
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return String::new();
         };
         let Some(probe) = p.term.screen_text(0) else {
@@ -10796,6 +10862,16 @@ impl App {
                             match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos) {
                                 Ok(()) => {
                                     self.fire_tab_close_event(closing_idx);
+                                    // C8: agents see the tear-off too.
+                                    self.ctl_broadcast(
+                                        "tab_moved",
+                                        None,
+                                        serde_json::json!({
+                                            "from_window": ws.seq,
+                                            "to_window": self.focused_seq,
+                                            "tab": closing_idx,
+                                        }),
+                                    );
                                     self.resize_all(ws);
                                     if let Some(w) = &ws.window {
                                         w.request_redraw();
