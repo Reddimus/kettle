@@ -957,6 +957,9 @@ impl Mux {
             active: self.active,
             // Filled in by App::save_session (it owns the active theme).
             theme: None,
+            // C7: snapshot() is the ONE-window serializer; App::save_session
+            // assembles the multi-window `windows` vec from per-window calls.
+            windows: Vec::new(),
         }
     }
 

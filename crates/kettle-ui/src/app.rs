@@ -7217,8 +7217,51 @@ impl App {
         }
     }
 
+    /// C7 (multi-window): snapshot ONE window (its tabs + geometry).
+    fn snapshot_window(w: &WindowState) -> crate::session::SWindow {
+        let s = w.mux.snapshot();
+        let geometry = w.window.as_ref().and_then(|win| {
+            let pos = win.outer_position().ok()?;
+            let size = win.inner_size();
+            Some(crate::session::SGeometry {
+                x: pos.x,
+                y: pos.y,
+                w: size.width,
+                h: size.height,
+            })
+        });
+        crate::session::SWindow {
+            tabs: s.tabs,
+            active: s.active,
+            geometry,
+        }
+    }
+
     fn save_session(&self, ws: &WindowState) {
-        let mut s = ws.mux.snapshot();
+        // C7 (multi-window): serialize EVERY live window — the checked-out
+        // one plus the map — ordered by seq so window 1 stays first. Windows
+        // whose mux is already empty (a close_window in flight) are dropped:
+        // nothing to restore there.
+        let mut wins: Vec<(u64, crate::session::SWindow)> =
+            vec![(ws.seq, Self::snapshot_window(ws))];
+        for w in self.windows.values() {
+            wins.push((w.seq, Self::snapshot_window(w)));
+        }
+        wins.sort_by_key(|(seq, _)| *seq);
+        let windows: Vec<crate::session::SWindow> = wins
+            .into_iter()
+            .map(|(_, w)| w)
+            .filter(|w| !w.tabs.is_empty())
+            .collect();
+        // Downgrade-compat dual-write: mirror window 1 into the legacy
+        // top-level fields so an older kettle reading this file still
+        // restores its first window.
+        let mut s = crate::session::Session {
+            tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
+            active: windows.first().map(|w| w.active).unwrap_or(0),
+            theme: None,
+            windows,
+        };
         // Cycle 918: theme is config-governed (persisted to the config file via
         // `persist_pref`), NOT stored in the session. A session-pinned theme used
         // to OVERRIDE the config/compile-time default on restore, so a default
@@ -9231,10 +9274,23 @@ enum WindowOpen {
     Fresh { cwd: Option<String> },
     /// Adopt a tab detached from another window — the live tab move /
     /// tear-off. PTYs keep running; nothing respawns.
-    // C4: constructed by C5 (MoveTabToNewWindow) and C6 (drag tear-off)
-    // later this cycle; the open_window arm consuming it is already live.
-    #[allow(dead_code)]
     AdoptTab(crate::mux::DetachedTab),
+    /// C7: respawn one saved window of a multi-window session (tabs +
+    /// geometry) on `--restore` / `restore-session = true` startup.
+    Restore(crate::session::SWindow),
+}
+
+/// C7: the live monitor rects, for clamping a saved window geometry whose
+/// monitor is gone (see `session::clamp_geometry_to_monitors`).
+fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
+    event_loop
+        .available_monitors()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect()
 }
 
 impl App {
@@ -9402,11 +9458,23 @@ impl App {
         // point); a fresh window honors the configured window-state except
         // Hidden (an invisible NewWindow helps nobody).
         let state = match (&open, self.cfg.window_state) {
-            (WindowOpen::AdoptTab(_), _) => kettle_config::WindowState::Normal,
+            (WindowOpen::AdoptTab(_), _) | (WindowOpen::Restore(_), _) => {
+                kettle_config::WindowState::Normal
+            }
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
             (_, s) => s,
         };
         let mut attrs = self.window_attributes(state);
+        // C7: a restored window lands at its saved geometry, clamped to the
+        // live monitor layout (its monitor may be unplugged).
+        if let WindowOpen::Restore(sw) = &open
+            && let Some(g) = sw.geometry
+        {
+            let g = crate::session::clamp_geometry_to_monitors(g, &monitor_rects(event_loop));
+            attrs = attrs
+                .with_position(winit::dpi::PhysicalPosition::new(g.x, g.y))
+                .with_inner_size(winit::dpi::PhysicalSize::new(g.w, g.h));
+        }
         if let Some(p) = pos {
             attrs = attrs.with_position(p);
         }
@@ -9472,6 +9540,26 @@ impl App {
             }
             WindowOpen::AdoptTab(dt) => {
                 ws.mux.attach_tab(dt, None);
+            }
+            WindowOpen::Restore(sw) => {
+                let sess = crate::session::Session {
+                    tabs: sw.tabs.clone(),
+                    active: sw.active,
+                    theme: None,
+                    windows: Vec::new(),
+                };
+                let proxy = self.proxy.clone();
+                let mk = move || -> kettle_core::Waker {
+                    let p = proxy.clone();
+                    std::sync::Arc::new(move || {
+                        let _ = p.send_event(UserEvent::Wakeup);
+                    })
+                };
+                if !ws.mux.restore(&sess, &self.cfg, cw, ch, &mk) {
+                    // `ws` (and its OS window) drop here; nothing restored.
+                    log::error!("open_window: saved-window restore failed");
+                    return Err(WindowOpen::Restore(sw));
+                }
             }
         }
         self.resize_all(&mut ws);
@@ -9583,27 +9671,35 @@ impl App {
         let (cols, rows) = self.grid_of(ws, area);
         let (cw, ch) = self.cell_px(ws);
 
-        // CLI `-e cmd` / `-d dir` (consumed once) take precedence over a
-        // saved session: explicit intent shouldn't be overridden by restore.
-        let startup = std::mem::take(&mut self.startup);
-        // Cycle 875: capture the recorder opts NOW — `self.startup` was just
-        // taken (so it's default/empty), and the local `startup` is consumed
-        // building the first tab below. The recorder is started further down,
-        // after the first paint, from this captured value.
+        // CLI `-e cmd` / `-d dir` are consumed ONCE (they seed this window's
+        // first tab and must not respawn on restore); take exactly those two
+        // fields. The REST of `self.startup` stays intact for the whole
+        // session — the explicit-restore gates below (`--tab-handoff` /
+        // `--layout` / `--restore`), the save-session layout/restore gating,
+        // and reload_config's launch-override re-application (cycle 938) all
+        // read it later.
+        //
+        // C7 regression fix: this used to be a wholesale
+        // `mem::take(&mut self.startup)`, which silently DEFAULTED all of
+        // those later reads — `--layout` / `--restore` / `--tab-handoff`
+        // never loaded at startup (verified live: `--layout` with a 2-tab
+        // file opened 1 tab) and live reloads dropped the `-m/-f/-b/-H/-T`
+        // overrides. Pinned by `startup_is_not_taken_wholesale` below.
+        let cmd_override = self.startup.command.take();
+        let cwd_override = self.startup.cwd.take();
         #[cfg(feature = "dev-record")]
-        let dev_record = startup
+        let dev_record = self
+            .startup
             .record
             .clone()
-            .map(|p| (p, startup.record_raw_input));
-        // Cycle 928 (agent-first A2): same — capture the `--agent-server`
-        // override before `startup` is consumed, so the control server start
-        // (further down, after the first paint) can read it.
-        let startup_agent_server = startup.agent_server;
-        let has_override = startup.command.is_some() || startup.cwd.is_some();
+            .map(|p| (p, self.startup.record_raw_input));
+        // Cycle 928 (agent-first A2): the `--agent-server` override for the
+        // control-server start further down (after the first paint).
+        let startup_agent_server = self.startup.agent_server;
+        let has_override = cmd_override.is_some() || cwd_override.is_some();
         let restored = if has_override {
-            let argv = startup.command.unwrap_or_default();
-            let cwd = startup
-                .cwd
+            let argv = cmd_override.unwrap_or_default();
+            let cwd = cwd_override
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned());
             if let Err(e) = ws.mux.new_tab_with(
@@ -9723,7 +9819,50 @@ impl App {
                             let _ = p.send_event(UserEvent::Wakeup);
                         })
                     };
-                    ws.mux.restore(&s, &self.cfg, cw, ch, &mk)
+                    // C7 (multi-window): window 1 of the session restores into
+                    // THIS window; each additional saved window opens via
+                    // open_window(Restore) — possible here because the GPU
+                    // context was cached just above. A legacy single-window
+                    // file normalizes to one entry.
+                    let wins = s.windows_normalized();
+                    if let Some((first, rest)) = wins.split_first() {
+                        let first_session = crate::session::Session {
+                            tabs: first.tabs.clone(),
+                            active: first.active,
+                            theme: None,
+                            windows: Vec::new(),
+                        };
+                        let ok = ws.mux.restore(&first_session, &self.cfg, cw, ch, &mk);
+                        if ok {
+                            // Window 1's saved geometry, clamped to the live
+                            // monitor layout (the saved monitor may be gone).
+                            if let (Some(g), Some(win)) = (first.geometry, ws.window.as_ref()) {
+                                let g = crate::session::clamp_geometry_to_monitors(
+                                    g,
+                                    &monitor_rects(event_loop),
+                                );
+                                win.set_outer_position(winit::dpi::PhysicalPosition::new(g.x, g.y));
+                                let _ =
+                                    win.request_inner_size(winit::dpi::PhysicalSize::new(g.w, g.h));
+                            }
+                            for sw in rest {
+                                if self
+                                    .open_window(event_loop, WindowOpen::Restore(sw.clone()), None)
+                                    .is_err()
+                                {
+                                    log::warn!(
+                                        "session restore: could not open an additional window"
+                                    );
+                                }
+                            }
+                            // Focus comes home to window 1 (open_window moves
+                            // focused_seq to each window it opens).
+                            self.focused_seq = ws.seq;
+                        }
+                        ok
+                    } else {
+                        false
+                    }
                 }
                 _ => false,
             }
@@ -11663,6 +11802,29 @@ mod tests {
         assert!(
             head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
             "the Resized handler must early-return on a 0-dimension size"
+        );
+    }
+
+    /// C7 regression guard. `resumed_inner` must take ONLY the consumed-once
+    /// CLI fields (`command`, `cwd`) from `self.startup` — a wholesale
+    /// `mem::take(&mut self.startup)` silently defaults every later read:
+    /// the `--tab-handoff` / `--layout` / `--restore` startup gates (they
+    /// loaded NOTHING — verified live, a 2-tab `--layout` opened 1 tab), the
+    /// save-session layout/restore gating, and reload_config's cycle-938
+    /// launch-override re-application.
+    #[test]
+    fn startup_is_not_taken_wholesale() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let taken = concat!("std::mem::take", "(&mut self.startup)");
+        assert!(
+            !src.contains(taken),
+            "self.startup must never be wholesale-taken; take the \
+             consumed-once fields individually"
+        );
+        assert!(
+            src.contains("let cmd_override = self.startup.command.take();")
+                && src.contains("let cwd_override = self.startup.cwd.take();"),
+            "the -e/-d overrides are the only consumed-once startup fields"
         );
     }
 

@@ -47,8 +47,34 @@ pub struct STab {
     pub focus: usize,
 }
 
+/// C7 (multi-window): a window's saved outer position + inner size,
+/// physical pixels. Restore clamps it to the visible monitors (the saved
+/// monitor may be unplugged) before applying.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// C7 (multi-window): one window's tabs within a session. `geometry` is
+/// `None` when the platform can't report an outer position (Wayland) — the
+/// WM places the window on restore.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SWindow {
+    pub tabs: Vec<STab>,
+    #[serde(default)]
+    pub active: usize,
+    #[serde(default)]
+    pub geometry: Option<SGeometry>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Session {
+    /// LEGACY single-window fields. C7 dual-writes window 1 here so an older
+    /// kettle (or a hand-rolled tool) reading the file still restores
+    /// something sensible; `windows` is the source of truth when present.
     pub tabs: Vec<STab>,
     pub active: usize,
     /// LEGACY back-compat field. Cycle 919 (audit L7): the theme is now
@@ -58,6 +84,11 @@ pub struct Session {
     /// (which stored a theme here) still deserialize. `default` so absent is OK.
     #[serde(default)]
     pub theme: Option<String>,
+    /// C7 (multi-window): every window's tabs + geometry, ordered window 1
+    /// first. `#[serde(default)]` so pre-multi-window files still load —
+    /// `windows_normalized` falls back to the legacy top-level fields.
+    #[serde(default)]
+    pub windows: Vec<SWindow>,
 }
 
 /// Cycle 291 / 789 (audit D1): sanitize a user-supplied layout name (from
@@ -193,7 +224,65 @@ impl Session {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tabs.is_empty()
+        self.tabs.is_empty() && self.windows.iter().all(|w| w.tabs.is_empty())
+    }
+
+    /// C7: the session's windows in restore order, whatever vintage the file
+    /// is. A v2 file returns its (non-empty) `windows` entries; a legacy
+    /// single-window file becomes one geometry-less `SWindow` from the
+    /// top-level fields. Empty-tab windows are dropped — nothing to restore.
+    pub fn windows_normalized(&self) -> Vec<SWindow> {
+        if !self.windows.is_empty() {
+            return self
+                .windows
+                .iter()
+                .filter(|w| !w.tabs.is_empty())
+                .cloned()
+                .collect();
+        }
+        if self.tabs.is_empty() {
+            return Vec::new();
+        }
+        vec![SWindow {
+            tabs: self.tabs.clone(),
+            active: self.active,
+            geometry: None,
+        }]
+    }
+}
+
+/// C7: clamp a saved window geometry so the window is actually reachable on
+/// the CURRENT monitor layout (the saved monitor may be unplugged or the
+/// resolution changed). If the window's top strip — the part you grab to
+/// move it — intersects no monitor, snap the position into the first
+/// monitor; the size is left alone (the WM clips oversize windows fine).
+/// Pure for testability; monitors are `(x, y, w, h)` rects in physical px.
+pub(crate) fn clamp_geometry_to_monitors(
+    g: SGeometry,
+    monitors: &[(i32, i32, u32, u32)],
+) -> SGeometry {
+    if monitors.is_empty() {
+        return g;
+    }
+    // The grabbable strip: the window's top 30px, inset 50px from each side
+    // (so "barely off-screen left" still counts as reachable if 50px of the
+    // titlebar shows).
+    let strip_l = g.x + 50;
+    let strip_r = g.x + g.w as i32 - 50;
+    let strip_t = g.y;
+    let strip_b = g.y + 30;
+    let visible = monitors.iter().any(|&(mx, my, mw, mh)| {
+        let (mr, mb) = (mx + mw as i32, my + mh as i32);
+        strip_l < mr && strip_r > mx && strip_t < mb && strip_b > my
+    });
+    if visible {
+        return g;
+    }
+    let (mx, my, mw, mh) = monitors[0];
+    SGeometry {
+        x: g.x.clamp(mx, (mx + mw as i32 - 100).max(mx)),
+        y: g.y.clamp(my, (my + mh as i32 - 100).max(my)),
+        ..g
     }
 }
 
@@ -480,6 +569,7 @@ mod tests {
             }],
             active: 0,
             theme: Some("Dracula".into()),
+            windows: vec![],
         };
         save_to_path(&s, &path).expect("save");
         assert!(path.exists(), "destination written");
@@ -522,6 +612,7 @@ mod tests {
             }],
             active: 0,
             theme: None,
+            windows: vec![],
         };
         save_to_path(&s2, &path).expect("second save");
         let loaded = load_from_path(&path).expect("load");
@@ -576,6 +667,7 @@ mod tests {
             }],
             active: 0,
             theme: Some("Dracula".into()),
+            windows: vec![],
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
@@ -603,6 +695,122 @@ mod tests {
     }
 
     #[test]
+    fn session_v2_windows_round_trip_with_geometry() {
+        // C7: the multi-window session shape — windows with geometry survive
+        // a JSON round-trip, and windows_normalized returns them in order.
+        let leaf = || STab {
+            root: SNode::Leaf {
+                cwd: None,
+                cmd: vec![],
+            },
+            focus: 0,
+        };
+        let s = Session {
+            // Dual-write mirror of window 1 (what save_session produces).
+            tabs: vec![leaf()],
+            active: 0,
+            theme: None,
+            windows: vec![
+                SWindow {
+                    tabs: vec![leaf()],
+                    active: 0,
+                    geometry: Some(SGeometry {
+                        x: 100,
+                        y: 200,
+                        w: 800,
+                        h: 600,
+                    }),
+                },
+                SWindow {
+                    tabs: vec![leaf(), leaf()],
+                    active: 1,
+                    geometry: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        let wins = back.windows_normalized();
+        assert_eq!(wins.len(), 2, "v2 windows are the source of truth");
+        assert_eq!(
+            wins[0].geometry,
+            Some(SGeometry {
+                x: 100,
+                y: 200,
+                w: 800,
+                h: 600
+            })
+        );
+        assert_eq!(wins[1].tabs.len(), 2);
+        assert_eq!(wins[1].active, 1);
+        assert!(!back.is_empty());
+    }
+
+    #[test]
+    fn legacy_session_normalizes_to_one_window() {
+        // C7: a pre-multi-window file (no `windows` field) loads and
+        // normalizes to a single geometry-less window from the top-level
+        // fields — and an OLD kettle reading a NEW dual-written file sees
+        // window 1 via those same top-level fields.
+        let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}},{"root":{"Leaf":{"cwd":null}}}],"active":1}"#;
+        let s: Session = serde_json::from_str(legacy).unwrap();
+        let wins = s.windows_normalized();
+        assert_eq!(wins.len(), 1);
+        assert_eq!(wins[0].tabs.len(), 2);
+        assert_eq!(wins[0].active, 1);
+        assert_eq!(wins[0].geometry, None);
+        // Empty-tab windows are dropped; fully-empty sessions normalize to [].
+        let empty = Session::default();
+        assert!(empty.windows_normalized().is_empty());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn clamp_geometry_snaps_offscreen_windows_into_a_monitor() {
+        // C7: a window saved on a now-unplugged monitor must come back
+        // reachable. One 1920x1080 monitor at the origin:
+        let mons = [(0, 0, 1920u32, 1080u32)];
+        // Fully on-screen geometry is untouched.
+        let g = SGeometry {
+            x: 100,
+            y: 100,
+            w: 800,
+            h: 600,
+        };
+        assert_eq!(clamp_geometry_to_monitors(g, &mons), g);
+        // A window on a (gone) second monitor to the right snaps back in.
+        let off = SGeometry {
+            x: 2500,
+            y: 300,
+            w: 800,
+            h: 600,
+        };
+        let c = clamp_geometry_to_monitors(off, &mons);
+        assert!(c.x <= 1920 - 100, "x clamped into the monitor: {c:?}");
+        assert_eq!(c.y, 300, "y already visible-range");
+        assert_eq!((c.w, c.h), (800, 600), "size untouched");
+        // A window above the screen comes down.
+        let above = SGeometry {
+            x: 100,
+            y: -900,
+            w: 800,
+            h: 600,
+        };
+        let c = clamp_geometry_to_monitors(above, &mons);
+        assert!(c.y >= 0, "y clamped down: {c:?}");
+        // Barely-overlapping titlebar (50px visible) is accepted as-is.
+        let edge = SGeometry {
+            x: -700,
+            y: 10,
+            w: 800,
+            h: 600,
+        };
+        assert_eq!(clamp_geometry_to_monitors(edge, &mons), edge);
+        // No monitors reported (headless oddity): pass through.
+        assert_eq!(clamp_geometry_to_monitors(off, &[]), off);
+    }
+
+    #[test]
     fn session_round_trips_focused_pane_index() {
         // Cycle 82: the session now records which leaf was focused so
         // restore brings the user back to the same pane within each tab.
@@ -626,6 +834,7 @@ mod tests {
             }],
             active: 0,
             theme: None,
+            windows: vec![],
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
