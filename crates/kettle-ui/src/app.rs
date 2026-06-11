@@ -10008,20 +10008,14 @@ impl App {
             // `Idle` remains harmless.
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
-                ws.detach_drag = prev.on_cursor_leave_window(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_micros() as u64)
-                        .unwrap_or(0),
-                );
+                ws.detach_drag = prev.on_cursor_leave_window();
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::CursorEntered { .. } => {
-                let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 let prev = std::mem::take(&mut ws.detach_drag);
-                ws.detach_drag = prev.on_cursor_reenter_window(x, y);
+                ws.detach_drag = prev.on_cursor_reenter_window();
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -10140,6 +10134,32 @@ impl App {
                             }
                         }
                     }
+                }
+                // C6 (tear-off): drive the detach FSM from the press origin.
+                // Distance decides click-vs-drag; WINDOW-BOUNDS CONTAINMENT
+                // decides inside/outside — Windows' SetCapture keeps
+                // streaming CursorMoved (with out-of-client coordinates)
+                // while the button is held but suppresses CursorLeft, so
+                // position is the reliable outside signal. The
+                // CursorLeft/Entered arms below remain as supplementary
+                // signals for platforms that do deliver them mid-drag.
+                if let Some((ox, oy)) = ws.drag_press {
+                    let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    let next = std::mem::take(&mut ws.detach_drag).on_mouse_move(cx - ox, cy - oy);
+                    let (sw, sh) = ws
+                        .renderer
+                        .as_ref()
+                        .map(|r| {
+                            let (w, h) = r.surface_size();
+                            (w as f32, h as f32)
+                        })
+                        .unwrap_or((800.0, 600.0));
+                    let outside = cx < 0.0 || cy < 0.0 || cx >= sw || cy >= sh;
+                    ws.detach_drag = if outside {
+                        next.on_cursor_leave_window()
+                    } else {
+                        next.on_cursor_reenter_window()
+                    };
                 }
                 if let Some(btn) = ws.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
@@ -10359,6 +10379,15 @@ impl App {
                             // == left, not middle / close).
                             if bcode == 0 {
                                 ws.tab_drag_active = true;
+                                // C6 (tear-off): arm the detach FSM alongside
+                                // the in-window reorder. Only a multi-tab
+                                // window can tear off — moving a lone tab out
+                                // would just re-create the same window.
+                                if ws.mux.tabs.len() > 1 {
+                                    ws.detach_drag =
+                                        crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
+                                    ws.drag_press = Some((px, py));
+                                }
                             }
                         }
                     }
@@ -10597,6 +10626,54 @@ impl App {
                     // during the drag are already committed; this just
                     // disarms the CursorMoved handler.
                     ws.tab_drag_active = false;
+                    // C6 (tear-off): a release while the detach FSM is
+                    // OUTSIDE the window tears the dragged tab off into a
+                    // new in-process window at the drop point (Windows
+                    // Terminal parity). The dragged tab is the ACTIVE tab —
+                    // the cycle-249 reorder keeps it active while the FSM's
+                    // armed index can go stale across reorders.
+                    let dropped_outside = matches!(
+                        ws.detach_drag,
+                        crate::detach::DragState::DraggingOutside { .. }
+                    );
+                    ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
+                    ws.drag_press = None;
+                    if dropped_outside && ws.mux.tabs.len() > 1 {
+                        let closing_idx = ws.mux.active;
+                        if let Some(dt) = ws.mux.detach_tab(closing_idx) {
+                            // Open at the drop point: window origin + cursor.
+                            // `outer_position` errs on Wayland — `None` lets
+                            // the WM place the window.
+                            let pos = ws
+                                .window
+                                .as_ref()
+                                .and_then(|w| w.outer_position().ok())
+                                .map(|p| {
+                                    winit::dpi::PhysicalPosition::new(
+                                        p.x + ws.cursor.x as i32,
+                                        p.y + ws.cursor.y as i32,
+                                    )
+                                });
+                            match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos) {
+                                Ok(()) => {
+                                    self.fire_tab_close_event(closing_idx);
+                                    self.resize_all(ws);
+                                    if let Some(w) = &ws.window {
+                                        w.request_redraw();
+                                    }
+                                }
+                                Err(WindowOpen::AdoptTab(dt)) => {
+                                    log::warn!(
+                                        "tear-off: open_window failed; tab kept in source window"
+                                    );
+                                    ws.mux.attach_tab(dt, Some(closing_idx));
+                                }
+                                Err(_) => {
+                                    unreachable!("open_window returns the WindowOpen it was given")
+                                }
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -10776,6 +10853,10 @@ impl App {
                     // Cycle 904: a focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
                     ws.mouse_btn = None;
+                    // C6: a focus loss also cancels an in-flight tab tear-off
+                    // (the release will land on whatever window took focus).
+                    ws.detach_drag = crate::detach::DragState::default();
+                    ws.drag_press = None;
                 }
                 // Cycle 344 (Terminator parity, terminatorlib/config.py:77
                 // `hide_on_lose_focus`): Quake-style auto-hide. When
@@ -10835,6 +10916,20 @@ impl App {
                     if let Some(rec) = self.recorder.as_mut() {
                         dev_record_key(rec, &event.logical_key, mods);
                     }
+                }
+                // C6 (tear-off): Esc cancels an in-flight tab drag and is
+                // consumed — it must not leak to the PTY or close a modal.
+                if !matches!(ws.detach_drag, crate::detach::DragState::Idle)
+                    && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    let (next, _restored) = std::mem::take(&mut ws.detach_drag).cancel();
+                    ws.detach_drag = next;
+                    ws.drag_press = None;
+                    ws.tab_drag_active = false;
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
                 }
                 // Keep the cursor solid while actively typing (cycle 144).
                 // Routes through the shared helper so the eight

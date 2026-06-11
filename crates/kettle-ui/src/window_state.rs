@@ -105,10 +105,16 @@ pub(crate) struct WindowState {
     /// Cycle 249: drag-to-reorder tab state. `Some(_)` while a left-
     /// mouse-button press in the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
-    /// Cycle 402: cross-window drag FSM state. Distinct from the in-window
+    /// Cycle 402: tab tear-off drag FSM state. Distinct from the in-window
     /// `tab_drag_active` reorder (cycle 249); both fire from the same
-    /// mouse-down on the tab bar. Wired live in C6 of the multi-window cycle.
+    /// mouse-down on the tab bar. Wired live in C6 of the multi-window
+    /// cycle: a release while DraggingOutside tears the tab off into a new
+    /// in-process window at the drop point.
     pub(crate) detach_drag: crate::detach::DragState,
+    /// C6: surface position of the tab-bar mouse-down that armed
+    /// `detach_drag` — the origin the FSM's click-vs-drag distance is
+    /// measured from. `None` while no tear-off gesture is armed.
+    pub(crate) drag_press: Option<(f32, f32)>,
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
@@ -187,6 +193,7 @@ impl WindowState {
             last_cursor_icon: None,
             tab_drag_active: false,
             detach_drag: crate::detach::DragState::default(),
+            drag_press: None,
             hovered_close_idx: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
