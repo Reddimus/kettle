@@ -709,9 +709,6 @@ static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// A tab lifted out of one Mux, panes and all, ready to be attached to
 /// another (the C5 live tab move — PTYs keep running, nothing respawns).
 /// Pane ids stay valid across the move because they're process-global.
-// C2: consumed by the C5 MoveTabToNewWindow rewrite later this cycle; until
-// then only the mux tests exercise it (same staging as extract_tab had).
-#[allow(dead_code)]
 pub struct DetachedTab {
     pub tab: Tab,
     pub panes: Vec<(u64, Pane)>,
@@ -925,11 +922,13 @@ impl Mux {
     /// Cycle 397 (Terminator parity, detachable-tabs Bucket-D
     /// sub-cycle 2): serialize ONE tab (by index) to the same
     /// STab wire format that session.json uses. Returns None when
-    /// the index is out-of-range. Used by the detachable-tabs path
-    /// (cycle-400-411 design doc) to wire cross-process tab handoff
-    /// via JSON-over-Unix-socket. Called from `App::on_tab_detach`
-    /// at app.rs:1562 and `App::serialize_tab_for_handoff` at
-    /// app.rs:5832 (cycle 411).
+    /// the index is out-of-range.
+    // C5: its production callers were the serialize-and-respawn handoff
+    // senders, retired in favor of the live in-process tab move. Kept (tests
+    // pin the contract) — the deprecated `--tab-handoff` receive path still
+    // consumes the wire format for one release, and C7's per-window session
+    // serialization is the natural next consumer.
+    #[allow(dead_code)]
     pub fn serialize_tab(&self, idx: usize) -> Option<STab> {
         let t = self.tabs.get(idx)?;
         Some(STab {
@@ -1739,8 +1738,6 @@ impl Mux {
     /// `extract_and_insert_tab_roundtrip`); this adds the pane transfer.
     /// Unlike `close_tab_at`, nothing is pushed to `closed_tabs` — the tab
     /// isn't closing, it's moving. Returns `None` for an out-of-range idx.
-    // C2: consumed by C5 (MoveTabToNewWindow → open_window(AdoptTab)).
-    #[allow(dead_code)]
     pub fn detach_tab(&mut self, idx: usize) -> Option<DetachedTab> {
         let tab = self.extract_tab(idx)?;
         let mut ids = Vec::new();
@@ -1760,9 +1757,6 @@ impl Mux {
     /// `insert_tab` semantics — and is marked seen. Returns the index it
     /// landed at. Pane ids can't collide: they're process-global
     /// (`NEXT_PANE_ID`), and a detached tab's ids left their source map.
-    // C2: consumed by C4/C5 (open_window(AdoptTab) attaches into the new
-    // window's Mux).
-    #[allow(dead_code)]
     pub fn attach_tab(&mut self, dt: DetachedTab, at: Option<usize>) -> usize {
         for (id, p) in dt.panes {
             debug_assert!(

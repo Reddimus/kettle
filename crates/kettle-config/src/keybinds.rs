@@ -406,14 +406,13 @@ pub enum Action {
     /// 303) via the remote-control IPC; this is the in-process keybind
     /// equivalent for users who don't want to set up a global hotkey.
     ToggleWindowVisibility,
-    /// Cycle 384 (Terminator parity, detachable-tabs Bucket-D
-    /// Wayland-fallback per docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md
-    /// sub-cycle 10): move the focused tab to a new kettle window.
-    /// Keyboard-driven alternative for Wayland (where cross-window
-    /// cursor drag isn't feasible without global tracking). New
-    /// window inherits cwd; running shells stay in the source tab
-    /// (cross-process PTY transfer needs SCM_RIGHTS — multi-cycle
-    /// full impl thread).
+    /// Cycle 384 (Terminator parity, detachable-tabs): move the focused tab
+    /// to a new kettle window. Since the multi-window cycle (C5) this is a
+    /// LIVE in-process move — the tab's panes (PTYs, scrollback, running
+    /// programs) transfer untouched to the new window; nothing respawns.
+    /// Keyboard-driven equivalent of the drag tear-off (C6), and the only
+    /// route on Wayland (no global cursor tracking). No-op on a 1-tab
+    /// window.
     MoveTabToNewWindow,
     /// Cycle 407 (Terminator parity, titlebar Bucket-D sub-cycle 8):
     /// open the edit overlay for the focused pane's broadcast

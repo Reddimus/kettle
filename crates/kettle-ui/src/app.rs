@@ -1966,104 +1966,6 @@ impl App {
         self.windows.insert(seq, ws);
     }
 
-    /// Cycle 410: SCM_RIGHTS-based cross-process tab handoff.
-    /// Creates a Unix socketpair, fork+exec's a kettle child with
-    /// the child's socket fd as fd 3 + `--tab-handoff-fd 3`, then
-    /// calls `fd_transport::send_fds` to ship the serialized tab
-    /// JSON. Returns true on success; false on any failure
-    /// (caller falls through to file-fallback).
-    ///
-    /// Currently sends JSON only; live PTY-fd transfer is the
-    /// final sub-cycle 7 piece that requires extracting PTYs
-    /// from the source Pane (a non-trivial alacritty_terminal
-    /// internal change).
-    #[cfg(unix)]
-    #[allow(unused_variables)]
-    fn try_move_tab_to_new_window_scm_rights(
-        &mut self,
-        ws: &mut WindowState,
-        _event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> bool {
-        use std::os::unix::io::AsRawFd;
-        let stab = match ws.mux.serialize_tab(ws.mux.active) {
-            Some(s) => s,
-            None => return false,
-        };
-        let session = crate::session::Session {
-            tabs: vec![stab],
-            active: 0,
-            theme: Some(self.cfg.theme_name.clone()),
-        };
-        let json = match serde_json::to_vec(&session) {
-            Ok(j) => j,
-            Err(_) => return false,
-        };
-        let (parent, child) = match std::os::unix::net::UnixStream::pair() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let child_fd = child.as_raw_fd();
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--tab-handoff-fd").arg("3");
-        if let Some(p) = self.config_path.as_ref() {
-            cmd.arg("--config").arg(p);
-        }
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        // The child socket needs to end up at fd 3 in the child
-        // process. pre_exec runs in the child between fork + exec;
-        // dup2 the socket into 3 + clear close-on-exec so it
-        // survives the exec.
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::dup2(child_fd, 3) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Clear FD_CLOEXEC on fd 3 so it survives exec.
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags >= 0 {
-                    libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                }
-                Ok(())
-            });
-        }
-        match cmd.spawn() {
-            Ok(_) => {
-                // Drop the child end in the parent so we don't
-                // hold an extra reference.
-                drop(child);
-                // Send the JSON via send_fds (empty fds for now;
-                // future cycle adds PTY fds).
-                //
-                // Cycle 776: if the send fails the child never receives the
-                // tab — so we must NOT close the source tab. Returning false
-                // here drops `parent` (signalling EOF to the empty child) and
-                // routes the caller to the file-fallback, so the user keeps
-                // their session. The old `let _ =` swallowed the error and
-                // then closed the source tab unconditionally below, silently
-                // losing the tab on any socket error (ENOBUFS / EMSGSIZE / …).
-                if let Err(e) = crate::fd_transport::send_fds(&parent, &json, &[]) {
-                    log::error!("tab handoff send_fds failed, keeping source tab: {e}");
-                    return false;
-                }
-                drop(parent);
-                // Close the source tab now that the child is up.
-                // Cycle 424: fire TabClose so plugins see the close.
-                let closing_idx = ws.mux.active;
-                let _ = ws.mux.close_tab();
-                self.fire_tab_close_event(closing_idx);
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
     pub fn run() -> Result<()> {
         Self::run_with(crate::Options::default())
     }
@@ -7249,79 +7151,44 @@ impl App {
             // This gives the user the "move this work to a new
             // window" UX path Terminator's detachable_tabs ships.
             Action::MoveTabToNewWindow => {
-                // Cycle 410 (Terminator parity, detachable-tabs
-                // Bucket-D sub-cycle 7 source): on Unix, prefer the
-                // SCM_RIGHTS socketpair path over the cycle-405 file-
-                // fallback. socketpair → fork+exec child with
-                // --tab-handoff-fd 3 → parent send_fds the serialized
-                // tab + (future: PTY fds) → child recv_fds + restore.
-                //
-                // Falls through to the cycle-405 file-fallback when
-                // socketpair fails or on Windows/Wayland.
-                //
-                // Cycle 405 (Terminator parity, detachable-tabs
-                // Bucket-D sub-cycle 8 full): serialize the focused
-                // tab to a one-shot JSON handoff file + spawn a
-                // new kettle process with --tab-handoff PATH.
-                // The target reads + reconstructs the tab (cycle 404).
-                //
-                // Running shells in the source tab stay in the
-                // source window (true PTY-fd transfer needs the
-                // SCM_RIGHTS path, sub-cycle 7). The file-fallback
-                // works cross-platform incl. Windows + Wayland.
-                #[cfg(unix)]
-                if self.try_move_tab_to_new_window_scm_rights(ws, event_loop) {
+                // C5 (multi-window): LIVE in-process move — the tab's panes
+                // (PTYs, scrollback, running programs) transfer untouched to
+                // a brand-new window via detach_tab → open_window(AdoptTab).
+                // Replaces the cycle-405/410 serialize-and-respawn handoff
+                // (SCM_RIGHTS socketpair on Unix / one-shot JSON file
+                // elsewhere), which never transferred live PTYs — the target
+                // process respawned the shells from argv+cwd, losing running
+                // programs. The receive-side `--tab-handoff` parsing stays
+                // one release for an upgrade-in-flight old sender.
+                if ws.mux.tabs.len() <= 1 {
+                    // Moving a lone tab out of its window is a no-op: you'd
+                    // get the same window back.
                     return;
                 }
-                let cwd = ws
-                    .mux
-                    .focused()
-                    .and_then(|p| p.term.current_dir())
-                    .or_else(|| {
-                        std::env::current_dir()
-                            .ok()
-                            .map(|p| p.display().to_string())
-                    });
-                // Serialize the focused tab to a temp file.
-                let handoff_path: Option<std::path::PathBuf> =
-                    ws.mux.serialize_tab(ws.mux.active).and_then(|stab| {
-                        let session = crate::session::Session {
-                            tabs: vec![stab],
-                            active: 0,
-                            theme: Some(self.cfg.theme_name.clone()),
-                        };
-                        let path = std::env::temp_dir()
-                            .join(format!("kettle-handoff-{}.json", std::process::id()));
-                        serde_json::to_string(&session)
-                            .ok()
-                            .and_then(|json| std::fs::write(&path, json).ok())
-                            .map(|_| path)
-                    });
-                if let Ok(exe) = std::env::current_exe() {
-                    let mut cmd = std::process::Command::new(exe);
-                    if let Some(p) = handoff_path.as_ref() {
-                        cmd.arg("--tab-handoff").arg(p);
-                    } else if let Some(d) = cwd {
-                        cmd.arg("--working-directory").arg(d);
-                    }
-                    if let Some(p) = self.config_path.as_ref() {
-                        cmd.arg("--config").arg(p);
-                    }
-                    cmd.stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
-                    if cmd.spawn().is_ok() {
-                        // Cycle 424: fire TabClose so plugins see the close.
-                        let closing_idx = ws.mux.active;
-                        let _ = ws.mux.close_tab();
+                let closing_idx = ws.mux.active;
+                let Some(dt) = ws.mux.detach_tab(closing_idx) else {
+                    return;
+                };
+                match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None) {
+                    Ok(()) => {
+                        // The tab LEFT this window; plugins see the same
+                        // close event the process-handoff path fired
+                        // (cycle 424).
                         self.fire_tab_close_event(closing_idx);
-                    } else {
-                        log::warn!("MoveTabToNewWindow: spawn failed; tab kept in source window");
-                        // Clean up the orphan handoff file.
-                        if let Some(p) = handoff_path.as_ref() {
-                            let _ = std::fs::remove_file(p);
+                        self.resize_all(ws);
+                        if let Some(w) = &ws.window {
+                            w.request_redraw();
                         }
                     }
+                    Err(WindowOpen::AdoptTab(dt)) => {
+                        // Window creation failed — put the live tab back
+                        // exactly where it was; nothing is lost.
+                        log::warn!(
+                            "MoveTabToNewWindow: open_window failed; tab kept in source window"
+                        );
+                        ws.mux.attach_tab(dt, Some(closing_idx));
+                    }
+                    Err(_) => unreachable!("open_window returns the WindowOpen it was given"),
                 }
             }
             Action::ResetAndClear => {
@@ -10132,19 +9999,13 @@ impl App {
             // IPC handshake); CursorEntered → DraggingInside (user
             // brought the cursor back; cancel the cross-window flow).
             //
-            // Staging note (cycle 854 audit): the FSM's *entry* transitions
-            // (`on_mouse_down_on_tab` → ArmedInside, `on_mouse_move` →
-            // DraggingInside) are intentionally NOT yet wired into the tab-bar
-            // mouse handler — the cross-window tear-off needs the IPC
-            // handshake + drop sub-cycles (7-11) that aren't built, and is
-            // SCM_RIGHTS-based (Unix-only; `fd_transport` is `#![cfg(unix)]`).
-            // So `detach_drag` is always `Idle` here and these two arms are
-            // inert by design, NOT an accidental dead-wire. In-window tab
-            // drag-to-reorder is the separate cycle-249 `tab_drag_active`
-            // path; the working cross-window move today is the keyboard
-            // `Action::MoveTabToNewWindow` (cycle 384) +
-            // `try_move_tab_to_new_window_scm_rights`. Tracked for completion;
-            // a no-op transition on `Idle` is harmless until then.
+            // Staging note (cycle 854 audit, updated by C5): the FSM's
+            // *entry* transitions are wired by C6 of the multi-window cycle
+            // (mouse-down arming on the tab bar). The working cross-window
+            // move is the keyboard `Action::MoveTabToNewWindow`, now a LIVE
+            // in-process detach_tab → open_window(AdoptTab) (the SCM_RIGHTS
+            // process-handoff sender is retired). A no-op transition on
+            // `Idle` remains harmless.
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_leave_window(
