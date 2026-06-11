@@ -12,7 +12,6 @@ use kettle_render::{
     TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -20,12 +19,13 @@ use winit::window::{CursorIcon, Fullscreen, UserAttentionType, Window, WindowId}
 
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
+use crate::window_state::WindowState;
 
 /// Cycle 904 (audit): live state for a split-divider mouse drag — the addressed
 /// split (`path`) and its orientation. The split's rect is re-fetched from
 /// `split_seams` on every move (keyed by `path`) so a layout change mid-drag
 /// (another pane closing) can't desync the ratio math.
-struct SplitDrag {
+pub(crate) struct SplitDrag {
     path: Vec<bool>,
     dir: Dir,
 }
@@ -65,7 +65,7 @@ pub enum UserEvent {
     RemoteCommand,
     /// Cycle 928 (agent-first A2): the control server enqueued a message
     /// (new connection / request / disconnect). The main thread drains the
-    /// server channel and dispatches each request against `self.mux`.
+    /// server channel and dispatches each request against `ws.mux`.
     Ctl,
     /// Cycle 794: the background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
@@ -997,7 +997,7 @@ fn shell_quote_path(p: &std::path::Path) -> String {
 /// Cycle 298-301 vi-mode (Alacritty parity). Carries the vi cursor's
 /// position + the visual-selection anchor when vi-mode is active.
 #[derive(Debug, Clone, Copy)]
-struct ViState {
+pub(crate) struct ViState {
     /// Vi cursor row in the focused pane's grid coordinates (0 = top
     /// of viewport).
     row: usize,
@@ -1139,7 +1139,7 @@ fn smart_selection_at(line: &str, col: usize) -> Option<(usize, usize)> {
 
 /// One on-screen quick-select target: where its label sits and what it is.
 #[derive(Clone)]
-struct HintTarget {
+pub(crate) struct HintTarget {
     row: usize,
     col: usize,
     label: String,
@@ -1380,7 +1380,7 @@ pub struct ConfirmDialogState {
     pub on_confirm: ConfirmAction,
 }
 
-struct ContextMenuState {
+pub(crate) struct ContextMenuState {
     anchor: (f32, f32),
     items: Vec<ContextMenuItem>,
     /// Index of the currently highlighted item — always points at an
@@ -1811,32 +1811,35 @@ fn clamp_context_menu_anchor(
 }
 
 /// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
-type FocusKey = (usize, Option<u64>);
+pub(crate) type FocusKey = (usize, Option<u64>);
 /// Cycle 803 cache key for the search re-scan: `(query, focus, tab last-output)`.
-type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
+pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
 /// Cycle 803 cache key for the viewport link re-scan: `(focus, tab last-output,
 /// scroll display_offset)`.
-type LinksScanKey = (FocusKey, Option<std::time::Instant>, Option<usize>);
+pub(crate) type LinksScanKey = (FocusKey, Option<std::time::Instant>, Option<usize>);
 
 pub struct App {
     cfg: Config,
-    window: Option<Arc<Window>>,
-    /// Cycle 745: OS taskbar progress, driven by the focused pane's OSC 9;4
-    /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
-    taskbar: crate::taskbar::Taskbar,
-    /// Cycle 869: true while an OS attention request (taskbar flash / dock
-    /// bounce) is outstanding. winit's `request_user_attention(None)` doesn't
-    /// reliably stop the Win11 taskbar flash, so we track outstanding requests
-    /// and clear them directly via `Taskbar::clear_attention` on focus-gain.
-    attention_active: bool,
+    /// C1 (multi-window foundation): all per-window state, keyed by the
+    /// window's stable sequence number (`WindowState::seq`, 1-based, never
+    /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
+    /// ...). The `ApplicationHandler` entry points remove the addressed entry,
+    /// run the inner handler with disjoint `&mut self` (globals) +
+    /// `&mut WindowState` borrows, then reinsert — see window_state.rs for the
+    /// dispatch contract.
+    windows: std::collections::BTreeMap<u64, WindowState>,
+    /// Seq of the window that has (or most recently had) OS focus. Routes
+    /// window-less events (UserEvent wakeups, remote/ctl/Lua commands).
+    focused_seq: u64,
+    /// Next `WindowState::seq` to assign. Consumed by `open_window` (C4 of
+    /// the multi-window cycle); until then only written at construction.
+    #[allow(dead_code)]
+    next_window_seq: u64,
     /// Cycle 875: developer session recorder (asciicast trace). `Some` only in
     /// a `dev-record` feature build when `--record PATH` / `KETTLE_RECORD` was
     /// given; compiled out entirely of shipped builds.
     #[cfg(feature = "dev-record")]
     recorder: Option<crate::dev_record::Recorder>,
-    renderer: Option<Renderer>,
-    mux: Mux,
-    mods: ModifiersState,
     proxy: EventLoopProxy<UserEvent>,
     /// Cycle 928 (agent-first A2): the in-process control server, present when
     /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
@@ -1848,252 +1851,48 @@ pub struct App {
     /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
     pending_runs: std::collections::HashMap<u64, PendingRun>,
     clipboard: Option<arboard::Clipboard>,
-    fullscreen: bool,
-    cursor: PhysicalPosition<f64>,
-    selecting: bool,
-    /// Dragging the focused pane's scrollbar thumb.
-    dragging_scrollbar: bool,
-    /// Cycle 904 (audit): in-progress mouse drag of a split divider. `Some`
-    /// while the left button is held after a press landed on a divider seam;
-    /// each CursorMoved recomputes the addressed split's ratio from the cursor.
-    dragging_split: Option<SplitDrag>,
-    /// `(query, index)` last scrolled-to, so the viewport follows search
-    /// matches into scrollback without re-scrolling every frame.
-    search_revealed: Option<(String, usize)>,
-    /// Cycle 803: cache key for the last completed search scan —
-    /// `(query, focused-pane, that tab's last-output instant)`. `update_search`
-    /// runs every frame while the overlay is open; without this it re-ran the
-    /// full-scrollback regex scan (O(history) per match attempt) ~60×/s even
-    /// when nothing changed. We re-scan only when the query, the focused pane,
-    /// or the tab's output (new text could create/remove matches) changed.
-    search_scan_key: Option<SearchScanKey>,
-    /// Cycle 803: cache key for the last viewport link-autodetect scan —
-    /// `(focused-pane, that tab's last-output instant, scroll display_offset)`.
-    /// `update_links` ran `kettle_core::links` (a full-viewport URL regex pass)
-    /// every frame; the viewport's link set only changes on output, scroll, or
-    /// a focus switch, so we re-scan only then (the cheap part — reading the
-    /// scroll offset — still runs per frame to detect the change).
-    links_scan_key: Option<LinksScanKey>,
-    mouse_btn: Option<u8>,
-    /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
-    /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
-    /// intra-cell moves; a fast drag would otherwise flood one SGR report
-    /// per pixel of travel (cycle 842, audit).
-    last_mouse_cell: Option<(usize, usize)>,
-    links: Vec<kettle_core::Link>,
-    ssh_input: Option<String>,
-    /// `Some((query, selected))` while the command palette is open.
-    palette_input: Option<(String, usize)>,
-    /// Cycle 756: `Action::OpenSettings` overlay navigation. `Some` while the
-    /// in-app settings panel is open. Field values are read live from
-    /// `self.cfg`; changes persist immediately via `persist_pref` + reload.
-    settings_nav: Option<crate::settings::SettingsNav>,
-    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
-    /// `Action::OpenLayoutPicker` modal state. Same shape as
-    /// `palette_input` — (typed query, selected index) — but
-    /// ranks against the cycle-708 `Session::list_layouts`
-    /// instead of the cycle-104 command palette. Enter spawns
-    /// `kettle --layout NAME` as a new window.
-    layout_picker_input: Option<(String, usize)>,
-    /// Active quick-select hint mode: detected targets + typed prefix.
-    hint_state: Option<(Vec<HintTarget>, String)>,
-    /// Right-click context menu state (`Some` while open). Lives next
-    /// to the other modal overlays — same close-all-modals discipline,
-    /// same Esc-to-dismiss key route. Anchored at the click point so
-    /// the menu appears where the user looked, not at a fixed corner.
-    context_menu: Option<ContextMenuState>,
-    /// Cycle 369 (Terminator parity, replaces cycle-354 placeholders):
-    /// when `Some`, the user is editing a window/tab/pane title via
-    /// an inline overlay. Enter applies + clears; Esc cancels +
-    /// clears; printable chars append; Backspace removes one.
-    editing_title: Option<TitleEditState>,
-    /// Cycle 648 (sub-cycle 2 of confirm-dialog design): when `Some`,
-    /// a confirm modal is open. Keyboard input routes to modal
-    /// dispatch (`Tab` cycles `focus_idx`, `Enter` confirms, `Esc`
-    /// cancels) and the renderer paints the centered modal panel
-    /// over a dimming backdrop. State landed now; sub-cycle 3 wires
-    /// the renderer, sub-cycle 4 wires keyboard nav, sub-cycle 5
-    /// wires the dispatch interception for `Action::CloseWindow`.
-    confirm_dialog: Option<ConfirmDialogState>,
-    window_focused: bool,
-    /// True while the OS mouse cursor is hidden because the user is typing
-    /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
-    mouse_hidden: bool,
-    /// Last `CursorIcon` we pushed to the window — used to dedupe so we
-    /// don't issue a `set_cursor` syscall on every CursorMoved event.
-    /// `None` until the first call, which guarantees the initial state
-    /// gets pushed exactly once.
-    last_cursor_icon: Option<CursorIcon>,
-    /// Cycle 249: drag-to-reorder tab state. `Some(_)` while a left-
-    /// mouse-button press in the tab bar is being held; cleared on
-    /// release. Mouse moves while held swap the active tab by the
-    /// delta between the current cursor index and the active index.
-    tab_drag_active: bool,
-    /// Cycle 402 (Terminator parity, detachable-tabs Bucket-D
-    /// sub-cycle 6): cross-window drag FSM state. Distinct from
-    /// the existing in-window tab_drag_active (cycle 249) — that
-    /// handles drag-to-reorder within this window. detach_drag
-    /// handles cross-window drag-to-detach. Both fire from the
-    /// same mouse-down on the tab bar.
-    detach_drag: crate::detach::DragState,
-    /// Index of the tab whose close-button (`✕`) zone the mouse cursor
-    /// is currently over. Drives both the OS pointer-cursor swap and
-    /// the renderer's hover-background quad so the trailing `✕` reads
-    /// as a clickable button rather than part of the title text.
-    /// Updated in `sync_cursor_icon` on `CursorMoved`; cleared when
-    /// the cursor leaves the bar or the bar is hidden.
-    hovered_close_idx: Option<usize>,
-    /// Cycle 290 triggers: compiled regex set built from
-    /// `cfg.triggers` at App construction (and after live reload).
-    /// Invalid patterns are logged via `log::warn!` and dropped, so a
-    /// malformed `trigger = ` line on one rule doesn't sink the whole
-    /// trigger set.
+    /// Cycle 290 triggers: compiled regex set built from `cfg.triggers` at App
+    /// construction (and after live reload). Invalid patterns are logged via
+    /// `log::warn!` and dropped.
     compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
-    /// Cycle 298 vi-mode (Alacritty parity), sub-cycle 1 of 4.
-    /// `Some(ViState)` when the user has triggered ToggleViMode and
-    /// kettle is intercepting keys for vi-style navigation; `None`
-    /// otherwise. Sub-cycle 2 wires h/j/k/l movement; sub-cycle 3
-    /// adds the visible block cursor render; sub-cycle 4 adds `v`
-    /// visual selection + `y` yank.
-    vi_mode: Option<ViState>,
-    /// Cycle 290: per-trigger last-fire timestamps. Dedupes a fast-
-    /// arriving match flood (e.g., a build script printing 100 error
-    /// lines in one frame should only nudge the user once, not
-    /// 100×). Cleared when any trigger fires past a 2-second
-    /// quietness window.
+    /// Cycle 290: per-trigger last-fire timestamps. Dedupes a fast-arriving
+    /// match flood; cleared when any trigger fires past a 2-second window.
     last_trigger_fire: std::time::Instant,
-    /// Cycle 656 (Terminator parity, sub-cycle 6 of
-    /// [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): cached
-    /// `sysinfo::System` owned across ticks so the process-list
-    /// refresh amortizes (sysinfo's internal cache survives between
-    /// `refresh_processes_specifics` calls). Used by the
-    /// per-pane remote-session detector.
-    /// Cycle 851 (audit): a shared snapshot scanner — refreshes the OS process
-    /// list + parent→children index once per poll tick, then answers every
-    /// pane from it (was one OS walk + map build *per pane*).
+    /// Cycle 656/851: shared snapshot scanner — refreshes the OS process list
+    /// and parent→children index once per poll tick, then answers every pane
+    /// from it. Used by the per-pane remote-session detector.
     remote_scanner: kettle_remote::RemoteScanner,
-    /// Cycle 656: throttle the remote-detect poll to ~5 Hz. The
-    /// process-list refresh is fast on Linux (<1 ms) but no need
-    /// to walk every tick — SSH/Docker sessions don't fire-up
-    /// faster than a couple times per second.
+    /// Cycle 656: throttle the remote-detect poll to ~5 Hz.
     last_remote_poll: std::time::Instant,
-    /// Cycle 666 (sub-cycle 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)): the
-    /// most-recent "schedule decision" (true=dark, false=light)
-    /// we've applied. A boundary-crossing fires the theme swap
-    /// exactly once (instead of every tick the schedule says
-    /// "now's dark"). `None` = haven't checked yet; first check
-    /// seeds it without swapping the theme.
+    /// Cycle 666: the most-recent auto-theme "schedule decision" (true=dark)
+    /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
-    /// Cycle 693 Terminator parity (`key_scaled_zoom`). When
-    /// `Action::ScaledZoom` enters the zoom state, it saves the
-    /// font size here so the leave-zoom path can restore it
-    /// exactly. `None` means "not currently in scaled zoom" — so
-    /// repeated `ToggleZoom` taps from other code paths don't
-    /// accidentally undo this.
-    scaled_zoom_prev_font_size: Option<f32>,
-    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
-    /// `LuaEvent::PaneFocus`). The pane id we last fired the
-    /// focus-change event for. `None` until the first
-    /// `poll_focus_event` tick — that first tick emits with
-    /// `prev = None` so plugins can seed their state. Diff
-    /// against `self.mux.active_focus()` each redraw; emit on
-    /// boundary-cross.
-    last_emitted_focus: Option<u64>,
-    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
-    /// `LuaEvent::TitleChanged`). Snapshot of the last title we
-    /// emitted a `title_changed` event for, keyed by pane id.
-    /// Diffed against `mux.panes[].title` each redraw; emit on
-    /// boundary-cross. Entries for closed panes drop on next
-    /// tick (we only iterate live panes — closed ids never get
-    /// re-checked, so the map self-prunes on close+reopen of
-    /// the same id since `Pane::id` is monotonic).
-    last_emitted_titles: std::collections::HashMap<u64, String>,
-    blink_on: bool,
-    last_blink: std::time::Instant,
-    last_bell: Option<std::time::Instant>,
-    /// Cycle 910 (R2): coalesce output-driven repaints. `last_paint` is when the
-    /// last frame painted; `coalescing_paint` marks a deferred output paint
-    /// whose frame budget has not elapsed yet. Capping PTY-output paints to one
-    /// per `OUTPUT_FRAME_BUDGET` lets a non-atomic repaint burst (apps that skip
-    /// DEC 2026 synchronized output, e.g. Claude Code) settle into a single
-    /// frame instead of being snapshot mid-update — the transient that flashed
-    /// the cursor a row above the prompt under load. Input/cursor paints bypass
-    /// this (they call `request_redraw` directly), so typing stays instant.
-    last_paint: Option<std::time::Instant>,
-    coalescing_paint: bool,
-    last_click: Option<(std::time::Instant, usize, usize, u8)>,
-    /// Last OS window title set (dedupe `set_title` syscalls).
-    last_title: String,
     /// Explicit `--config` file (persists for live reload).
     config_path: Option<std::path::PathBuf>,
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
-    /// Cycle 302: drop guard for the remote-control watcher. Stays
-    /// alive for the whole App lifetime; dropping the watcher would
-    /// kill the notify thread without warning.
+    /// Cycle 302: drop guard for the remote-control watcher.
     _remote_watcher: Option<notify::RecommendedWatcher>,
-    /// Cycle 325 Lua scripting: bytes the user's `--lua-script`
-    /// queued via `kettle.send_text(s)` before the first pane
-    /// existed. Drained + written to the first focused pane's
-    /// PTY once that pane is ready.
+    /// Cycle 325 Lua scripting: bytes the user's `--lua-script` queued via
+    /// `kettle.send_text(s)` before the first pane existed.
     pending_lua_send: Vec<u8>,
-    /// Cycle 326 Lua scripting: Actions the user's `--lua-script`
-    /// queued via `kettle.exec_action(name)`. Drained + dispatched
-    /// after the first pane spawns (some actions like
-    /// `toggle_vi_mode` need a focused pane to operate on).
+    /// Cycle 326 Lua scripting: Actions queued via `kettle.exec_action(name)`,
+    /// drained after the first pane spawns.
     pending_lua_actions: Vec<kettle_config::Action>,
-    /// Cycle 412 (Terminator parity, exit-action = restart impl):
-    /// pane ids whose shell exited + cfg.exit_action requested
-    /// restart. Drained AFTER drain_events (so we don't borrow
-    /// self.mux mutably twice in one tick), spawns a NEW tab
-    /// containing the same argv + cwd via `Mux::new_tab_with`
-    /// (cycle 418); the dead pane is reaped at end-of-redraw.
-    /// Dedup'd on push (cycle 452) so alacritty's `Exit` +
-    /// `ChildExit` pair only spawn one new tab.
-    pending_pane_restarts: Vec<u64>,
-    /// Cycle 366 (Terminator plugin parity, plugin Bucket-D
-    /// sub-cycle 3): the live LuaEngine persisted across the App's
-    /// lifetime so `kettle.on(event, callback)` registrations stay
-    /// in scope + LuaEngine::fire_event(...) can invoke them from
-    /// the 5 emission sites:
-    /// - Startup — App::resumed once, guarded by lua_startup_fired
-    ///   (cycle 366).
-    /// - TabAdd — `fire_tab_add_event` helper (cycle 425): keyboard
-    ///   NewTab, NewWindow fallback, remote-control IPC new-tab,
-    ///   exit-action=restart respawn — 4 sites.
-    /// - TabClose — `fire_tab_close_event` helper (cycle 424):
-    ///   keyboard CloseTab, tab-bar ✕-click (2 click-handler
-    ///   branches), SCM_RIGHTS + file-fallback handoff sources —
-    ///   5 sites.
-    /// - Bell — drain_events Bell handler (cycle 367).
-    /// - Output — drain_events output sidechannel (cycle 378).
-    ///
-    /// All 5 hooks share `drain_lua_hook_commands` for the
-    /// LuaCommand queue dispatch (cycles 426-428, 433).
+    /// Cycle 366: the live LuaEngine persisted across the App's lifetime so
+    /// `kettle.on(event, callback)` registrations stay in scope. All event
+    /// hooks share `drain_lua_hook_commands` for the LuaCommand dispatch.
     lua_engine: Option<crate::LuaEngine>,
-    /// Cycle 366: set to true after we've fired LuaEvent::Startup
-    /// once. Guards against re-firing on subsequent resumed()
-    /// invocations (winit may re-emit resumed on Wayland).
+    /// Cycle 366: set after LuaEvent::Startup fired once (Wayland can re-emit
+    /// `resumed`).
     lua_startup_fired: bool,
-    /// Cycle 785: the window is created hidden (`with_visible(false)`) so the
-    /// user never sees an unpainted / "not responding" rectangle during the
-    /// ~1.5s GPU adapter+device init that `Renderer::new` blocks on. This is
-    /// `false` until the first frame is composited, at which point `redraw`
-    /// calls `set_visible(true)` and flips it to `true`. `resumed` initializes
-    /// it to `true` for a configured `window_state = hidden`, so that case
-    /// stays hidden (no reveal).
-    window_shown: bool,
     /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
-    /// available" banner is showing (set by `UserEvent::UpdateAvailable` from
-    /// the background check). Esc dismisses it (and records the tag so it never
-    /// re-nags); Enter opens the release URL.
+    /// available" banner is showing. Esc dismisses; Enter opens the URL.
     update_available: Option<(String, String)>,
     /// Cycle 834 (audit): cached new-tab `▾` shell list. `detect_shells()` can
-    /// spawn `wsl.exe` (bounded, but still a one-off cost), so compute it at most
-    /// once per session instead of on every dropdown open.
+    /// spawn `wsl.exe` (bounded, but still a one-off cost), so compute it at
+    /// most once per session instead of on every dropdown open.
     detected_shells: Option<Vec<(String, Vec<String>)>>,
 }
 
@@ -2117,6 +1916,14 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
 }
 
 impl App {
+    /// The map key of the WindowState whose OS window is `wid`, if any.
+    /// Returns `WindowState::seq`, which is the map key by invariant.
+    fn seq_of_window(&self, wid: WindowId) -> Option<u64> {
+        self.windows
+            .values()
+            .find_map(|w| (w.window.as_ref().map(|x| x.id()) == Some(wid)).then_some(w.seq))
+    }
+
     /// Cycle 410: SCM_RIGHTS-based cross-process tab handoff.
     /// Creates a Unix socketpair, fork+exec's a kettle child with
     /// the child's socket fd as fd 3 + `--tab-handoff-fd 3`, then
@@ -2132,10 +1939,11 @@ impl App {
     #[allow(unused_variables)]
     fn try_move_tab_to_new_window_scm_rights(
         &mut self,
+        ws: &mut WindowState,
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> bool {
         use std::os::unix::io::AsRawFd;
-        let stab = match self.mux.serialize_tab(self.mux.active) {
+        let stab = match ws.mux.serialize_tab(ws.mux.active) {
             Some(s) => s,
             None => return false,
         };
@@ -2205,8 +2013,8 @@ impl App {
                 drop(parent);
                 // Close the source tab now that the child is up.
                 // Cycle 424: fire TabClose so plugins see the close.
-                let closing_idx = self.mux.active;
-                let _ = self.mux.close_tab();
+                let closing_idx = ws.mux.active;
+                let _ = ws.mux.close_tab();
                 self.fire_tab_close_event(closing_idx);
                 true
             }
@@ -2311,8 +2119,8 @@ impl App {
         // Cycle 938 (Terminator parity): launch-time window-state CLI flags
         // (`-m/-f/-H/-b/-T`) override the config for THIS launch — same
         // "CLI flags are launch-time intent" precedent as --accent above.
-        if let Some(ws) = startup.window_state_override {
-            initial_cfg.window_state = ws;
+        if let Some(wstate) = startup.window_state_override {
+            initial_cfg.window_state = wstate;
         }
         if let Some(b) = startup.borderless_override {
             initial_cfg.borderless = b;
@@ -2442,26 +2250,30 @@ impl App {
         // setting `broadcast-default = all` in a config has no
         // visible effect; broadcast scope defaults to the cycle-178
         // active-tab leaves.
+        // C1 (multi-window foundation): per-window state lives in a
+        // WindowState; the first window is seq 1. The Mux is built here
+        // because its construction flags (`lua_output_subscribed`,
+        // `record_lossless`) are process-global decisions.
+        let mux = {
+            let mut m = Mux::new();
+            m.lua_output_subscribed = lua_output_subscribed;
+            // Cycle 881: a dev recording needs a lossless output channel so
+            // the asciicast trace can't drop chunks under a fast burst.
+            #[cfg(feature = "dev-record")]
+            {
+                m.record_lossless = startup.record.is_some();
+            }
+            m
+        };
+        let mut windows = std::collections::BTreeMap::new();
+        windows.insert(1, WindowState::new(1, start_fullscreen, mux));
         let mut app = App {
             cfg: initial_cfg,
-            window: None,
-            taskbar: crate::taskbar::Taskbar::new(),
-            attention_active: false,
+            windows,
+            focused_seq: 1,
+            next_window_seq: 2,
             #[cfg(feature = "dev-record")]
             recorder: None,
-            renderer: None,
-            mux: {
-                let mut m = Mux::new();
-                m.lua_output_subscribed = lua_output_subscribed;
-                // Cycle 881: a dev recording needs a lossless output channel so
-                // the asciicast trace can't drop chunks under a fast burst.
-                #[cfg(feature = "dev-record")]
-                {
-                    m.record_lossless = startup.record.is_some();
-                }
-                m
-            },
-            mods: ModifiersState::empty(),
             proxy,
             // Cycle 928 (agent-first A2): server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
@@ -2470,9 +2282,7 @@ impl App {
             // Cycle 754: surface why the clipboard is unavailable instead of a
             // silent `None`. On headless/SSH-without-X11-forwarding/sandboxed
             // Linux, arboard can't connect to a display server, and copy/paste
-            // + OSC 52 then silently no-op. A startup warning makes the cause
-            // debuggable from `RUST_LOG` rather than "paste mysteriously does
-            // nothing".
+            // + OSC 52 then silently no-op.
             clipboard: {
                 match arboard::Clipboard::new() {
                     Ok(cb) => Some(cb),
@@ -2486,57 +2296,19 @@ impl App {
                     }
                 }
             },
-            fullscreen: start_fullscreen,
-            cursor: PhysicalPosition::new(0.0, 0.0),
-            selecting: false,
-            dragging_scrollbar: false,
-            dragging_split: None,
-            search_revealed: None,
-            search_scan_key: None,
-            links_scan_key: None,
-            mouse_btn: None,
-            last_mouse_cell: None,
-            links: Vec::new(),
-            ssh_input: None,
-            palette_input: None,
-            settings_nav: None,
-            layout_picker_input: None,
-            hint_state: None,
-            context_menu: None,
-            editing_title: None,
-            confirm_dialog: None,
-            window_focused: true,
-            mouse_hidden: false,
-            last_cursor_icon: None,
-            tab_drag_active: false,
-            detach_drag: crate::detach::DragState::default(),
-            hovered_close_idx: None,
-            vi_mode: None,
             compiled_triggers: initial_triggers,
             last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
             remote_scanner: kettle_remote::RemoteScanner::new(),
             last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
             last_schedule_decision: None,
-            scaled_zoom_prev_font_size: None,
-            last_emitted_focus: None,
-            last_emitted_titles: std::collections::HashMap::new(),
-            blink_on: true,
-            last_blink: std::time::Instant::now(),
-            last_bell: None,
-            last_paint: None,
-            coalescing_paint: false,
-            last_click: None,
-            last_title: String::new(),
             config_path: startup.config.clone(),
             startup,
             _watcher: watcher,
             _remote_watcher: remote_watcher,
             pending_lua_send,
             pending_lua_actions,
-            pending_pane_restarts: Vec::new(),
             lua_engine,
             lua_startup_fired: false,
-            window_shown: false,
             update_available: None,
             detected_shells: None,
         };
@@ -2601,13 +2373,13 @@ impl App {
     /// creates a tab (i.e. NOT startup-time first-tab init before
     /// plugins load) should call this. Centralizes the plugin-
     /// contract dispatch so future new_tab callers can't drift.
-    fn fire_tab_add_event(&mut self) {
+    fn fire_tab_add_event(&mut self, ws: &mut WindowState) {
         #[cfg(feature = "dev-record")]
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_add");
         }
         if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::TabAdd(self.mux.active));
+            eng.fire_event(&crate::LuaEvent::TabAdd(ws.mux.active));
         }
         self.drain_lua_hook_commands("tab_add hook");
     }
@@ -2633,9 +2405,12 @@ impl App {
     /// focused pane's process tree via the remote scanner (one refresh on the
     /// split keystroke — not per frame). `None` for a plain pane, in which case
     /// the split falls back to cloning the pane's own launch command (cycle 886).
-    fn focused_foreground_shell(&mut self) -> Option<kettle_remote::ShellLaunch> {
+    fn focused_foreground_shell(
+        &mut self,
+        ws: &mut WindowState,
+    ) -> Option<kettle_remote::ShellLaunch> {
         let (pid, pane_cwd) = {
-            let pane = self.mux.focused()?;
+            let pane = ws.mux.focused()?;
             (pane.term.child_pid()?, pane.term.current_dir())
         };
         self.remote_scanner.refresh();
@@ -2678,8 +2453,8 @@ impl App {
         })
     }
 
-    fn cell_px(&self) -> (u16, u16) {
-        self.renderer
+    fn cell_px(&self, ws: &WindowState) -> (u16, u16) {
+        ws.renderer
             .as_ref()
             .map(|r| (r.cell_w.max(1.0) as u16, r.cell_h.max(1.0) as u16))
             .unwrap_or((8, 16))
@@ -2688,25 +2463,25 @@ impl App {
     /// Hide the OS mouse cursor; idempotent. Called when the user starts
     /// typing if `mouse-hide-while-typing` is on. The cursor reappears on
     /// the next mouse move or window-enter event.
-    fn hide_mouse_cursor(&mut self) {
-        if self.mouse_hidden || !self.cfg.mouse_hide_while_typing {
+    fn hide_mouse_cursor(&mut self, ws: &mut WindowState) {
+        if ws.mouse_hidden || !self.cfg.mouse_hide_while_typing {
             return;
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.set_cursor_visible(false);
-            self.mouse_hidden = true;
+            ws.mouse_hidden = true;
         }
     }
 
     /// Show the OS mouse cursor; idempotent. Called whenever the mouse
     /// moves or re-enters the window.
-    fn show_mouse_cursor(&mut self) {
-        if !self.mouse_hidden {
+    fn show_mouse_cursor(&mut self, ws: &mut WindowState) {
+        if !ws.mouse_hidden {
             return;
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.set_cursor_visible(true);
-            self.mouse_hidden = false;
+            ws.mouse_hidden = false;
         }
     }
 
@@ -2718,32 +2493,32 @@ impl App {
     /// Cycle 320: cursor is over the cycle-295 status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
     /// the terminal I-beam over the status strip too.
-    fn cursor_in_status_bar(&self) -> bool {
-        let h = self.status_bar_h();
+    fn cursor_in_status_bar(&self, ws: &WindowState) -> bool {
+        let h = self.status_bar_h(ws);
         if h <= 0.0 {
             return false;
         }
-        let (_, sh) = self
+        let (_, sh) = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        cursor_in_status_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
+        cursor_in_status_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
     }
 
     /// Cycle 320: combined chrome-band hit-test. True when the
     /// cursor is over either the tab bar or the status bar — both
     /// belong in the "OS arrow cursor" group.
-    fn cursor_in_chrome_band(&self) -> bool {
-        self.cursor_in_tab_bar() || self.cursor_in_status_bar()
+    fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
+        self.cursor_in_tab_bar(ws) || self.cursor_in_status_bar(ws)
     }
 
-    fn cursor_in_tab_bar(&self) -> bool {
-        let h = self.tab_bar_h();
+    fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
+        let h = self.tab_bar_h(ws);
         if h <= 0.0 {
             return false;
         }
-        let (sw, sh) = self
+        let (sw, sh) = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
@@ -2753,15 +2528,15 @@ impl App {
         // `VERTICAL_TAB_STRIP_W` of the configured edge.
         match self.cfg.tab_bar_pos {
             TabBarPos::Left => {
-                let x = self.cursor.x as f32;
+                let x = ws.cursor.x as f32;
                 (0.0..self.cfg.tab_bar_width).contains(&x)
             }
             TabBarPos::Right => {
-                let x = self.cursor.x as f32;
+                let x = ws.cursor.x as f32;
                 x >= sw as f32 - self.cfg.tab_bar_width && x <= sw as f32
             }
             TabBarPos::Top | TabBarPos::Bottom => {
-                cursor_in_tab_bar_band(self.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
+                cursor_in_tab_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
             }
         }
     }
@@ -2779,8 +2554,8 @@ impl App {
 
     /// Cycle 904: a SplitDrag for the divider seam under content-area pixel
     /// `(px, py)`, or None. Used to start a drag-to-resize on left-press.
-    fn split_drag_at(&self, area: Rect, px: f32, py: f32) -> Option<SplitDrag> {
-        let seams = self.mux.split_seams(self.mux.active, area);
+    fn split_drag_at(&self, ws: &WindowState, area: Rect, px: f32, py: f32) -> Option<SplitDrag> {
+        let seams = ws.mux.split_seams(ws.mux.active, area);
         let i = crate::mux::seam_at(&seams, px, py, SPLIT_SEAM_TOL)?;
         let s = &seams[i];
         Some(SplitDrag {
@@ -2793,16 +2568,16 @@ impl App {
     /// seam (no drag yet), or None when the cursor isn't over one. Suppressed
     /// while a modal owns the pointer. Cheap in the common single-pane case —
     /// `split_seams` returns empty when the tab root is a lone leaf.
-    fn split_seam_hover_icon(&self) -> Option<CursorIcon> {
-        if self.any_modal_open() {
+    fn split_seam_hover_icon(&self, ws: &WindowState) -> Option<CursorIcon> {
+        if self.any_modal_open(ws) {
             return None;
         }
-        let area = self.area();
-        let seams = self.mux.split_seams(self.mux.active, area);
+        let area = self.area(ws);
+        let seams = ws.mux.split_seams(ws.mux.active, area);
         let i = crate::mux::seam_at(
             &seams,
-            self.cursor.x as f32,
-            self.cursor.y as f32,
+            ws.cursor.x as f32,
+            ws.cursor.y as f32,
             SPLIT_SEAM_TOL,
         )?;
         Some(Self::resize_cursor_for(seams[i].dir))
@@ -2812,7 +2587,7 @@ impl App {
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
     /// click-to-open affordance).
-    fn sync_cursor_icon(&mut self) {
+    fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
         // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
         // a "pointing hand" while the user holds the same modifier that
         // would open a URL on click (Ctrl on Linux/Windows, Cmd on
@@ -2832,38 +2607,38 @@ impl App {
         // renderer stays in sync (the renderer reads
         // `tabbar.hovered_close_idx`, which we pass through in
         // `tab_bar()`).
-        let bar = self.tab_bar();
-        self.hovered_close_idx =
-            hovered_close_button(&bar.segments, self.cursor.x as f32, self.cursor.y as f32);
-        let close_hover = tab_close_hover_icon(self.hovered_close_idx.is_some());
-        let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(), self.any_modal_open());
+        let bar = self.tab_bar(ws);
+        ws.hovered_close_idx =
+            hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
+        let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
+        let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
         // Cycle 904: a split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let want = close_hover
             .or(chrome)
-            .or_else(|| self.split_seam_hover_icon())
+            .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
-                let want_pointer = (self.mods.control_key() || self.mods.super_key())
-                    && self.link_at_cursor().is_some();
+                let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
+                    && self.link_at_cursor(ws).is_some();
                 if want_pointer {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::Text
                 }
             });
-        if self.last_cursor_icon != Some(want)
-            && let Some(w) = &self.window
+        if ws.last_cursor_icon != Some(want)
+            && let Some(w) = &ws.window
         {
             w.set_cursor(want);
-            self.last_cursor_icon = Some(want);
+            ws.last_cursor_icon = Some(want);
         }
     }
 
     /// Clear the focused pane's selection (called when the user types —
     /// every modern terminal does this so a stale highlight doesn't
     /// confuse the next copy/paste). No-op when nothing is selected.
-    fn clear_selection_on_input(&mut self) {
-        if let Some(p) = self.mux.focused()
+    fn clear_selection_on_input(&mut self, ws: &mut WindowState) {
+        if let Some(p) = ws.mux.focused()
             && let Ok(mut t) = p.term.term.lock()
             && t.selection.is_some()
         {
@@ -2871,17 +2646,14 @@ impl App {
         }
     }
 
-    fn tab_bar_h(&self) -> f32 {
+    fn tab_bar_h(&self, ws: &WindowState) -> f32 {
         let show = match self.cfg.tab_bar {
             TabBarMode::Off => false,
-            TabBarMode::Auto => self.mux.tabs.len() > 1,
+            TabBarMode::Auto => ws.mux.tabs.len() > 1,
             TabBarMode::Always => true,
         };
         if show {
-            self.renderer
-                .as_ref()
-                .map(|r| r.cell_h + 8.0)
-                .unwrap_or(24.0)
+            ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0)
         } else {
             0.0
         }
@@ -2891,14 +2663,10 @@ impl App {
     /// enabled). Pair with `cfg.status_bar` (StatusBarMode) for
     /// position. Slightly shorter than the tab bar so the two strips
     /// read as distinct horizontal bands.
-    fn status_bar_h(&self) -> f32 {
+    fn status_bar_h(&self, ws: &WindowState) -> f32 {
         match self.cfg.status_bar {
             kettle_config::StatusBarMode::Off => 0.0,
-            _ => self
-                .renderer
-                .as_ref()
-                .map(|r| r.cell_h + 6.0)
-                .unwrap_or(22.0),
+            _ => ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(22.0),
         }
     }
 
@@ -2911,27 +2679,23 @@ impl App {
     /// cfg.show_titlebar gate + the cycle-385 title_at_bottom flip.
     /// Used by the click handler to dispatch EditPaneTitle on the
     /// clicked pane.
-    fn pane_at_titlebar_click(&self, px: f32, py: f32) -> Option<u64> {
+    fn pane_at_titlebar_click(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
         if !self.cfg.show_titlebar {
             return None;
         }
-        let active = self.mux.active;
-        let rects = self.mux.layout(active, self.area());
+        let active = ws.mux.active;
+        let rects = ws.mux.layout(active, self.area(ws));
         if rects.len() < 2 {
             // Single-pane tab: titlebar isn't rendered (cycle-379
             // gates on >1 pane).
             return None;
         }
-        let bar_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.cell_h + 6.0)
-            .unwrap_or(20.0);
+        let bar_h = ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0);
         pane_titlebar_hit(px, py, &rects, self.cfg.title_at_bottom, bar_h)
     }
 
-    fn area(&self) -> Rect {
-        let surface = self
+    fn area(&self, ws: &WindowState) -> Rect {
+        let surface = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
@@ -2941,8 +2705,8 @@ impl App {
         // is honored.
         content_rect_for_with_strip(
             surface,
-            self.tab_bar_h(),
-            self.status_bar_h(),
+            self.tab_bar_h(ws),
+            self.status_bar_h(ws),
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -2951,12 +2715,12 @@ impl App {
 
     /// Tab-bar geometry — the single source of truth shared by the renderer
     /// (drawing) and the click hit-testing below.
-    fn tab_bar(&self) -> TabBar {
-        let height = self.tab_bar_h();
+    fn tab_bar(&self, ws: &WindowState) -> TabBar {
+        let height = self.tab_bar_h(ws);
         if height <= 0.0 {
             return TabBar::hidden();
         }
-        let (w, h) = self
+        let (w, h) = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
@@ -2968,13 +2732,13 @@ impl App {
         // Horizontal Top/Bottom keeps the cycle-620
         // compute_tab_segment_widths flow.
         if is_vertical {
-            return self.tab_bar_vertical(sw, sh, height);
+            return self.tab_bar_vertical(ws, sw, sh, height);
         }
         let y = match self.cfg.tab_bar_pos {
             TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
             TabBarPos::Bottom => sh - height,
         };
-        let titles = self.mux.tab_titles();
+        let titles = ws.mux.tab_titles();
         let n = titles.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
         // each `height` wide. Cycle 805: the strip must reserve the WHOLE
@@ -2996,7 +2760,7 @@ impl App {
         let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
-        let cell_w = self
+        let cell_w = ws
             .renderer
             .as_ref()
             .map(|r| r.cell_w)
@@ -3015,7 +2779,7 @@ impl App {
             height,
             self.cfg.homogeneous_tabbar,
         );
-        let active = self.mux.active;
+        let active = ws.mux.active;
         // Pre-compute x offsets from the cumulative widths so the
         // closure stays a stateless map. (Slight allocation, but
         // n is small — tab counts cap in the dozens.)
@@ -3037,7 +2801,7 @@ impl App {
                 // already signals "you are here").
                 let now = std::time::Instant::now();
                 let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
-                let activity = self
+                let activity = ws
                     .mux
                     .tabs
                     .get(i)
@@ -3075,18 +2839,18 @@ impl App {
             new_tab: plus_rect,
             new_tab_menu: arrow_rect,
             // Cycle 178: broadcast indicator on the active tab.
-            broadcast: self.mux.is_broadcast_on(),
+            broadcast: ws.mux.is_broadcast_on(),
             // Hover-on-✕ chip: renderer paints a red highlight behind
             // the close glyph; UI's `sync_cursor_icon` flips the OS
             // cursor to Pointer at the same time.
-            hovered_close_idx: self.hovered_close_idx,
+            hovered_close_idx: ws.hovered_close_idx,
             // Cycle 255: while a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor — gives
             // the cycle-249 reorder a "I'm picking this tab up"
             // affordance instead of the bare snap behavior.
-            drag_cursor_x: if self.tab_drag_active {
-                Some(self.cursor.x as f32)
+            drag_cursor_x: if ws.tab_drag_active {
+                Some(ws.cursor.x as f32)
             } else {
                 None
             },
@@ -3097,15 +2861,15 @@ impl App {
     /// `TabBarPos::Left` / `Right`. Stacks segments vertically,
     /// each one (`VERTICAL_TAB_STRIP_W` × `tab_bar_h`).
     /// New-tab `+` button anchors at the bottom of the strip.
-    fn tab_bar_vertical(&self, sw: f32, sh: f32, height: f32) -> TabBar {
+    fn tab_bar_vertical(&self, ws: &WindowState, sw: f32, sh: f32, height: f32) -> TabBar {
         let strip_w = self.cfg.tab_bar_width;
         let strip_x = match self.cfg.tab_bar_pos {
             TabBarPos::Left => 0.0,
             TabBarPos::Right => sw - strip_w,
             _ => 0.0, // unreachable in this branch
         };
-        let titles = self.mux.tab_titles();
-        let active = self.mux.active;
+        let titles = ws.mux.tab_titles();
+        let active = ws.mux.active;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
         let segments: Vec<TabSeg> = titles
@@ -3113,7 +2877,7 @@ impl App {
             .enumerate()
             .map(|(i, t)| {
                 let seg_y = i as f32 * height;
-                let activity = self
+                let activity = ws
                     .mux
                     .tabs
                     .get(i)
@@ -3158,12 +2922,12 @@ impl App {
             // Cycle 805: no dropdown arrow on vertical bars — the bottom-of-
             // strip full-width `+` has nowhere sensible for a left-side arrow.
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
-            broadcast: self.mux.is_broadcast_on(),
-            hovered_close_idx: self.hovered_close_idx,
+            broadcast: ws.mux.is_broadcast_on(),
+            hovered_close_idx: ws.hovered_close_idx,
             // Drag-cursor preview is x-only in v1; vertical drag
             // reorder is sub-cycle 6 of the design.
-            drag_cursor_x: if self.tab_drag_active {
-                Some(self.cursor.x as f32)
+            drag_cursor_x: if ws.tab_drag_active {
+                Some(ws.cursor.x as f32)
             } else {
                 None
             },
@@ -3175,25 +2939,22 @@ impl App {
     /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the cycle-389
     /// titlebar hit-test. `0.0` (no inset) for a single-pane tab or when
     /// titlebars are off. Cycle 817 (audit).
-    fn pane_titlebar_inset(&self, pane_count: usize) -> f32 {
+    fn pane_titlebar_inset(&self, ws: &WindowState, pane_count: usize) -> f32 {
         if self.cfg.show_titlebar && pane_count > 1 {
-            self.renderer
-                .as_ref()
-                .map(|r| r.cell_h + 6.0)
-                .unwrap_or(20.0)
+            ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0)
         } else {
             0.0
         }
     }
 
-    fn grid_of(&self, rect: Rect) -> (usize, usize) {
+    fn grid_of(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
         // Full-area / single-pane sizing: no titlebar inset. Per-pane sizing in
         // a split tab goes through `grid_of_inset` (cycle 817).
-        self.grid_of_inset(rect, 0.0)
+        self.grid_of_inset(ws, rect, 0.0)
     }
 
-    fn grid_of_inset(&self, rect: Rect, titlebar_h: f32) -> (usize, usize) {
-        let (cw, ch) = self
+    fn grid_of_inset(&self, ws: &WindowState, rect: Rect, titlebar_h: f32) -> (usize, usize) {
+        let (cw, ch) = ws
             .renderer
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
@@ -3207,10 +2968,10 @@ impl App {
         )
     }
 
-    fn focused_rect(&self, area: Rect) -> Option<Rect> {
-        let f = self.mux.active_focus()?;
-        self.mux
-            .layout(self.mux.active, area)
+    fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
+        let f = ws.mux.active_focus()?;
+        ws.mux
+            .layout(ws.mux.active, area)
             .into_iter()
             .find(|(id, _)| *id == f)
             .map(|(_, r)| r)
@@ -3220,25 +2981,32 @@ impl App {
     /// and the bar is visible, jump the viewport to the clicked position.
     /// Returns `true` if it handled the click (so it won't start a
     /// selection).
-    fn scrollbar_jump(&mut self, area: Rect, px: f32, py: f32) -> bool {
-        self.scrollbar_at(area, px, py, true)
+    fn scrollbar_jump(&mut self, ws: &mut WindowState, area: Rect, px: f32, py: f32) -> bool {
+        self.scrollbar_at(ws, area, px, py, true)
     }
 
     /// Map a pointer position to a viewport jump on the focused pane's
     /// scrollbar. With `require_zone`, only the right-edge ~8 px strip
     /// counts (initial click); during a drag the x is ignored so the
     /// grab follows the pointer's y anywhere.
-    fn scrollbar_at(&mut self, area: Rect, px: f32, py: f32, require_zone: bool) -> bool {
+    fn scrollbar_at(
+        &mut self,
+        ws: &mut WindowState,
+        area: Rect,
+        px: f32,
+        py: f32,
+        require_zone: bool,
+    ) -> bool {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
             return false;
         }
-        let Some((rx, ry, rw, rh)) = self.focused_rect(area) else {
+        let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
             return false;
         };
         if require_zone && (px < rx + rw - 8.0 || px > rx + rw || py < ry || py > ry + rh) {
             return false;
         }
-        let Some(p) = self.mux.focused() else {
+        let Some(p) = ws.mux.focused() else {
             return false;
         };
         let Ok(mut t) = p.term.term.lock() else {
@@ -3259,8 +3027,8 @@ impl App {
         true
     }
 
-    fn px_to_point(&self, rect: Rect, px: f32, py: f32) -> kettle_core::Point {
-        let (cw, ch) = self
+    fn px_to_point(&self, ws: &WindowState, rect: Rect, px: f32, py: f32) -> kettle_core::Point {
+        let (cw, ch) = ws
             .renderer
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
@@ -3270,7 +3038,7 @@ impl App {
         // The focused pane lives in the active tab, so its inset depends on the
         // active tab's pane count.
         let titlebar_h =
-            self.pane_titlebar_inset(self.mux.layout(self.mux.active, self.area()).len());
+            self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
         let (col, line) = px_to_cell(
             px,
             py,
@@ -3293,8 +3061,13 @@ impl App {
     /// failure. Same row→column iteration shape as
     /// `line_text_for_smart_select` to keep grid-read paths
     /// consistent.
-    fn yank_vi_selection(&mut self, start: (usize, usize), end: (usize, usize)) -> String {
-        let Some(pane) = self.mux.focused() else {
+    fn yank_vi_selection(
+        &mut self,
+        ws: &mut WindowState,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> String {
+        let Some(pane) = ws.mux.focused() else {
             return String::new();
         };
         let Ok(t) = pane.term.term.lock() else {
@@ -3338,9 +3111,9 @@ impl App {
             .join("\n")
     }
 
-    fn line_text_for_smart_select(&mut self, row: usize) -> Option<String> {
+    fn line_text_for_smart_select(&mut self, ws: &mut WindowState, row: usize) -> Option<String> {
         use kettle_core::Dimensions;
-        let pane = self.mux.focused()?;
+        let pane = ws.mux.focused()?;
         let t = pane.term.term.lock().ok()?;
         let cols = t.columns();
         let rows = t.screen_lines();
@@ -3369,12 +3142,19 @@ impl App {
     /// selection was set, false if there's no focused pane or the lock
     /// failed (in which case the caller falls through to its normal
     /// `begin_selection` path).
-    fn apply_smart_selection(&mut self, area: Rect, row: usize, start: usize, end: usize) -> bool {
+    fn apply_smart_selection(
+        &mut self,
+        ws: &mut WindowState,
+        area: Rect,
+        row: usize,
+        start: usize,
+        end: usize,
+    ) -> bool {
         // The `_area` is unused but kept in the signature to mirror
         // `begin_selection`'s API — future viewport-aware variants may
         // need it for clamping.
         let _ = area;
-        let Some(pane) = self.mux.focused() else {
+        let Some(pane) = ws.mux.focused() else {
             return false;
         };
         let Ok(mut t) = pane.term.term.lock() else {
@@ -3401,19 +3181,24 @@ impl App {
         t.selection = Some(sel);
         // Like Semantic, a smart selection resolves on press; the
         // caller treats `selecting=false` so motion doesn't extend it.
-        self.selecting = false;
+        ws.selecting = false;
         true
     }
 
-    fn begin_selection(&mut self, area: Rect, ty: kettle_core::SelectionType) {
+    fn begin_selection(
+        &mut self,
+        ws: &mut WindowState,
+        area: Rect,
+        ty: kettle_core::SelectionType,
+    ) {
         // Simple + Block are drags; word/line select immediately on click.
-        self.selecting = matches!(
+        ws.selecting = matches!(
             ty,
             kettle_core::SelectionType::Simple | kettle_core::SelectionType::Block
         );
-        if let Some(rect) = self.focused_rect(area) {
-            let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
-            if let Some(pane) = self.mux.focused()
+        if let Some(rect) = self.focused_rect(ws, area) {
+            let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+            if let Some(pane) = ws.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
                 // R1: store the grid-absolute point (viewport − display_offset)
@@ -3426,9 +3211,9 @@ impl App {
     }
 
     /// Click count for the press at `(row,col)` within ~400 ms of the last.
-    fn click_count(&mut self, row: usize, col: usize) -> u8 {
+    fn click_count(&mut self, ws: &mut WindowState, row: usize, col: usize) -> u8 {
         let now = std::time::Instant::now();
-        let n = match self.last_click {
+        let n = match ws.last_click {
             Some((t, r, c, n))
                 if r == row
                     && c == col
@@ -3438,7 +3223,7 @@ impl App {
             }
             _ => 1,
         };
-        self.last_click = Some((now, row, col, n));
+        ws.last_click = Some((now, row, col, n));
         n
     }
 
@@ -3500,13 +3285,13 @@ impl App {
         }
     }
 
-    fn paste_clipboard(&mut self) {
+    fn paste_clipboard(&mut self, ws: &mut WindowState) {
         let text = self
             .clipboard
             .as_mut()
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
-        self.paste_text(text);
+        self.paste_text(ws, text);
     }
 
     /// Cycle 755: paste the **X11 PRIMARY selection** (middle-click). On X11 the
@@ -3519,7 +3304,7 @@ impl App {
     /// no PRIMARY selection, so we fall back to the regular clipboard — the
     /// historical behavior. Shares `paste_text` so the clamp + bracketed-paste
     /// + broadcast scoping match `Action::Paste`.
-    fn paste_primary(&mut self) {
+    fn paste_primary(&mut self, ws: &mut WindowState) {
         #[cfg(target_os = "linux")]
         let text = {
             use arboard::{GetExtLinux, LinuxClipboardKind};
@@ -3544,14 +3329,14 @@ impl App {
             .as_mut()
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
-        self.paste_text(text);
+        self.paste_text(ws, text);
     }
 
     /// Cycle 755: shared paste path — clamp, broadcast scoping, bracketed-paste
     /// wrap, write to the focused PTY. Extracted so `paste_clipboard` and
     /// `paste_primary` (and any future paste channel) can't drift on the
     /// safety/scoping rules.
-    fn paste_text(&mut self, text: String) {
+    fn paste_text(&mut self, ws: &mut WindowState, text: String) {
         if text.is_empty() {
             return;
         }
@@ -3575,22 +3360,22 @@ impl App {
         // `BRACKETED_PASTE` decision (different panes may have
         // different mode state), so the wrap is per-pane, not a
         // single shared payload.
-        if self.mux.is_broadcast_on() {
-            self.mux.broadcast_paste(text);
+        if ws.mux.is_broadcast_on() {
+            ws.mux.broadcast_paste(text);
             return;
         }
         let bracketed = self
-            .focused_mode()
+            .focused_mode(ws)
             .contains(kettle_core::TermMode::BRACKETED_PASTE);
         let bytes = input::paste_payload(text, bracketed);
-        if let Some(p) = self.mux.focused() {
+        if let Some(p) = ws.mux.focused() {
             // Cycle 941: paste is user input — a read-only pane drops it.
             p.feed_input(&bytes);
         }
     }
 
-    fn copy_selection(&mut self) {
-        let sel = self
+    fn copy_selection(&mut self, ws: &mut WindowState) {
+        let sel = ws
             .mux
             .focused()
             .and_then(|p| {
@@ -3610,13 +3395,13 @@ impl App {
         }
     }
 
-    fn update_selection(&mut self, area: Rect) {
-        if !self.selecting {
+    fn update_selection(&mut self, ws: &mut WindowState, area: Rect) {
+        if !ws.selecting {
             return;
         }
-        if let Some(rect) = self.focused_rect(area) {
-            let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
-            if let Some(pane) = self.mux.focused()
+        if let Some(rect) = self.focused_rect(ws, area) {
+            let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+            if let Some(pane) = ws.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
                 // R1: convert to grid-absolute before the mutable `selection`
@@ -3635,13 +3420,13 @@ impl App {
     /// existed (so Shift+Click on empty space starts a normal selection).
     /// Matches xterm / Alacritty / iTerm2: Shift+Click anchors the
     /// existing selection's start and pulls the end to the click.
-    fn extend_selection_to_cursor(&mut self, area: Rect) -> bool {
-        let rect = match self.focused_rect(area) {
+    fn extend_selection_to_cursor(&mut self, ws: &mut WindowState, area: Rect) -> bool {
+        let rect = match self.focused_rect(ws, area) {
             Some(r) => r,
             None => return false,
         };
-        let vp = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
-        if let Some(pane) = self.mux.focused()
+        let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        if let Some(pane) = ws.mux.focused()
             && let Ok(mut t) = pane.term.term.lock()
         {
             // R1: grid-absolute end-point so Shift+Click extends to the right
@@ -3651,7 +3436,7 @@ impl App {
                 sel.update(p, kettle_core::Side::Right);
                 // Enter drag mode so a follow-up mouse-move keeps extending —
                 // matches every Mac/Linux text-control: shift-click, then drag.
-                self.selecting = true;
+                ws.selecting = true;
                 return true;
             }
         }
@@ -3659,30 +3444,30 @@ impl App {
     }
 
     /// Resize every pane's PTY to match its tile in the layout.
-    fn resize_all(&mut self) {
-        let (cw, ch) = self.cell_px();
-        let area = self.area();
+    fn resize_all(&mut self, ws: &mut WindowState) {
+        let (cw, ch) = self.cell_px(ws);
+        let area = self.area(ws);
         let mut plan: Vec<(u64, usize, usize)> = Vec::new();
-        for ti in 0..self.mux.tabs.len() {
+        for ti in 0..ws.mux.tabs.len() {
             // Cycle 817 (audit): a split tab's panes each lose `titlebar_h` of
             // height to their per-pane titlebar, so size each PTY for the rows
             // that fit below it (per-tab, since the inset depends on that tab's
             // own pane count).
-            let panes = self.mux.layout(ti, area);
-            let titlebar_h = self.pane_titlebar_inset(panes.len());
+            let panes = ws.mux.layout(ti, area);
+            let titlebar_h = self.pane_titlebar_inset(ws, panes.len());
             for (id, r) in panes {
-                let (cols, rows) = self.grid_of_inset(r, titlebar_h);
+                let (cols, rows) = self.grid_of_inset(ws, r, titlebar_h);
                 plan.push((id, cols, rows));
             }
         }
         for (id, cols, rows) in plan {
-            if let Some(p) = self.mux.panes.get_mut(&id) {
+            if let Some(p) = ws.mux.panes.get_mut(&id) {
                 p.term.resize(cols, rows, cw, ch);
             }
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ws: &mut WindowState) {
         let mut bell = false;
         // Cycle 246: pane ids that fired `TermEvent::Bell` this drain
         // pass — latched onto their containing tabs *after* the
@@ -3699,14 +3484,14 @@ impl App {
         let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
         // Cycle 412: pane ids whose shell exited with cfg.exit_action
         // = Restart. Queued during the drain; appended to
-        // self.pending_pane_restarts after the iteration so the
+        // ws.pending_pane_restarts after the iteration so the
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
         // Cell size is renderer-owned and uniform across panes, so resolve it
         // once per drain rather than per event (a sixel/kitty app polling CSI
         // 14 t doesn't need a renderer lookup per CSI).
-        let (cell_w, cell_h) = self.cell_px();
-        for (&pane_id, pane) in self.mux.panes.iter_mut() {
+        let (cell_w, cell_h) = self.cell_px(ws);
+        for (&pane_id, pane) in ws.mux.panes.iter_mut() {
             // Cycle 378: drain the optional output sidechannel
             // BEFORE the regular event channel. Coalesces multiple
             // chunks into a single Vec per pane per drain pass.
@@ -3796,11 +3581,11 @@ impl App {
                         // and *blink-off* makes the cursor solid right
                         // away — not on whatever half-period we'd
                         // otherwise land in. (We're inside a
-                        // `self.mux.panes.values_mut()` loop here so
+                        // `ws.mux.panes.values_mut()` loop here so
                         // we can't call `self.reset_blink_phase()`;
                         // the two field writes are the same body.)
-                        self.blink_on = true;
-                        self.last_blink = std::time::Instant::now();
+                        ws.blink_on = true;
+                        ws.last_blink = std::time::Instant::now();
                     }
                     // Cycle 349 (Terminator parity, terminatorlib/
                     // config.py:103 `force_no_bell`): silence every
@@ -3825,7 +3610,7 @@ impl App {
                     // Ctrl+Shift+W.
                     // Restart (cycle 412): queue the pane id for
                     // post-drain respawn so we don't double-borrow
-                    // self.mux during this iteration. Close the
+                    // ws.mux during this iteration. Close the
                     // current PTY (pane.closed = true) — the
                     // post-drain handler resurrects with the same
                     // argv via Mux::spawn_pane.
@@ -3882,14 +3667,14 @@ impl App {
         }
         if bell {
             if self.cfg.bell.visual() {
-                self.last_bell = Some(std::time::Instant::now());
+                ws.last_bell = Some(std::time::Instant::now());
             }
             if self.cfg.bell.attention()
-                && !self.window_focused
-                && let Some(w) = &self.window
+                && !ws.window_focused
+                && let Some(w) = &ws.window
             {
                 w.request_user_attention(Some(UserAttentionType::Informational));
-                self.attention_active = true;
+                ws.attention_active = true;
             }
         }
         // Cycle 246: latch any per-pane bells onto their tab's
@@ -3910,7 +3695,7 @@ impl App {
         // event drains (TabAdd, TabClose, Bell, Output) share the
         // same canonical LuaCommand-match path.
         for id in bell_panes {
-            self.mux.touch_tab_bell(id);
+            ws.mux.touch_tab_bell(id);
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Bell(id));
             }
@@ -3939,7 +3724,7 @@ impl App {
             // (a) Desktop notification for a long background command.
             if self.cfg.command_notify_threshold_ms > 0 {
                 let elapsed_ms = ev.duration.as_millis() as u64;
-                if !self.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
+                if !ws.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
                     let secs = ev.duration.as_secs();
                     let exit_text = match ev.exit_code {
                         Some(0) => "✓ ok".to_string(),
@@ -3955,7 +3740,7 @@ impl App {
                 }
             }
             // (b) Resolve a pending run_command for this pane.
-            self.resolve_pending_run(pane_id, &ev);
+            self.resolve_pending_run(ws, pane_id, &ev);
             // (c) Notify event subscribers.
             self.ctl_broadcast(
                 "command_finished",
@@ -3968,11 +3753,11 @@ impl App {
         }
         // Cycle 412: stash the per-tick restart list on App so the
         // post-drain handler can process it with a fresh
-        // &mut self.mux borrow (the drain_events loop above held a
-        // &mut iter into self.mux.panes, so spawn_pane couldn't run
+        // &mut ws.mux borrow (the drain_events loop above held a
+        // &mut iter into ws.mux.panes, so spawn_pane couldn't run
         // there).
         if !pending_restarts_local.is_empty() {
-            self.pending_pane_restarts.extend(pending_restarts_local);
+            ws.pending_pane_restarts.extend(pending_restarts_local);
         }
     }
 
@@ -3988,12 +3773,12 @@ impl App {
     /// when not recording. Verified by `dev-record`-feature test
     /// `recorder_captures_fast_command_tail` + the live close-path tests.
     #[cfg(feature = "dev-record")]
-    fn flush_recorder_output(&mut self) {
+    fn flush_recorder_output(&mut self, ws: &mut WindowState) {
         if self.recorder.is_none() {
             return;
         }
         // Always drain what's queued right now (cheap, non-blocking).
-        self.drain_recorder_output_once();
+        self.drain_recorder_output_once(ws);
         // A pane marked `closed` (its shell exited under exit-action = close /
         // restart) is about to be reaped + its sidechannel dropped. The PTY
         // reader may still be teeing the shell's FINAL output: the child-exit
@@ -4006,14 +3791,14 @@ impl App {
         let mut idle = 0u8;
         let mut rounds = 0u8;
         while rounds < 30
-            && self
+            && ws
                 .mux
                 .panes
                 .values()
                 .any(|p| p.closed && p.output_rx.is_some())
         {
             std::thread::sleep(std::time::Duration::from_millis(2));
-            if self.drain_recorder_output_once() {
+            if self.drain_recorder_output_once(ws) {
                 idle = 0;
             } else {
                 idle += 1;
@@ -4029,11 +3814,11 @@ impl App {
     /// Returns whether any bytes were captured. (Per-event flush in the Recorder
     /// makes each chunk durable immediately.)
     #[cfg(feature = "dev-record")]
-    fn drain_recorder_output_once(&mut self) -> bool {
+    fn drain_recorder_output_once(&mut self, ws: &mut WindowState) -> bool {
         // Collect first (immutable borrow of the panes), then feed the recorder
         // (mutable borrow of self.recorder) — two sequential borrows.
         let mut tail: Vec<Vec<u8>> = Vec::new();
-        for pane in self.mux.panes.values() {
+        for pane in ws.mux.panes.values() {
             if let Some(rx) = &pane.output_rx {
                 let mut combined: Vec<u8> = Vec::new();
                 while let Ok(chunk) = rx.try_recv() {
@@ -4056,14 +3841,11 @@ impl App {
     /// Keep the OS window title in sync with the *active* pane's title —
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
-    fn sync_window_title(&mut self) {
-        let pane = self
-            .mux
-            .active_focus()
-            .and_then(|id| self.mux.panes.get(&id));
+    fn sync_window_title(&mut self, ws: &mut WindowState) {
+        let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id));
         let title = pane.map(|p| p.title.as_str()).unwrap_or("kettle");
         let cwd = pane.and_then(|p| p.term.current_dir()).unwrap_or_default();
-        let tab = self.mux.active + 1;
+        let tab = ws.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
         // Cycle 876: an always-visible recording indicator in the title bar so
         // the dev recorder is never silently capturing.
@@ -4073,21 +3855,21 @@ impl App {
         } else {
             want
         };
-        if want != self.last_title {
-            if let Some(w) = &self.window {
+        if want != ws.last_title {
+            if let Some(w) = &ws.window {
                 w.set_title(&want);
             }
-            self.last_title = want;
+            ws.last_title = want;
         }
     }
 
-    fn update_search(&mut self) {
-        if !self.mux.search.open {
+    fn update_search(&mut self, ws: &mut WindowState) {
+        if !ws.mux.search.open {
             // Clear the scan cache so the next open re-scans from scratch.
-            self.search_scan_key = None;
+            ws.search_scan_key = None;
             return;
         }
-        let query = self.mux.search.query.clone();
+        let query = ws.mux.search.query.clone();
         // Cycle 803: re-run the (potentially full-scrollback) regex scan only
         // when something that affects the match set changed — the query, the
         // focused pane, or that tab's last-output instant (new text could add
@@ -4096,14 +3878,14 @@ impl App {
         // expensive scan is skipped on an idle frame.
         let scan_key = (
             query.clone(),
-            self.focus_key(),
-            self.mux
+            self.focus_key(ws),
+            ws.mux
                 .tabs
-                .get(self.mux.active)
+                .get(ws.mux.active)
                 .and_then(|t| t.last_output_at),
         );
-        if self.search_scan_key.as_ref() != Some(&scan_key) {
-            let matches = if let Some(p) = self.mux.focused() {
+        if ws.search_scan_key.as_ref() != Some(&scan_key) {
+            let matches = if let Some(p) = ws.mux.focused() {
                 p.term
                     .term
                     .lock()
@@ -4119,26 +3901,26 @@ impl App {
             } else {
                 Vec::new()
             };
-            let s = &mut self.mux.search;
+            let s = &mut ws.mux.search;
             s.matches = matches;
             if s.index >= s.matches.len() {
                 s.index = 0;
             }
-            self.search_scan_key = Some(scan_key);
+            ws.search_scan_key = Some(scan_key);
         }
         // Follow the active match into scrollback when it (or the query)
         // changed — once, so the user can still wheel-scroll freely.
         let active = {
-            let s = &self.mux.search;
+            let s = &ws.mux.search;
             s.matches
                 .get(s.index)
                 .copied()
                 .map(|m| ((s.query.clone(), s.index), m.line))
         };
         if let Some((key, line)) = active
-            && self.search_revealed.as_ref() != Some(&key)
+            && ws.search_revealed.as_ref() != Some(&key)
         {
-            if let Some(p) = self.mux.focused()
+            if let Some(p) = ws.mux.focused()
                 && let Ok(mut t) = p.term.term.lock()
             {
                 use kettle_core::Dimensions;
@@ -4149,7 +3931,7 @@ impl App {
                     t.scroll_display(kettle_core::Scroll::Delta(want as i32 - off as i32));
                 }
             }
-            self.search_revealed = Some(key);
+            ws.search_revealed = Some(key);
         }
     }
 
@@ -4160,9 +3942,9 @@ impl App {
     /// LAST cell, never one past the edge. A mouse-tracking app that sees
     /// `col == cols` or `row == rows` mis-renders (cycle 842, audit) — xterm
     /// itself clamps the reported coordinate to the window.
-    fn cursor_cell(&self) -> Option<(usize, usize)> {
-        let rect = self.focused_rect(self.area())?;
-        let p = self.px_to_point(rect, self.cursor.x as f32, self.cursor.y as f32);
+    fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
+        let rect = self.focused_rect(ws, self.area(ws))?;
+        let p = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         let (row, col) = (p.line.0.max(0) as usize, p.column.0);
         // Clamp to the pane's geometric grid (same cell size AND titlebar inset
         // `px_to_point` used): a click in the right/bottom padding rounds up to
@@ -4173,8 +3955,8 @@ impl App {
         // titlebar'd split, so a bottom-edge click reported one row past the
         // PTY's last valid row to mouse-tracking TUIs.
         let titlebar_h =
-            self.pane_titlebar_inset(self.mux.layout(self.mux.active, self.area()).len());
-        let (cols, rows) = self.grid_of_inset(rect, titlebar_h);
+            self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
+        let (cols, rows) = self.grid_of_inset(ws, rect, titlebar_h);
         Some((
             row.min(rows.saturating_sub(1)),
             col.min(cols.saturating_sub(1)),
@@ -4183,10 +3965,10 @@ impl App {
 
     /// Scan the focused pane's visible grid for quick-select targets and
     /// assign each a short label.
-    fn collect_hints(&mut self) -> Vec<HintTarget> {
+    fn collect_hints(&mut self, ws: &mut WindowState) -> Vec<HintTarget> {
         use kettle_core::hints;
         use kettle_core::{Column, Dimensions, Line, Point};
-        let Some(p) = self.mux.focused() else {
+        let Some(p) = ws.mux.focused() else {
             return Vec::new();
         };
         let Ok(t) = p.term.term.lock() else {
@@ -4225,15 +4007,15 @@ impl App {
             .collect()
     }
 
-    fn link_at_cursor(&self) -> Option<&kettle_core::Link> {
-        let (row, col) = self.cursor_cell()?;
-        self.links
+    fn link_at_cursor<'a>(&self, ws: &'a WindowState) -> Option<&'a kettle_core::Link> {
+        let (row, col) = self.cursor_cell(ws)?;
+        ws.links
             .iter()
             .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
     }
 
-    fn focused_mode(&mut self) -> kettle_core::TermMode {
-        self.mux
+    fn focused_mode(&mut self, ws: &mut WindowState) -> kettle_core::TermMode {
+        ws.mux
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
             .unwrap_or(kettle_core::TermMode::empty())
@@ -4253,7 +4035,7 @@ impl App {
         !(motion && last == Some(cur))
     }
 
-    fn send_mouse(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
+    fn send_mouse(&mut self, ws: &mut WindowState, btn: u8, pressed: bool, motion: bool) -> bool {
         // Shift held = "bypass mouse tracking, let kettle handle this
         // locally" — the xterm convention every modern terminal honors.
         // Without it, running htop/vim/tmux with mouse-mode locks out
@@ -4262,24 +4044,24 @@ impl App {
         // Returning `false` here makes the caller fall through to
         // selection / scrollbar / extend logic exactly as if tracking
         // were off.
-        if self.mods.shift_key() {
+        if ws.mods.shift_key() {
             return false;
         }
         // Cycle 942 (audit, VTE input-enabled parity): a read-only pane gets
         // no mouse-tracking reports either. Returning false falls through to
         // kettle-local handling, so selection / scrollback still work for the
         // user — the same degradation VTE applies when input is disabled.
-        if self.mux.focused().is_some_and(|p| p.read_only) {
+        if ws.mux.focused().is_some_and(|p| p.read_only) {
             return false;
         }
-        let (track, sgr) = input::mouse_tracking(self.focused_mode());
+        let (track, sgr) = input::mouse_tracking(self.focused_mode(ws));
         if track == input::MouseTracking::Off {
             return false;
         }
-        if motion && track != input::MouseTracking::Motion && self.mouse_btn.is_none() {
+        if motion && track != input::MouseTracking::Motion && ws.mouse_btn.is_none() {
             return track != input::MouseTracking::Off; // consume, no report
         }
-        let Some((row, col)) = self.cursor_cell() else {
+        let Some((row, col)) = self.cursor_cell(ws) else {
             return false;
         };
         // Cell-motion coalescing: a drag that stays inside one cell must not
@@ -4288,20 +4070,20 @@ impl App {
         // SGR report per pixel of travel, flooding the TUI (cycle 842, audit).
         // Press/release always report (the guard is motion-only) and refresh
         // the baseline, so the next motion is compared against the right cell.
-        if !Self::motion_should_report(motion, self.last_mouse_cell, (row, col)) {
+        if !Self::motion_should_report(motion, ws.last_mouse_cell, (row, col)) {
             return true;
         }
-        let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, self.mods);
-        if let Some(p) = self.mux.focused() {
+        let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
+        if let Some(p) = ws.mux.focused() {
             p.term.write(&seq);
         }
-        self.last_mouse_cell = Some((row, col));
+        ws.last_mouse_cell = Some((row, col));
         true
     }
 
-    fn overlay(&self) -> Overlay {
-        let hover = self.cursor_cell();
-        let links = self
+    fn overlay(&self, ws: &WindowState) -> Overlay {
+        let hover = self.cursor_cell(ws);
+        let links = ws
             .links
             .iter()
             .map(|l| kettle_render::LinkRect {
@@ -4314,7 +4096,7 @@ impl App {
             })
             .collect();
 
-        let (ssh_query, ssh_hint) = match &self.ssh_input {
+        let (ssh_query, ssh_hint) = match &ws.ssh_input {
             Some(q) => {
                 let hint = if self.cfg.ssh_hosts.is_empty() {
                     "(type user@host)".to_string()
@@ -4328,7 +4110,7 @@ impl App {
             None => (None, String::new()),
         };
 
-        let (palette_query, palette_hint) = match &self.palette_input {
+        let (palette_query, palette_hint) = match &ws.palette_input {
             Some((q, sel)) => {
                 let cmds = kettle_config::palette::commands();
                 let ranked = kettle_config::palette::rank(q, &cmds);
@@ -4363,7 +4145,7 @@ impl App {
         // string the same way as the command palette. Empty
         // layouts dir is fine — the hint reads `(no saved
         // layouts; run kettle --save-layout NAME)`.
-        let (layout_picker_query, layout_picker_hint) = match &self.layout_picker_input {
+        let (layout_picker_query, layout_picker_hint) = match &ws.layout_picker_input {
             Some((q, sel)) => {
                 let layouts = crate::session::Session::list_layouts();
                 let ranked = rank_layouts(q, &layouts);
@@ -4395,7 +4177,7 @@ impl App {
             None => (None, String::new()),
         };
 
-        let hint_labels: Vec<HintLabel> = match &self.hint_state {
+        let hint_labels: Vec<HintLabel> = match &ws.hint_state {
             Some((targets, typed)) => targets
                 .iter()
                 .map(|t| HintLabel {
@@ -4408,7 +4190,7 @@ impl App {
             None => Vec::new(),
         };
 
-        let window_focused = self.window_focused;
+        let window_focused = ws.window_focused;
         // Cursor blink is the *intersection* of the user config and the
         // running app's wishes — programs flip it via DEC private mode 12
         // (`CSI ?12 h/l`), which the engine tracks per-pane on its
@@ -4417,32 +4199,32 @@ impl App {
         // honored even when the global config wants blink. (Goes through
         // `active_focus` + `panes.get` so the `overlay()` builder stays a
         // pure `&self` reader.)
-        let pane_blink = self
+        let pane_blink = ws
             .mux
             .active_focus()
-            .and_then(|id| self.mux.panes.get(&id))
+            .and_then(|id| ws.mux.panes.get(&id))
             .map(|p| p.term.cursor_blinking())
             .unwrap_or(true);
         let blink_enabled = self.cfg.cursor_blink && pane_blink;
         let cursor_visible = if !blink_enabled
             || !window_focused
-            || self.ssh_input.is_some()
-            || self.palette_input.is_some()
-            || self.layout_picker_input.is_some()
-            || self.hint_state.is_some()
-            || self.mux.search.open
+            || ws.ssh_input.is_some()
+            || ws.palette_input.is_some()
+            || ws.layout_picker_input.is_some()
+            || ws.hint_state.is_some()
+            || ws.mux.search.open
             // Cycle 763: the title-edit and confirm-dialog input bars are also
             // active text surfaces — keep the cursor steady (not mid-blink-off)
             // while the user is typing/navigating them, like the other modals.
-            || self.editing_title.is_some()
-            || self.confirm_dialog.is_some()
-            || self.settings_nav.is_some()
+            || ws.editing_title.is_some()
+            || ws.confirm_dialog.is_some()
+            || ws.settings_nav.is_some()
         {
             true
         } else {
-            self.blink_on
+            ws.blink_on
         };
-        let bell = self
+        let bell = ws
             .last_bell
             .map(|t| {
                 let e = t.elapsed().as_secs_f32();
@@ -4450,7 +4232,7 @@ impl App {
             })
             .unwrap_or(0.0);
 
-        let context_menu = self.context_menu_overlay();
+        let context_menu = self.context_menu_overlay(ws);
         // Cycle 372: marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing.
         //
@@ -4459,7 +4241,7 @@ impl App {
         // the overlay anchors near the clicked pane vs the window-
         // bottom (window/tab scopes still use window-bottom).
         let edit_title: Option<(String, String, Option<f32>)> =
-            self.editing_title.as_ref().map(|s| {
+            ws.editing_title.as_ref().map(|s| {
                 let label = match s.scope {
                     TitleEditScope::Window => "Edit window title:",
                     TitleEditScope::Tab => "Edit tab title:",
@@ -4467,10 +4249,10 @@ impl App {
                     TitleEditScope::Group => "Edit pane group:",
                 };
                 let anchor_y = if matches!(s.scope, TitleEditScope::Pane | TitleEditScope::Group) {
-                    let area = self.area();
-                    let active = self.mux.active;
-                    let rects = self.mux.layout(active, area);
-                    let focus = self.mux.active_focus();
+                    let area = self.area(ws);
+                    let active = ws.mux.active;
+                    let rects = ws.mux.layout(active, area);
+                    let focus = ws.mux.active_focus();
                     rects
                         .iter()
                         .find(|(id, _)| Some(*id) == focus)
@@ -4494,7 +4276,7 @@ impl App {
         // renderer's projection (so it shows even when no
         // search is open — confirm modals are independent).
         let confirm_dialog_early =
-            self.confirm_dialog
+            ws.confirm_dialog
                 .as_ref()
                 .map(|d| kettle_render::ConfirmDialogOverlay {
                     prompt: d.prompt.clone(),
@@ -4519,7 +4301,7 @@ impl App {
         // Cycle 756: project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
-        let settings_overlay = self.settings_nav.as_ref().map(|nav| {
+        let settings_overlay = ws.settings_nav.as_ref().map(|nav| {
             let cats = crate::settings::categories();
             let cat = nav.category.min(cats.len().saturating_sub(1));
             let active = &cats[cat];
@@ -4545,7 +4327,7 @@ impl App {
                 focused_row: fld,
             }
         });
-        let s = &self.mux.search;
+        let s = &ws.mux.search;
         if !s.open {
             return Overlay {
                 links,
@@ -4602,59 +4384,59 @@ impl App {
             cursor_visible,
             bell,
             context_menu,
-            vi_cursor: self.vi_mode.map(|v| (v.row, v.col)),
-            vi_visual_anchor: self.vi_mode.and_then(|v| v.visual_anchor),
+            vi_cursor: ws.vi_mode.map(|v| (v.row, v.col)),
+            vi_visual_anchor: ws.vi_mode.and_then(|v| v.visual_anchor),
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
         }
     }
 
-    fn update_links(&mut self) {
+    fn update_links(&mut self, ws: &mut WindowState) {
         // Cycle 803: build a cheap key (focus + tab output instant + scroll
         // offset) and skip the viewport URL re-scan when the visible content
         // can't have changed. The brief lock to read display_offset is cheap;
         // the avoided work is `kettle_core::links`' per-cell regex pass.
         let key = {
-            let out_at = self
+            let out_at = ws
                 .mux
                 .tabs
-                .get(self.mux.active)
+                .get(ws.mux.active)
                 .and_then(|t| t.last_output_at);
-            let off = self
+            let off = ws
                 .mux
                 .focused()
                 .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
-            (self.focus_key(), out_at, off)
+            (self.focus_key(ws), out_at, off)
         };
-        if self.links_scan_key.as_ref() == Some(&key) {
+        if ws.links_scan_key.as_ref() == Some(&key) {
             return;
         }
-        self.links = self
+        ws.links = ws
             .mux
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| kettle_core::links(&t)))
             .unwrap_or_default();
-        self.links_scan_key = Some(key);
+        ws.links_scan_key = Some(key);
     }
 
-    fn redraw(&mut self) {
-        self.drain_events();
-        self.poll_remote_contexts();
-        self.poll_theme_schedule();
-        self.poll_focus_event();
-        self.poll_title_event();
+    fn redraw(&mut self, ws: &mut WindowState) {
+        self.drain_events(ws);
+        self.poll_remote_contexts(ws);
+        self.poll_theme_schedule(ws);
+        self.poll_focus_event(ws);
+        self.poll_title_event(ws);
         // Cycle 745: reflect the focused pane's OSC 9;4 progress onto the OS
         // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
-        self.poll_taskbar_progress();
+        self.poll_taskbar_progress(ws);
         // Cycle 418: process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
-        // &mut iter into self.mux.panes when spawning a new tab.
+        // &mut iter into ws.mux.panes when spawning a new tab.
         // event_loop arg is unused for now (the spawn doesn't need it);
         // kept in the signature for symmetry with other dispatchers.
-        if !self.pending_pane_restarts.is_empty() {
-            let pane_ids: Vec<u64> = std::mem::take(&mut self.pending_pane_restarts);
-            let (cw, ch) = self.cell_px();
+        if !ws.pending_pane_restarts.is_empty() {
+            let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
+            let (cw, ch) = self.cell_px(ws);
             let waker = self.waker();
             // Cycle 420: use the live grid (matches the existing surface)
             // for the new tab. cycle-418 hardcoded 80×24 which mismatched
@@ -4662,15 +4444,15 @@ impl App {
             // start with a tiny grid then grow on next resize. Pulling
             // from the current area means the restart shell starts at
             // the size the user is actually using.
-            let (cols, rows) = self.grid_of(self.area());
+            let (cols, rows) = self.grid_of(ws, self.area(ws));
             for pane_id in pane_ids {
-                let restart_info: Option<(Vec<String>, Option<String>)> = self
+                let restart_info: Option<(Vec<String>, Option<String>)> = ws
                     .mux
                     .panes
                     .get(&pane_id)
                     .map(|p| (p.argv.clone(), p.term.current_dir()));
                 if let Some((argv, cwd)) = restart_info {
-                    if let Err(e) = self.mux.new_tab_with(
+                    if let Err(e) = ws.mux.new_tab_with(
                         &self.cfg,
                         cols,
                         rows,
@@ -4684,37 +4466,37 @@ impl App {
                     } else {
                         // Cycle 425: respawned tab is a fresh tab
                         // from the plugin's POV; fire TabAdd.
-                        self.fire_tab_add_event();
+                        self.fire_tab_add_event(ws);
                     }
                 }
             }
         }
         // Reflect the active pane (incl. after tab/focus switches).
-        self.sync_window_title();
+        self.sync_window_title(ws);
         // Advance the cursor blink phase (configurable half-period). Skip
         // the increment when the active pane has DEC mode 12 cleared so the
         // cursor sits solid — without this, vim-style "solid block while
         // editing" requests are ignored even though the engine honored them.
-        let pane_blink_redraw = self
+        let pane_blink_redraw = ws
             .mux
             .active_focus()
-            .and_then(|id| self.mux.panes.get(&id))
+            .and_then(|id| ws.mux.panes.get(&id))
             .map(|p| p.term.cursor_blinking())
             .unwrap_or(true);
         if self.cfg.cursor_blink
             && pane_blink_redraw
-            && self.window_focused
-            && self.last_blink.elapsed()
+            && ws.window_focused
+            && ws.last_blink.elapsed()
                 >= std::time::Duration::from_millis(self.cfg.cursor_blink_interval)
         {
-            self.blink_on = !self.blink_on;
-            self.last_blink = std::time::Instant::now();
+            ws.blink_on = !ws.blink_on;
+            ws.last_blink = std::time::Instant::now();
         }
         // Cycle 908: capture a just-exited pane's final output before reap drops
         // its sidechannel — otherwise the shell's last line is lost from the trace.
         #[cfg(feature = "dev-record")]
-        self.flush_recorder_output();
-        if self.mux.reap() {
+        self.flush_recorder_output(ws);
+        if ws.mux.reap() {
             return;
         }
         // scroll-on-output: if new output landed in any pane since the
@@ -4729,7 +4511,7 @@ impl App {
         // and dispatched after the borrow ends — same shape as the
         // `bell_panes` collection in `drain_events`.
         let mut output_panes: Vec<u64> = Vec::new();
-        for (&pane_id, pane) in self.mux.panes.iter_mut() {
+        for (&pane_id, pane) in ws.mux.panes.iter_mut() {
             let now = pane
                 .term
                 .term
@@ -4755,7 +4537,7 @@ impl App {
             pane.last_history = Some(now);
         }
         for id in output_panes {
-            self.mux.touch_tab_output(id);
+            ws.mux.touch_tab_output(id);
         }
         // Auto-scroll while dragging a selection past the focused pane's
         // top/bottom edge — every modern terminal does this so the user
@@ -4763,13 +4545,12 @@ impl App {
         // Pure `selection_autoscroll_lines` chooses the per-frame rate;
         // scrolling the viewport here naturally re-fires `update_selection`
         // below to anchor the selection's end to the new visible line.
-        if self.selecting {
-            let area = self.area();
-            if let Some(rect) = self.focused_rect(area) {
-                let lines =
-                    selection_autoscroll_lines(self.cursor.y as f32, rect.1, rect.1 + rect.3);
+        if ws.selecting {
+            let area = self.area(ws);
+            if let Some(rect) = self.focused_rect(ws, area) {
+                let lines = selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3);
                 if lines != 0
-                    && let Some(p) = self.mux.focused()
+                    && let Some(p) = ws.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
                 {
                     t.scroll_display(Scroll::Delta(lines));
@@ -4778,30 +4559,30 @@ impl App {
                     // Re-anchor the selection's end at the (now-moved)
                     // cursor row so the highlight grows in step with the
                     // scroll, not stuck on the original click-time row.
-                    self.update_selection(area);
+                    self.update_selection(ws, area);
                 }
             }
         }
-        self.update_search();
-        self.update_links();
+        self.update_search(ws);
+        self.update_links(ws);
         // Link set may have changed (scroll, output, mode flip) — re-sync
         // the cursor icon so a URL scrolling out from under a held Ctrl
         // doesn't leave the pointer-hand icon stuck on a now-empty cell.
         // Deduped via `last_cursor_icon` so this is a cheap per-frame
         // recheck when nothing changed.
-        self.sync_cursor_icon();
-        let overlay = self.overlay();
-        let area = self.area();
-        let tabbar = self.tab_bar();
+        self.sync_cursor_icon(ws);
+        let overlay = self.overlay(ws);
+        let area = self.area(ws);
+        let tabbar = self.tab_bar(ws);
         // Cycle 296: build status bar BEFORE the &mut renderer borrow
-        // since `build_status_bar` reads self.mux / self.cfg
+        // since `build_status_bar` reads ws.mux / self.cfg
         // immutably.
-        let status = self.build_status_bar();
-        let active = self.mux.active;
-        let layout = self.mux.layout(active, area);
-        let focus = self.mux.active_focus();
+        let status = self.build_status_bar(ws);
+        let active = ws.mux.active;
+        let layout = ws.mux.layout(active, area);
+        let focus = ws.mux.active_focus();
 
-        let Some(renderer) = self.renderer.as_mut() else {
+        let Some(renderer) = ws.renderer.as_mut() else {
             return;
         };
 
@@ -4810,7 +4591,7 @@ impl App {
         // titlebar can render the text.
         let mut guards = Vec::with_capacity(layout.len());
         for (id, r) in &layout {
-            if let Some(p) = self.mux.panes.get(id) {
+            if let Some(p) = ws.mux.panes.get(id) {
                 let mut imgs = p.term.placements();
                 imgs.extend(p.term.placeholder_tiles());
                 imgs.extend(p.term.relative_tiles());
@@ -4858,7 +4639,7 @@ impl App {
             )
             .collect();
         // Cycle 296: status bar built BEFORE the &mut renderer borrow
-        // (the helper reads `self.mux` immutably). Cheap when off.
+        // (the helper reads `ws.mux` immutably). Cheap when off.
         if let Err(e) =
             renderer.render_frame_with_status(&panes, &tabbar, &self.cfg, &overlay, &status)
         {
@@ -4870,16 +4651,16 @@ impl App {
         // reveal, so the window can never get stuck invisible. No-op on every
         // subsequent frame (and for a `window_state = hidden` window, which
         // `resumed` already marked shown).
-        if !self.window_shown {
-            if let Some(w) = &self.window {
+        if !ws.window_shown {
+            if let Some(w) = &ws.window {
                 w.set_visible(true);
             }
-            self.window_shown = true;
+            ws.window_shown = true;
         }
         // Cycle 910 (R2): record the paint time and clear any pending coalesced
         // output paint now that this settled frame is on the surface.
-        self.last_paint = Some(std::time::Instant::now());
-        self.coalescing_paint = false;
+        ws.last_paint = Some(std::time::Instant::now());
+        ws.coalescing_paint = false;
     }
 
     /// Cycle 296: compose the status-bar contents (HH:MM:SS · theme ·
@@ -4888,12 +4669,12 @@ impl App {
     /// hidden status bar so this is cheap even when never visible.
     /// Takes `&mut self` only because `Mux::focused` does — no state
     /// is actually mutated here.
-    fn build_status_bar(&mut self) -> kettle_render::StatusBar {
+    fn build_status_bar(&mut self, ws: &mut WindowState) -> kettle_render::StatusBar {
         if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Off) {
             return kettle_render::StatusBar::hidden();
         }
-        let h = self.status_bar_h();
-        let surface_h = self
+        let h = self.status_bar_h(ws);
+        let surface_h = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size().1 as f32)
@@ -4914,7 +4695,7 @@ impl App {
             .unwrap_or(0);
         let day = secs % 86400;
         let (hh, mm, ss) = (day / 3600, (day % 3600) / 60, day % 60);
-        let title = self
+        let title = ws
             .mux
             .focused()
             .map(|p| p.title.clone())
@@ -4938,21 +4719,21 @@ impl App {
     /// and, if so, reset the cursor blink phase so the new pane's
     /// cursor is visible immediately (cycle 135 pattern, extracted to
     /// a helper in cycle 136 so the mouse-driven paths can share it).
-    fn focus_key(&self) -> (usize, Option<u64>) {
-        (self.mux.active, self.mux.active_focus())
+    fn focus_key(&self, ws: &WindowState) -> (usize, Option<u64>) {
+        (ws.mux.active, ws.mux.active_focus())
     }
 
     /// If the focused `(tab, leaf)` changed since `pre`, land the
     /// cursor visible on the new pane right away.
-    fn note_focus_change(&mut self, pre: (usize, Option<u64>)) {
-        if self.focus_key() != pre {
-            self.reset_blink_phase();
+    fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
+        if self.focus_key(ws) != pre {
+            self.reset_blink_phase(ws);
             // Cycle 802 (audit): repaint immediately so the focused-pane
             // border and the cursor's solid/hollow state track the new pane.
             // Without this, a focus-follows-mouse (`focus = sloppy`) change
             // left a stale focus border until some *other* event happened to
             // trigger a redraw — the pane under the cursor looked unfocused.
-            if let Some(w) = &self.window {
+            if let Some(w) = &ws.window {
                 w.request_redraw();
             }
         }
@@ -4965,46 +4746,46 @@ impl App {
     /// modals at once (palette opened while ssh launcher was up
     /// would render both, with palette capturing keys; visually
     /// confusing).
-    fn close_all_modals(&mut self) {
-        self.mux.search.open = false;
-        self.palette_input = None;
-        self.settings_nav = None;
-        self.layout_picker_input = None;
-        self.hint_state = None;
-        self.ssh_input = None;
-        self.context_menu = None;
-        self.editing_title = None;
+    fn close_all_modals(&mut self, ws: &mut WindowState) {
+        ws.mux.search.open = false;
+        ws.palette_input = None;
+        ws.settings_nav = None;
+        ws.layout_picker_input = None;
+        ws.hint_state = None;
+        ws.ssh_input = None;
+        ws.context_menu = None;
+        ws.editing_title = None;
         // Cycle 298 vi-mode behaves like a modal — Esc exits it,
         // close_all_modals exits it. Sub-cycle 1.
-        self.vi_mode = None;
+        ws.vi_mode = None;
         // Cycle 754: the confirm dialog ("Close this pane?", "Quit?") is a
         // modal too, but was omitted here — so opening search / palette / a
         // menu while a confirm prompt was up rendered BOTH overlays at once
         // with ambiguous key focus. Every modal-opener calls close_all_modals
         // first (then sets its own modal), so clearing the confirm dialog here
         // is safe: the confirm-open path clears-then-sets in that order.
-        self.confirm_dialog = None;
+        ws.confirm_dialog = None;
     }
 
     /// Cycle 369: apply the in-progress title edit + clear the
     /// overlay. The scope decides which setter is invoked.
-    fn apply_title_edit(&mut self) {
-        if let Some(state) = self.editing_title.take() {
+    fn apply_title_edit(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.editing_title.take() {
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.set_title(&value);
                     }
-                    self.last_title = value;
+                    ws.last_title = value;
                 }
                 TitleEditScope::Tab => {
-                    if let Some(t) = self.mux.tabs.get_mut(self.mux.active) {
+                    if let Some(t) = ws.mux.tabs.get_mut(ws.mux.active) {
                         t.title_override = if value.is_empty() { None } else { Some(value) };
                     }
                 }
                 TitleEditScope::Pane => {
-                    if let Some(p) = self.mux.focused() {
+                    if let Some(p) = ws.mux.focused() {
                         p.title = value;
                     }
                 }
@@ -5016,27 +4797,27 @@ impl App {
                     let next = if value.is_empty() { None } else { Some(value) };
                     match state.bulk {
                         GroupBulkScope::Single => {
-                            if let Some(p) = self.mux.focused() {
+                            if let Some(p) = ws.mux.focused() {
                                 p.group_name = next;
                             }
                         }
                         GroupBulkScope::Tab => {
-                            let ids: Vec<u64> = self
+                            let ids: Vec<u64> = ws
                                 .mux
                                 .tabs
-                                .get(self.mux.active)
+                                .get(ws.mux.active)
                                 .map(|t| t.root.leaf_ids())
                                 .unwrap_or_default();
                             for id in ids {
-                                if let Some(p) = self.mux.panes.get_mut(&id) {
+                                if let Some(p) = ws.mux.panes.get_mut(&id) {
                                     p.group_name = next.clone();
                                 }
                             }
                         }
                         GroupBulkScope::Window => {
-                            let ids: Vec<u64> = self.mux.panes.keys().copied().collect();
+                            let ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
                             for id in ids {
-                                if let Some(p) = self.mux.panes.get_mut(&id) {
+                                if let Some(p) = ws.mux.panes.get_mut(&id) {
                                     p.group_name = next.clone();
                                 }
                             }
@@ -5052,21 +4833,21 @@ impl App {
     /// so the two stay in lock-step — extracted in cycle 161 to drive the
     /// cursor-icon override (the OS arrow, not the I-beam, belongs over
     /// modal chrome) and extended in cycle 245 for the right-click menu.
-    fn any_modal_open(&self) -> bool {
-        self.mux.search.open
-            || self.palette_input.is_some()
-            || self.settings_nav.is_some()
-            || self.layout_picker_input.is_some()
-            || self.hint_state.is_some()
-            || self.ssh_input.is_some()
-            || self.context_menu.is_some()
-            || self.editing_title.is_some()
-            || self.vi_mode.is_some()
+    fn any_modal_open(&self, ws: &WindowState) -> bool {
+        ws.mux.search.open
+            || ws.palette_input.is_some()
+            || ws.settings_nav.is_some()
+            || ws.layout_picker_input.is_some()
+            || ws.hint_state.is_some()
+            || ws.ssh_input.is_some()
+            || ws.context_menu.is_some()
+            || ws.editing_title.is_some()
+            || ws.vi_mode.is_some()
             // Cycle 754: the confirm dialog is a modal too. Its key input has a
             // dedicated priority branch, but without it here mouse/scroll/cursor
             // gating let clicks fall through to the terminal behind a "Quit?" /
             // "Close pane?" prompt.
-            || self.confirm_dialog.is_some()
+            || ws.confirm_dialog.is_some()
     }
 
     /// Build the right-click context-menu item list. Each `Item`'s
@@ -5077,8 +4858,8 @@ impl App {
     /// separators that would orphan them are hidden entirely
     /// (Terminator-style) rather than shown greyed-out — less visual
     /// clutter, every visible row is actionable.
-    fn context_menu_items(&mut self) -> Vec<ContextMenuItem> {
-        let has_selection = self
+    fn context_menu_items(&mut self, ws: &mut WindowState) -> Vec<ContextMenuItem> {
+        let has_selection = ws
             .mux
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
@@ -5087,14 +4868,14 @@ impl App {
         // group_name set. Otherwise the row used to greyed-out
         // confuse new users ("why's that here if I can't click it?");
         // now it's filtered out entirely until it's actionable.
-        let has_group = self
+        let has_group = ws
             .mux
             .focused()
             .map(|p| p.group_name.as_ref().is_some_and(|g| !g.is_empty()))
             .unwrap_or(false);
         // Cycle 941 (Terminator parity, terminal_popup_menu.py "Read only"):
         // checked while the focused pane drops user input.
-        let read_only = self.mux.focused().map(|p| p.read_only).unwrap_or(false);
+        let read_only = ws.mux.focused().map(|p| p.read_only).unwrap_or(false);
         vec![
             ContextMenuItem::Item {
                 label: "Copy",
@@ -5368,8 +5149,8 @@ impl App {
         });
     }
 
-    fn append_remote_menu_items(&mut self, items: &mut Vec<ContextMenuItem>) {
-        let Some(pane) = self.mux.focused() else {
+    fn append_remote_menu_items(&mut self, ws: &mut WindowState, items: &mut Vec<ContextMenuItem>) {
+        let Some(pane) = ws.mux.focused() else {
             return;
         };
         let Some(ctx) = &pane.remote_context else {
@@ -5409,25 +5190,25 @@ impl App {
     /// size from the cell metrics and clamps the anchor so the menu fits
     /// the surface (right-click near the bottom-right corner flips up-
     /// and-left rather than rendering off-screen).
-    fn open_context_menu(&mut self, px: f32, py: f32) {
-        self.close_all_modals();
+    fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
+        self.close_all_modals(ws);
         // Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
         // "Copy address"): when the right-click landed on a detected
         // hyperlink, lead with the URL rows. The URL is captured NOW — fresh
         // output scrolling the grid between open and click must not retarget
         // the action. `update_links` is keyed (cycle 803) so this is a no-op
         // when the viewport hasn't changed since the last scan.
-        self.update_links();
+        self.update_links(ws);
         // Cycle 942 (audit): only offer the rows when the click is INSIDE the
         // focused pane's rect. `cursor_cell` clamps out-of-rect coordinates to
         // the nearest cell (xterm parity — right for mouse reports), which
         // here could surface "Open Link" for a link the user never pointed at
         // (right-click on chrome / another pane mapping into the focused grid).
         let in_focused_pane = self
-            .focused_rect(self.area())
+            .focused_rect(ws, self.area(ws))
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
-        if in_focused_pane && let Some(url) = self.link_at_cursor().map(|l| l.uri.clone()) {
+        if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.push(ContextMenuItem::UrlItem {
                 label: "Open Link",
                 url: url.clone(),
@@ -5440,7 +5221,7 @@ impl App {
             });
             items.push(ContextMenuItem::Separator);
         }
-        items.extend(self.context_menu_items());
+        items.extend(self.context_menu_items(ws));
         // Cycle 611: append config-file menu items (if any).
         self.append_config_menu_items(&mut items);
         // Cycle 375: append Lua-supplied items (if any).
@@ -5448,7 +5229,7 @@ impl App {
         // Cycle 658 (remote.py sub-cycle 7): append the remote-
         // session reconnect entry when the focused pane has a
         // detected SSH/Docker/Podman/kubectl context.
-        self.append_remote_menu_items(&mut items);
+        self.append_remote_menu_items(ws, &mut items);
         // Cycle 685 (theme-submenu sub-cycle 2): append the
         // Theme submenu populated from Theme::list(). The flyout
         // open machinery lands in sub-cycle 3.
@@ -5469,7 +5250,7 @@ impl App {
         // Cycle 717 (Preferences submenu, C8): runtime-mutable
         // settings + the Advanced… escape hatch.
         self.append_preferences_submenu_items(&mut items);
-        self.show_context_menu(items, px, py);
+        self.show_context_menu(ws, items, px, py);
     }
 
     /// Cycle 805: shared tail of context-menu opening — drop disabled rows +
@@ -5477,11 +5258,17 @@ impl App {
     /// on-screen, and install the `ContextMenuState`. Used by both the
     /// right-click menu and the new-tab `▾` dropdown so they render
     /// pixel-identically.
-    fn show_context_menu(&mut self, items: Vec<ContextMenuItem>, px: f32, py: f32) {
+    fn show_context_menu(
+        &mut self,
+        ws: &mut WindowState,
+        items: Vec<ContextMenuItem>,
+        px: f32,
+        py: f32,
+    ) {
         // Cycle 713 (Terminator menu UX, C4): every visible row is actionable.
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
-        let (cw, ch) = self.cell_px();
+        let (cw, ch) = self.cell_px(ws);
         let (cw, ch) = (cw as f32, ch as f32);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
@@ -5524,7 +5311,7 @@ impl App {
             .max()
             .unwrap_or(0) as f32;
         let panel_w = (max_chars * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
-        let (sw, sh) = self
+        let (sw, sh) = ws
             .renderer
             .as_ref()
             .map(|r| {
@@ -5533,7 +5320,7 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         let anchor = clamp_context_menu_anchor((px, py), (panel_w, panel_h), (sw, sh));
-        self.context_menu = Some(ContextMenuState {
+        ws.context_menu = Some(ContextMenuState {
             anchor,
             items,
             highlight,
@@ -5543,7 +5330,7 @@ impl App {
             typeahead_buf: String::new(),
             typeahead_until: None,
         });
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -5552,8 +5339,8 @@ impl App {
     /// Auto-detects available shells; if none are detected (shouldn't happen —
     /// `detect_shells` always returns ≥1), falls back to opening a default tab
     /// so the click is never a dead no-op.
-    fn open_new_tab_menu(&mut self, px: f32, py: f32) {
-        self.close_all_modals();
+    fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
+        self.close_all_modals(ws);
         // Cycle 834 (audit): cache the detection — it can spawn `wsl.exe` (now
         // bounded by a timeout in `list_wsl_distros`), so don't re-run it on
         // every dropdown open.
@@ -5562,14 +5349,11 @@ impl App {
             .get_or_insert_with(kettle_core::term::detect_shells)
             .clone();
         if shells.is_empty() {
-            let area = self.area();
-            let (cols, rows) = self.grid_of(area);
-            let (cw, ch) = self.cell_px();
-            match self
-                .mux
-                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
-            {
-                Ok(()) => self.fire_tab_add_event(),
+            let area = self.area(ws);
+            let (cols, rows) = self.grid_of(ws, area);
+            let (cw, ch) = self.cell_px(ws);
+            match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                Ok(()) => self.fire_tab_add_event(ws),
                 Err(e) => log::warn!("could not open a new tab (▾ fallback): {e}"),
             }
             return;
@@ -5578,27 +5362,27 @@ impl App {
             .into_iter()
             .map(|(label, argv)| ContextMenuItem::NewTabShell { label, argv })
             .collect();
-        self.show_context_menu(items, px, py);
+        self.show_context_menu(ws, items, px, py);
     }
 
     /// Cycle 805: open a new tab running `argv`, inheriting the focused tab's
     /// current working directory. Shared by the new-tab `▾` dropdown's mouse +
     /// keyboard dispatch. Mirrors the cycle-802 NewTab pattern: log on failure,
     /// fire the `TabAdd` plugin event only when a tab was actually created.
-    fn open_tab_with_argv(&mut self, argv: &[String]) {
-        let area = self.area();
-        let (cols, rows) = self.grid_of(area);
-        let (cw, ch) = self.cell_px();
+    fn open_tab_with_argv(&mut self, ws: &mut WindowState, argv: &[String]) {
+        let area = self.area(ws);
+        let (cols, rows) = self.grid_of(ws, area);
+        let (cw, ch) = self.cell_px(ws);
         let waker = self.waker();
-        let cwd = self.mux.focused().and_then(|p| p.term.current_dir());
+        let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
         // Cycle 912 (audit): route through new_tab_with_launch so a WSL ▾-dropdown
         // entry's Linux cwd is carried via `wsl --cd` instead of being dropped
         // (a Windows spawn can't `cd` into a Linux path, so it fell back home).
-        match self
+        match ws
             .mux
             .new_tab_with_launch(&self.cfg, cols, rows, cw, ch, waker, argv.to_vec(), cwd)
         {
-            Ok(()) => self.fire_tab_add_event(),
+            Ok(()) => self.fire_tab_add_event(ws),
             Err(e) => log::warn!("could not open shell tab ({argv:?}): {e}"),
         }
     }
@@ -5609,14 +5393,14 @@ impl App {
     /// versa — Chrome / Firefox menu convention. Pure on `(items,
     /// current)` so the wrap+skip math is unit-testable independent of
     /// the App / cursor state.
-    fn step_context_menu_highlight(&mut self, delta: isize) {
-        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry() else {
+    fn step_context_menu_highlight(&mut self, ws: &mut WindowState, delta: isize) {
+        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
             return;
         };
-        let (_, ch) = self.cell_px();
+        let (_, ch) = self.cell_px(ws);
         let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
         let next = next_context_menu_highlight(&menu.items, menu.highlight, delta);
@@ -5639,7 +5423,7 @@ impl App {
             }
             menu.scroll_offset = off;
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -5647,14 +5431,14 @@ impl App {
     /// Cycle 714. Scroll the context-menu by `delta` rows (positive
     /// = down). Clamped so we can't scroll past the last row that
     /// would still fill the visible window.
-    fn scroll_context_menu(&mut self, delta: isize) {
-        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry() else {
+    fn scroll_context_menu(&mut self, ws: &mut WindowState, delta: isize) {
+        let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
             return;
         };
-        let (_, ch) = self.cell_px();
+        let (_, ch) = self.cell_px(ws);
         let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
         let n = menu.items.len();
@@ -5673,7 +5457,7 @@ impl App {
         let clamped = new_off.min(max_off);
         if clamped != menu.scroll_offset {
             menu.scroll_offset = clamped;
-            if let Some(w) = &self.window {
+            if let Some(w) = &ws.window {
                 w.request_redraw();
             }
         }
@@ -5693,14 +5477,14 @@ impl App {
     /// App. Used by `update_menu_highlight_from_cursor` on every
     /// `CursorMoved` so the highlight tracks the pointer the way every
     /// desktop menu does (GTK / macOS NSMenu / Windows).
-    fn menu_row_at_cursor(&self) -> Option<usize> {
-        let menu = self.context_menu.as_ref()?;
-        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry()?;
-        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+    fn menu_row_at_cursor(&self, ws: &WindowState) -> Option<usize> {
+        let menu = ws.context_menu.as_ref()?;
+        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(ws)?;
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
             return None;
         }
-        let (_, ch) = self.cell_px();
+        let (_, ch) = self.cell_px(ws);
         let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: row-walk starts at scroll_offset; only the
@@ -5719,18 +5503,18 @@ impl App {
     /// on a separator. Called from `CursorMoved`. Requests a redraw
     /// only when the highlight actually changed so we don't churn the
     /// GPU on every sub-pixel motion event.
-    fn update_menu_highlight_from_cursor(&mut self) {
-        let Some(idx) = self.menu_row_at_cursor() else {
+    fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        let Some(idx) = self.menu_row_at_cursor(ws) else {
             return;
         };
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
         if menu.highlight == idx {
             return;
         }
         menu.highlight = idx;
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -5745,21 +5529,22 @@ impl App {
     /// `DrillIntoSubmenu` keeps the menu open — it replaces the visible
     /// level with the submenu's items (parent pushed onto `drill_stack`).
     ///
-    /// Cycle 889 (audit): the mouse path used to set `self.context_menu =
+    /// Cycle 889 (audit): the mouse path used to set `ws.context_menu =
     /// None` *before* matching the click, which made the
-    /// `DrillIntoSubmenu` arm — which needs `self.context_menu.as_mut()`
+    /// `DrillIntoSubmenu` arm — which needs `ws.context_menu.as_mut()`
     /// — dead code: a mouse-clicked submenu row silently dismissed the
     /// whole menu instead of drilling in. Closing per-leaf here (and
     /// leaving the menu intact for the drill) fixes that.
     fn dispatch_context_menu_click(
         &mut self,
+        ws: &mut WindowState,
         click: ContextMenuClick,
         event_loop: &ActiveEventLoop,
     ) {
         match click {
             // Keep the menu open: swap the visible level for the submenu.
             ContextMenuClick::DrillIntoSubmenu(idx) => {
-                if let Some(menu) = self.context_menu.as_mut() {
+                if let Some(menu) = ws.context_menu.as_mut() {
                     let nested_items = match menu.items.get(idx) {
                         Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
                         _ => Vec::new(),
@@ -5782,16 +5567,16 @@ impl App {
                             .unwrap_or(0);
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             ContextMenuClick::Action(action) => {
-                self.context_menu = None;
-                self.handle_action(action, event_loop);
+                ws.context_menu = None;
+                self.handle_action(ws, action, event_loop);
             }
             ContextMenuClick::LuaMenuItem(idx) => {
-                self.context_menu = None;
+                ws.context_menu = None;
                 // Cycle 375/433: invoke the Lua callback + drain any
                 // LuaCommands it queued through the canonical helper.
                 if let Some(eng) = &self.lua_engine {
@@ -5800,17 +5585,17 @@ impl App {
                 self.drain_lua_hook_commands("lua menu-item");
             }
             ContextMenuClick::ConfigCommand(command) => {
-                self.context_menu = None;
+                ws.context_menu = None;
                 // Cycle 611 (Terminator parity): write `CMD\n` to the PTY.
                 // Cycle 941: acts as the user — a read-only pane drops it.
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
                     p.feed_input(&bytes);
                 }
             }
             ContextMenuClick::SetTheme(name) => {
-                self.context_menu = None;
+                ws.context_menu = None;
                 self.cfg.theme_name = name.clone();
                 self.cfg.theme = kettle_config::Theme::by_name(&name);
                 // Cycle 918: theme is config-governed — persist to the config
@@ -5825,27 +5610,27 @@ impl App {
                         "Applied for this session — couldn't write it to your config file.",
                     );
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             ContextMenuClick::SetProfile(name) => {
-                self.context_menu = None;
+                ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
                     self.config_path = Some(p);
-                    self.reload_config();
+                    self.reload_config(ws);
                 }
             }
             ContextMenuClick::NewTabWithArgv(argv) => {
-                self.context_menu = None;
-                self.open_tab_with_argv(&argv);
+                ws.context_menu = None;
+                self.open_tab_with_argv(ws, &argv);
             }
             // Cycle 941 (Terminator parity): the URL-aware leading rows.
             // Open routes through the cycle-374 `open_url` chain (Lua URL
             // handlers → custom_url_handler → system open, with the
             // `is_safe_url` guard); Copy puts the address on the clipboard.
             ContextMenuClick::Url { url, copy } => {
-                self.context_menu = None;
+                ws.context_menu = None;
                 if copy {
                     if let Some(cb) = &mut self.clipboard
                         && let Err(e) = cb.set_text(url)
@@ -5859,17 +5644,17 @@ impl App {
         }
     }
 
-    fn context_menu_click_action(&self, bcode: u8) -> Option<ContextMenuClick> {
+    fn context_menu_click_action(&self, ws: &WindowState, bcode: u8) -> Option<ContextMenuClick> {
         if bcode != 0 {
             return None;
         }
-        let menu = self.context_menu.as_ref()?;
-        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry()?;
-        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+        let menu = ws.context_menu.as_ref()?;
+        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(ws)?;
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
             return None;
         }
-        let (_, ch) = self.cell_px();
+        let (_, ch) = self.cell_px(ws);
         let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: skip the scrolled-off rows above scroll_offset
@@ -5904,9 +5689,9 @@ impl App {
     /// `(items, anchor, panel_w, panel_h)` snapshot for the click /
     /// hover hit-tests — returned in pixels so callers don't have to
     /// re-derive the layout. `None` when the menu isn't open.
-    fn context_menu_geometry(&self) -> Option<((f32, f32), (f32, f32))> {
-        let menu = self.context_menu.as_ref()?;
-        let (cw, ch) = self.cell_px();
+    fn context_menu_geometry(&self, ws: &WindowState) -> Option<((f32, f32), (f32, f32))> {
+        let menu = ws.context_menu.as_ref()?;
+        let (cw, ch) = self.cell_px(ws);
         let (cw, ch) = (cw as f32, ch as f32);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
@@ -5924,7 +5709,7 @@ impl App {
         // can't grow off-screen. We reserve 80px of vertical
         // breathing room (40px top + 40px bottom) so the menu
         // doesn't bump into the window edge.
-        let (_, surface_h) = self
+        let (_, surface_h) = ws
             .renderer
             .as_ref()
             .map(|r| {
@@ -5958,8 +5743,8 @@ impl App {
     /// Build the renderer-side `ContextMenu` slice from the App-side
     /// state. Splits the labels (owned `String`) from the dispatch
     /// actions so the renderer stays Action-agnostic.
-    fn context_menu_overlay(&self) -> Option<ContextMenu> {
-        let menu = self.context_menu.as_ref()?;
+    fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
+        let menu = ws.context_menu.as_ref()?;
         let rows = menu
             .items
             .iter()
@@ -6036,7 +5821,7 @@ impl App {
         // scroll state + clamped panel height the renderer needs to
         // draw only the visible slice.
         let panel_h_clamped = self
-            .context_menu_geometry()
+            .context_menu_geometry(ws)
             .map(|(_, (_, h))| h)
             .unwrap_or(0.0);
         Some(ContextMenu {
@@ -6055,9 +5840,9 @@ impl App {
     /// - the four modal Escape handlers (cycle 140) so closing the
     ///   search/palette/hints/SSH overlay reveals the cursor immediately
     ///   instead of waiting up to one blink interval.
-    fn reset_blink_phase(&mut self) {
-        self.blink_on = true;
-        self.last_blink = std::time::Instant::now();
+    fn reset_blink_phase(&mut self, ws: &mut WindowState) {
+        ws.blink_on = true;
+        ws.last_blink = std::time::Instant::now();
     }
 
     /// Cycle 717 (Preferences submenu, C8): write a `key = value`
@@ -6108,7 +5893,7 @@ impl App {
     /// that's a no-op or worth a debug log). Shared by the banner mouse
     /// handler and the cycle-809 `OpenUpdate` / `DismissUpdate` keyboard
     /// actions so all three paths stay in lockstep.
-    fn act_on_update_banner(&mut self, open: bool) -> bool {
+    fn act_on_update_banner(&mut self, ws: &mut WindowState, open: bool) -> bool {
         let Some((tag, url)) = self.update_available.clone() else {
             return false;
         };
@@ -6117,23 +5902,28 @@ impl App {
         }
         crate::update_check::record_dismissed(&tag);
         self.update_available = None;
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
         true
     }
 
-    fn handle_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
-        let area = self.area();
-        let (cols, rows) = self.grid_of(area);
-        let (cw, ch) = self.cell_px();
+    fn handle_action(
+        &mut self,
+        ws: &mut WindowState,
+        action: Action,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let area = self.area(ws);
+        let (cols, rows) = self.grid_of(ws, area);
+        let (cw, ch) = self.cell_px(ws);
         let waker = self.waker();
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can
         // detect any focus change the action causes. Cycles 134/135
         // landed this for keyboard-driven actions; cycle 136 extended
         // to mouse paths via the shared `focus_key` / `note_focus_change`
         // helpers.
-        let pre_focus = self.focus_key();
+        let pre_focus = self.focus_key(ws);
         match action {
             Action::NewTab => {
                 // Cycle 368 (plugin sub-cycle 4): fires LuaEvent::TabAdd
@@ -6144,8 +5934,8 @@ impl App {
                 // swallowing it with `let _ =` (the `-e` launch path already
                 // logs), and only fire TabAdd when a tab was actually created
                 // — firing it on failure announced a tab that doesn't exist.
-                match self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
-                    Ok(()) => self.fire_tab_add_event(),
+                match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                    Ok(()) => self.fire_tab_add_event(ws),
                     Err(e) => log::warn!("could not open a new tab (shell spawn failed?): {e}"),
                 }
             }
@@ -6184,8 +5974,8 @@ impl App {
                     // resolvable. Plugins listening for tab_add
                     // should see this just like Action::NewTab.
                     // Cycle 802 (audit): log + gate the event on success.
-                    match self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
-                        Ok(()) => self.fire_tab_add_event(),
+                    match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                        Ok(()) => self.fire_tab_add_event(ws),
                         Err(e) => {
                             log::warn!("new-window fallback: could not open a tab: {e}")
                         }
@@ -6197,9 +5987,9 @@ impl App {
                 // (e.g. typed `wsl` in pwsh), clone THAT shell + its dir; else
                 // clone the pane's own launch command (cycle 886). Cycle 802:
                 // log a spawn failure instead of swallowing it.
-                let detected = self.focused_foreground_shell();
+                let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => self.mux.split_with(
+                    Some(s) => ws.mux.split_with(
                         Dir::Horizontal,
                         &self.cfg,
                         cols,
@@ -6210,7 +6000,7 @@ impl App {
                         s.argv,
                         s.cwd,
                     ),
-                    None => self
+                    None => ws
                         .mux
                         .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker),
                 };
@@ -6219,9 +6009,9 @@ impl App {
                 }
             }
             Action::SplitDown | Action::SplitAuto => {
-                let detected = self.focused_foreground_shell();
+                let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => self.mux.split_with(
+                    Some(s) => ws.mux.split_with(
                         Dir::Vertical,
                         &self.cfg,
                         cols,
@@ -6232,7 +6022,7 @@ impl App {
                         s.argv,
                         s.cwd,
                     ),
-                    None => self
+                    None => ws
                         .mux
                         .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker),
                 };
@@ -6246,8 +6036,8 @@ impl App {
                 // MultipleTerminals doesn't prompt (single pane); see
                 // cycle-638's should_prompt for the matrix.
                 if self.cfg.ask_before_closing.should_prompt(1) {
-                    self.close_all_modals();
-                    self.confirm_dialog = Some(ConfirmDialogState {
+                    self.close_all_modals(ws);
+                    ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: "Close this pane?".to_string(),
                         buttons: vec![
                             ConfirmButton::Cancel,
@@ -6259,15 +6049,15 @@ impl App {
                         focus_idx: 0,
                         on_confirm: ConfirmAction::ClosePane,
                     });
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
                 // Cycle 750: capture the focused pane id BEFORE the close —
                 // afterward active_focus() returns the promoted sibling.
-                let closing_pane = self.mux.active_focus();
-                let was_last = self.mux.close_focused();
+                let closing_pane = ws.mux.active_focus();
+                let was_last = ws.mux.close_focused();
                 if let Some(id) = closing_pane {
                     self.fire_pane_close_event(id);
                 }
@@ -6297,7 +6087,7 @@ impl App {
                     // the redraw + focus-event refresh forces the
                     // renderer + lua to see the new, consistent
                     // tree on the same frame as the close.
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     // The cycle-703 PaneFocus event needs to fire
@@ -6305,7 +6095,7 @@ impl App {
                     // got promoted), so plugins that observe focus
                     // don't keep stale per-pane state. Mirrors the
                     // poll_focus_event helper's pattern at ~5987.
-                    self.poll_focus_event();
+                    self.poll_focus_event(ws);
                 }
             }
             Action::CloseTab => {
@@ -6313,15 +6103,15 @@ impl App {
                 // active tab via the modal when ask_before_closing
                 // says so. scope_count = leaves in the active tab
                 // (panes_in_tab below).
-                let panes_in_tab = self
+                let panes_in_tab = ws
                     .mux
                     .tabs
-                    .get(self.mux.active)
+                    .get(ws.mux.active)
                     .map(|t| count_leaves(&t.root))
                     .unwrap_or(1);
                 if self.cfg.ask_before_closing.should_prompt(panes_in_tab) {
-                    self.close_all_modals();
-                    self.confirm_dialog = Some(ConfirmDialogState {
+                    self.close_all_modals(ws);
+                    ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close tab with {panes_in_tab} pane(s)?"),
                         buttons: vec![
                             ConfirmButton::Cancel,
@@ -6333,20 +6123,20 @@ impl App {
                         focus_idx: 0,
                         on_confirm: ConfirmAction::CloseTab,
                     });
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
                 // Cycle 368: capture the active index BEFORE close
                 // so the LuaEvent::TabClose payload is meaningful
-                // (after close, self.mux.active points at a
+                // (after close, ws.mux.active points at a
                 // different tab).
                 //
                 // Cycle 426 collapsed the inline event/drain into
                 // the shared fire_tab_close_event helper.
-                let closing_idx = self.mux.active;
-                if self.mux.close_tab() {
+                let closing_idx = ws.mux.active;
+                if ws.mux.close_tab() {
                     event_loop.exit();
                 }
                 self.fire_tab_close_event(closing_idx);
@@ -6358,10 +6148,10 @@ impl App {
                 // with on_confirm=CloseWindow; the modal's Confirm
                 // dispatch (in the key handler) re-runs the close
                 // path below.
-                let scope = self.mux.panes.len();
+                let scope = ws.mux.panes.len();
                 if self.cfg.ask_before_closing.should_prompt(scope) {
-                    self.close_all_modals();
-                    self.confirm_dialog = Some(ConfirmDialogState {
+                    self.close_all_modals(ws);
+                    ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close {scope} pane(s)?"),
                         buttons: vec![
                             ConfirmButton::Cancel,
@@ -6373,7 +6163,7 @@ impl App {
                         focus_idx: 0, // Cancel — safe default.
                         on_confirm: ConfirmAction::CloseWindow,
                     });
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -6383,26 +6173,26 @@ impl App {
                 // both actions did `close_tab()` so binding `close_window`
                 // gave the user a confusingly-misnamed alias for
                 // `close_tab`. Now they're genuinely different.
-                self.mux.close_window();
+                ws.mux.close_window();
                 // Cycle 157: save the (now-empty) session so next
                 // launch starts fresh. Otherwise the previous
                 // multi-tab state from before close_window stays
                 // in session.json and silently restores.
-                self.save_session();
+                self.save_session(ws);
                 event_loop.exit();
             }
-            Action::NextTab => self.mux.next_tab(),
-            Action::PrevTab => self.mux.prev_tab(),
-            Action::FocusNext => self.mux.focus_cycle(area, true),
-            Action::FocusPrev => self.mux.focus_cycle(area, false),
-            Action::FocusLeft => self.mux.focus_dir(area, -1, 0),
-            Action::FocusRight => self.mux.focus_dir(area, 1, 0),
-            Action::FocusUp => self.mux.focus_dir(area, 0, -1),
-            Action::FocusDown => self.mux.focus_dir(area, 0, 1),
-            Action::ResizeLeft => self.mux.resize_focus(Dir::Horizontal, -0.03),
-            Action::ResizeRight => self.mux.resize_focus(Dir::Horizontal, 0.03),
-            Action::ResizeUp => self.mux.resize_focus(Dir::Vertical, -0.03),
-            Action::ResizeDown => self.mux.resize_focus(Dir::Vertical, 0.03),
+            Action::NextTab => ws.mux.next_tab(),
+            Action::PrevTab => ws.mux.prev_tab(),
+            Action::FocusNext => ws.mux.focus_cycle(area, true),
+            Action::FocusPrev => ws.mux.focus_cycle(area, false),
+            Action::FocusLeft => ws.mux.focus_dir(area, -1, 0),
+            Action::FocusRight => ws.mux.focus_dir(area, 1, 0),
+            Action::FocusUp => ws.mux.focus_dir(area, 0, -1),
+            Action::FocusDown => ws.mux.focus_dir(area, 0, 1),
+            Action::ResizeLeft => ws.mux.resize_focus(Dir::Horizontal, -0.03),
+            Action::ResizeRight => ws.mux.resize_focus(Dir::Horizontal, 0.03),
+            Action::ResizeUp => ws.mux.resize_focus(Dir::Vertical, -0.03),
+            Action::ResizeDown => ws.mux.resize_focus(Dir::Vertical, 0.03),
             Action::Copy => {
                 // Cycle 609 (Terminator parity, terminatorlib/config.py
                 // `smart_copy` + terminal.py:real_copy_clipboard):
@@ -6418,7 +6208,7 @@ impl App {
                 //     clipboard now reflects the current selection
                 //     (empty or not)" without smart heuristics.
                 // Pre-cycle-609 kettle hardcoded smart_copy = true.
-                let selection_text = self.mux.focused().and_then(|p| {
+                let selection_text = ws.mux.focused().and_then(|p| {
                     p.term
                         .term
                         .lock()
@@ -6448,15 +6238,15 @@ impl App {
                 // false matches Terminator's default — the selection
                 // stays so re-Copy still works.
                 if copied && self.cfg.clear_select_on_copy {
-                    self.clear_selection_on_input();
-                    if let Some(w) = &self.window {
+                    self.clear_selection_on_input(ws);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                 }
             }
-            Action::Paste => self.paste_clipboard(),
+            Action::Paste => self.paste_clipboard(ws),
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     // Cycle 747: step the logical font size directly. Back-
                     // deriving from `r.cell_h` (now physical-px after the DPI
                     // fix) would double-apply the scale factor on HiDPI.
@@ -6471,7 +6261,7 @@ impl App {
                 // enter/exit, so the saved pre-zoom size is now stale — drop it
                 // so a later zoom-out keeps this new chosen size instead of
                 // reverting to the old one.
-                self.scaled_zoom_prev_font_size = None;
+                ws.scaled_zoom_prev_font_size = None;
             }
             Action::StartSearch => {
                 // Cycle 154: close any other modal first so we don't
@@ -6480,12 +6270,12 @@ impl App {
                 // None already on the happy path, but defending in
                 // depth here lets a future "open X without closing"
                 // bug stay sane.)
-                self.close_all_modals();
-                self.mux.search.open = true;
-                self.mux.search.query.clear();
-                self.mux.search.matches.clear();
-                self.mux.search.index = 0;
-                self.search_revealed = None; // re-reveal on this new search
+                self.close_all_modals(ws);
+                ws.mux.search.open = true;
+                ws.mux.search.query.clear();
+                ws.mux.search.matches.clear();
+                ws.mux.search.index = 0;
+                ws.search_revealed = None; // re-reveal on this new search
             }
             Action::ToggleBroadcastAll => {
                 // Cycle 679: cycle-178 "broadcast-all" is actually
@@ -6495,17 +6285,17 @@ impl App {
                 // variants are reachable via the upcoming
                 // GroupTab/GroupWindow/CreateGroup actions
                 // (cycle 642 surface, dispatch follow-up).
-                self.mux.broadcast = crate::mux::BroadcastScope::Tab;
+                ws.mux.broadcast = crate::mux::BroadcastScope::Tab;
             }
             Action::ToggleBroadcastOff => {
-                self.mux.broadcast = crate::mux::BroadcastScope::Off;
+                ws.mux.broadcast = crate::mux::BroadcastScope::Off;
             }
             Action::ToggleBroadcastGroup => {
                 // Cycle 681 (named-groups sub-cycle 5): toggle
                 // broadcast scope between Off and
                 // Group(focused_pane.group_name). If focused
                 // pane has no group, log + no-op.
-                let focused_group = self.mux.focused().and_then(|p| p.group_name.clone());
+                let focused_group = ws.mux.focused().and_then(|p| p.group_name.clone());
                 let Some(group) = focused_group else {
                     log::info!(
                         "toggle-broadcast-group: focused pane has no group_name; \
@@ -6513,7 +6303,7 @@ impl App {
                     );
                     return;
                 };
-                self.mux.broadcast = match &self.mux.broadcast {
+                ws.mux.broadcast = match &ws.mux.broadcast {
                     crate::mux::BroadcastScope::Group(name) if name == &group => {
                         crate::mux::BroadcastScope::Off
                     }
@@ -6525,14 +6315,14 @@ impl App {
                 // window-wide broadcast on/off. Distinct from
                 // ToggleBroadcastAll (which is misnamed —
                 // actually per-tab).
-                self.mux.broadcast = match &self.mux.broadcast {
+                ws.mux.broadcast = match &ws.mux.broadcast {
                     crate::mux::BroadcastScope::All => crate::mux::BroadcastScope::Off,
                     _ => crate::mux::BroadcastScope::All,
                 };
             }
             Action::ToggleZoom => {
-                self.mux.toggle_zoom();
-                self.resize_all();
+                ws.mux.toggle_zoom();
+                self.resize_all(ws);
             }
             // Cycle 702 Terminator parity (`key_send_newline`).
             // Write a literal `\n` to the focused pane's PTY.
@@ -6540,7 +6330,7 @@ impl App {
             // normally but expect explicit `\n` for line
             // continuation (multi-line readline prompts).
             Action::SendNewline => {
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     // Cycle 941: typed-input semantics — read-only drops it.
                     p.feed_input(b"\n");
                 }
@@ -6665,10 +6455,10 @@ impl App {
             // the post-toggle zoom flag and pair save/restore via
             // a single `Option<f32>`.
             Action::ScaledZoom => {
-                self.mux.toggle_zoom();
-                self.resize_all();
-                let now_zoomed = self.mux.is_zoomed();
-                if let Some(r) = self.renderer.as_mut() {
+                ws.mux.toggle_zoom();
+                self.resize_all(ws);
+                let now_zoomed = ws.mux.is_zoomed();
+                if let Some(r) = ws.renderer.as_mut() {
                     if now_zoomed {
                         // Cycle 846 (audit): baseline off the LIVE renderer size,
                         // not `self.cfg.font_size`. Increase/DecreaseFontSize
@@ -6678,20 +6468,20 @@ impl App {
                         // from the original config size and, on exit, *discard*
                         // the user's manual zoom by restoring it.
                         let cur = r.font_size();
-                        if self.scaled_zoom_prev_font_size.is_none() {
-                            self.scaled_zoom_prev_font_size = Some(cur);
+                        if ws.scaled_zoom_prev_font_size.is_none() {
+                            ws.scaled_zoom_prev_font_size = Some(cur);
                         }
                         let new_size = (cur * 1.5).clamp(6.0, 96.0);
                         r.set_font_size(new_size);
-                    } else if let Some(prev) = self.scaled_zoom_prev_font_size.take() {
+                    } else if let Some(prev) = ws.scaled_zoom_prev_font_size.take() {
                         r.set_font_size(prev);
                     }
                 }
             }
             Action::ToggleFullscreen => {
-                self.fullscreen = !self.fullscreen;
-                if let Some(w) = &self.window {
-                    w.set_fullscreen(if self.fullscreen {
+                ws.fullscreen = !ws.fullscreen;
+                if let Some(w) = &ws.window {
+                    w.set_fullscreen(if ws.fullscreen {
                         Some(Fullscreen::Borderless(None))
                     } else {
                         None
@@ -6713,12 +6503,12 @@ impl App {
                 // now agree that a read-only pane drops the clear (the
                 // broadcast branch inherited the gate from broadcast_write;
                 // the focused branch used to bypass it, a split-brain).
-                if self.mux.is_broadcast_on() {
-                    self.mux.broadcast_write(b"\x1b[3J");
-                } else if let Some(p) = self.mux.focused() {
+                if ws.mux.is_broadcast_on() {
+                    ws.mux.broadcast_write(b"\x1b[3J");
+                } else if let Some(p) = ws.mux.focused() {
                     p.feed_input(b"\x1b[3J");
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -6738,13 +6528,13 @@ impl App {
                 // Cycle 942 (audit): feed_input — injecting ESC c into a
                 // read-only pane's child (e.g. a locked agent TUI, where ESC
                 // is the interrupt key) is exactly what the toggle prevents.
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     p.feed_input(b"\x1bc");
                 }
-                self.clear_selection_on_input();
+                self.clear_selection_on_input(ws);
                 // Cycle 111's modal sweep, extracted to a helper in
                 // cycle 154 so the modal-opening actions can reuse it.
-                self.close_all_modals();
+                self.close_all_modals(ws);
                 // Cycle 134: also reset the blink phase so the cursor
                 // is immediately visible. Without this, hitting Reset
                 // right as `blink_on` was false left the user staring
@@ -6753,7 +6543,7 @@ impl App {
                 // recover from a visually-jammed terminal. Shares
                 // `reset_blink_phase` with cycle-135 focus-change and
                 // cycle-140 modal-close paths.
-                self.reset_blink_phase();
+                self.reset_blink_phase(ws);
             }
             Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -6761,7 +6551,7 @@ impl App {
             | Action::ScrollLineDown
             | Action::ScrollToTop
             | Action::ScrollToBottom => {
-                if let Some(p) = self.mux.focused()
+                if let Some(p) = ws.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
                 {
                     t.scroll_display(match action {
@@ -6779,7 +6569,7 @@ impl App {
             }
             Action::JumpPrevPrompt | Action::JumpNextPrompt => {
                 let prev = matches!(action, Action::JumpPrevPrompt);
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     let marks = p.term.prompt_marks();
                     if let Ok(mut t) = p.term.term.lock() {
                         use kettle_core::Dimensions;
@@ -6802,18 +6592,18 @@ impl App {
                 }
             }
             Action::OpenSsh => {
-                self.close_all_modals();
-                self.ssh_input = Some(String::new());
+                self.close_all_modals(ws);
+                ws.ssh_input = Some(String::new());
             }
             Action::CommandPalette => {
-                self.close_all_modals();
-                self.palette_input = Some((String::new(), 0));
+                self.close_all_modals(ws);
+                ws.palette_input = Some((String::new(), 0));
             }
             // Cycle 756: open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
             Action::OpenSettings => {
-                self.close_all_modals();
-                self.settings_nav = Some(crate::settings::SettingsNav::default());
+                self.close_all_modals(ws);
+                ws.settings_nav = Some(crate::settings::SettingsNav::default());
             }
             // Cycle 708 (Terminator parity, layoutlauncher.py):
             // open the runtime layout picker. Empty layouts dir
@@ -6822,14 +6612,14 @@ impl App {
             // "I have no saved layouts yet; save one with
             // `kettle --save-layout NAME`" affordance.
             Action::OpenLayoutPicker => {
-                self.close_all_modals();
-                self.layout_picker_input = Some((String::new(), 0));
+                self.close_all_modals(ws);
+                ws.layout_picker_input = Some((String::new(), 0));
             }
             Action::HintMode => {
-                let targets = self.collect_hints();
+                let targets = self.collect_hints(ws);
                 if !targets.is_empty() {
-                    self.close_all_modals();
-                    self.hint_state = Some((targets, String::new()));
+                    self.close_all_modals(ws);
+                    ws.hint_state = Some((targets, String::new()));
                 }
             }
             Action::ToggleViMode => {
@@ -6839,14 +6629,14 @@ impl App {
                 // position; Esc also exits (handled in keyboard
                 // dispatch). h/j/k/l movement + visual selection +
                 // yank land in sub-cycles 2-4.
-                if self.vi_mode.is_some() {
-                    self.vi_mode = None;
+                if ws.vi_mode.is_some() {
+                    ws.vi_mode = None;
                 } else {
-                    self.close_all_modals();
+                    self.close_all_modals(ws);
                     // Seed cursor at the focused pane's current
                     // terminal cursor position. h/j/k/l will move
                     // around this in sub-cycle 2.
-                    let (row, col) = self
+                    let (row, col) = ws
                         .mux
                         .focused()
                         .and_then(|p| {
@@ -6856,13 +6646,13 @@ impl App {
                             })
                         })
                         .unwrap_or((0, 0));
-                    self.vi_mode = Some(ViState {
+                    ws.vi_mode = Some(ViState {
                         row,
                         col,
                         visual_anchor: None,
                     });
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -6871,18 +6661,15 @@ impl App {
                 // position so the menu lands where the user is looking;
                 // falls back to the center of the focused pane when
                 // dispatched programmatically (e.g. from the palette).
-                let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
-                self.open_context_menu(px, py);
+                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                self.open_context_menu(ws, px, py);
             }
             Action::UndoCloseTab => {
                 let waker = self.waker();
-                match self
-                    .mux
-                    .undo_close_tab(&self.cfg, cols, rows, cw, ch, waker)
-                {
+                match ws.mux.undo_close_tab(&self.cfg, cols, rows, cw, ch, waker) {
                     Ok(true) => {
-                        self.resize_all();
-                        self.save_session();
+                        self.resize_all(ws);
+                        self.save_session(ws);
                     }
                     Ok(false) => {
                         log::debug!("undo_close_tab: ring is empty, nothing to restore");
@@ -6892,19 +6679,19 @@ impl App {
             }
             Action::DuplicateTab => {
                 let waker = self.waker();
-                if let Err(e) = self
+                if let Err(e) = ws
                     .mux
                     .duplicate_focused_tab(&self.cfg, cols, rows, cw, ch, waker)
                 {
                     log::error!("duplicate_tab failed: {e}");
                 } else {
-                    self.resize_all();
-                    self.save_session();
+                    self.resize_all(ws);
+                    self.save_session(ws);
                 }
             }
             Action::DuplicatePane => {
                 let waker = self.waker();
-                if let Err(e) = self.mux.duplicate_focused_pane(
+                if let Err(e) = ws.mux.duplicate_focused_pane(
                     crate::mux::Dir::Horizontal,
                     &self.cfg,
                     cols,
@@ -6915,7 +6702,7 @@ impl App {
                 ) {
                     log::error!("duplicate_pane failed: {e}");
                 } else {
-                    self.resize_all();
+                    self.resize_all(ws);
                 }
             }
             Action::NextTheme | Action::PrevTheme => {
@@ -6930,7 +6717,7 @@ impl App {
                         "Applied for this session — couldn't write it to your config file.",
                     );
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -6949,7 +6736,7 @@ impl App {
                             "Applied for this session — couldn't write it to your config file.",
                         );
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                 } else {
@@ -6964,7 +6751,7 @@ impl App {
                 // Cycle 621 (Terminator parity, `plugins/logger.py`):
                 // toggle the focused pane's session log. Pure helper
                 // computes the file path; this arm does the I/O.
-                if let Some(pane) = self.mux.focused() {
+                if let Some(pane) = ws.mux.focused() {
                     let mut guard = match pane.term.log_file.lock() {
                         Ok(g) => g,
                         Err(_) => return,
@@ -7016,18 +6803,18 @@ impl App {
                 // Cycle 690 (terminalshot sub-cycle 6): compute
                 // the focused pane's rect at dispatch time so the
                 // screenshot crops to just that pane. Computed
-                // BEFORE the `&mut self.renderer` borrow to keep
+                // BEFORE the `&mut ws.renderer` borrow to keep
                 // the borrow window narrow.
-                let area = self.area();
-                let active = self.mux.active;
-                let focus_id = self.mux.tabs.get(active).map(|t| t.focus).unwrap_or(0);
-                let crop = self
+                let area = self.area(ws);
+                let active = ws.mux.active;
+                let focus_id = ws.mux.tabs.get(active).map(|t| t.focus).unwrap_or(0);
+                let crop = ws
                     .mux
                     .layout(active, area)
                     .into_iter()
                     .find(|(id, _)| *id == focus_id)
                     .map(|(_, rect)| rect);
-                if let Some(renderer) = self.renderer.as_mut() {
+                if let Some(renderer) = ws.renderer.as_mut() {
                     let secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -7054,18 +6841,18 @@ impl App {
                     fire_notify("kettle: screenshot queued", &path_str);
                 }
             }
-            Action::ReloadConfig => self.reload_config(),
+            Action::ReloadConfig => self.reload_config(ws),
             Action::MoveTabLeft => {
-                self.mux.move_active_tab(-1);
+                ws.mux.move_active_tab(-1);
             }
             Action::MoveTabRight => {
-                self.mux.move_active_tab(1);
+                ws.mux.move_active_tab(1);
             }
             Action::GotoTab(n) => {
                 let i = n as usize;
-                if i < self.mux.tabs.len() {
-                    self.mux.active = i;
-                    self.mux.touch_active_tab_seen();
+                if i < ws.mux.tabs.len() {
+                    ws.mux.active = i;
+                    ws.mux.touch_active_tab_seen();
                 }
             }
             // Cycle 809 (audit): keyboard equivalents of clicking the cycle-794
@@ -7073,12 +6860,12 @@ impl App {
             // `DismissUpdate` just dismisses. Both no-op (debug-logged) when no
             // banner is showing, so a bound key is harmless the rest of the time.
             Action::OpenUpdate => {
-                if !self.act_on_update_banner(true) {
+                if !self.act_on_update_banner(ws, true) {
                     log::debug!("open_update: no update banner is showing");
                 }
             }
             Action::DismissUpdate => {
-                if !self.act_on_update_banner(false) {
+                if !self.act_on_update_banner(ws, false) {
                     log::debug!("dismiss_update: no update banner is showing");
                 }
             }
@@ -7099,47 +6886,47 @@ impl App {
             // Render is a thin bar at the top of the window (similar
             // shape to cycle-X's command palette overlay).
             Action::EditWindowTitle => {
-                self.close_all_modals();
-                let current = self.last_title.clone();
-                self.editing_title = Some(TitleEditState {
+                self.close_all_modals(ws);
+                let current = ws.last_title.clone();
+                ws.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Window,
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             Action::EditTabTitle => {
-                self.close_all_modals();
-                let current = self
+                self.close_all_modals(ws);
+                let current = ws
                     .mux
                     .tabs
-                    .get(self.mux.active)
+                    .get(ws.mux.active)
                     .and_then(|t| t.title_override.clone())
                     .unwrap_or_default();
-                self.editing_title = Some(TitleEditState {
+                ws.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Tab,
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             Action::EditPaneTitle => {
-                self.close_all_modals();
-                let current = self
+                self.close_all_modals(ws);
+                let current = ws
                     .mux
                     .focused()
                     .map(|p| p.title.clone())
                     .unwrap_or_default();
-                self.editing_title = Some(TitleEditState {
+                ws.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Pane,
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7149,18 +6936,18 @@ impl App {
                 // group. Same overlay mechanism as cycle-369
                 // EditPaneTitle. `CreateGroup` (Terminator name)
                 // and `EditPaneGroup` (kettle name) share dispatch.
-                self.close_all_modals();
-                let current = self
+                self.close_all_modals(ws);
+                let current = ws
                     .mux
                     .focused()
                     .and_then(|p| p.group_name.clone())
                     .unwrap_or_default();
-                self.editing_title = Some(TitleEditState {
+                ws.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Group,
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7169,18 +6956,18 @@ impl App {
                 // title-edit overlay with `bulk` set to Tab/Window
                 // so on Apply the typed name writes to every pane
                 // in scope.
-                self.close_all_modals();
+                self.close_all_modals(ws);
                 let bulk = if matches!(action, Action::GroupTab) {
                     GroupBulkScope::Tab
                 } else {
                     GroupBulkScope::Window
                 };
-                self.editing_title = Some(TitleEditState {
+                ws.editing_title = Some(TitleEditState {
                     scope: TitleEditScope::Group,
                     input: String::new(),
                     bulk,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7190,20 +6977,20 @@ impl App {
                 // overlay needed — empty input is the "clear"
                 // signal, and the action carries the scope.
                 let pane_ids: Vec<u64> = if matches!(action, Action::UngroupTab) {
-                    self.mux
+                    ws.mux
                         .tabs
-                        .get(self.mux.active)
+                        .get(ws.mux.active)
                         .map(|t| t.root.leaf_ids())
                         .unwrap_or_default()
                 } else {
-                    self.mux.panes.keys().copied().collect()
+                    ws.mux.panes.keys().copied().collect()
                 };
                 for id in pane_ids {
-                    if let Some(p) = self.mux.panes.get_mut(&id) {
+                    if let Some(p) = ws.mux.panes.get_mut(&id) {
                         p.group_name = None;
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7240,7 +7027,7 @@ impl App {
                     );
                     if let Some(p) = kettle_config::Config::path_for_profile(&next) {
                         self.config_path = Some(p);
-                        self.reload_config();
+                        self.reload_config(ws);
                     }
                 }
             }
@@ -7249,14 +7036,14 @@ impl App {
             // RotateCcw flips dir without swap. No-op when the
             // focused leaf has no parent (single-pane tab).
             Action::RotateCw => {
-                self.mux.rotate_focused_split(true);
-                if let Some(w) = &self.window {
+                ws.mux.rotate_focused_split(true);
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             Action::RotateCcw => {
-                self.mux.rotate_focused_split(false);
-                if let Some(w) = &self.window {
+                ws.mux.rotate_focused_split(false);
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7273,7 +7060,7 @@ impl App {
                     Always => Auto,
                     Auto => Never,
                 };
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7282,9 +7069,9 @@ impl App {
             // dropped before it reaches the PTY; the child keeps producing
             // output. A `[RO]` titlebar badge shows the state.
             Action::TogglePaneReadOnly => {
-                let _ = self.mux.toggle_focused_read_only();
+                let _ = ws.mux.toggle_focused_read_only();
                 // The `[RO]` titlebar badge reflects the new state.
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7295,18 +7082,18 @@ impl App {
             // IncreaseFontSize / DecreaseFontSize / ResetFontSize
             // arm — same shape as ResetAndClear.
             Action::ZoomInAll => {
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     // Cycle 747: step logical size (see IncreaseFontSize).
                     r.set_font_size(r.font_size() + 1.0);
                 }
             }
             Action::ZoomOutAll => {
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     r.set_font_size((r.font_size() - 1.0).max(6.0));
                 }
             }
             Action::ZoomNormalAll => {
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     r.set_font_size(self.cfg.font_size);
                 }
             }
@@ -7315,22 +7102,22 @@ impl App {
             // numbering). InsertPanePadded uses 2-digit zero-padded
             // form (Terminator default).
             Action::InsertPaneNumber => {
-                let idx = self
+                let idx = ws
                     .mux
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     p.feed_input(idx.to_string().as_bytes());
                 }
             }
             Action::InsertPanePadded => {
-                let idx = self
+                let idx = ws
                     .mux
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     p.feed_input(format!("{idx:02}").as_bytes());
                 }
             }
@@ -7342,7 +7129,7 @@ impl App {
             // output by source pane, or for keyboard workflows
             // that re-type the current title into the command line.
             Action::InsertPaneName => {
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     let title = p.title.clone();
                     p.feed_input(title.as_bytes());
                 }
@@ -7358,7 +7145,7 @@ impl App {
             // shape to clicking a `file://...` hyperlink in pane
             // output — re-uses the safety policy for free.
             Action::OpenCwdInFileManager => {
-                match self.mux.focused().and_then(|p| p.term.current_dir()) {
+                match ws.mux.focused().and_then(|p| p.term.current_dir()) {
                     // Cycle 816 (audit): refuse a non-local OSC 7 cwd before
                     // building/opening the URL (it's untrusted PTY input — a
                     // UNC path would trigger an SMB/NTLM leak on Windows).
@@ -7384,7 +7171,7 @@ impl App {
             // Pull the row count from the focused pane's grid
             // dimensions (cycle-X pattern; works for any pane size).
             Action::ScrollPageUpHalf | Action::ScrollPageDownHalf => {
-                if let Some(p) = self.mux.focused()
+                if let Some(p) = ws.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
                 {
                     use kettle_core::Dimensions;
@@ -7404,14 +7191,14 @@ impl App {
             // to the clipboard on Wayland/macOS/Windows. It shares `paste_text`
             // so the LOCAL_PASTE_MAX clamp, bracketed-paste wrap, and broadcast
             // scoping all match Action::Paste.
-            Action::PastePrimary => self.paste_primary(),
+            Action::PastePrimary => self.paste_primary(ws),
             // Cycle 345: in-process Quake toggle. Same tri-state
             // logic as cycle-319's --toggle remote command:
             //   hidden → show + focus
             //   visible + focused → hide
             //   visible + !focused → focus (don't hide)
             Action::ToggleWindowVisibility => {
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     let visible = w.is_visible().unwrap_or(true);
                     let focused = w.has_focus();
                     if !visible {
@@ -7456,10 +7243,10 @@ impl App {
                 // SCM_RIGHTS path, sub-cycle 7). The file-fallback
                 // works cross-platform incl. Windows + Wayland.
                 #[cfg(unix)]
-                if self.try_move_tab_to_new_window_scm_rights(event_loop) {
+                if self.try_move_tab_to_new_window_scm_rights(ws, event_loop) {
                     return;
                 }
-                let cwd = self
+                let cwd = ws
                     .mux
                     .focused()
                     .and_then(|p| p.term.current_dir())
@@ -7470,7 +7257,7 @@ impl App {
                     });
                 // Serialize the focused tab to a temp file.
                 let handoff_path: Option<std::path::PathBuf> =
-                    self.mux.serialize_tab(self.mux.active).and_then(|stab| {
+                    ws.mux.serialize_tab(ws.mux.active).and_then(|stab| {
                         let session = crate::session::Session {
                             tabs: vec![stab],
                             active: 0,
@@ -7498,8 +7285,8 @@ impl App {
                         .stderr(std::process::Stdio::null());
                     if cmd.spawn().is_ok() {
                         // Cycle 424: fire TabClose so plugins see the close.
-                        let closing_idx = self.mux.active;
-                        let _ = self.mux.close_tab();
+                        let closing_idx = ws.mux.active;
+                        let _ = ws.mux.close_tab();
                         self.fire_tab_close_event(closing_idx);
                     } else {
                         log::warn!("MoveTabToNewWindow: spawn failed; tab kept in source window");
@@ -7519,7 +7306,7 @@ impl App {
                 // ClearHistory actions.
                 // Cycle 942 (audit): feed_input, same read-only rule as the
                 // separate Reset + ClearHistory arms.
-                if let Some(p) = self.mux.focused()
+                if let Some(p) = ws.mux.focused()
                     && p.feed_input(b"\x1bc")
                 {
                     p.feed_input(b"\x1b[3J");
@@ -7528,16 +7315,16 @@ impl App {
         }
         // Cycle 135 (cont.): if focus moved as a result of the action,
         // land the cursor visible on the new pane right away.
-        self.note_focus_change(pre_focus);
-        self.resize_all();
-        self.save_session();
-        if let Some(w) = &self.window {
+        self.note_focus_change(ws, pre_focus);
+        self.resize_all(ws);
+        self.save_session(ws);
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
 
-    fn save_session(&self) {
-        let mut s = self.mux.snapshot();
+    fn save_session(&self, ws: &WindowState) {
+        let mut s = ws.mux.snapshot();
         // Cycle 918: theme is config-governed (persisted to the config file via
         // `persist_pref`), NOT stored in the session. A session-pinned theme used
         // to OVERRIDE the config/compile-time default on restore, so a default
@@ -7584,14 +7371,14 @@ impl App {
     ///
     /// First tick after startup emits with `previous = None` so
     /// plugins can seed their state.
-    fn poll_focus_event(&mut self) {
-        let current = self.mux.active_focus();
+    fn poll_focus_event(&mut self, ws: &mut WindowState) {
+        let current = ws.mux.active_focus();
         let Some(cur_id) = current else { return };
-        if self.last_emitted_focus == Some(cur_id) {
+        if ws.last_emitted_focus == Some(cur_id) {
             return;
         }
-        let prev = self.last_emitted_focus;
-        self.last_emitted_focus = Some(cur_id);
+        let prev = ws.last_emitted_focus;
+        ws.last_emitted_focus = Some(cur_id);
         if let Some(eng) = self.lua_engine.as_ref() {
             eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
         }
@@ -7607,20 +7394,20 @@ impl App {
     /// taskbar button each frame (pwsh 7 / Windows Terminal parity). Reads the
     /// focused pane the same way the cursor-blink poll does; `Taskbar` dedups
     /// internally, so an unchanged value costs nothing. No-op off Windows.
-    fn poll_taskbar_progress(&mut self) {
-        let progress = self
+    fn poll_taskbar_progress(&mut self, ws: &mut WindowState) {
+        let progress = ws
             .mux
             .active_focus()
-            .and_then(|id| self.mux.panes.get(&id))
+            .and_then(|id| ws.mux.panes.get(&id))
             .and_then(|p| p.term.progress());
-        if let Some(window) = self.window.clone() {
-            self.taskbar.apply(&window, progress);
+        if let Some(window) = ws.window.clone() {
+            ws.taskbar.apply(&window, progress);
         }
     }
 
     /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
     /// `LuaEvent::TitleChanged`). Walk live panes, diff each
-    /// title against `self.last_emitted_titles`, emit on any
+    /// title against `ws.last_emitted_titles`, emit on any
     /// boundary cross. One pass site, regardless of how many
     /// title-mutating sites exist in App.
     ///
@@ -7628,7 +7415,7 @@ impl App {
     /// hash lookup + string compare per entry. Future cycles
     /// can add a "dirty-title" bitset on Mux if pane counts
     /// grow into the thousands.
-    fn poll_title_event(&mut self) {
+    fn poll_title_event(&mut self, ws: &mut WindowState) {
         // Cycle 930 (agent-first A2): also run when a ctl subscriber is present,
         // so title changes reach agents even without a Lua engine.
         let has_subscribers = self
@@ -7640,14 +7427,14 @@ impl App {
             return;
         }
         let mut changes: Vec<(u64, String)> = Vec::new();
-        for (id, p) in self.mux.panes.iter() {
-            let last = self.last_emitted_titles.get(id);
+        for (id, p) in ws.mux.panes.iter() {
+            let last = ws.last_emitted_titles.get(id);
             if last.map(|s| s.as_str()) != Some(p.title.as_str()) {
                 changes.push((*id, p.title.clone()));
             }
         }
         for (id, title) in changes {
-            self.last_emitted_titles.insert(id, title.clone());
+            ws.last_emitted_titles.insert(id, title.clone());
             if let Some(eng) = self.lua_engine.as_ref() {
                 eng.fire_event(&crate::LuaEvent::TitleChanged(id, title.clone()));
             }
@@ -7658,14 +7445,14 @@ impl App {
         // (it's only ever read for live panes). Covers every close path —
         // keybind, confirm dialog, tab close, reap. The O(1) length guard means
         // the O(n) retain runs only when there are actually stale entries.
-        if self.last_emitted_titles.len() > self.mux.panes.len() {
-            let panes = &self.mux.panes;
-            self.last_emitted_titles
+        if ws.last_emitted_titles.len() > ws.mux.panes.len() {
+            let panes = &ws.mux.panes;
+            ws.last_emitted_titles
                 .retain(|id, _| panes.contains_key(id));
         }
     }
 
-    fn poll_theme_schedule(&mut self) {
+    fn poll_theme_schedule(&mut self, ws: &mut WindowState) {
         let Some(schedule) = self.cfg.theme_schedule else {
             return;
         };
@@ -7726,8 +7513,8 @@ impl App {
             log::info!("theme-schedule: switching to {next}");
             self.cfg.theme_name = next.clone();
             self.cfg.theme = kettle_config::Theme::by_name(&next);
-            self.save_session();
-            if let Some(w) = &self.window {
+            self.save_session(ws);
+            if let Some(w) = &ws.window {
                 w.request_redraw();
             }
         }
@@ -7740,13 +7527,14 @@ impl App {
     /// the close-family actions run their real bodies.
     fn dispatch_confirm_action(
         &mut self,
+        ws: &mut WindowState,
         action: ConfirmAction,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
         match action {
             ConfirmAction::CloseWindow => {
-                self.mux.close_window();
-                self.save_session();
+                ws.mux.close_window();
+                self.save_session(ws);
                 event_loop.exit();
             }
             ConfirmAction::CloseTab => {
@@ -7758,19 +7546,19 @@ impl App {
                 // was the LAST tab, so the window must exit now. Pre-fix the
                 // return was dropped, so closing the last tab via the confirm
                 // dialog deferred exit by a tick and painted an empty frame.
-                if self.mux.close_tab() {
-                    self.save_session();
+                if ws.mux.close_tab() {
+                    self.save_session(ws);
                     event_loop.exit();
                     return;
                 }
-                self.save_session();
+                self.save_session(ws);
             }
             ConfirmAction::ClosePane => {
                 // Cycle 750: capture the pane id before the close so the
                 // pane_close hook fires with the right id (mirrors the
                 // keybind path).
-                let closing_pane = self.mux.active_focus();
-                let was_last = self.mux.close_focused();
+                let closing_pane = ws.mux.active_focus();
+                let was_last = ws.mux.close_focused();
                 if let Some(id) = closing_pane {
                     self.fire_pane_close_event(id);
                 }
@@ -7779,12 +7567,12 @@ impl App {
                 // so exit; otherwise redraw the collapsed layout (the renderer
                 // cache + focus id are stale until a frame is scheduled).
                 if was_last {
-                    self.save_session();
+                    self.save_session(ws);
                     event_loop.exit();
                     return;
                 }
-                self.save_session();
-                if let Some(w) = &self.window {
+                self.save_session(ws);
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -7802,24 +7590,24 @@ impl App {
     /// On the inverse (was-Some now-None — SSH exited), the title
     /// is left alone (the shell that re-shows after `ssh exit` is
     /// already the right OSC-1/2-set title).
-    fn poll_remote_contexts(&mut self) {
+    fn poll_remote_contexts(&mut self, ws: &mut WindowState) {
         if self.last_remote_poll.elapsed().as_millis() < 200 {
             return;
         }
         self.last_remote_poll = std::time::Instant::now();
-        let pane_ids: Vec<u64> = self.mux.panes.keys().copied().collect();
+        let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
         // Cycle 851: refresh the OS process snapshot + parent→children index
         // ONCE per tick, then query every pane against the shared index.
         self.remote_scanner.refresh();
         for id in pane_ids {
-            let Some(pane) = self.mux.panes.get(&id) else {
+            let Some(pane) = ws.mux.panes.get(&id) else {
                 continue;
             };
             let Some(pid) = pane.term.child_pid() else {
                 continue;
             };
             let detected = self.remote_scanner.detect_root(pid);
-            if let Some(pane) = self.mux.panes.get_mut(&id)
+            if let Some(pane) = ws.mux.panes.get_mut(&id)
                 && detected != pane.remote_context
             {
                 if let Some(ctx) = &detected {
@@ -7830,13 +7618,13 @@ impl App {
         }
     }
 
-    fn reload_config(&mut self) {
+    fn reload_config(&mut self, ws: &mut WindowState) {
         let mut new = self
             .config_path
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = ws.renderer.as_mut() {
             // Order matters slightly: family first so the cell measurer
             // sees the new family when size changes (the size setter
             // re-measures internally; a stale family would yield wrong
@@ -7868,8 +7656,8 @@ impl App {
         // reverted a `-T` pinned title to `window-title-format` (and the
         // -m/-f/-H/-b overrides out of `self.cfg`, which save_session and
         // future window ops read).
-        if let Some(ws) = self.startup.window_state_override {
-            new.window_state = ws;
+        if let Some(wstate) = self.startup.window_state_override {
+            new.window_state = wstate;
         }
         if let Some(b) = self.startup.borderless_override {
             new.borderless = b;
@@ -7881,9 +7669,9 @@ impl App {
         // Cycle 936: a config reload may have changed the font size, so the
         // saved pre-scaled-zoom size is stale — drop it (see the font-size
         // action arm) so a later zoom-out doesn't revert to the old size.
-        self.scaled_zoom_prev_font_size = None;
-        self.resize_all();
-        if let Some(w) = &self.window {
+        ws.scaled_zoom_prev_font_size = None;
+        self.resize_all(ws);
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -7907,10 +7695,10 @@ impl App {
     /// initial create event before the writer's content is visible;
     /// next event will catch it).
     /// Cycle 928 (agent-first A2): drain the control-server channel and
-    /// dispatch each message on the main thread (the only place `self.mux` is
+    /// dispatch each message on the main thread (the only place `ws.mux` is
     /// touched). Mirrors `drain_remote_commands` but with per-connection
     /// replies + a connection table.
-    fn drain_ctl(&mut self) {
+    fn drain_ctl(&mut self, ws: &mut WindowState) {
         use crate::ctl_server::CtlServerMsg;
         // Pull all pending messages first so we don't hold a `&self.ctl` borrow
         // while calling `&mut self` handlers.
@@ -7939,7 +7727,7 @@ impl App {
                     req,
                     reply,
                 } => {
-                    self.handle_ctl_request(conn_id, &req, reply);
+                    self.handle_ctl_request(ws, conn_id, &req, reply);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -7955,7 +7743,7 @@ impl App {
                             .map(|c| c.pane_is_attached(pane))
                             .unwrap_or(false);
                         if !still {
-                            self.set_pane_agent_attached(pane, false);
+                            self.set_pane_agent_attached(ws, pane, false);
                         }
                     }
                     // Drop any pending run owned by this connection.
@@ -7965,7 +7753,7 @@ impl App {
                 }
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -7975,6 +7763,7 @@ impl App {
     /// it later (OSC-133 completion or the deadline).
     fn handle_ctl_request(
         &mut self,
+        ws: &mut WindowState,
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
         reply: crate::ctl_server::ReplyTx,
@@ -8003,10 +7792,10 @@ impl App {
             })
         };
         let resp = match req.method.as_str() {
-            "get_state" => Response::ok(req.id, self.ctl_get_state(mode)),
-            "list_tabs" => Response::ok(req.id, self.ctl_list_tabs()),
-            "list_panes" => Response::ok(req.id, self.ctl_list_panes()),
-            "read_screen" => self.ctl_read_screen(req),
+            "get_state" => Response::ok(req.id, self.ctl_get_state(ws, mode)),
+            "list_tabs" => Response::ok(req.id, self.ctl_list_tabs(ws)),
+            "list_panes" => Response::ok(req.id, self.ctl_list_panes(ws)),
+            "read_screen" => self.ctl_read_screen(ws, req),
             "subscribe" => {
                 if let Some(c) = &mut self.ctl {
                     c.set_subscribed(conn_id);
@@ -8014,13 +7803,13 @@ impl App {
                 Response::ok(req.id, serde_json::json!({"subscribed": true}))
             }
             "send_text" => require_full(req.id, "send_text")
-                .unwrap_or_else(|| self.ctl_send_text(conn_id, req)),
+                .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
                 } else {
                     // Deferred: store `reply`; resolved on completion/deadline.
-                    self.ctl_run_command(conn_id, req, reply);
+                    self.ctl_run_command(ws, conn_id, req, reply);
                     return;
                 }
             }
@@ -8034,21 +7823,25 @@ impl App {
     }
 
     /// `get_state`: version, theme, pid, server mode, focused pane.
-    fn ctl_get_state(&self, mode: kettle_config::AgentServer) -> serde_json::Value {
+    fn ctl_get_state(
+        &self,
+        ws: &WindowState,
+        mode: kettle_config::AgentServer,
+    ) -> serde_json::Value {
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
             "mode": format!("{mode:?}").to_lowercase(),
             "theme": self.cfg.theme_name,
-            "tabs": self.mux.tabs.len(),
-            "focused_pane": self.mux.tabs.get(self.mux.active).map(|t| t.focus),
+            "tabs": ws.mux.tabs.len(),
+            "focused_pane": ws.mux.tabs.get(ws.mux.active).map(|t| t.focus),
         })
     }
 
     /// `list_tabs`: index, title, active flag, pane ids.
-    fn ctl_list_tabs(&self) -> serde_json::Value {
-        let titles = self.mux.tab_titles();
-        let tabs: Vec<_> = self
+    fn ctl_list_tabs(&self, ws: &WindowState) -> serde_json::Value {
+        let titles = ws.mux.tab_titles();
+        let tabs: Vec<_> = ws
             .mux
             .tabs
             .iter()
@@ -8057,7 +7850,7 @@ impl App {
                 serde_json::json!({
                     "index": i,
                     "title": titles.get(i).cloned().unwrap_or_default(),
-                    "active": i == self.mux.active,
+                    "active": i == ws.mux.active,
                     "focused_pane": t.focus,
                     "panes": t.root.leaf_ids(),
                 })
@@ -8068,12 +7861,12 @@ impl App {
 
     /// `list_panes`: id, tab, title, cwd, size, focused, argv, child_pid,
     /// agent_attached.
-    fn ctl_list_panes(&self) -> serde_json::Value {
-        let focused = self.mux.tabs.get(self.mux.active).map(|t| t.focus);
+    fn ctl_list_panes(&self, ws: &WindowState) -> serde_json::Value {
+        let focused = ws.mux.tabs.get(ws.mux.active).map(|t| t.focus);
         let mut panes = Vec::new();
-        for (ti, tab) in self.mux.tabs.iter().enumerate() {
+        for (ti, tab) in ws.mux.tabs.iter().enumerate() {
             for id in tab.root.leaf_ids() {
-                let Some(pane) = self.mux.panes.get(&id) else {
+                let Some(pane) = ws.mux.panes.get(&id) else {
                     continue;
                 };
                 let (cols, rows) = pane
@@ -8115,10 +7908,11 @@ impl App {
     /// `read_screen`: a plain-text snapshot of a pane (default: focused).
     fn ctl_read_screen(
         &mut self,
+        ws: &mut WindowState,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
-        let pane = match self.ctl_resolve_pane(&req.params) {
+        let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
             Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
         };
@@ -8127,7 +7921,7 @@ impl App {
             .get("scrollback_lines")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
-        let Some(p) = self.mux.panes.get(&pane) else {
+        let Some(p) = ws.mux.panes.get(&pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
         match p.term.screen_text(scrollback) {
@@ -8150,18 +7944,19 @@ impl App {
     /// `send_text`: write text to a pane's PTY (default: focused).
     fn ctl_send_text(
         &mut self,
+        ws: &mut WindowState,
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
-        let pane = match self.ctl_resolve_pane(&req.params) {
+        let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
             Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
         };
         let Some(text) = req.params.get("text").and_then(|v| v.as_str()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'text' string");
         };
-        let Some(p) = self.mux.panes.get(&pane) else {
+        let Some(p) = ws.mux.panes.get(&pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
         // Cycle 941: an agent acts as the user — the per-pane read-only
@@ -8178,7 +7973,7 @@ impl App {
             "agent-server: send_text conn={conn_id} pane={pane} ({} bytes)",
             text.len()
         );
-        self.ctl_attach(conn_id, pane);
+        self.ctl_attach(ws, conn_id, pane);
         Response::ok(
             req.id,
             serde_json::json!({"pane": pane, "bytes": text.len()}),
@@ -8187,37 +7982,41 @@ impl App {
 
     /// Resolve the `pane` param to a pane id; default to the focused pane.
     /// `Err` with a message when neither resolves.
-    fn ctl_resolve_pane(&self, params: &serde_json::Value) -> Result<u64, String> {
+    fn ctl_resolve_pane(
+        &self,
+        ws: &WindowState,
+        params: &serde_json::Value,
+    ) -> Result<u64, String> {
         if let Some(p) = params.get("pane").and_then(|v| v.as_u64()) {
-            if self.mux.panes.contains_key(&p) {
+            if ws.mux.panes.contains_key(&p) {
                 return Ok(p);
             }
             return Err(format!("no pane with id {p}"));
         }
-        self.mux
+        ws.mux
             .tabs
-            .get(self.mux.active)
+            .get(ws.mux.active)
             .map(|t| t.focus)
-            .filter(|f| self.mux.panes.contains_key(f))
+            .filter(|f| ws.mux.panes.contains_key(f))
             .ok_or_else(|| "no focused pane".to_string())
     }
 
     /// Mark `conn_id` attached to `pane` + fire the badge transition once.
-    fn ctl_attach(&mut self, conn_id: u64, pane: u64) {
+    fn ctl_attach(&mut self, ws: &mut WindowState, conn_id: u64, pane: u64) {
         let newly = self
             .ctl
             .as_mut()
             .map(|c| c.attach_pane(conn_id, pane))
             .unwrap_or(false);
         if newly {
-            self.set_pane_agent_attached(pane, true);
+            self.set_pane_agent_attached(ws, pane, true);
         }
     }
 
     /// Cycle 934 (agent-first A4): flip a pane's agent badge + emit the
     /// `agent_attached` event so subscribers + the titlebar update.
-    fn set_pane_agent_attached(&mut self, pane: u64, attached: bool) {
-        if let Some(p) = self.mux.panes.get_mut(&pane) {
+    fn set_pane_agent_attached(&mut self, ws: &mut WindowState, pane: u64, attached: bool) {
+        if let Some(p) = ws.mux.panes.get_mut(&pane) {
             if p.agent_attached == attached {
                 return;
             }
@@ -8228,7 +8027,7 @@ impl App {
             Some(pane),
             serde_json::json!({"attached": attached}),
         );
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -8248,12 +8047,13 @@ impl App {
     /// the deadline. A bad request replies immediately over `reply`.
     fn ctl_run_command(
         &mut self,
+        ws: &mut WindowState,
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
         reply: crate::ctl_server::ReplyTx,
     ) {
         use kettle_ctl::protocol::{Response, error_codes as ec};
-        let pane = match self.ctl_resolve_pane(&req.params) {
+        let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
             Err(e) => {
                 let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, e));
@@ -8288,13 +8088,13 @@ impl App {
         // measuring by `rows` would make `total_now == start_line` and slice out
         // nothing; the cursor advances as output is printed, so the absolute
         // cursor line tracks the real content position whether or not it scrolls.
-        let start_line = self
+        let start_line = ws
             .mux
             .panes
             .get(&pane)
             .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.cursor.0))
             .unwrap_or(0);
-        if let Some(p) = self.mux.panes.get(&pane) {
+        if let Some(p) = ws.mux.panes.get(&pane) {
             let mut line = command.to_string();
             // Submit with a CARRIAGE RETURN, not a line feed: CR is the Enter
             // key a shell's line editor acts on. Under Windows ConPTY only CR is
@@ -8317,7 +8117,7 @@ impl App {
             }
         }
         log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
-        self.ctl_attach(conn_id, pane);
+        self.ctl_attach(ws, conn_id, pane);
         self.pending_runs.insert(
             pane,
             PendingRun {
@@ -8333,11 +8133,16 @@ impl App {
     /// Cycle 929: an OSC-133 `CommandFinished` arrived for `pane` — if a
     /// `run_command` is pending there, reply with the exit code, duration, and
     /// the output captured since the command started.
-    fn resolve_pending_run(&mut self, pane: u64, ev: &kettle_core::CommandFinished) {
+    fn resolve_pending_run(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        ev: &kettle_core::CommandFinished,
+    ) {
         let Some(run) = self.pending_runs.remove(&pane) else {
             return;
         };
-        let output = self.ctl_capture_output_since(pane, run.start_line);
+        let output = self.ctl_capture_output_since(ws, pane, run.start_line);
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
             serde_json::json!({
@@ -8356,7 +8161,7 @@ impl App {
     /// (cycle 936) immediately resolve any pending run whose pane has CLOSED, so
     /// the agent isn't blocked for the full timeout after a pane vanishes.
     /// Called each event-loop tick from the redraw scheduler.
-    fn check_pending_run_deadlines(&mut self) {
+    fn check_pending_run_deadlines(&mut self, ws: &mut WindowState) {
         if self.pending_runs.is_empty() {
             return;
         }
@@ -8366,7 +8171,7 @@ impl App {
             .pending_runs
             .keys()
             .copied()
-            .filter(|pane| !self.mux.panes.contains_key(pane))
+            .filter(|pane| !ws.mux.panes.contains_key(pane))
             .collect();
         for pane in orphaned {
             if let Some(run) = self.pending_runs.remove(&pane) {
@@ -8389,7 +8194,7 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let output = self.ctl_capture_output_since(pane, run.start_line);
+            let output = self.ctl_capture_output_since(ws, pane, run.start_line);
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -8415,9 +8220,9 @@ impl App {
     /// those trailing blanks; addressing by absolute line lands on the real
     /// content wherever it is. The cursor's absolute line is the end of the
     /// content the command produced.
-    fn ctl_capture_output_since(&self, pane: u64, start_line: usize) -> String {
+    fn ctl_capture_output_since(&self, ws: &WindowState, pane: u64, start_line: usize) -> String {
         const CAP_LINES: usize = 10_000;
-        let Some(p) = self.mux.panes.get(&pane) else {
+        let Some(p) = ws.mux.panes.get(&pane) else {
             return String::new();
         };
         let Some(probe) = p.term.screen_text(0) else {
@@ -8443,7 +8248,7 @@ impl App {
         lines[start_idx..end_idx].join("\n")
     }
 
-    fn drain_remote_commands(&mut self) {
+    fn drain_remote_commands(&mut self, ws: &mut WindowState) {
         let Some(path) = self.startup.remote_file.clone() else {
             return;
         };
@@ -8477,7 +8282,7 @@ impl App {
             }
             if let Some(payload) = line.strip_prefix("send-text ") {
                 let decoded = payload.replace("\\n", "\n");
-                if let Some(p) = self.mux.focused() {
+                if let Some(p) = ws.mux.focused() {
                     // Cycle 941: remote.cmd acts as the user — read-only drops it.
                     p.feed_input(decoded.as_bytes());
                 }
@@ -8497,7 +8302,7 @@ impl App {
                 // winit's has_focus / is_visible / focus_window /
                 // set_visible all support this; the helper landed in
                 // cycle 319.
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     let visible = w.is_visible().unwrap_or(true);
                     let focused = w.has_focus();
                     if !visible {
@@ -8519,25 +8324,25 @@ impl App {
                 // cycle 423: also fire LuaEvent::TabAdd so plugins
                 // listening for tab_add see remote-triggered tabs
                 // the same as keyboard ones.
-                let (cw, ch) = self.cell_px();
-                let area = self.area();
-                let (cols, rows) = self.grid_of(area);
+                let (cw, ch) = self.cell_px(ws);
+                let area = self.area(ws);
+                let (cols, rows) = self.grid_of(ws, area);
                 let waker = self.waker();
-                if let Err(e) = self.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
                     log::warn!("remote-control: new-tab failed: {e}");
                 } else {
-                    self.fire_tab_add_event();
+                    self.fire_tab_add_event(ws);
                 }
             } else {
                 log::warn!("remote command not recognized: {line:?}");
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
 
-    fn run_triggers(&mut self) {
+    fn run_triggers(&mut self, ws: &mut WindowState) {
         if self.compiled_triggers.is_empty() {
             return;
         }
@@ -8547,7 +8352,7 @@ impl App {
             return;
         }
         // Don't pulse the user's own window when it's already focused.
-        if self.window_focused {
+        if ws.window_focused {
             return;
         }
         // Pull each pane's bottom-of-screen text. Visible viewport
@@ -8555,8 +8360,8 @@ impl App {
         // burn CPU on a chatty pane. Last 50 rows is the typical
         // "what just happened" window.
         let snapshots: Vec<String> = {
-            let mut out = Vec::with_capacity(self.mux.panes.len());
-            for pane in self.mux.panes.values() {
+            let mut out = Vec::with_capacity(ws.mux.panes.len());
+            for pane in ws.mux.panes.values() {
                 if let Ok(t) = pane.term.term.lock() {
                     use kettle_core::Dimensions;
                     let rows = t.screen_lines();
@@ -8582,10 +8387,10 @@ impl App {
             if let Some(action) = match_triggers(snap, &self.compiled_triggers) {
                 match action {
                     kettle_config::TriggerAction::Urgency => {
-                        if let Some(w) = &self.window {
+                        if let Some(w) = &ws.window {
                             use winit::window::UserAttentionType;
                             w.request_user_attention(Some(UserAttentionType::Critical));
-                            self.attention_active = true;
+                            ws.attention_active = true;
                         }
                     }
                     kettle_config::TriggerAction::RunCommand(argv) => {
@@ -8605,18 +8410,18 @@ impl App {
         }
     }
 
-    fn search_key(&mut self, key: &Key, text: Option<&str>) {
+    fn search_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         match key {
             Key::Named(NamedKey::Escape) => {
                 // Cycle 140: closing the search overlay reveals the
                 // pane's cursor underneath. Reset blink so the
                 // cursor is visible immediately — same UX argument
                 // as cycles 134/135 (focus + Reset paths).
-                self.mux.search.open = false;
-                self.reset_blink_phase();
+                ws.mux.search.open = false;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Enter) => {
-                let s = &mut self.mux.search;
+                let s = &mut ws.mux.search;
                 if !s.matches.is_empty() {
                     // Cycle 358 (Terminator parity, terminatorlib/config.py:93
                     // `invert_search`): flip the default-direction.
@@ -8624,7 +8429,7 @@ impl App {
                     // - With invert_search = true: Enter → previous match,
                     //   Shift+Enter → next. Matches Terminator's "search
                     //   reverse" toggle.
-                    let go_back = self.mods.shift_key() ^ self.cfg.invert_search;
+                    let go_back = ws.mods.shift_key() ^ self.cfg.invert_search;
                     let n = s.matches.len();
                     // Cycle 940 (Terminator parity): `search-wrap = false` stops
                     // at the ends instead of cycling around.
@@ -8642,7 +8447,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Backspace) => {
-                self.mux.search.query.pop();
+                ws.mux.search.query.pop();
             }
             _ => {
                 // Cycle 857 (audit): filter control chars like the sibling
@@ -8652,7 +8457,7 @@ impl App {
                 if let Some(t) = text
                     && !t.chars().any(|c| c.is_control())
                 {
-                    self.mux.search.query.push_str(t);
+                    ws.mux.search.query.push_str(t);
                 }
             }
         }
@@ -8670,14 +8475,14 @@ impl App {
     ///
     /// Movement clamps to the focused pane's grid (no negative rows
     /// yet — sub-cycle 3 extends into scrollback).
-    fn vi_mode_key(&mut self, key: &Key, text: Option<&str>) {
+    fn vi_mode_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         // Esc exits.
         if matches!(key, Key::Named(NamedKey::Escape)) {
-            self.vi_mode = None;
+            ws.vi_mode = None;
             return;
         }
         // Grab the focused pane's grid dims to clamp movement.
-        let (max_row, max_col) = self
+        let (max_row, max_col) = ws
             .mux
             .focused()
             .and_then(|p| {
@@ -8690,7 +8495,7 @@ impl App {
                 })
             })
             .unwrap_or((23, 79));
-        let Some(state) = self.vi_mode.as_mut() else {
+        let Some(state) = ws.vi_mode.as_mut() else {
             return;
         };
         // Character-based dispatch — works for both `Key::Character`
@@ -8728,7 +8533,7 @@ impl App {
                     } else {
                         (cur, anchor)
                     };
-                    let yanked = self.yank_vi_selection(start, end);
+                    let yanked = self.yank_vi_selection(ws, start, end);
                     if !yanked.is_empty() {
                         // Cycle 316: log a warn when clipboard is None
                         // (e.g. SSH without X11 / Wayland forwarding,
@@ -8751,7 +8556,7 @@ impl App {
                         }
                     }
                 }
-                self.vi_mode = None;
+                ws.vi_mode = None;
             }
             _ => {
                 // Arrow keys also navigate.
@@ -8774,14 +8579,14 @@ impl App {
         }
     }
 
-    fn hint_key(&mut self, key: &Key, text: Option<&str>) {
+    fn hint_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         match key {
             Key::Named(NamedKey::Escape) => {
-                self.hint_state = None;
-                self.reset_blink_phase();
+                ws.hint_state = None;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
-                if let Some((_, typed)) = self.hint_state.as_mut() {
+                if let Some((_, typed)) = ws.hint_state.as_mut() {
                     typed.pop();
                 }
             }
@@ -8795,7 +8600,7 @@ impl App {
                 };
                 // Extend the typed prefix only if it still matches a label.
                 let chosen = {
-                    let Some((targets, typed)) = self.hint_state.as_mut() else {
+                    let Some((targets, typed)) = ws.hint_state.as_mut() else {
                         return;
                     };
                     let cand = format!("{typed}{ch}");
@@ -8807,7 +8612,7 @@ impl App {
                     (exact.len() == 1).then(|| exact[0].clone())
                 };
                 if let Some(h) = chosen {
-                    self.hint_state = None;
+                    ws.hint_state = None;
                     self.act_hint(&h);
                 }
             }
@@ -8828,15 +8633,21 @@ impl App {
         }
     }
 
-    fn palette_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+    fn palette_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        text: Option<&str>,
+        event_loop: &ActiveEventLoop,
+    ) {
         let cmds = kettle_config::palette::commands();
-        let Some((q, sel)) = self.palette_input.as_mut() else {
+        let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
         };
         match key {
             Key::Named(NamedKey::Escape) => {
-                self.palette_input = None;
-                self.reset_blink_phase();
+                ws.palette_input = None;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
                 q.pop();
@@ -8857,9 +8668,9 @@ impl App {
             Key::Named(NamedKey::Enter) => {
                 let ranked = kettle_config::palette::rank(q, &cmds);
                 let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
-                self.palette_input = None;
+                ws.palette_input = None;
                 if let Some(a) = action {
-                    self.handle_action(a, event_loop);
+                    self.handle_action(ws, a, event_loop);
                 }
             }
             _ => {
@@ -8880,13 +8691,13 @@ impl App {
     /// Esc closes. Every change persists to the config file via `persist_pref`
     /// and reloads live, so the effect is immediate (matching the right-click
     /// Preferences toggles).
-    fn settings_key(&mut self, key: &Key, _event_loop: &ActiveEventLoop) {
+    fn settings_key(&mut self, ws: &mut WindowState, key: &Key, _event_loop: &ActiveEventLoop) {
         let cats = crate::settings::categories();
         if cats.is_empty() {
-            self.settings_nav = None;
+            ws.settings_nav = None;
             return;
         }
-        let (mut cat, mut fld, capturing) = match &self.settings_nav {
+        let (mut cat, mut fld, capturing) = match &ws.settings_nav {
             Some(n) => (n.category.min(cats.len() - 1), n.field, n.capturing),
             None => return,
         };
@@ -8905,13 +8716,13 @@ impl App {
         // the config file so it survives restart.
         if capturing {
             if matches!(key, Key::Named(NamedKey::Escape)) {
-                if let Some(n) = self.settings_nav.as_mut() {
+                if let Some(n) = ws.settings_nav.as_mut() {
                     n.capturing = false;
                 }
                 return;
             }
             if let Some(kk) = to_kkey(key) {
-                let mods = to_mods(self.mods);
+                let mods = to_mods(ws.mods);
                 // Cycle 835 (audit): refuse a modifier-less binding to a
                 // text/essential key — it would shadow that key in normal typing
                 // everywhere, persisted, with no in-overlay unbind. Stay in
@@ -8940,7 +8751,7 @@ impl App {
                         log::warn!("append_keybind({label}={action}) failed: {e}");
                     }
                 }
-                if let Some(n) = self.settings_nav.as_mut() {
+                if let Some(n) = ws.settings_nav.as_mut() {
                     n.capturing = false;
                 }
             }
@@ -8949,15 +8760,15 @@ impl App {
 
         match key {
             Key::Named(NamedKey::Escape) => {
-                self.settings_nav = None;
-                self.reset_blink_phase();
+                ws.settings_nav = None;
+                self.reset_blink_phase(ws);
                 return;
             }
             Key::Named(NamedKey::ArrowDown) => fld = (fld + 1) % field_count,
             Key::Named(NamedKey::ArrowUp) => fld = (fld + field_count - 1) % field_count,
             Key::Named(NamedKey::Tab) => {
                 let n = cats.len();
-                cat = if self.mods.shift_key() {
+                cat = if ws.mods.shift_key() {
                     (cat + n - 1) % n
                 } else {
                     (cat + 1) % n
@@ -8975,7 +8786,7 @@ impl App {
                         key,
                         Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter)
                     ) {
-                        if let Some(n) = self.settings_nav.as_mut() {
+                        if let Some(n) = ws.settings_nav.as_mut() {
                             n.category = cat;
                             n.field = fld;
                             n.capturing = true;
@@ -9010,7 +8821,7 @@ impl App {
                     if key_str == "window-padding-x" {
                         self.persist_pref("window-padding-y", &new_val);
                     }
-                    self.reload_config();
+                    self.reload_config(ws);
                     // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid
                     // is gone. It existed only to defend against startup's
                     // session-theme override (now removed) reverting a Settings
@@ -9021,7 +8832,7 @@ impl App {
             }
             _ => {}
         }
-        if let Some(n) = self.settings_nav.as_mut() {
+        if let Some(n) = ws.settings_nav.as_mut() {
             n.category = cat;
             n.field = fld;
         }
@@ -9032,15 +8843,15 @@ impl App {
     /// Same shape as `palette_key` but ranks against
     /// `Session::list_layouts()` and dispatches by spawning
     /// `kettle --layout NAME` as a new window.
-    fn layout_picker_key(&mut self, key: &Key, text: Option<&str>) {
+    fn layout_picker_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         let layouts = crate::session::Session::list_layouts();
-        let Some((q, sel)) = self.layout_picker_input.as_mut() else {
+        let Some((q, sel)) = ws.layout_picker_input.as_mut() else {
             return;
         };
         match key {
             Key::Named(NamedKey::Escape) => {
-                self.layout_picker_input = None;
-                self.reset_blink_phase();
+                ws.layout_picker_input = None;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
                 q.pop();
@@ -9061,7 +8872,7 @@ impl App {
             Key::Named(NamedKey::Enter) => {
                 let ranked = rank_layouts(q, &layouts);
                 let name = ranked.get(*sel).map(|&i| layouts[i].clone());
-                self.layout_picker_input = None;
+                ws.layout_picker_input = None;
                 if let Some(name) = name {
                     let exe = std::env::current_exe()
                         .unwrap_or_else(|_| std::path::PathBuf::from("kettle"));
@@ -9095,14 +8906,20 @@ impl App {
     /// the highlighted action. Any other key is swallowed so a stray
     /// keypress doesn't leak into the focused pane while the menu is
     /// expecting nav input.
-    fn context_menu_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+    fn context_menu_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        text: Option<&str>,
+        event_loop: &ActiveEventLoop,
+    ) {
         match key {
             Key::Named(NamedKey::Escape) => {
                 // Cycle 687 (theme-submenu sub-cycle 3): Esc on
                 // a drilled-in submenu pops back to the parent
                 // instead of closing the menu entirely. Only
                 // when drill_stack is empty does Esc close.
-                if let Some(menu) = self.context_menu.as_mut()
+                if let Some(menu) = ws.context_menu.as_mut()
                     && let Some(parent) = menu.drill_stack.pop()
                 {
                     menu.items = parent;
@@ -9116,19 +8933,19 @@ impl App {
                         .iter()
                         .position(item_is_dispatchable)
                         .unwrap_or(0);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
-                self.context_menu = None;
-                self.reset_blink_phase();
+                ws.context_menu = None;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
-                self.step_context_menu_highlight(1);
+                self.step_context_menu_highlight(ws, 1);
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.step_context_menu_highlight(-1);
+                self.step_context_menu_highlight(ws, -1);
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 // Cycle 890 (audit): resolve the highlighted row through the
@@ -9137,17 +8954,17 @@ impl App {
                 // profile choice, new-tab ▾ shell — not just `Item`. The
                 // mapper + dispatcher also own the close-or-keep decision, so
                 // a submenu Enter no longer wrongly closes the menu.
-                let chosen = self.context_menu.as_ref().and_then(|m| {
+                let chosen = ws.context_menu.as_ref().and_then(|m| {
                     m.items
                         .get(m.highlight)
                         .and_then(|it| item_to_click(it, m.highlight))
                 });
-                self.reset_blink_phase();
+                self.reset_blink_phase(ws);
                 match chosen {
-                    Some(click) => self.dispatch_context_menu_click(click, event_loop),
+                    Some(click) => self.dispatch_context_menu_click(ws, click, event_loop),
                     // Highlight on a non-dispatchable row (shouldn't happen —
                     // nav skips them — but close rather than trap the user).
-                    None => self.context_menu = None,
+                    None => ws.context_menu = None,
                 }
             }
             _ => {
@@ -9167,7 +8984,7 @@ impl App {
                 let lower = c.to_ascii_lowercase();
                 let now = std::time::Instant::now();
                 // Clear stale typeahead buffer.
-                if let Some(menu) = self.context_menu.as_mut()
+                if let Some(menu) = ws.context_menu.as_mut()
                     && menu
                         .typeahead_until
                         .map(|deadline| now > deadline)
@@ -9180,7 +8997,7 @@ impl App {
                 // (single-char). On a hit, dispatch the row + close
                 // the menu (matches Win32 / GTK convention). On a
                 // miss, accumulate into typeahead.
-                let mnemonic_hit = self.context_menu.as_ref().and_then(|menu| {
+                let mnemonic_hit = ws.context_menu.as_ref().and_then(|menu| {
                     if !menu.typeahead_buf.is_empty() {
                         return None;
                     }
@@ -9195,19 +9012,19 @@ impl App {
                     // so a mnemonic reaches every row type (Lua / config /
                     // ▾ shell included) and the close-or-drill decision stays
                     // in one place.
-                    let click = self
+                    let click = ws
                         .context_menu
                         .as_ref()
                         .and_then(|m| m.items.get(idx).and_then(|it| item_to_click(it, idx)));
                     if let Some(click) = click {
-                        self.dispatch_context_menu_click(click, event_loop);
+                        self.dispatch_context_menu_click(ws, click, event_loop);
                         return;
                     }
                 }
                 // Typeahead path: accumulate into the buffer, find
                 // the first row whose label has this prefix, advance
                 // highlight without dispatching.
-                if let Some(menu) = self.context_menu.as_mut() {
+                if let Some(menu) = ws.context_menu.as_mut() {
                     menu.typeahead_buf.push(lower);
                     menu.typeahead_until = Some(now + std::time::Duration::from_millis(750));
                     if let Some(idx) = typeahead_match(&menu.items, &menu.typeahead_buf) {
@@ -9218,29 +9035,29 @@ impl App {
         }
     }
 
-    fn ssh_key(&mut self, key: &Key, text: Option<&str>) {
+    fn ssh_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         match key {
             Key::Named(NamedKey::Escape) => {
-                self.ssh_input = None;
-                self.reset_blink_phase();
+                ws.ssh_input = None;
+                self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
-                if let Some(q) = self.ssh_input.as_mut() {
+                if let Some(q) = ws.ssh_input.as_mut() {
                     q.pop();
                 }
             }
             Key::Named(NamedKey::Tab) => {
                 // Fuzzy-complete to the best-matching configured host name.
-                let typed = self.ssh_input.clone().unwrap_or_default();
+                let typed = ws.ssh_input.clone().unwrap_or_default();
                 if !typed.is_empty()
                     && let Some((n, _)) =
                         kettle_config::fuzzy::best(&typed, &self.cfg.ssh_hosts, |h| h.0.as_str())
                 {
-                    self.ssh_input = Some(n.clone());
+                    ws.ssh_input = Some(n.clone());
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let typed = self.ssh_input.take().unwrap_or_default();
+                let typed = ws.ssh_input.take().unwrap_or_default();
                 let target = self
                     .cfg
                     .ssh_hosts
@@ -9265,17 +9082,17 @@ impl App {
                         }
                     });
                 if let Some(target) = target {
-                    let area = self.area();
-                    let (cols, rows) = self.grid_of(area);
-                    let (cw, ch) = self.cell_px();
+                    let area = self.area(ws);
+                    let (cols, rows) = self.grid_of(ws, area);
+                    let (cw, ch) = self.cell_px(ws);
                     if let Err(e) =
-                        self.mux
+                        ws.mux
                             .new_ssh_tab(&self.cfg, cols, rows, cw, ch, self.waker(), &target)
                     {
                         log::error!("ssh launch failed: {e}");
                     }
-                    self.resize_all();
-                    self.save_session();
+                    self.resize_all(ws);
+                    self.save_session(ws);
                 }
             }
             _ => {
@@ -9284,7 +9101,7 @@ impl App {
                 // comment claimed this handler already did, but it didn't.
                 if let Some(t) = text
                     && !t.chars().any(|c| c.is_control())
-                    && let Some(q) = self.ssh_input.as_mut()
+                    && let Some(q) = ws.ssh_input.as_mut()
                 {
                     q.push_str(t);
                 }
@@ -9422,8 +9239,59 @@ fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    // C1-DISPATCH-BEGIN: take-out/put-back window dispatch.
+    //
+    // Every per-window field lives on `WindowState` (window_state.rs). Each
+    // handler removes the addressed window from the map, runs the inner
+    // handler with disjoint `&mut self` (globals) + `&mut WindowState`
+    // borrows, then reinserts it. A panic mid-handler drops the entry, which
+    // is fine: kettle aborts on panic, nothing observes the missing window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        let seq = self.focused_seq;
+        let Some(mut ws) = self.windows.remove(&seq) else {
+            return;
+        };
+        self.resumed_inner(&mut ws, event_loop);
+        self.windows.insert(seq, ws);
+    }
+
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+        let seq = self.focused_seq;
+        let Some(mut ws) = self.windows.remove(&seq) else {
+            return;
+        };
+        self.user_event_inner(&mut ws, el, ev);
+        self.windows.insert(seq, ws);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Unknown WindowId (can't happen for a live window) falls back to the
+        // focused window — same effective routing as the pre-C1 single-window
+        // dispatch, which ignored the id entirely.
+        let seq = self.seq_of_window(id).unwrap_or(self.focused_seq);
+        let Some(mut ws) = self.windows.remove(&seq) else {
+            return;
+        };
+        self.window_event_inner(&mut ws, event_loop, event);
+        self.windows.insert(seq, ws);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let seqs: Vec<u64> = self.windows.keys().copied().collect();
+        for seq in seqs {
+            let Some(mut ws) = self.windows.remove(&seq) else {
+                continue;
+            };
+            self.about_to_wait_inner(&mut ws, event_loop);
+            self.windows.insert(seq, ws);
+        }
+    }
+    // C1-DISPATCH-END
+}
+
+impl App {
+    fn resumed_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
+        if ws.window.is_some() {
             return;
         }
         let mut attrs = Window::default_attributes()
@@ -9531,7 +9399,7 @@ impl ApplicationHandler<UserEvent> for App {
         // on. A configured `window_state = hidden` already set `with_visible
         // (false)` above and must stay hidden, so `window_shown` starts `true`
         // there (no reveal) and `false` for every visible state.
-        self.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
+        ws.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
         let attrs = attrs.with_visible(false);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -9627,12 +9495,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        self.renderer = Some(renderer);
-        self.window = Some(window);
+        ws.renderer = Some(renderer);
+        ws.window = Some(window);
 
-        let area = self.area();
-        let (cols, rows) = self.grid_of(area);
-        let (cw, ch) = self.cell_px();
+        let area = self.area(ws);
+        let (cols, rows) = self.grid_of(ws, area);
+        let (cw, ch) = self.cell_px(ws);
 
         // CLI `-e cmd` / `-d dir` (consumed once) take precedence over a
         // saved session: explicit intent shouldn't be overridden by restore.
@@ -9657,7 +9525,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .cwd
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned());
-            if let Err(e) = self.mux.new_tab_with(
+            if let Err(e) = ws.mux.new_tab_with(
                 &self.cfg,
                 cols,
                 rows,
@@ -9774,21 +9642,17 @@ impl ApplicationHandler<UserEvent> for App {
                             let _ = p.send_event(UserEvent::Wakeup);
                         })
                     };
-                    self.mux.restore(&s, &self.cfg, cw, ch, &mk)
+                    ws.mux.restore(&s, &self.cfg, cw, ch, &mk)
                 }
                 _ => false,
             }
         };
-        if !restored
-            && let Err(e) = self
-                .mux
-                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
-        {
+        if !restored && let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
             log::error!("failed to spawn shell: {e}");
             event_loop.exit();
             return;
         }
-        self.resize_all();
+        self.resize_all(ws);
         // Cycle 928 (agent-first A2): start the control server now — right after
         // the first pane exists, BEFORE the first GPU paint (which can take
         // several seconds on a cold shader cache). The server only needs the
@@ -9822,7 +9686,7 @@ impl ApplicationHandler<UserEvent> for App {
         // focused pane's PTY. The pane is fresh; the shell will
         // see this as the user's first typing.
         if !self.pending_lua_send.is_empty()
-            && let Some(p) = self.mux.focused()
+            && let Some(p) = ws.mux.focused()
         {
             let bytes = std::mem::take(&mut self.pending_lua_send);
             // Cycle 941: Lua send_text acts as the user — read-only drops it.
@@ -9837,7 +9701,7 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.pending_lua_actions.is_empty() {
             let actions = std::mem::take(&mut self.pending_lua_actions);
             for a in actions {
-                self.handle_action(a, event_loop);
+                self.handle_action(ws, a, event_loop);
             }
         }
         // Cycle 366 (Terminator plugin parity, sub-cycle 3): fire
@@ -9847,7 +9711,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Drains any LuaCommand the callbacks queued so a
         // `kettle.on('startup', function() kettle.send_text(...) end)`
         // takes effect immediately.
-        if !self.lua_startup_fired && self.lua_engine.is_some() && self.mux.focused().is_some() {
+        if !self.lua_startup_fired && self.lua_engine.is_some() && ws.mux.focused().is_some() {
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Startup);
             }
@@ -9878,7 +9742,7 @@ impl ApplicationHandler<UserEvent> for App {
         // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
         #[cfg(feature = "dev-record")]
         if let Some((path, raw)) = dev_record {
-            let (cols, rows) = self.grid_of(self.area());
+            let (cols, rows) = self.grid_of(ws, self.area(ws));
             match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16, raw) {
                 Ok(rec) => {
                     log::info!("dev-record: recording this session to {}", path.display());
@@ -9890,8 +9754,8 @@ impl ApplicationHandler<UserEvent> for App {
                 ),
             }
         }
-        self.redraw();
-        if let Some(w) = &self.window {
+        self.redraw(ws);
+        if let Some(w) = &ws.window {
             w.request_redraw();
         }
         // Cycle 794: kick off the update check on a background thread — AFTER
@@ -9904,14 +9768,14 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _el: &ActiveEventLoop, ev: UserEvent) {
+    fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::Wakeup => {
                 // Cycle 290: run output triggers before the redraw —
                 // a match fires window urgency so the user notices the
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
-                self.run_triggers();
+                self.run_triggers(ws);
                 // Cycle 910 (R2): coalesce rapid PTY-output paints to ~one per
                 // frame budget so a non-atomic repaint burst settles before we
                 // snapshot the grid. When deferred, `about_to_wait` schedules
@@ -9920,17 +9784,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // typing and the cursor stay immediate.
                 if should_defer_output_paint(
                     std::time::Instant::now(),
-                    self.last_paint,
+                    ws.last_paint,
                     OUTPUT_FRAME_BUDGET,
                 ) {
-                    self.coalescing_paint = true;
-                } else if let Some(w) = &self.window {
+                    ws.coalescing_paint = true;
+                } else if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
-            UserEvent::ReloadConfig => self.reload_config(),
-            UserEvent::RemoteCommand => self.drain_remote_commands(),
-            UserEvent::Ctl => self.drain_ctl(),
+            UserEvent::ReloadConfig => self.reload_config(ws),
+            UserEvent::RemoteCommand => self.drain_remote_commands(ws),
+            UserEvent::Ctl => self.drain_ctl(ws),
             UserEvent::UpdateAvailable { tag, url } => {
                 // Cycle 794: a newer release exists. Show the dismissable
                 // bottom-bar banner, fire one desktop toast, and nudge the
@@ -9941,16 +9805,16 @@ impl ApplicationHandler<UserEvent> for App {
                     &format!("{tag} — click the banner in kettle to open the release page"),
                 );
                 self.update_available = Some((tag, url));
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     // Cycle 879: only raise OS attention (+ latch the tracker)
                     // when unfocused — mirroring the bell path — so
                     // `attention_active` keeps meaning "a flash is actually
                     // outstanding". FlashWindowEx is a no-op on the foreground
                     // window anyway, and latching the flag while focused would
                     // leave it set until an unrelated defocus/refocus.
-                    if !self.window_focused {
+                    if !ws.window_focused {
                         w.request_user_attention(Some(UserAttentionType::Informational));
-                        self.attention_active = true;
+                        ws.attention_active = true;
                     }
                     w.request_redraw();
                 }
@@ -9958,7 +9822,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event_inner(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => {
                 // Cycle 875/908: tee any in-flight PTY output into the trace,
@@ -9968,12 +9837,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // events, it does not pull the output sidechannel.
                 #[cfg(feature = "dev-record")]
                 {
-                    self.flush_recorder_output();
+                    self.flush_recorder_output(ws);
                     if let Some(rec) = self.recorder.as_mut() {
                         rec.finish();
                     }
                 }
-                self.save_session();
+                self.save_session(ws);
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -9988,19 +9857,19 @@ impl ApplicationHandler<UserEvent> for App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     r.resize(size.width, size.height);
                 }
-                self.resize_all();
+                self.resize_all(ws);
                 // Cycle 875: record the new grid size into the asciicast trace.
                 #[cfg(feature = "dev-record")]
                 if self.recorder.is_some() {
-                    let (cols, rows) = self.grid_of(self.area());
+                    let (cols, rows) = self.grid_of(ws, self.area(ws));
                     if let Some(rec) = self.recorder.as_mut() {
                         rec.record_resize(cols as u16, rows as u16);
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -10013,22 +9882,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // surface itself is reconfigured by the Resized event winit
                 // emits alongside this one. Re-grid so panes reflow to the new
                 // cell dimensions.
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = ws.renderer.as_mut() {
                     r.set_scale(scale_factor as f32);
                 }
-                self.resize_all();
-                if let Some(w) = &self.window {
+                self.resize_all(ws);
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::ModifiersChanged(m) => {
-                self.mods = m.state();
+                ws.mods = m.state();
                 // Modifier change can flip the URL hover affordance from
                 // text-I-beam to pointing-hand without the mouse moving
                 // (Ctrl held = "this click would open"). Re-sync the
                 // cursor icon so the affordance updates the moment Ctrl
                 // is pressed/released over a link.
-                self.sync_cursor_icon();
+                self.sync_cursor_icon(ws);
             }
             // Cycle 402 (Terminator parity, detachable-tabs Bucket-D
             // sub-cycle 6): winit CursorLeft/Entered events transition
@@ -10051,77 +9920,77 @@ impl ApplicationHandler<UserEvent> for App {
             // `try_move_tab_to_new_window_scm_rights`. Tracked for completion;
             // a no-op transition on `Idle` is harmless until then.
             WindowEvent::CursorLeft { .. } => {
-                let prev = std::mem::take(&mut self.detach_drag);
-                self.detach_drag = prev.on_cursor_leave_window(
+                let prev = std::mem::take(&mut ws.detach_drag);
+                ws.detach_drag = prev.on_cursor_leave_window(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_micros() as u64)
                         .unwrap_or(0),
                 );
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::CursorEntered { .. } => {
-                let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                let prev = std::mem::take(&mut self.detach_drag);
-                self.detach_drag = prev.on_cursor_reenter_window(x, y);
-                if let Some(w) = &self.window {
+                let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                let prev = std::mem::take(&mut ws.detach_drag);
+                ws.detach_drag = prev.on_cursor_reenter_window(x, y);
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = position;
+                ws.cursor = position;
                 // Cycle 904 (audit): dragging a split divider — recompute the
                 // addressed split's ratio from the cursor and apply. The split
                 // rect is re-fetched from the live seams so a mid-drag layout
                 // change (a pane elsewhere closing) can't desync the math; if
                 // the split has vanished, cancel the drag.
-                if self.dragging_split.is_some() {
+                if ws.dragging_split.is_some() {
                     let (path, dir) = {
-                        let d = self.dragging_split.as_ref().unwrap();
+                        let d = ws.dragging_split.as_ref().unwrap();
                         (d.path.clone(), d.dir)
                     };
-                    let area = self.area();
-                    let seams = self.mux.split_seams(self.mux.active, area);
+                    let area = self.area(ws);
+                    let seams = ws.mux.split_seams(ws.mux.active, area);
                     match seams.iter().find(|s| s.path == path).map(|s| s.rect) {
                         Some(rect) => {
                             let ratio = crate::mux::ratio_from_pos(
                                 rect,
                                 dir,
-                                self.cursor.x as f32,
-                                self.cursor.y as f32,
+                                ws.cursor.x as f32,
+                                ws.cursor.y as f32,
                             );
-                            self.mux.set_split_ratio(self.mux.active, &path, ratio);
+                            ws.mux.set_split_ratio(ws.mux.active, &path, ratio);
                             // Cycle 916 (file-by-file audit): the layout-tree
                             // ratio changed, but each pane's PTY grid is resized
                             // only by resize_all (the keyboard resize path reaches
                             // it via handle_action's tail). Without this the child
                             // TUIs keep their old cols/rows — rendering clipped —
                             // until some unrelated event fires a resize.
-                            self.resize_all();
-                            if let Some(w) = &self.window {
+                            self.resize_all(ws);
+                            if let Some(w) = &ws.window {
                                 w.set_cursor(Self::resize_cursor_for(dir));
                                 w.request_redraw();
                             }
                         }
-                        None => self.dragging_split = None,
+                        None => ws.dragging_split = None,
                     }
                     return;
                 }
                 // Any real mouse movement undoes the hide-while-typing
                 // state. Sub-pixel movements that winit *might* coalesce
                 // are fine to ignore — the next "real" motion will fire.
-                self.show_mouse_cursor();
-                self.sync_cursor_icon();
+                self.show_mouse_cursor(ws);
+                self.sync_cursor_icon(ws);
                 // Cycle 712 (Terminator menu UX, hover-to-highlight):
                 // cursor over a context-menu row immediately updates
                 // the highlight. Matches GTK/NSMenu/Win32 menu
                 // conventions; before this cycle the highlight only
                 // moved via keyboard so the menu felt unresponsive to
                 // mouse users. Cheap: no-op when the menu is closed.
-                if self.context_menu.is_some() {
-                    self.update_menu_highlight_from_cursor();
+                if ws.context_menu.is_some() {
+                    self.update_menu_highlight_from_cursor(ws);
                 }
                 // Cycle 360 (Terminator parity, terminatorlib/config.py:73
                 // `focus = sloppy`): focus-follows-mouse. The pane
@@ -10131,20 +10000,20 @@ impl ApplicationHandler<UserEvent> for App {
                 // kettle — winit doesn't expose the OS-level focus
                 // policy.
                 if matches!(self.cfg.focus, kettle_config::FocusMode::Sloppy)
-                    && !self.tab_drag_active
-                    && !self.selecting
-                    && !self.dragging_scrollbar
+                    && !ws.tab_drag_active
+                    && !ws.selecting
+                    && !ws.dragging_scrollbar
                     // Cycle 786 (audit A4): don't let focus-follows-mouse
                     // reassign pane focus while a modal is open — typing into
                     // search/palette while the cursor drifts over another pane
                     // would otherwise silently steal focus.
-                    && !self.any_modal_open()
+                    && !self.any_modal_open(ws)
                 {
-                    let area = self.area();
-                    let pre = self.focus_key();
-                    self.mux
-                        .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
-                    self.note_focus_change(pre);
+                    let area = self.area(ws);
+                    let pre = self.focus_key(ws);
+                    ws.mux
+                        .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.note_focus_change(ws, pre);
                 }
                 // Cycle 249: drag-to-reorder tabs (kitty / iTerm2 /
                 // Ghostty parity). When a left-button press in the tab
@@ -10152,8 +10021,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // compute the target index under the cursor, and swap
                 // the active tab toward it via `move_active_tab`
                 // (cycle ~125's pure swap-with-clamp helper).
-                if self.tab_drag_active {
-                    let bar = self.tab_bar();
+                if ws.tab_drag_active {
+                    let bar = self.tab_bar(ws);
                     if bar.height > 0.0 && !bar.segments.is_empty() {
                         let (_, _, nw, _) = bar.new_tab;
                         // Cycle 821 (audit): the trailing button area is the
@@ -10165,7 +10034,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // cursor near the right edge (`arrow_w` is 0 when the
                         // dropdown is absent, so this is still correct there).
                         let (_, _, aw, _) = bar.new_tab_menu;
-                        let (sw, _) = self
+                        let (sw, _) = ws
                             .renderer
                             .as_ref()
                             .map(|r| {
@@ -10174,41 +10043,38 @@ impl ApplicationHandler<UserEvent> for App {
                             })
                             .unwrap_or((800.0, 600.0));
                         let strip_w = tab_segment_strip_width(sw, nw, aw);
-                        let target = tab_drag_target_index(
-                            self.cursor.x as f32,
-                            bar.segments.len(),
-                            strip_w,
-                        );
-                        let delta = target as i32 - self.mux.active as i32;
-                        if delta != 0 && self.mux.move_active_tab(delta) {
-                            self.mux.touch_active_tab_seen();
-                            if let Some(w) = &self.window {
+                        let target =
+                            tab_drag_target_index(ws.cursor.x as f32, bar.segments.len(), strip_w);
+                        let delta = target as i32 - ws.mux.active as i32;
+                        if delta != 0 && ws.mux.move_active_tab(delta) {
+                            ws.mux.touch_active_tab_seen();
+                            if let Some(w) = &ws.window {
                                 w.request_redraw();
                             }
                         }
                     }
                 }
-                if let Some(btn) = self.mouse_btn {
+                if let Some(btn) = ws.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
-                    if self.send_mouse(btn, true, true) {
+                    if self.send_mouse(ws, btn, true, true) {
                         return;
                     }
                 }
-                if self.dragging_scrollbar {
-                    let area = self.area();
-                    let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
-                    self.scrollbar_at(area, px, py, false);
-                    if let Some(w) = &self.window {
+                if ws.dragging_scrollbar {
+                    let area = self.area(ws);
+                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.scrollbar_at(ws, area, px, py, false);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
-                if self.selecting {
-                    let area = self.area();
-                    self.update_selection(area);
+                if ws.selecting {
+                    let area = self.area(ws);
+                    self.update_selection(ws, area);
                 }
-                if (self.selecting || !self.links.is_empty())
-                    && let Some(w) = &self.window
+                if (ws.selecting || !ws.links.is_empty())
+                    && let Some(w) = &ws.window
                 {
                     w.request_redraw();
                 }
@@ -10233,15 +10099,15 @@ impl ApplicationHandler<UserEvent> for App {
                     // pre-fix a Back/Forward click both leaked SGR to the
                     // tracking app *behind* the menu AND left the menu open
                     // (every other button dismisses it).
-                    if self.context_menu.is_some() {
-                        self.context_menu = None;
-                        if let Some(w) = &self.window {
+                    if ws.context_menu.is_some() {
+                        ws.context_menu = None;
+                        if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
-                        self.send_mouse(sgr, true, false);
+                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                        self.send_mouse(ws, sgr, true, false);
                     }
                     return;
                 }
@@ -10257,22 +10123,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // GNOME / browser convention; right-click on another
                 // location is handled as a re-open after this close
                 // because the right-click handler runs the open path).
-                if self.context_menu.is_some()
-                    && let Some(click) = self.context_menu_click_action(bcode)
+                if ws.context_menu.is_some()
+                    && let Some(click) = self.context_menu_click_action(ws, bcode)
                 {
                     // Cycle 889: route through the shared sink. It closes the
                     // menu per-leaf and keeps it open for DrillIntoSubmenu —
-                    // the old inline `self.context_menu = None` *before* the
+                    // the old inline `ws.context_menu = None` *before* the
                     // match made the drill arm dead code (submenu clicks just
                     // dismissed the menu).
-                    self.dispatch_context_menu_click(click, event_loop);
+                    self.dispatch_context_menu_click(ws, click, event_loop);
                     return;
                 }
-                if self.context_menu.is_some() && bcode == 0 {
+                if ws.context_menu.is_some() && bcode == 0 {
                     // Left-click outside the panel — dismiss without
                     // firing anything (matches every modern menu).
-                    self.context_menu = None;
-                    if let Some(w) = &self.window {
+                    ws.context_menu = None;
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10286,25 +10152,25 @@ impl ApplicationHandler<UserEvent> for App {
                 // dialog that looked like it had focus. The context menu is
                 // excluded (handled + returned above; a right-click below
                 // relocates it).
-                if modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
+                if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
                 // middle = close that tab).
-                let bar = self.tab_bar();
-                let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+                let bar = self.tab_bar(ws);
+                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 // Cycle 794: the update banner is the bottom bar when shown.
                 // Left-click opens the release page (+ records the dismissal so
                 // it won't re-nag); right-click dismisses without opening. Only
                 // reachable with no modal open (the gate above returned for
                 // those) — exactly when the banner is actually on screen.
                 if self.update_available.is_some() {
-                    let sh = self
+                    let sh = ws
                         .window
                         .as_ref()
                         .map(|w| w.inner_size().height as f32)
                         .unwrap_or(0.0);
-                    let banner_h = self.cell_px().1 as f32 + 10.0;
+                    let banner_h = self.cell_px(ws).1 as f32 + 10.0;
                     // Cycle 808 (audit): the banner stacks ABOVE a bottom-
                     // anchored tab / status bar (matching the renderer through
                     // the shared `update_banner_top`), so hit-test its ACTUAL
@@ -10318,7 +10184,7 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     let bottom_status_h =
                         if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
-                            self.status_bar_h()
+                            self.status_bar_h(ws)
                         } else {
                             0.0
                         };
@@ -10336,7 +10202,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // Left-click opens + dismisses; right-click only
                         // dismisses. Shared with the keyboard `OpenUpdate` /
                         // `DismissUpdate` actions (cycle 809).
-                        self.act_on_update_banner(bcode == 0);
+                        self.act_on_update_banner(ws, bcode == 0);
                         return;
                     }
                 }
@@ -10353,16 +10219,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
                         let (ax, ay, _, ah) = bar.new_tab_menu;
-                        self.open_new_tab_menu(ax, ay + ah);
+                        self.open_new_tab_menu(ws, ax, ay + ah);
                     } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
-                        let area = self.area();
-                        let (cols, rows) = self.grid_of(area);
-                        let (cw, ch) = self.cell_px();
+                        let area = self.area(ws);
+                        let (cols, rows) = self.grid_of(ws, area);
+                        let (cw, ch) = self.cell_px(ws);
                         // Cycle 802 (audit): log a `+`-button new-tab spawn
                         // failure rather than swallowing it.
-                        if let Err(e) =
-                            self.mux
-                                .new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
+                        if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
                         {
                             log::warn!("could not open a new tab (+ button): {e}");
                         }
@@ -10375,11 +10239,11 @@ impl ApplicationHandler<UserEvent> for App {
                             // Treat it like any other focus-changing
                             // action so the cursor on the now-active
                             // tab lands visible immediately.
-                            let pre = self.focus_key();
+                            let pre = self.focus_key(ws);
                             // Cycle 424: fire TabClose so plugins see
                             // the ✕-click close the same as Action::CloseTab.
                             let closing_idx = seg.idx;
-                            if self.mux.close_tab_at(seg.idx) {
+                            if ws.mux.close_tab_at(seg.idx) {
                                 // Cycle 157: save the (empty) session
                                 // before exit so next launch starts
                                 // fresh rather than restoring the
@@ -10388,17 +10252,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 // last tab, WindowEvent::CloseRequested)
                                 // already save; this one was missed.
                                 self.fire_tab_close_event(closing_idx);
-                                self.save_session();
+                                self.save_session(ws);
                                 event_loop.exit();
                                 return;
                             }
                             self.fire_tab_close_event(closing_idx);
-                            self.note_focus_change(pre);
+                            self.note_focus_change(ws, pre);
                         } else {
-                            let pre = self.focus_key();
-                            self.mux.active = seg.idx;
-                            self.mux.touch_active_tab_seen();
-                            self.note_focus_change(pre);
+                            let pre = self.focus_key(ws);
+                            ws.mux.active = seg.idx;
+                            ws.mux.touch_active_tab_seen();
+                            self.note_focus_change(ws, pre);
                             // Cycle 249: arm the drag-to-reorder
                             // handler so a subsequent CursorMoved
                             // event with the left button still held
@@ -10407,17 +10271,17 @@ impl ApplicationHandler<UserEvent> for App {
                             // below. Only on bare left-click (bcode 0
                             // == left, not middle / close).
                             if bcode == 0 {
-                                self.tab_drag_active = true;
+                                ws.tab_drag_active = true;
                             }
                         }
                     }
-                    self.resize_all();
-                    if let Some(win) = &self.window {
+                    self.resize_all(ws);
+                    if let Some(win) = &ws.window {
                         win.request_redraw();
                     }
                     return;
                 }
-                let area = self.area();
+                let area = self.area(ws);
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
                 //
                 // Cycle 350 (Terminator parity, terminatorlib/config.py:120
@@ -10426,10 +10290,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // kettle's Ctrl-click guard so accidental drags don't
                 // navigate.
                 let url_modifier =
-                    self.cfg.link_single_click || self.mods.control_key() || self.mods.super_key();
+                    self.cfg.link_single_click || ws.mods.control_key() || ws.mods.super_key();
                 if bcode == 0
                     && url_modifier
-                    && let Some(uri) = self.link_at_cursor().map(|l| l.uri.clone())
+                    && let Some(uri) = self.link_at_cursor(ws).map(|l| l.uri.clone())
                 {
                     // Cycle 351: route through helper so custom URL
                     // handler config is honored.
@@ -10441,18 +10305,18 @@ impl ApplicationHandler<UserEvent> for App {
                 // focuses + opens the EditPaneTitle overlay. Two
                 // clicks model (focus first, edit second) avoids
                 // accidental title edits on focus transitions.
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 if bcode == 0
-                    && let Some(clicked_pane_id) = self.pane_at_titlebar_click(cx, cy)
+                    && let Some(clicked_pane_id) = self.pane_at_titlebar_click(ws, cx, cy)
                 {
-                    let already_focused = self.mux.active_focus() == Some(clicked_pane_id);
-                    let pre = self.focus_key();
-                    self.mux.focus_at(area, cx, cy);
-                    self.note_focus_change(pre);
+                    let already_focused = ws.mux.active_focus() == Some(clicked_pane_id);
+                    let pre = self.focus_key(ws);
+                    ws.mux.focus_at(area, cx, cy);
+                    self.note_focus_change(ws, pre);
                     if already_focused {
-                        self.handle_action(Action::EditPaneTitle, event_loop);
+                        self.handle_action(ws, Action::EditPaneTitle, event_loop);
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10462,22 +10326,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // a selection. Seams are hit-tested over the same content `area`
                 // the panes lay out in, with a small grab tolerance.
                 if bcode == 0
-                    && let Some(drag) = self.split_drag_at(area, px, py)
+                    && let Some(drag) = self.split_drag_at(ws, area, px, py)
                 {
                     let dir = drag.dir;
-                    self.dragging_split = Some(drag);
-                    if let Some(w) = &self.window {
+                    ws.dragging_split = Some(drag);
+                    if let Some(w) = &ws.window {
                         w.set_cursor(Self::resize_cursor_for(dir));
                         w.request_redraw();
                     }
                     return;
                 }
-                let pre = self.focus_key();
-                self.mux
-                    .focus_at(area, self.cursor.x as f32, self.cursor.y as f32);
-                self.note_focus_change(pre);
-                if self.send_mouse(bcode, true, false) {
-                    self.mouse_btn = Some(bcode);
+                let pre = self.focus_key(ws);
+                ws.mux
+                    .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
+                self.note_focus_change(ws, pre);
+                if self.send_mouse(ws, bcode, true, false) {
+                    ws.mouse_btn = Some(bcode);
                     return;
                 }
                 // Middle-click in the content area pastes the clipboard
@@ -10489,8 +10353,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // cases where accidental middle-clicks shouldn't leak
                 // clipboard content into commands.
                 if bcode == 1 && !self.cfg.disable_mouse_paste {
-                    self.paste_clipboard();
-                    if let Some(w) = &self.window {
+                    self.paste_clipboard(ws);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10499,16 +10363,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // `putty_paste_style`): right-click pastes (PuTTY/Windows
                 // convention) instead of opening the context menu.
                 if bcode == 2 && self.cfg.putty_paste_style {
-                    self.paste_clipboard();
-                    if let Some(w) = &self.window {
+                    self.paste_clipboard(ws);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
                 // Click the scrollbar to jump the viewport, then drag it.
-                if bcode == 0 && self.scrollbar_jump(area, px, py) {
-                    self.dragging_scrollbar = true;
-                    if let Some(w) = &self.window {
+                if bcode == 0 && self.scrollbar_jump(ws, area, px, py) {
+                    ws.dragging_scrollbar = true;
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10528,16 +10392,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // focused program is consuming mouse events, so this only
                 // fires for the kettle chrome.
                 if bcode == 2 {
-                    if self.mods.shift_key() && self.extend_selection_to_cursor(area) {
+                    if ws.mods.shift_key() && self.extend_selection_to_cursor(ws, area) {
                         if self.cfg.copy_on_select {
-                            self.copy_selection();
+                            self.copy_selection(ws);
                         }
-                        if let Some(w) = &self.window {
+                        if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    self.open_context_menu(px, py);
+                    self.open_context_menu(ws, px, py);
                     return;
                 }
                 if bcode == 0 {
@@ -10547,18 +10411,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // so Shift+Alt remains block. If there's no selection
                     // to extend, fall through to the normal new-selection
                     // path so Shift+Click on empty space "just works."
-                    if self.mods.shift_key()
-                        && !self.mods.alt_key()
-                        && self.extend_selection_to_cursor(area)
+                    if ws.mods.shift_key()
+                        && !ws.mods.alt_key()
+                        && self.extend_selection_to_cursor(ws, area)
                     {
-                        if let Some(w) = &self.window {
+                        if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    let cell = self.cursor_cell();
-                    let clicks = cell.map(|(r, c)| self.click_count(r, c)).unwrap_or(1);
-                    let kind = selection_kind(clicks, self.mods.alt_key());
+                    let cell = self.cursor_cell(ws);
+                    let clicks = cell.map(|(r, c)| self.click_count(ws, r, c)).unwrap_or(1);
+                    let kind = selection_kind(clicks, ws.mods.alt_key());
                     // Cycle 288 smart selection (iTerm2 parity): on a
                     // double-click that lands inside a hint match
                     // (URL / path / IPv4 / git SHA), select the whole
@@ -10568,18 +10432,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // when no hint matches, preserving existing behavior.
                     let mut smart_selected = false;
                     if clicks == 2
-                        && !self.mods.alt_key()
+                        && !ws.mods.alt_key()
                         && let Some((row, col)) = cell
                         && let Some((start, end)) = self
-                            .line_text_for_smart_select(row)
+                            .line_text_for_smart_select(ws, row)
                             .as_deref()
                             .and_then(|line| smart_selection_at(line, col))
-                        && self.apply_smart_selection(area, row, start, end)
+                        && self.apply_smart_selection(ws, area, row, start, end)
                     {
                         smart_selected = true;
                     }
                     if !smart_selected {
-                        self.begin_selection(area, kind);
+                        self.begin_selection(ws, area, kind);
                     }
                     // Word/line selections resolve on press; copy them now.
                     // Simple/Block are drags — copied on button release.
@@ -10594,10 +10458,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     | kettle_core::SelectionType::Lines
                             ))
                     {
-                        self.copy_selection();
+                        self.copy_selection(ws);
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -10613,11 +10477,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // Cycle 897 (audit): symmetry with the Pressed path — a lone
                     // context menu swallows the side-button release too (its
                     // press was swallowed above, so no up-report should leak).
-                    if self.context_menu.is_some() {
+                    if ws.context_menu.is_some() {
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
-                        self.send_mouse(sgr, false, false);
+                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                        self.send_mouse(ws, sgr, false, false);
                     }
                     return;
                 }
@@ -10627,25 +10491,25 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                if self.mouse_btn == Some(bcode) {
-                    self.mouse_btn = None;
-                    if self.send_mouse(bcode, false, false) {
+                if ws.mouse_btn == Some(bcode) {
+                    ws.mouse_btn = None;
+                    if self.send_mouse(ws, bcode, false, false) {
                         return;
                     }
                 }
                 if bcode == 0 {
-                    if self.selecting && self.cfg.copy_on_select {
-                        self.copy_selection();
+                    if ws.selecting && self.cfg.copy_on_select {
+                        self.copy_selection(ws);
                     }
-                    self.selecting = false;
-                    self.dragging_scrollbar = false;
+                    ws.selecting = false;
+                    ws.dragging_scrollbar = false;
                     // Cycle 904: end any split-divider drag on left-button up.
-                    self.dragging_split = None;
+                    ws.dragging_split = None;
                     // Cycle 249: end the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just
                     // disarms the CursorMoved handler.
-                    self.tab_drag_active = false;
+                    ws.tab_drag_active = false;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -10659,10 +10523,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // so a 512-entry Theme submenu scrolls cleanly
                 // instead of leaking through to the underlying pane
                 // / tab bar / font-zoom.
-                if self.context_menu.is_some() {
+                if ws.context_menu.is_some() {
                     // Wheel up = lines > 0 = scroll up = decrement
                     // offset; wheel down = lines < 0 = scroll down.
-                    self.scroll_context_menu(-(lines as isize));
+                    self.scroll_context_menu(ws, -(lines as isize));
                     return;
                 }
                 // Cycle 786 (audit A2): a non-context-menu modal swallows the
@@ -10671,7 +10535,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // behind an open search / palette / settings / etc. The context
                 // menu already consumed its wheel above, so it is `None` here
                 // and `modal_swallows_pointer` reduces to "any modal open".
-                if modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {
+                if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
                 // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
@@ -10679,13 +10543,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // tab regardless of `scroll-multiplier` so the gesture
                 // stays predictable — multiple lines from a fast scroll
                 // collapse to a single tab change, like the real apps.
-                if self.cursor_in_tab_bar() && self.mux.tabs.len() > 1 {
+                if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
                     if lines > 0 {
-                        self.mux.prev_tab();
+                        ws.mux.prev_tab();
                     } else {
-                        self.mux.next_tab();
+                        ws.mux.next_tab();
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10702,10 +10566,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // IncreaseFontSize / DecreaseFontSize actions for a
                 // single source of truth.
                 if let Some(sign) = should_zoom_font(
-                    self.mods.control_key(),
+                    ws.mods.control_key(),
                     lines,
                     self.cfg.disable_mousewheel_zoom,
-                ) && let Some(r) = self.renderer.as_mut()
+                ) && let Some(r) = ws.renderer.as_mut()
                 {
                     // Cycle 747: step logical size, not the now-physical
                     // cell_h (which would double-apply the DPI scale).
@@ -10715,7 +10579,7 @@ impl ApplicationHandler<UserEvent> for App {
                         (r.font_size() - 1.0).max(6.0)
                     };
                     r.set_font_size(new);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10725,20 +10589,20 @@ impl ApplicationHandler<UserEvent> for App {
                 // Without this bypass, you can't scroll back through
                 // your tmux/htop session — the TUI swallows every wheel
                 // notch.
-                let (track, _) = input::mouse_tracking(self.focused_mode());
-                let track_active = track != input::MouseTracking::Off && !self.mods.shift_key();
+                let (track, _) = input::mouse_tracking(self.focused_mode(ws));
+                let track_active = track != input::MouseTracking::Off && !ws.mods.shift_key();
                 if track_active {
                     let btn = if lines > 0 { 64 } else { 65 };
                     for _ in 0..lines.abs().min(8) {
-                        self.send_mouse(btn, true, false);
+                        self.send_mouse(ws, btn, true, false);
                     }
                 } else {
-                    if let Some(pane) = self.mux.focused()
+                    if let Some(pane) = ws.mux.focused()
                         && let Ok(mut t) = pane.term.term.lock()
                     {
                         t.scroll_display(Scroll::Delta(lines));
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                 }
@@ -10749,7 +10613,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // copy-mode / …) is open must NOT inject its path into the PTY
                 // behind the dialog — the same pointer-leak class cycle 786
                 // closed for clicks. A lone context menu doesn't count here.
-                if self.any_modal_open() {
+                if self.any_modal_open(ws) {
                     return;
                 }
                 // Standard modern-terminal affordance: dragging a file
@@ -10777,27 +10641,27 @@ impl ApplicationHandler<UserEvent> for App {
                 // so a broadcast set containing one shell + one vim
                 // doesn't break either of them.
                 let text = format!("{} ", shell_quote_path(&path));
-                if self.mux.is_broadcast_on() {
-                    self.mux.broadcast_paste(&text);
+                if ws.mux.is_broadcast_on() {
+                    ws.mux.broadcast_paste(&text);
                 } else {
                     // Read the focused pane's BRACKETED_PASTE state first
                     // — `focused_mode` and `mux.focused` both want &mut
                     // self, so they have to run sequentially (not nested).
                     let bracketed = self
-                        .focused_mode()
+                        .focused_mode(ws)
                         .contains(kettle_core::TermMode::BRACKETED_PASTE);
                     let bytes = input::paste_payload(&text, bracketed);
-                    if let Some(p) = self.mux.focused() {
+                    if let Some(p) = ws.mux.focused() {
                         // Cycle 941: drag-drop is user input — read-only drops it.
                         p.feed_input(&bytes);
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::Focused(f) => {
-                self.window_focused = f;
+                ws.window_focused = f;
                 // Cycle 876: non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
                 #[cfg(feature = "dev-record")]
@@ -10816,15 +10680,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // button down. Disarm them on focus loss, committing any pending
                 // copy-on-select first (mirrors the left-button-up path).
                 if !f {
-                    if self.selecting && self.cfg.copy_on_select {
-                        self.copy_selection();
+                    if ws.selecting && self.cfg.copy_on_select {
+                        self.copy_selection(ws);
                     }
-                    self.selecting = false;
-                    self.dragging_scrollbar = false;
-                    self.tab_drag_active = false;
+                    ws.selecting = false;
+                    ws.dragging_scrollbar = false;
+                    ws.tab_drag_active = false;
                     // Cycle 904: a focus loss also ends any split-divider drag.
-                    self.dragging_split = None;
-                    self.mouse_btn = None;
+                    ws.dragging_split = None;
+                    ws.mouse_btn = None;
                 }
                 // Cycle 344 (Terminator parity, terminatorlib/config.py:77
                 // `hide_on_lose_focus`): Quake-style auto-hide. When
@@ -10834,7 +10698,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // bound. Honors only on focus-LOSS (f == false).
                 if !f
                     && self.cfg.hide_on_lose_focus
-                    && let Some(w) = &self.window
+                    && let Some(w) = &ws.window
                 {
                     w.set_visible(false);
                 }
@@ -10842,15 +10706,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // user-driven blink-reset paths share one implementation
                 // (cycles 134-141 + 144 + 150 audit). The
                 // CursorBlinkingChange handler still inlines the body
-                // because it runs inside `self.mux.panes.values_mut()`
+                // because it runs inside `ws.mux.panes.values_mut()`
                 // and can't borrow `self` again — that one's documented.
-                self.reset_blink_phase();
+                self.reset_blink_phase(ws);
                 // Focus-event reporting (DEC private mode ?1004): apps that
                 // enabled it expect CSI I on focus-in, CSI O on focus-out.
                 if self
-                    .focused_mode()
+                    .focused_mode(ws)
                     .contains(kettle_core::TermMode::FOCUS_IN_OUT)
-                    && let Some(p) = self.mux.focused()
+                    && let Some(p) = ws.mux.focused()
                 {
                     p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
                 }
@@ -10859,14 +10723,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // when an attention request is outstanding, clear it directly
                 // (FlashWindowEx FLASHW_STOP via Taskbar) on focus-gain and
                 // reset the tracker.
-                if f && self.attention_active {
-                    self.attention_active = false;
-                    if let Some(w) = &self.window {
+                if f && ws.attention_active {
+                    ws.attention_active = false;
+                    if let Some(w) = &ws.window {
                         w.request_user_attention(None);
-                        self.taskbar.clear_attention(w);
+                        ws.taskbar.clear_attention(w);
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
@@ -10880,7 +10744,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // marker (see the paste sites), never raw bytes.
                 #[cfg(feature = "dev-record")]
                 {
-                    let mods = self.mods;
+                    let mods = ws.mods;
                     if let Some(rec) = self.recorder.as_mut() {
                         dev_record_key(rec, &event.logical_key, mods);
                     }
@@ -10890,15 +10754,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // user-driven blink-reset paths (Reset / focus changes /
                 // modal close / typing / tab close / window focus /
                 // DEC ?12 toggle) stay in lock-step. Cycle 171.
-                self.reset_blink_phase();
+                self.reset_blink_phase(ws);
                 // Hide the OS mouse cursor (configurable; default on, like
                 // every modern terminal). Re-shown on the next CursorMoved.
-                self.hide_mouse_cursor();
+                self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
 
-                if self.context_menu.is_some() {
-                    self.context_menu_key(&event.logical_key, text, event_loop);
-                    if let Some(w) = &self.window {
+                if ws.context_menu.is_some() {
+                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10908,50 +10772,50 @@ impl ApplicationHandler<UserEvent> for App {
                 // vi_mode is Some, intercept keys for vi-style
                 // navigation before they reach the PTY. h/j/k/l move
                 // the vi cursor; 0/$/g/G jump; Esc exits.
-                if self.vi_mode.is_some() {
-                    self.vi_mode_key(&event.logical_key, text);
-                    if let Some(w) = &self.window {
+                if ws.vi_mode.is_some() {
+                    self.vi_mode_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                if self.hint_state.is_some() {
-                    self.hint_key(&event.logical_key, text);
-                    if let Some(w) = &self.window {
+                if ws.hint_state.is_some() {
+                    self.hint_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                if self.palette_input.is_some() {
-                    self.palette_key(&event.logical_key, text, event_loop);
-                    if let Some(w) = &self.window {
+                if ws.palette_input.is_some() {
+                    self.palette_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
                 // Cycle 756: settings overlay key handling (exclusive modal).
-                if self.settings_nav.is_some() {
-                    self.settings_key(&event.logical_key, event_loop);
-                    if let Some(w) = &self.window {
+                if ws.settings_nav.is_some() {
+                    self.settings_key(ws, &event.logical_key, event_loop);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                if self.layout_picker_input.is_some() {
-                    self.layout_picker_key(&event.logical_key, text);
-                    if let Some(w) = &self.window {
+                if ws.layout_picker_input.is_some() {
+                    self.layout_picker_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                if self.ssh_input.is_some() {
-                    self.ssh_key(&event.logical_key, text);
-                    if let Some(w) = &self.window {
+                if ws.ssh_input.is_some() {
+                    self.ssh_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
@@ -10962,12 +10826,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // cycle focus, Enter dispatches on_confirm, Esc
                 // closes the modal without dispatching. Modal is
                 // exclusive — non-nav keys are swallowed.
-                if self.confirm_dialog.is_some() {
+                if ws.confirm_dialog.is_some() {
                     let key = match &event.logical_key {
                         Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
                         Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
                         Key::Named(NamedKey::Tab) => {
-                            if self.mods.shift_key() {
+                            if ws.mods.shift_key() {
                                 Some(ConfirmKey::ShiftTab)
                             } else {
                                 Some(ConfirmKey::Tab)
@@ -10978,7 +10842,7 @@ impl ApplicationHandler<UserEvent> for App {
                         _ => None,
                     };
                     if let Some(k) = key
-                        && let Some(state) = self.confirm_dialog.as_ref()
+                        && let Some(state) = ws.confirm_dialog.as_ref()
                     {
                         let n = state.buttons.len();
                         let focus = state.focus_idx;
@@ -10986,7 +10850,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let result = confirm_dialog_keypress(focus, n, k);
                         match result {
                             ConfirmKeyResult::Move(idx) => {
-                                if let Some(s) = self.confirm_dialog.as_mut() {
+                                if let Some(s) = ws.confirm_dialog.as_mut() {
                                     s.focus_idx = idx;
                                 }
                             }
@@ -10994,15 +10858,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 // Inspect on_confirm BEFORE clearing
                                 // so the dispatch sees the right action.
                                 let to_run = action.clone();
-                                self.confirm_dialog = None;
-                                self.dispatch_confirm_action(to_run, event_loop);
+                                ws.confirm_dialog = None;
+                                self.dispatch_confirm_action(ws, to_run, event_loop);
                             }
                             ConfirmKeyResult::Cancel => {
-                                self.confirm_dialog = None;
+                                ws.confirm_dialog = None;
                             }
                             ConfirmKeyResult::Ignore => {}
                         }
-                        if let Some(w) = &self.window {
+                        if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
                     }
@@ -11011,22 +10875,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // Cycle 369: Edit-title overlay key handler. Esc
                 // cancels; Enter applies via apply_title_edit;
                 // Backspace removes one char; printable text appends.
-                if self.editing_title.is_some() {
+                if ws.editing_title.is_some() {
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
-                            self.editing_title = None;
+                            ws.editing_title = None;
                         }
                         Key::Named(NamedKey::Enter) => {
-                            self.apply_title_edit();
+                            self.apply_title_edit(ws);
                         }
                         Key::Named(NamedKey::Backspace) => {
-                            if let Some(state) = self.editing_title.as_mut() {
+                            if let Some(state) = ws.editing_title.as_mut() {
                                 state.input.pop();
                             }
                         }
                         _ => {
                             if let Some(s) = text
-                                && let Some(state) = self.editing_title.as_mut()
+                                && let Some(state) = ws.editing_title.as_mut()
                             {
                                 for c in s.chars() {
                                     if !c.is_control() {
@@ -11036,29 +10900,29 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                if self.mux.search.open {
-                    self.search_key(&event.logical_key, text);
-                    if let Some(w) = &self.window {
+                if ws.mux.search.open {
+                    self.search_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
                 if let Some(k) = to_kkey(&event.logical_key) {
-                    let trig = Trigger::new(to_mods(self.mods), k);
+                    let trig = Trigger::new(to_mods(ws.mods), k);
                     if let Some(act) = self.cfg.keybinds.get(&trig).cloned() {
-                        self.handle_action(act, event_loop);
+                        self.handle_action(ws, act, event_loop);
                         return;
                     }
                 }
 
-                let mode = self
+                let mode = ws
                     .mux
                     .focused()
                     .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
@@ -11069,8 +10933,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // location-agnostic. `event.location` distinguishes the numpad
                 // from the main keyboard row.
                 let encoded =
-                    input::encode_app_keypad(&event.logical_key, event.location, self.mods, mode)
-                        .or_else(|| input::encode(&event.logical_key, text, self.mods, mode));
+                    input::encode_app_keypad(&event.logical_key, event.location, ws.mods, mode)
+                        .or_else(|| input::encode(&event.logical_key, text, ws.mods, mode));
                 if let Some(mut bytes) = encoded {
                     // Cycle 352 (Terminator parity, terminatorlib/config.py:107-108
                     // `backspace_binding` + `delete_binding`): remap the
@@ -11080,8 +10944,8 @@ impl ApplicationHandler<UserEvent> for App {
                         use kettle_config::{BackspaceBinding, DeleteBinding};
                         use winit::keyboard::NamedKey;
                         if *named == NamedKey::Backspace
-                            && !self.mods.control_key()
-                            && !self.mods.alt_key()
+                            && !ws.mods.control_key()
+                            && !ws.mods.alt_key()
                         {
                             bytes = match self.cfg.backspace_binding {
                                 BackspaceBinding::AsciiDel => vec![0x7f],
@@ -11102,7 +10966,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // an active selection — alacritty/iTerm2/WezTerm all do
                     // this so typing after a select doesn't leave a stale
                     // highlight behind.
-                    self.clear_selection_on_input();
+                    self.clear_selection_on_input(ws);
                     // Cycle 141: typing should land the cursor visible
                     // immediately. Without this, a fast typist hitting
                     // a key right as `blink_on` was false saw a brief
@@ -11112,9 +10976,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // as cycles 134-140 (Reset, focus changes, modal
                     // close, mouse focus); typing is the last
                     // user-driven path that still needed it.
-                    self.reset_blink_phase();
-                    if self.mux.is_broadcast_on() {
-                        self.mux.broadcast_write(&bytes);
+                    self.reset_blink_phase(ws);
+                    if ws.mux.is_broadcast_on() {
+                        ws.mux.broadcast_write(&bytes);
                         // `scroll-on-keystroke` (Ghostty / Alacritty
                         // default) snaps the viewport back to the
                         // bottom on every keystroke. With broadcast
@@ -11132,9 +10996,9 @@ impl ApplicationHandler<UserEvent> for App {
                         // path's behavior so the config flag is
                         // honored consistently regardless of mode.
                         if self.cfg.scroll_on_keystroke {
-                            self.mux.broadcast_scroll_to_bottom();
+                            ws.mux.broadcast_scroll_to_bottom();
                         }
-                    } else if let Some(p) = self.mux.focused() {
+                    } else if let Some(p) = ws.mux.focused() {
                         // Cycle 941: a read-only pane (Terminator parity)
                         // drops the keystroke — and skips the scroll snap,
                         // since nothing was typed.
@@ -11154,30 +11018,30 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => self.redraw(ws),
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         // Cycle 908: drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
         #[cfg(feature = "dev-record")]
-        self.flush_recorder_output();
-        if self.mux.reap() && self.window.is_some() {
-            self.save_session();
+        self.flush_recorder_output(ws);
+        if ws.mux.reap() && ws.window.is_some() {
+            self.save_session(ws);
             event_loop.exit();
             return;
         }
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
-        let bell_active = self
+        let bell_active = ws
             .last_bell
             .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
             .unwrap_or(false);
-        let blink_active = self.cfg.cursor_blink && self.window_focused;
-        let anim_active = self
+        let blink_active = self.cfg.cursor_blink && ws.window_focused;
+        let anim_active = ws
             .mux
             .panes
             .values()
@@ -11186,27 +11050,27 @@ impl ApplicationHandler<UserEvent> for App {
         // animation — without an active wake-up the loop sits idle waiting
         // for a fresh CursorMoved, so the drag-past-edge case would freeze
         // until the user wiggled the mouse.
-        let autoscroll_active = self.selecting && {
-            let area = self.area();
-            self.focused_rect(area)
-                .map(|r| selection_autoscroll_lines(self.cursor.y as f32, r.1, r.1 + r.3) != 0)
+        let autoscroll_active = ws.selecting && {
+            let area = self.area(ws);
+            self.focused_rect(ws, area)
+                .map(|r| selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0)
                 .unwrap_or(false)
         };
         // Cycle 910 (R2): a deferred (coalesced) output paint becomes due
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
         let now = std::time::Instant::now();
-        let coalesce_due = self.coalescing_paint
-            && self
+        let coalesce_due = ws.coalescing_paint
+            && ws
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= OUTPUT_FRAME_BUDGET)
                 .unwrap_or(true);
         if bell_active || blink_active || anim_active || autoscroll_active || coalesce_due {
-            if let Some(w) = &self.window {
+            if let Some(w) = &ws.window {
                 w.request_redraw();
             }
             if coalesce_due {
-                self.coalescing_paint = false;
+                ws.coalescing_paint = false;
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
@@ -11219,8 +11083,8 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             None
         };
-        if self.coalescing_paint {
-            let remaining = self
+        if ws.coalescing_paint {
+            let remaining = ws
                 .last_paint
                 .map(|t| OUTPUT_FRAME_BUDGET.saturating_sub(now.saturating_duration_since(t)))
                 .unwrap_or_default();
@@ -11231,7 +11095,7 @@ impl ApplicationHandler<UserEvent> for App {
         // run_command whose deadline has passed, and—while runs are pending—
         // schedule a wake at the soonest deadline so a fully-silent command
         // (no output to wake us) still times out on time.
-        self.check_pending_run_deadlines();
+        self.check_pending_run_deadlines(ws);
         if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
             let ms = (soonest.saturating_duration_since(now).as_millis() as u64).clamp(1, 500);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
@@ -11265,12 +11129,12 @@ mod modal_discipline_guard {
             rest[..end].to_string()
         };
         assert!(
-            body("close_all_modals").contains("self.confirm_dialog = None"),
+            body("close_all_modals").contains("ws.confirm_dialog = None"),
             "close_all_modals must clear confirm_dialog so it can't stack under \
              another overlay"
         );
         assert!(
-            body("any_modal_open").contains("self.confirm_dialog.is_some()"),
+            body("any_modal_open").contains("ws.confirm_dialog.is_some()"),
             "any_modal_open must count the confirm dialog so input doesn't fall \
              through to the terminal behind it"
         );
@@ -11292,11 +11156,11 @@ mod modal_discipline_guard {
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
         assert!(
-            body.contains("if self.mux.close_tab() {") && body.contains("event_loop.exit();"),
+            body.contains("if ws.mux.close_tab() {") && body.contains("event_loop.exit();"),
             "CloseTab dispatch must exit when close_tab() reports the last tab"
         );
         assert!(
-            body.contains("let was_last = self.mux.close_focused();")
+            body.contains("let was_last = ws.mux.close_focused();")
                 && body.contains("if was_last {"),
             "ClosePane dispatch must exit when close_focused() reports the last pane"
         );
@@ -11420,8 +11284,8 @@ mod tests {
         );
         // Move applies the new ratio.
         assert!(
-            src.contains("if self.dragging_split.is_some() {")
-                && src.contains("self.mux.set_split_ratio(self.mux.active, &path, ratio);"),
+            src.contains("if ws.dragging_split.is_some() {")
+                && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);"),
             "CursorMoved must apply the dragged split ratio"
         );
         // Up + focus-loss end the drag (distinctive comments at each site, so
@@ -11485,22 +11349,22 @@ mod tests {
         // 1. Dropped-file modal gate, at the top of the arm.
         assert!(
             src.contains("WindowEvent::DroppedFile(path) => {")
-                && src.contains("if self.any_modal_open() {\n                    return;\n                }\n                // Standard modern-terminal affordance"),
+                && src.contains("if self.any_modal_open(ws) {\n                    return;\n                }\n                // Standard modern-terminal affordance"),
             "DroppedFile must early-return when a modal is open"
         );
         // 2. Focus-loss drag-flag reset (the block also clears dragging_split
         //    since cycle 904, so check the individual resets, not a contiguous
         //    block).
         assert!(
-            src.contains("if self.selecting && self.cfg.copy_on_select {")
-                && src.contains("self.selecting = false;")
-                && src.contains("self.tab_drag_active = false;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    self.dragging_split = None;\n                    self.mouse_btn = None;"),
+            src.contains("if ws.selecting && self.cfg.copy_on_select {")
+                && src.contains("ws.selecting = false;")
+                && src.contains("ws.tab_drag_active = false;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
         assert!(
             src.contains(
-                "if self.context_menu.is_some() {\n                        self.context_menu = None;"
+                "if ws.context_menu.is_some() {\n                        ws.context_menu = None;"
             ),
             "a side-button press must dismiss a lone context menu, not forward SGR"
         );
@@ -11565,7 +11429,7 @@ mod tests {
             .expect("search_key present");
         assert!(
             arm.contains("!t.chars().any(|c| c.is_control())")
-                && arm.contains("self.mux.search.query.push_str(t)"),
+                && arm.contains("ws.mux.search.query.push_str(t)"),
             "search_key must filter control chars before appending to the query"
         );
     }
@@ -11628,7 +11492,7 @@ mod tests {
         // `\n` in this literal, so the test's own source can't self-match.)
         let src = include_str!("app.rs").replace('\r', "");
         let gated = src
-            .matches("if !modal_swallows_pointer(self.any_modal_open(), self.context_menu.is_some()) {\n                        self.send_mouse(sgr,")
+            .matches("if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {\n                        self.send_mouse(ws, sgr,")
             .count();
         assert!(
             gated >= 2,
@@ -12316,15 +12180,15 @@ mod tests {
     fn output_coalescer_flushes_before_the_wait_clamp() {
         let src = include_str!("app.rs").replace("\r\n", "\n");
         let start = src
-            .find("fn about_to_wait(")
-            .expect("about_to_wait present");
+            .find("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner present");
         let rest = &src[start..];
-        // Bound the scan to the about_to_wait body (it is the last method in the
-        // impl, so the next column-0 `}` closes the impl).
+        // Bound the scan to the about_to_wait_inner body (it is the last method
+        // in the impl, so the next column-0 `}` closes the impl).
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         let body = &rest[..end];
         let flush = body
-            .find("self.coalescing_paint = false")
+            .find("ws.coalescing_paint = false")
             .expect("the coalesce_due flush must exist in about_to_wait");
         let clamp = body
             .find(".max(1)")

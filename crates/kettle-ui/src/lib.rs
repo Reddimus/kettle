@@ -21,6 +21,9 @@
 //! `close_all_modals()` / `any_modal_open()` so they don't stack.
 
 mod app;
+// C1 (multi-window foundation): per-window state container. `App` keeps only
+// process-global state; everything tied to one OS window lives here.
+mod window_state;
 // Cycle 928 (agent-first A2): in-process control server. The accept/reader/
 // writer threads run kettle-ctl's transport; the App drains requests on the
 // main thread via `UserEvent::Ctl`. Always compiled (gated at runtime by the
