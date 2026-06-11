@@ -11,12 +11,12 @@ cwd, images, clipboard, title) flow back to the UI.
 graph TD
     bin["kettle (bin)<br/>CLI · entry · exec/ctl/mcp subcommands"] --> ui
     bin --> ctl
-    ui["kettle-ui<br/>winit app · tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
+    ui["kettle-ui<br/>winit multi-window app · per-window tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
     ui --> core
     ui --> cfg
     ui --> remote
     ui --> ctl
-    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery registry · blocking client"]
+    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · reader thread<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
@@ -43,7 +43,7 @@ graph LR
     ctlcli --> ipc["local IPC<br/>(Unix socket /<br/>Windows named pipe)"]
     mcp --> ipc
     ipc --> srv["control SERVER<br/>(hosted in kettle-ui)"]
-    srv -->|UserEvent::Ctl| app["App main thread<br/>(self.mux)"]
+    srv -->|UserEvent::Ctl| app["App main thread<br/>(windows map)"]
     reg["discovery registry<br/>reserved kind field<br/>(\"gui\" today, \"muxd\" later)"] -.-> ipc
 ```
 
@@ -51,18 +51,58 @@ Two roles split cleanly across the bin and the GUI:
 
 - The **GUI (kettle-ui)** hosts the control **server**. Requests arriving over
   the transport are dispatched on the App main thread via `UserEvent::Ctl`, so
-  they observe and mutate the same `self.mux` the renderer reads — no separate
-  lock on the pane tree.
+  they observe and mutate the same per-window `Mux` trees the renderer reads —
+  no separate lock on the pane tree.
 - The **bin (kettle)** hosts the three opt-in entry points: `kettle exec` (a
   headless one-shot that runs a command under a real PTY and streams its output
   to stdout, no GUI), `kettle ctl` (the kettle-ctl client that drives a running
   kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
   as native agent tools).
 
+The surface is multi-window aware (v2.18.0): `get_state` reports
+`{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
+window and tag each entry with its `window`; `--pane N` resolves across
+windows (pane ids are process-global); and a live tab tear-off emits a
+`tab_moved` event (`{from_window, to_window, tab}`) on the subscription
+feed.
+
 The discovery registry reserves a `kind` field — `"gui"` today — as the
 forward-compat seam for the optional `kettle-muxd` session daemon (see
 [MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)): when `kettle-muxd` lands it can
 re-host the same server side as `kind = "muxd"` without breaking any client.
+
+## In-process multi-window
+
+Since v2.18.0 every kettle window lives in one process. `App` holds
+`windows: BTreeMap<u64, WindowState>`
+(`crates/kettle-ui/src/window_state.rs`) — every per-window field (the
+winit window, its renderer, its `Mux` tab/split tree, input + overlay
+state) lives in `WindowState`, while `App` keeps the process globals
+(config, event-loop proxy, ctl server, Lua VM).
+
+- **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
+  remove the addressed window from the map, run the inner handlers with
+  disjoint `&mut App` + `&mut WindowState` borrows, then reinsert it.
+  Window closes route through a single funnel (`pending_window_close` →
+  `finish_window_dispatch`), which exits the event loop only when no
+  windows remain.
+- **One GPU context** — the wgpu `GpuContext { instance, adapter,
+  device, queue }` is created with window 1 and shared; each subsequent
+  window gets its own surface via `Renderer::new_with_gpu` (synchronous —
+  no adapter request, no watchdog needed).
+- **PTY wakeups fan out** to all windows, gated per window by a per-pane
+  output-generation counter — plain output emits no `TermEvent`, so the
+  counter is the only reliable "this pane has new bytes" signal.
+- **Pane ids are process-global** (the `NEXT_PANE_ID` atomic), so the
+  agent control plane and the session file address panes unambiguously
+  across windows.
+- **Per-window accents (Peacock), on by default** — `accent-color =
+  auto` (the default) gives each window a distinct theme-pool hue;
+  cross-process dedupe goes through a presence registry in kettle-ctl
+  (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
+  window under `<runtime base>/kettle/instances`, a sibling of the ctl
+  discovery dir; RAII guard, dead-pid pruning, best-effort).
+  `accent-color = theme|off|none` opts out; a hex value pins one color.
 
 ## Per-pane data flow
 
@@ -142,10 +182,12 @@ renderer, so the menu pass reuses already-cached glyphs.
 
 ## Threading model
 
-- **Main thread** — winit event loop, *all* GPU work, the tab/split tree,
-  input encoding, search/SSH overlays, session save/restore, cursor-blink and
-  visual-bell timers (scheduled via `ControlFlow::WaitUntil` only while
-  something animates, so an idle terminal does no work).
+- **Main thread** — winit event loop, *all* GPU work, every window's
+  tab/split tree (the `windows` map; dispatch is take-out/put-back, see
+  above), input encoding, search/SSH overlays, session save/restore,
+  cursor-blink and visual-bell timers (scheduled via
+  `ControlFlow::WaitUntil` only while something animates, so an idle
+  terminal does no work).
 - **One reader thread per pane** — blocking `read()` on the PTY master →
   `Extractor::feed` → image/side-channel chunks recorded, text chunks driven
   into the `alacritty_terminal::Term` (behind a `Mutex` shared with the
@@ -357,32 +399,36 @@ Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
 via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
 See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
 
-### Detachable tabs (cycles 397-410)
+### Detachable tabs (live in-process tear-off)
 
-Three paths, all end-to-end:
+Tab tear-off is a live, in-process move (v2.18.0): the tab's panes —
+PTYs, scrollback, running programs — transfer untouched into a new
+window in the same process.
 
 ```mermaid
 flowchart TD
-    A["Action::MoveTabToNewWindow"]
-    A --> B1["Wayland-fallback<br/>(keyboard-only)"]
-    A --> B2["Unix SCM_RIGHTS<br/>socketpair + fork+exec<br/>+ send_fds"]
-    A --> B3["File-fallback<br/>/tmp/handoff.json<br/>+ --tab-handoff PATH"]
-    B1 --> C["Target kettle"]
-    B2 --> C
-    B3 --> C
-    C --> D["Session restore<br/>(split tree + cwds preserved)"]
+    A["mouse-down on a tab<br/>(multi-tab window)"] --> B["detach::DragState FSM<br/>armed"]
+    B --> C["CursorMoved drives it<br/>position-based outside detection<br/>(Windows SetCapture suppresses<br/>CursorLeft mid-drag)"]
+    C -->|"release outside"| D["Mux::detach_tab"]
+    D --> E["open_window(AdoptTab)<br/>at the drop position"]
+    C -->|"Esc / focus loss"| F["cancel (tab stays put)"]
 ```
 
-In-process foundation: `Mux::serialize_tab` +
-`extract_tab`/`insert_tab`; IPC primitive:
-`fd_transport::send_fds`/`recv_fds`; drag FSM:
-`detach::DragState`. See
-[`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md).
+The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
+performs the same live in-process move. The old cross-process handoff
+*senders* (Unix SCM_RIGHTS socketpair + the JSON-file fallback) are
+deleted — they respawned shells rather than moving live PTYs; the
+`--tab-handoff` receive parsing stays for one release, deprecated. See
+[`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md)
+for the historical multi-process design this replaced.
 
 ### Session restore
 
 Per-pane working directory + tab/split tree are captured live as the
-user works and atomically written to `session.json`. Replay on the next
+user works and atomically written to `session.json`. Since v2.18.0 the
+session is **multi-window**: `Session` carries `windows: Vec<SWindow {
+tabs, active, geometry }>` and restore reopens *every* window at its
+(monitor-clamped) saved position. Replay on the next
 launch is **opt-in**: by default a new window opens fresh (a single pane
 in the default cwd, like every mainstream terminal), and the
 session is *saved* only in restore mode so a fresh window never clobbers
@@ -411,13 +457,13 @@ sequenceDiagram
     Note over App,FS: Next launch — restore is opt-in
     App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
     App->>FS: read session.json
-    FS-->>App: tab tree + per-pane cwd
-    App->>Mux: rehydrate split layout
+    FS-->>App: windows → tab trees + per-pane cwds
+    App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)
     Mux->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
     Note over Core,App: Pane reappears in same<br/>tab/split/cwd as last exit
 ```
 
-Three notable invariants preserved by this flow:
+Four notable invariants preserved by this flow:
 
 - **Atomic write** — `session.json` is written tempfile + rename, so a
   power-loss between writes leaves the previous valid snapshot intact
@@ -429,6 +475,13 @@ Three notable invariants preserved by this flow:
 - **No replay of failed spawns** — if a saved cwd is gone (deleted /
   unmounted), the pane spawns in `$HOME` and logs a warning instead
   of aborting the whole restore.
+- **Two on-disk vintages** — `windows_normalized()` reads both the
+  v2.18.0 `windows` array and the legacy single-window top-level
+  fields, and save dual-writes window 1 into those legacy fields, so
+  an older kettle can still read a new `session.json`. (v2.18.0 also
+  repaired a latent gate bug: the `--layout` / `--restore` /
+  `--tab-handoff` loads were dead because `resumed()` `mem::take`'d
+  the whole CLI-options struct before the gates read it.)
 
 See [`docs/ROADMAP.md`](ROADMAP.md) for the cycle-by-cycle ledger of
 session-restore hardening (cycles 411-420).

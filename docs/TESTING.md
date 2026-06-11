@@ -109,6 +109,24 @@ discipline here.
   + corruption-backup contracts; xterm modifier encoding + paste
   payload bracketing + injection-guard.
 
+- **Multi-window (v2.18.0, cross-crate)**: the tab tear-off drag is a
+  pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
+  window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel
+  returning the dragged tab, cursor leave/re-enter, plus an
+  end-to-end drag walkthrough; the per-window accent **presence
+  registry** (`kettle-ctl/src/presence.rs`) pins claim/release
+  round-trips, dead-PID pruning, and in-place hue updates against a
+  temp dir; **shell detection** (`detect_shells_windows`/`_unix`,
+  kettle-core) is pure over injected closures (PATH lookup, WSL
+  enumeration, vswhere, Git Bash probe), so the Windows-Terminal
+  ordering / skip-when-absent / never-empty cases run on every OS;
+  **session v2** round-trips multi-window saves with geometry
+  (`session_v2_windows_round_trip_with_geometry`) and still loads
+  legacy single-window files; and the **exit-allowlist drift guard**
+  (`event_loop_exit_sites_are_allowlisted`, kettle-ui) pins the only
+  code paths allowed to terminate the process, now that closing one
+  window must leave the others running.
+
 - **kettle** (binary, 15+ tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105
   `format_ssh_hosts` table renderer (sort + column alignment +

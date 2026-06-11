@@ -4,6 +4,91 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.18.0] — 2026-06-11
+
+  **In-process multi-window + live tab tear-off (Windows Terminal parity).**
+  One kettle process now hosts any number of OS windows:
+
+  - **Drag a tab out of the window and it becomes a new window at the drop
+    point** — the tab's panes (PTYs, scrollback, running programs) move
+    LIVE; nothing respawns, pane ids and child processes are stable.
+    `Esc` mid-drag (or focus loss) cancels. Verified with `ping -t`
+    streaming uninterrupted across the move.
+  - **`new_window` (Ctrl+Shift+I) opens in-process** (was: a separate kettle
+    process). Closing one window leaves the rest running; the process exits
+    with the last window. The GPU device is shared across windows (~17-25 MB
+    swapchain + 4-16 MB glyph atlas of VRAM per additional window).
+  - **`move_tab_to_new_window` is the same live move** by keyboard (the only
+    route on Wayland). The old serialize-and-respawn handoff senders
+    (SCM_RIGHTS socketpair / one-shot JSON file) are retired — they never
+    transferred live PTYs; the `--tab-handoff` receive parsing stays one
+    release for an upgrade-in-flight old sender, deprecated.
+  - **Session v2**: `session.json` records EVERY window (tabs + geometry);
+    restore reopens each window at its saved position, clamped to the live
+    monitor layout (an unplugged monitor can't strand a window off-screen).
+    Old session files load unchanged; new files mirror window 1 into the
+    legacy fields so an older kettle still restores something sensible.
+  - **Agent API (additive)**: `get_state` gains `windows` +
+    `focused_window`; `list_tabs` / `list_panes` enumerate every window with
+    a per-entry `window` field; an explicit `--pane N` resolves across all
+    windows (pane ids are process-global now); new `tab_moved` event.
+
+  **Peacock per-window accents — ON by default.** Every kettle window claims
+  a distinct hue from the theme's accent pool (the user-visible chrome that
+  already follows the accent: focused-pane border, active-tab strip, pane
+  titlebars, drag ghost, menu/settings highlights). Same project → same
+  starting hue; two live windows never share one while the pool has a free
+  hue — coordinated across processes by a tiny presence registry
+  (`<runtime>/kettle/instances`, dead entries auto-pruned, best-effort by
+  design). A theme switch keeps each window's pool slot. Opt out with
+  `accent-color = theme` (or `off`/`none`); a hex / `--accent` pins every
+  window and skips the dedupe.
+
+  **Windows Terminal dropdown parity.** The new-tab `▾` menu now lists, in
+  WT's order: PowerShell (relabeled from "PowerShell 7"), Windows
+  PowerShell, Command Prompt, the WSL distros, **Developer Command Prompt /
+  Developer PowerShell for VS 2022** (auto-detected via `vswhere`), and
+  **Git Bash** (registry → well-known dirs → `git.exe` on PATH) — then
+  WT's bottom section: **Settings… / Command palette / About kettle**.
+  **Ctrl+Shift+1..9 opens the Nth dropdown entry** (`new_tab_shell_N`; both
+  the digit and its US-shifted symbol are bound, the font-zoom precedent).
+  Menus show **right-aligned dimmed shortcut hints** computed from the LIVE
+  keybind map — a rebind shows your actual chord; the right-click menu rows
+  get hints for free. The dropdown is now **always visible on every
+  platform** (supersedes the cycle-917 single-shell gating: the bottom rows
+  mean it's never a one-item menu). New **About panel** (`about` action,
+  also in the palette): version + git hash (exactly `--version`'s output),
+  update status, copy-version / open-GitHub / open-release rows.
+
+  **Held-key stutter fixed** (user report: holding a character stuttered in
+  kettle but not Terminator). Typing echo only ever painted via the
+  PTY-output coalescer's `WaitUntil` deadline, whose ~16 ms Windows timer
+  granularity made the repeat cadence irregular. Echo arriving within 150 ms
+  of a keystroke now paints immediately — `request_redraw` is
+  vsync-coalesced, so this can't outpace the display — while non-input
+  bursts (build logs, streaming) still coalesce to one paint per frame.
+
+  **App icon cleanup.** The macOS-style titlebar strip + traffic-light dots
+  are gone — a clean rounded window with the centered `>_` prompt, signature
+  mauve border unchanged. `scripts/gen-icons.py` (new, committed) is a
+  Pillow reproduction of the SVG that regenerates every artifact (Linux
+  hicolor PNGs, the macOS iconset, the 7-resolution Windows `.ico`) on any
+  host — the rsvg path in `gen-icons.sh` remains for Linux.
+
+  **Fixed (latent, found while wiring the above):**
+
+  - `--layout`, `--restore`, and `--tab-handoff` startup loads were dead
+    since ~v2.15: `resumed()` consumed the whole CLI-options struct with a
+    wholesale `mem::take` before the load gates read it (verified: a 2-tab
+    `--layout` opened 1 tab). Live config reloads also lost the
+    `-m/-f/-b/-H/-T` launch overrides through the same hole. Only the
+    consumed-once `-e`/`-d` fields are taken now; regression-guarded.
+  - Context-menu geometry measured rows with the integer PTY cell height
+    while the renderer lays them out with the fractional cell size — at 9+
+    rows the ~0.5 px/row drift clipped the last row and drew a phantom
+    "more rows" scroll marker. Menu geometry now uses the renderer's
+    fractional metrics.
+
 ## [2.17.0] — 2026-06-10
 
   **Terminator-parity sweep (full re-audit of the Terminator codebase against

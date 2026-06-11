@@ -135,9 +135,12 @@ App-wide state container (the Borg pattern). Tracks all windows, all
 terminals, all groups. Coordinates `group_emit` (broadcast within a group)
 and `all_emit` (broadcast to every terminal). Layout loading.
 
-kettle equivalent: `kettle_ui::Mux` (cycle-X) is the per-window analog;
-kettle doesn't have a cross-window singleton because each kettle window is
-a separate process (cycle-302 file IPC bridges them).
+kettle equivalent: `kettle_ui::Mux` (cycle-X) is the per-window analog.
+Since v2.18.0 kettle has the cross-window coordinator too: every window
+lives in one process, owned by `App`'s `windows: BTreeMap<u64, WindowState>`
+map (`crates/kettle-ui/src/window_state.rs`) — the in-process equivalent of
+Terminator's Borg singleton. (cycle-302 file IPC still bridges *separate*
+kettle processes.)
 
 ### `terminatorlib/window.py` — top-level GTK Window
 
@@ -156,7 +159,13 @@ GTK Notebook with closable tabs, drag-to-reorder, right-click context menu,
 detachable tabs.
 
 kettle equivalent: `kettle_ui::Mux::tabs`. Drag-to-reorder ✅ (cycle-255
-dragged-tab ghost). Detachable tabs (drag to new window) — shipped at cycles 400-411 (see gap-table row + `crates/kettle-ui/src/detach.rs`).
+dragged-tab ghost). Detachable tabs (drag to new window) ✅ DONE — live
+in-process tear-off shipped in v2.18.0: drag a tab outside the window and
+`Mux::detach_tab` → `open_window(AdoptTab)` moves its panes (running
+programs, PTYs, scrollback untouched) into a new window at the drop
+position (`crates/kettle-ui/src/detach.rs` DragState FSM + gap-table row;
+the cycles 400-411 cross-process fallbacks respawned shells and their
+senders are now deleted).
 
 ### `terminatorlib/container.py` + `paned.py` — split container
 
@@ -442,7 +451,7 @@ references to the shipping cycles + the relevant code modules.
 |---|---|---|---|
 | ~~**Plugin system**~~ | plugin.py + plugins/*.py | A | Status: **COMPLETE** at cycle 708. Event-hook foundation via cycle-324 Lua scripting + cycle-365 `kettle.on(event, cb)` registry. **All 8 plugin-relevant events shipped**: `startup` (cycle-365), `tab_add` (cycle-365), `tab_close` (cycle-365), `bell` (cycle-377), `output` (cycle-377), `pane_focus` (cycle-703), `title_changed` (cycle-704), `url_clicked` (cycle-705). **All 6 Terminator plugins ported**: `activitywatch.py` → cycle-619 watcher; `custom_commands.py` → cycle-611 `menu-item =` config + cycle-375 `kettle.add_menu_item`; `terminalshot.py` → cycles 688/689; `logger.py` → cycle-621 `Action::ToggleSessionLog`; `urlhandlers.py` → cycle-X URL detection + cycle-374 `try_url_handler` + cycle-695 `Action::ShowHelp`; `launcher.py` → cycle-708 `Action::OpenLayoutPicker` (last gap closed). | cycle-708 |
 | ~~**Per-terminal titlebar**~~ | titlebar.py | A | cycles 379/382/386/682 — per-pane chrome reserves `ch + 6.0` px when `show_titlebar = true` && >1 panes; label format `[group] title COLS×ROWS [bell]`; title-edit overlay (cycle-407) + activity/bell/silence dots (cycle-X) all wired. See `### terminatorlib/titlebar.py` paragraph above for full mapping. | cycle-706 |
-| ~~**Detachable tabs (drag across windows)**~~ | notebook.py + window.py | A | cycles 400-411 shipped all 11 sub-cycles: `crates/kettle-ui/src/detach.rs` carries the drag-state machine (Idle → ArmedInside → DraggingInside → DraggingOutside transitions with Escape-abort + drop-zone hit testing). File-fallback persists tab state to a temp JSON; SCM_RIGHTS IPC carries the JSON payload end-to-end on Unix sockets. The user-facing detach UX is complete — drag a tab outside the window, a new kettle window appears with that tab's panes restored to their previous cwd + argv. **Live-PTY adoption** (transferring the PTY master fd across processes so the in-session shell history + running commands survive the detach, rather than respawning the shell with cwd preserved) is an **enhancement, not a gap** — Terminator's GTK-process-reparent shortcut isn't available cross-platform in winit, and the kettle-equivalent (`Terminal::from_raw_fd` + SCM_RIGHTS-carried PTY fd) is a future polish item that pre-cycle-708 closeout text mis-flagged as deferred. | cycle-708 |
+| ~~**Detachable tabs (drag across windows)**~~ | notebook.py + window.py | A | ✅ **DONE — live in-process tear-off shipped in v2.18.0.** Cycles 400-411 built the foundation: `crates/kettle-ui/src/detach.rs` carries the drag-state machine (Idle → ArmedInside → DraggingInside → DraggingOutside transitions with Escape-abort), originally feeding cross-process fallbacks (temp-JSON file + SCM_RIGHTS) that *respawned* shells with cwd preserved. v2.18.0 wired the FSM live against the in-process multi-window App: mouse-down on a tab arms it, CursorMoved drives it with position-based outside detection (Windows SetCapture suppresses CursorLeft mid-drag), and release outside runs `Mux::detach_tab` → `open_window(AdoptTab)` at the drop position — the tab's panes (PTYs, scrollback, running programs) transfer **untouched**, Esc/focus-loss cancel. That closes the live-PTY-adoption enhancement with no fd transfer at all (the PTYs never leave the process). The old SCM_RIGHTS/JSON handoff senders are deleted; `--tab-handoff` receive parsing stays one release, deprecated. The keyboard `move_tab_to_new_window` action is the same live move. | v2.18.0 |
 | ~~**Background image + blur**~~ | config.py + rendering | A | **All 12 sub-cycles shipped** (cycles 381-396): cycle-381 parser + `BgImage` struct (sub-cycle 2); cycle-388/389 wgpu texture upload + render pass (sub-cycles 3-4); cycle-390 alignment modes left/center/right + top/bottom (sub-cycles 5-7); cycle-394 implicit per-frame UV recompute for `background_image_mode = tile/scale/center` (sub-cycle 8); cycle-396 Gaussian blur via `image::imageops::blur` (sub-cycle 9); cache + path invalidation (sub-cycles 10-11); cycle-392 acceptance test `real_png_roundtrip` in `bg_image.rs:233-260` walks decode + write + roundtrip (sub-cycle 12). PNG/JPEG/WebP decode via `image` crate. The cycle-708 Stop hook reading of "11/12 sub-cycles" was an inaccurate transcription of the closeout summary's "11/12; sub-cycle 8 implicit" — sub-cycle 8 was always implicit via the UV pipeline (no separate explicit cycle needed), so the actual count is 12/12. | cycle-708 |
 
 ### Bucket E — won't implement (by design)
@@ -499,7 +508,10 @@ have ⛔. Source-of-origin is cited:
 - Vi-mode for scrollback (Ctrl+Shift+Space) — **Alacritty** origin, cycles 298-301.
 - Remote-control IPC (`--remote-send`, `--toggle`) — **kitty `@`** origin, cycles 302+303.
 - Quake dropdown (`--toggle`) — **Yakuake** / **Tilda** / **Ghostty** origin, cycle-303.
-- Peacock accent-color — **VS Code Peacock** origin, cycle-293.
+- Peacock accent-color — **VS Code Peacock** origin, cycle-293; since
+  v2.18.0 `accent-color = auto` is the **default** — every window claims a
+  distinct theme-pool hue, deduped across windows and kettle processes via
+  the kettle-ctl presence registry (`theme`/`off`/`none` opt out; hex pins).
 - Annotated screenshots (`--annotate`) — **iTerm2** caption variant, cycle-294.
 - Status bar widget (`status-bar = top|bottom`) — **iTerm2** / **kitty** origin, cycle-295.
 - Shell integration (OSC 133) — generic standard, not Terminator-specific.
@@ -588,9 +600,10 @@ tagged releases (v1.8.0 → v1.31.0). Cumulative deliverables:
                               implicit in the cycle-394 UV pipeline — no
                               separate explicit cycle needed)
   Detachable tabs Bucket-D    COMPLETE (11/11 sub-cycles; file-fallback +
-                              SCM_RIGHTS IPC for JSON payload; live-PTY
-                              adoption is a future polish enhancement, not
-                              a feature gap)
+                              SCM_RIGHTS IPC for JSON payload at the time;
+                              the then-deferred live-PTY adoption later
+                              shipped in v2.18.0 as the in-process live
+                              tear-off — see the Bucket D row)
   Plugin Lua API              7 functions + 5 event hooks + sandbox +
                               init.lua auto-load
   Action variants             20 new (cycle 342 added 18; cycle 384
@@ -605,10 +618,12 @@ tagged releases (v1.8.0 → v1.31.0). Cumulative deliverables:
 The kettle binary at v1.31.0 ships every Terminator user-facing feature
 with a complete implementation, a file-fallback path that delivers the
 same UX, or an explicit Bucket-E rationale for paradigm-divergent features
-(preferences GUI, D-Bus IPC). The only genuine remaining work is
+(preferences GUI, D-Bus IPC). The only genuine remaining work was
 `Terminal::from_raw_fd` in kettle-core for the SCM_RIGHTS live-PTY-
 adoption variant of detachable tabs — a kettle-internal optimization,
-not a missing Terminator feature.
+not a missing Terminator feature. (Since closed: v2.18.0 moved every
+window into one process, so a detached tab's live PTYs move by plain
+ownership transfer — `Mux::detach_tab` — with no fd passing needed.)
 
 ## Post-sweep polish (cycles 411-553, v1.32.0 → v1.43.0, 12 releases)
 

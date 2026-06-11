@@ -1,7 +1,7 @@
 .\" kettle.1 - manual page for kettle terminal emulator
 .\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
 .\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
-.TH KETTLE 1 "2026-06-09" "kettle" "User Commands"
+.TH KETTLE 1 "2026-06-11" "kettle" "User Commands"
 .
 .SH NAME
 kettle \- fast, cross-platform, GPU-accelerated terminal emulator
@@ -41,12 +41,14 @@ and built on the battle-tested
 VT engine.
 .PP
 Features include split panes (Terminator-style binary tree),
-multiple tabs with drag-to-reorder + activity / silence / bell
-indicators, inline images (sixel, kitty graphics, iTerm2 inline
-image protocols), OSC 8 hyperlinks, OSC 133 shell-integration
-jump-to-prompt, ligatures, infinite scrollback, fuzzy-search
-overlays (command palette, themes, SSH-host launcher), undo
-close tab, duplicate tab/pane, and broadcast / group-input mode.
+multiple tabs with drag-to-reorder, live tear-off into a new
+window (running programs move untouched), + activity / silence /
+bell indicators, inline images (sixel, kitty graphics, iTerm2
+inline image protocols), OSC 8 hyperlinks, OSC 133
+shell-integration jump-to-prompt, ligatures, infinite scrollback,
+fuzzy-search overlays (command palette, themes, SSH-host
+launcher), undo close tab, duplicate tab/pane, per-window accent
+colors, and broadcast / group-input mode.
 .PP
 Without arguments
 .B kettle
@@ -215,22 +217,23 @@ Override the rendered grid size (in cells) for
 Default 96x28.
 .TP
 .BI \-\-tab\-handoff \ PATH
-Restore a tab from a JSON handoff file written by another
-.B kettle
-process. Used by
-.B Action::MoveTabToNewWindow
-on platforms without SCM_RIGHTS (Windows + Wayland): the source
-process serializes the focused tab + passes the path; the target
-reads + reconstructs. Running shells stay in the source window —
-live PTY-fd transfer needs
-.BR \-\-tab\-handoff\-fd .
+.B Deprecated
+(receive parsing kept for one release, for handoff files written
+by older kettles). Restore a tab from a JSON handoff file.
+Nothing writes these files any more: tab tear-off is now a live
+in-process move \(em drag a tab outside the window, or use the
+.B move_tab_to_new_window
+action \(em and the tab's running programs, PTYs and scrollback
+transfer to the new window untouched.
 The handoff file is deleted after read (one-shot).
 .TP
 .BI \-\-tab\-handoff\-fd \ FD
-Receive a tab handoff via SCM_RIGHTS over the named inherited
-file descriptor. Used by
-.B Action::MoveTabToNewWindow
-on Linux + macOS where SCM_RIGHTS is available. Unix-only.
+.B Deprecated
+receive-side counterpart of
+.BR \-\-tab\-handoff :
+accept a tab handoff via SCM_RIGHTS over the named inherited
+file descriptor. kettle no longer sends these (see above).
+Unix-only.
 .TP
 .BI \-\-remote\-send \ TEXT
 Send
@@ -269,8 +272,9 @@ see
 for in-window save/restore.
 .TP
 .B \-\-restore
-Restore the previous session (tabs, splits, working directories)
-for this launch. By default kettle opens a fresh window \(em a single
+Restore the previous session (windows, tabs, splits, working
+directories) for this launch \(em every saved window reopens at its
+(monitor-clamped) saved position. By default kettle opens a fresh window \(em a single
 pane in the default working directory, matching mainstream terminals.
 Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
@@ -292,12 +296,20 @@ send text + run commands. OFF by default. See
 for the threat model.
 .TP
 .BI \-\-accent \ COLOR
-Tint this window's chrome (peacock parity) with the
-named or hex color, so multiple kettle windows are visually
-distinct. Accepts
+Pin this window's chrome tint (peacock parity) to the
+named or hex color. Accepts
 .B "#RRGGBB"
 or any palette name from
 .BR \-\-list\-themes .
+Per-window accents are on by default
+.RB ( "accent\-color = auto" ):
+every window \(em deduped across all kettle windows and processes
+\(em claims a distinct theme-pool hue, so multiple windows are
+visually distinct without any flag. Set the
+.B accent\-color
+config key to
+.BR theme ", " off ", or " none
+to opt out; a hex value (or this flag) pins one color.
 .TP
 .BI \-\-lua\-script \ PATH
 Load
@@ -413,6 +425,12 @@ entries). Cmd is the macOS modifier; Ctrl on Linux / Windows.
 .B Ctrl+Shift+T
 new tab
 .TP
+.B Ctrl+Shift+1 ... Ctrl+Shift+9
+new tab running the Nth entry of the new-tab dropdown (action
+.BR new_tab_shell_N ,
+1-based; also spelled
+.BR new\-tab\-shell\-N )
+.TP
 .B Ctrl+Shift+W
 close focused pane (or tab if last pane)
 .TP
@@ -439,6 +457,22 @@ close window
 .TP
 .B F11
 toggle fullscreen
+.PP
+The new-tab button's dropdown lists every detected shell in Windows
+Terminal order \(em PowerShell, Windows PowerShell, Command Prompt,
+WSL distros, Visual Studio 2022 Developer Command Prompt /
+PowerShell (vswhere-detected), Git Bash \(em plus Settings, Command
+palette and About rows; it is always visible on every platform.
+Menu rows show right-aligned shortcut hints taken from the live
+keybind map.
+.PP
+Dragging a tab outside its window tears it off into a new window in
+the same process: the tab's running programs, PTYs and scrollback
+move untouched (Esc or focus loss cancels the drag). The
+.B move_tab_to_new_window
+action (alias
+.BR detach_tab )
+performs the same live move from the keyboard.
 .SS Splits / panes
 .TP
 .B Ctrl+Shift+O
@@ -467,7 +501,12 @@ Additional actions available via the command palette
 .BR UndoCloseTab ,
 .BR DuplicateTab ,
 .BR DuplicatePane ,
-.BR Reset
+.BR Reset ,
+and
+.B about
+(open the About panel \(em version, update status, GitHub link;
+aliases
+.BR show_about " / " show\-about )
 \(em not default-bound (bind via the
 .B keybind
 config entry if you want a hotkey).
@@ -650,7 +689,8 @@ overrides the install root.
 User config file (Linux). See CONFIGURATION above.
 .TP
 .I ~/.local/share/kettle/sessions/
-Per-window session JSON (atomic write-then-rename). Always saved on exit
+Session JSON (atomic write-then-rename) capturing every window:
+tabs, splits, working directories + window geometry. Always saved on exit
 in restore mode; replayed on the next launch only when restore is opted
 in via
 .B restore-session = true

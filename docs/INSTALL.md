@@ -31,7 +31,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v2.17.0 sh
+  | KETTLE_VERSION=v2.18.0 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -224,14 +224,14 @@ one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.17.0)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.18.0)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.17.0/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.17.0/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.18.0/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.18.0/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```
@@ -282,17 +282,24 @@ render pass — it executes in CI on Linux, macOS and Windows.
 
 ## Regenerating the app icons (contributors)
 
-`packaging/linux/kettle.svg` is the single source of truth for the Linux
-launcher / window icon. The fixed-size PNGs that ship in the hicolor theme
-(`kettle-16.png` … `kettle-256.png`) are rasterized from it:
+`packaging/linux/kettle.svg` is the single source of truth for the app icon
+(as of v2.18.0 the artwork no longer carries the macOS-style titlebar strip).
+Every shipped raster is regenerated from it — the fixed-size PNGs in the
+hicolor theme (`kettle-16.png` … `kettle-256.png`), the macOS iconset, and
+the Windows `.ico`:
 
 ```sh
-./scripts/gen-icons.sh   # needs rsvg-convert (Debian/Ubuntu: librsvg2-bin)
+# Cross-platform path (committed; needs Pillow) — regenerates the Linux
+# PNGs + the macOS iconset + the Windows .ico in one pass:
+python3 scripts/gen-icons.py
+
+# Linux rsvg path (PNGs; needs rsvg-convert — Debian/Ubuntu: librsvg2-bin):
+./scripts/gen-icons.sh
 ```
 
-The script emits **8-bit/color RGBA** PNGs. This matters: 16-bit PNGs are
+The scripts emit **8-bit/color RGBA** PNGs. This matters: 16-bit PNGs are
 silently rejected by GNOME Shell's icon loader. After editing the SVG, re-run
-the script and commit the regenerated PNGs together. Verify with
+a script and commit the regenerated rasters together. Verify with
 `file packaging/linux/kettle-*.png` (every line should read `8-bit/color RGBA`).
 
 **Why the user-install `.desktop` uses an absolute `Icon=` path.** GNOME

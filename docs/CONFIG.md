@@ -78,7 +78,7 @@ keys). The file is **watched and reloaded live**.
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
 | `keybind` | `trigger=action` | Terminator set | Repeatable |
-| `accent-color` | color \| `auto` | theme accent | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, settings/menu highlights. Unset → the **theme's signature accent** (Catppuccin Mocha's mauve `#cba6f7`, matching the app icon; `palette[4]` for themes that don't declare an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins it. **`auto`** is Peacock parity — vary the accent by *working directory* so a window in a different project is a different (but per-project stable) color. CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
+| `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default since v2.18) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (Catppuccin Mocha's mauve `#cba6f7`, matching the app icon; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value — no `\|action` split, so alternation patterns like `(BUILD SUCCESSFUL\|FAILED)` survive intact |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` switches between them on a schedule (see `theme-schedule`) |
@@ -277,7 +277,9 @@ into a bare-key binding.
 
 **Tabs**: `new_tab`, `close_tab`, `next_tab`, `previous_tab`,
 `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based, N is the tab
-number — `goto_tab:1` is the first tab), `undo_close_tab` (also
+number — `goto_tab:1` is the first tab), `new_tab_shell_N` (1-based —
+open the Nth entry of the new-tab `▾` dropdown; `Ctrl+Shift+1..9` by
+default, Windows Terminal's profile shortcuts), `undo_close_tab` (also
 `reopen_tab` / `restore_tab` — restore the most recently-closed tab
 from a bounded LIFO ring of 10), `duplicate_tab` (clone the focused
 pane's argv + cwd into a new tab — `ssh prod` clones to a second
@@ -294,10 +296,14 @@ into a right-side split).
 `toggle_zoom` (also `toggle_split_zoom`), `rotate_cw` / `rotate_ccw`
 (rotate the split layout).
 
-**Window**: `new_window`, `close_window`, `toggle_fullscreen`,
-`move_tab_to_new_window` (tear the focused tab out into its own window),
-`open_settings` (`settings` — the Ctrl+, overlay), `layout_picker`,
-`screenshot` (`take_screenshot` / `terminalshot`).
+**Window**: `new_window` (opens another window **in this process** since
+v2.18 — tabs can move live between windows), `close_window`,
+`toggle_fullscreen`, `move_tab_to_new_window` (tear the focused tab out
+into its own window LIVE — running programs keep running; dragging a tab
+outside the window does the same with the mouse), `open_settings`
+(`settings` — the Ctrl+, overlay), `layout_picker`, `about` (also
+`show_about` — version, update status, GitHub link), `screenshot`
+(`take_screenshot` / `terminalshot`).
 
 **Editing**: `copy` (`copy_to_clipboard`), `paste`
 (`paste_from_clipboard`).

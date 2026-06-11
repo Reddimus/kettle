@@ -532,8 +532,9 @@ fn vs_dev_info() -> Option<VsDevInfo> {
 /// Pure: candidate `bash.exe` locations for a found `git.exe` —
 /// `<root>\cmd\git.exe` and `<root>\mingw64\bin\git.exe` both map to
 /// `<root>\bin\bash.exe`; a flat `<dir>\git.exe` maps to
-/// `<dir>\bash.exe`. Testable without a filesystem.
-#[cfg(any(windows, test))]
+/// `<dir>\bash.exe`. Testable without a filesystem — but Windows-only,
+/// since `Path` treats `\` as a separator only on Windows targets.
+#[cfg(windows)]
 fn git_bash_from_git_exe(git_exe: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = git_exe.parent() {
@@ -2207,6 +2208,11 @@ mod detect_shells_tests {
         assert_eq!(super::vs_year_from_install_path(r"C:\VS\Preview"), None);
     }
 
+    // Windows-only: `git_bash_from_git_exe` reasons over `std::path::Path`,
+    // and `\` is only a separator on Windows targets — on Linux these
+    // fixtures parse as single opaque components (the production caller,
+    // `git_bash_path`, is `cfg(windows)` for the same reason).
+    #[cfg(windows)]
     #[test]
     fn git_bash_from_git_exe_covers_cmd_bin_and_mingw_layouts() {
         use std::path::{Path, PathBuf};

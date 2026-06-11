@@ -25,7 +25,7 @@ for each invocation.
 > Captured at v1.3.8 (the Linux box wasn't available for a re-bench at later
 > cuts). There's been no major architectural change to the render/startup paths
 > since, so these should still be in the same ballpark on the current release
-> (v2.7.x) — but treat them as "what we measured then" and run
+> (v2.18.x) — but treat them as "what we measured then" and run
 > `scripts/bench.sh` for a fresh data point on your own machine.
 
 | Measurement | Value | Notes |
@@ -39,7 +39,7 @@ for each invocation.
 
 > Captured on a Surface Book 3 (Intel Iris Plus Graphics, x64,
 > Windows 11 build 26200) the day the v1.46.0 release was cut (a fixed data
-> point — the current release is v2.7.x; re-run `scripts/bench.ps1` for fresh
+> point — the current release is v2.18.x; re-run `scripts/bench.ps1` for fresh
 > numbers). wgpu
 > picked the **Vulkan** backend (Intel driver, integrated GPU) — the
 > same selection a user with the same hardware would see. Wall-clock
@@ -88,6 +88,26 @@ for each invocation.
   pages the wgpu adapter state to GPU-private memory, so the
   Windows working-set number undercounts the "real" footprint by
   comparison.
+- **Extra windows cost VRAM, not a second GPU device (v2.18.0).**
+  In-process multi-window shares one `wgpu` device/queue across
+  every window (the handles are ref-counted), so opening a second
+  window does *not* repeat the adapter/device init above. Each
+  additional window owns only its surface and text atlas: roughly
+  **17–25 MB of swapchain** (resolution-dependent) plus
+  **4–16 MB of glyph atlas** per window, in VRAM. The process-side
+  costs that dominate the tables — font set, themes, VT state —
+  are paid once regardless of window count, and the per-window
+  output-generation counter means only windows with new output
+  repaint.
+- **Typed echo bypasses the output coalescer (v2.18.0).** PTY output
+  paints are capped at one per ~16 ms frame budget so multi-read
+  bursts (build logs, streaming output) settle into single frames.
+  Keystroke echo used to ride the same `WaitUntil` deadline, and
+  Windows' ~16 ms timer granularity made held-key repeat visibly
+  stutter; echo output now requests a redraw immediately
+  (`request_redraw` is vsync-coalesced, so it can't outpace the
+  display) while non-input bursts still coalesce to one paint per
+  frame budget.
 
 ## Reproducing
 

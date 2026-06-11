@@ -126,13 +126,20 @@ kettle ctl get_state --pid 12345                        # target a specific kett
 
 | Method | Mode | Result |
 |---|---|---|
-| `get_state` | read-only | version, pid, mode, theme, focused pane |
-| `list_tabs` | read-only | index, title, active, pane ids |
-| `list_panes` | read-only | id, tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
+| `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq) |
+| `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
+| `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | text + cursor + history (params: `pane`, `scrollback_lines`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
+
+**Multi-window (v2.18)**: a kettle process can host several OS windows.
+`list_tabs` / `list_panes` enumerate them all, ordered by window seq;
+`index`, `tab`, `active`, and `focused` are *within-window* values — the
+`window` field disambiguates. Pane ids are process-global and stable across
+tab moves/tear-offs, and an explicit `pane` param targets a pane in **any**
+window (without one, the focused window's focused pane is used).
 
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
@@ -144,7 +151,9 @@ A pane the user has toggled **Read only** (right-click menu /
 error code — the agent is input like any other, and the user's lock wins.
 
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
-`agent_attached`, and `lag` (when a slow subscriber's queue overflowed).
+`agent_attached`, `tab_moved` (`{from_window, to_window, tab}` — a tab was
+torn off / moved to another window), and `lag` (when a slow subscriber's
+queue overflowed).
 
 ### When an agent attaches a pane
 

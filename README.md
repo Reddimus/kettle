@@ -25,7 +25,7 @@ and **WezTerm** into one tool.
      SCREENSHOT_DEMO_VERSION = env!("CARGO_PKG_VERSION")), so it never re-stales. -->
 
 
-> **Status: v2.17.0 — production-ready** on Linux, macOS and Windows 11.
+> **Status: v2.18.0 — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
@@ -47,6 +47,19 @@ and **WezTerm** into one tool.
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
+- **Multi-window** — one process hosts any number of OS windows
+  (`Ctrl+Shift+I`), and **dragging a tab out of the window tears it off
+  live** into its own window at the drop point, Windows Terminal-style —
+  PTYs, scrollback and running programs move untouched (`Esc` mid-drag
+  cancels). Each window claims its own Peacock accent hue from the theme
+  (on by default; pin one with `accent-color`/`--accent`, opt out with
+  `accent-color = theme`) so windows are tellable apart at a glance.
+- **New-tab dropdown** — the tab bar's `▾` lists every detected shell (on
+  Windows, in Windows Terminal's order: PowerShell, Windows PowerShell,
+  Command Prompt, WSL distros, the VS 2022 developer shells, Git Bash)
+  plus Settings…, the command palette, and an **About kettle** panel
+  (version + git hash, update status). `Ctrl+Shift+1..9` opens the Nth
+  entry; menu rows show right-aligned hints from your live keybind map.
 - **Every Ghostty theme bundled** (500+, from iTerm2-Color-Schemes), default
   **Catppuccin Mocha**. Ghostty-compatible `key = value` config with live
   reload.
@@ -74,7 +87,9 @@ and **WezTerm** into one tool.
   `cat ` + drop + Enter works). Honors broadcast mode.
 - **Session restore (opt-in)** — new windows open fresh by default (like every
   mainstream terminal); enable `restore-session = true` (or pass `--restore`) to
-  reopen the previous tab/split tree and per-pane working directories on launch.
+  reopen **every window** from the previous session — tab/split trees, per-pane
+  working directories, and each window's position and size (clamped to your
+  current monitor layout) — on launch.
   New tabs/splits always inherit the focused pane's current directory (OSC 7).
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
   `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
@@ -122,7 +137,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.17.0 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.18.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -153,7 +168,11 @@ portable? Skip the installer — just `cd` into the folder and run
 
 kettle opens **PowerShell 7+ (`pwsh`)** by default when it's installed —
 the same default as Windows Terminal — falling back to Windows PowerShell
-then `cmd.exe`. Set `shell = cmd.exe` (or any program) in your config to
+then `cmd.exe`. The new-tab `▾` dropdown lists the rest in Windows
+Terminal's order: Windows PowerShell, Command Prompt, your WSL distros,
+the Developer Command Prompt / Developer PowerShell for VS 2022 (when VS
+is installed), and Git Bash — `Ctrl+Shift+1..9` opens the Nth entry.
+Set `shell = cmd.exe` (or any program) in your config to
 override. To use **WSL / Ubuntu**, set `command = wsl.exe -d Ubuntu` — see
 [Launching WSL as your shell](docs/CONFIG.md#launching-wsl--ubuntu-as-your-shell-windows).
 
@@ -231,8 +250,13 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 | Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
 | Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
+| New tab: Nth dropdown shell | `Ctrl+Shift+1..9` | Settings panel | `Ctrl+,` |
 
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
+`Ctrl+Shift+I` opens the new window **in-process** (one kettle hosts them
+all; the process exits when the last window closes), and dragging a tab
+out of the window tears it off into a new window — the
+`move_tab_to_new_window` action does the same move from the keyboard.
 
 > **Tip — right-click anywhere in a pane** for the context menu: Copy /
 > Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled
@@ -241,7 +265,9 @@ Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 > bell mode, mouse-hide, and font size. Settings persist atomically to
 > `~/.config/kettle/config` with a backup at `config.bak`. The menu
 > supports keyboard mnemonics (single letter) and typeahead
-> (multi-char prefix) — see [docs/CONFIG.md](docs/CONFIG.md)
+> (multi-char prefix), and rows show right-aligned hints for their
+> current keybinds (computed from the live keymap, so rebinds show
+> your actual chord) — see [docs/CONFIG.md](docs/CONFIG.md)
 > "Editing the config from inside kettle" for the full toggle map.
 
 ## Configuration
