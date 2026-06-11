@@ -172,6 +172,14 @@ pub(crate) struct WindowState {
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
     /// each frame by `App::sync_window_accent`.
     pub(crate) accent: Option<WindowAccent>,
+    /// PERF (key-repeat stutter fix): when the user last typed bytes into a
+    /// PTY in this window. Output arriving within `TYPING_ECHO_WINDOW` of a
+    /// keystroke paints IMMEDIATELY (request_redraw is vsync-coalesced, so
+    /// this can't outpace the display) instead of through the cycle-910
+    /// output coalescer — whose WaitUntil deadline has ~16ms timer
+    /// granularity on Windows, which made held-key echo visibly stutter
+    /// while Terminator (steady GTK frame clock) stayed smooth.
+    pub(crate) last_typed: Option<std::time::Instant>,
 }
 
 impl WindowState {
@@ -229,6 +237,7 @@ impl WindowState {
             window_shown: false,
             seen_output_gen: std::collections::HashMap::new(),
             accent: None,
+            last_typed: None,
         }
     }
 }

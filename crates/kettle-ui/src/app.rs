@@ -843,6 +843,24 @@ fn should_defer_output_paint(
     }
 }
 
+/// PERF (key-repeat stutter fix): output that lands within this window of a
+/// keystroke is ECHO — it paints immediately, skipping the coalescer. Long
+/// enough to bridge OS key-repeat intervals (~33ms at default rates) plus
+/// ConPTY echo latency; short enough that an unrelated burst (a build log
+/// kicking in a beat after you pressed Enter twice) re-enters the coalescer
+/// quickly.
+const TYPING_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Pure (drift-tested in `typed_echo_bypasses_the_output_coalescer`): is
+/// `now` inside the typing-echo window after the last keystroke?
+fn typed_recently(
+    now: std::time::Instant,
+    last_typed: Option<std::time::Instant>,
+    window: std::time::Duration,
+) -> bool {
+    last_typed.is_some_and(|t| now.saturating_duration_since(t) < window)
+}
+
 /// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. Cycle 817
 /// (audit): a multi-pane tab's per-pane titlebar steals `titlebar_h` of height,
 /// so the PTY must be sized for the rows that actually fit *below* it — without
@@ -10195,11 +10213,22 @@ impl App {
                 // the flush at the budget deadline so the final frame still
                 // paints. Input/cursor paints don't come through here, so
                 // typing and the cursor stay immediate.
-                if should_defer_output_paint(
-                    std::time::Instant::now(),
-                    ws.last_paint,
-                    OUTPUT_FRAME_BUDGET,
-                ) {
+                let now = std::time::Instant::now();
+                // PERF (key-repeat stutter fix): keystroke ECHO paints
+                // immediately — request_redraw is vsync-coalesced, so this
+                // can't outpace the display, and the coalescer's job
+                // (letting a NON-atomic output burst settle before the
+                // snapshot) doesn't apply to a few echoed cells. Routing
+                // echo through the WaitUntil deadline (~16ms timer
+                // granularity on Windows, frequently late) made held-key
+                // repeat visibly stutter while Terminator's steady GTK
+                // frame clock stayed smooth.
+                if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
+                    ws.coalescing_paint = false;
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                } else if should_defer_output_paint(now, ws.last_paint, OUTPUT_FRAME_BUDGET) {
                     ws.coalescing_paint = true;
                 } else if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -11494,6 +11523,9 @@ impl App {
                     // close, mouse focus); typing is the last
                     // user-driven path that still needed it.
                     self.reset_blink_phase(ws);
+                    // PERF (key-repeat stutter fix): mark the keystroke so
+                    // its PTY echo paints immediately (see the Wakeup arm).
+                    ws.last_typed = Some(std::time::Instant::now());
                     if ws.mux.is_broadcast_on() {
                         ws.mux.broadcast_write(&bytes);
                         // `scroll-on-keystroke` (Ghostty / Alacritty
@@ -12001,6 +12033,44 @@ mod tests {
         );
     }
 
+    /// PERF (key-repeat stutter fix) drift guard: output inside the typing
+    /// window bypasses the coalescer (paints immediately); output after it
+    /// re-enters the frame-budget defer. The user-visible symptom this pins:
+    /// holding a key stuttered in kettle but not Terminator, because echo
+    /// paints rode the WaitUntil deadline (~16ms Windows timer granularity)
+    /// instead of the keystroke cadence.
+    #[test]
+    fn typed_echo_bypasses_the_output_coalescer() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        // Echo within the window → immediate (bypass).
+        assert!(super::typed_recently(
+            now,
+            Some(now - Duration::from_millis(30)),
+            super::TYPING_ECHO_WINDOW
+        ));
+        // Stale keystroke → back to the coalescer.
+        assert!(!super::typed_recently(
+            now,
+            Some(now - Duration::from_millis(500)),
+            super::TYPING_ECHO_WINDOW
+        ));
+        // Never typed → coalescer.
+        assert!(!super::typed_recently(now, None, super::TYPING_ECHO_WINDOW));
+        // The window must bridge OS key-repeat intervals (~33ms default) with
+        // slack for ConPTY echo latency.
+        assert!(super::TYPING_ECHO_WINDOW >= Duration::from_millis(100));
+        // The Wakeup arm must consult it (source-level pin: the bypass calls
+        // request_redraw and clears any pending coalesce).
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        assert!(
+            src.contains(
+                "if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {\n                    ws.coalescing_paint = false;"
+            ),
+            "the Wakeup arm must paint echo immediately"
+        );
+    }
+
     /// B (Peacock) drift guard: the live-dedupe pool walk. Same project →
     /// same starting slot; a collision with a live window advances to the
     /// next free hue; a fully-claimed pool accepts the seed slot.
@@ -12010,7 +12080,11 @@ mod tests {
             (0u8..4).map(|i| kettle_config::Rgb::new(i, i, i)).collect();
         // Empty in-use → the seed's own slot.
         assert_eq!(super::pick_accent_slot(&pool, 1, &[]), 1);
-        assert_eq!(super::pick_accent_slot(&pool, 5, &[]), 1, "seed wraps modulo");
+        assert_eq!(
+            super::pick_accent_slot(&pool, 5, &[]),
+            1,
+            "seed wraps modulo"
+        );
         // Seed slot taken → next free.
         assert_eq!(super::pick_accent_slot(&pool, 1, &[pool[1]]), 2);
         // Walk wraps past the end.
