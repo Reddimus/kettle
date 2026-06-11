@@ -568,6 +568,12 @@ pub struct Renderer {
     pub cell_scale_w: f32,
     pub cell_scale_h: f32,
     pub scale: f32,
+    /// Multi-window cycle (Peacock): the per-window accent the App resolved
+    /// (theme pool slot + live dedupe across windows and processes). `None`
+    /// falls back to the static `cfg.resolved_accent(theme)` — pinned hex or
+    /// the theme signature. The offscreen `--screenshot` renderer never sets
+    /// one, so hero renders stay cfg-governed.
+    accent_override: Option<Rgb>,
     /// Cycle 654 (sub-cycle 3 of
     /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)):
     /// when `Some`, the next `render_frame` call should also do a
@@ -810,6 +816,7 @@ impl Renderer {
             cell_scale_w,
             cell_scale_h,
             scale,
+            accent_override: None,
             pending_screenshot: None,
         })
     }
@@ -819,6 +826,20 @@ impl Renderer {
     /// context is a refcount bump.
     pub fn gpu(&self) -> &GpuContext {
         &self.gpu
+    }
+
+    /// Multi-window cycle (Peacock): set/clear this window's accent.
+    pub fn set_accent_override(&mut self, accent: Option<Rgb>) {
+        self.accent_override = accent;
+    }
+
+    /// The accent every LIVE chrome element uses (focused-pane border,
+    /// active-tab strip, drag ghost, context-menu + settings highlights,
+    /// pane titlebars): the per-window override when the App resolved one,
+    /// else the static config cascade.
+    fn ui_accent(&self, cfg: &Config, theme: &kettle_config::Theme) -> Rgb {
+        self.accent_override
+            .unwrap_or_else(|| cfg.resolved_accent(theme))
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1337,11 +1358,10 @@ impl Renderer {
                     let accent = if tabbar.broadcast {
                         theme.palette[3]
                     } else {
-                        // Cycle 293/937: explicit `accent-color` wins, then
-                        // Peacock auto (per-cwd), then the THEME's signature
-                        // accent (Mocha's mauve — matching the icon; palette[4]
-                        // for themes without one).
-                        cfg.resolved_accent(theme)
+                        // Cycle 293/937 + multi-window: the per-WINDOW accent
+                        // (Peacock pool slot, live-deduped), falling back to
+                        // explicit `accent-color` → theme signature.
+                        self.ui_accent(cfg, theme)
                     };
                     quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
                 }
@@ -1482,7 +1502,7 @@ impl Renderer {
                 let accent = if tabbar.broadcast {
                     theme.palette[3]
                 } else {
-                    cfg.resolved_accent(theme)
+                    self.ui_accent(cfg, theme)
                 };
                 over.push(rect(ghost_x, by, 2.0, seg_h, accent, 1.0));
             }
@@ -1520,7 +1540,7 @@ impl Renderer {
                     // Backward-compat: anyone who set `focused-split-color`
                     // before cycle 293 keeps their pinned color.
                     cfg.focused_split_color
-                        .unwrap_or_else(|| cfg.resolved_accent(theme))
+                        .unwrap_or_else(|| self.ui_accent(cfg, theme))
                 }
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
@@ -1546,7 +1566,13 @@ impl Renderer {
             // based on focus + broadcast group state.
             if pane_titlebar_h > 0.0 {
                 // Cycle 387 + 710: see `pick_titlebar_bg`.
-                let bar_bg = pick_titlebar_bg(cfg, theme, pv.focused, tabbar.broadcast);
+                let bar_bg = pick_titlebar_bg(
+                    cfg,
+                    theme,
+                    self.ui_accent(cfg, theme),
+                    pv.focused,
+                    tabbar.broadcast,
+                );
                 // Cycle 385 (Terminator parity, titlebar Bucket-D
                 // sub-cycle 9): title_at_bottom flips the bar from
                 // (top of pane) to (bottom of pane). Cells shift
@@ -2443,7 +2469,7 @@ impl Renderer {
         // `self.menu_text_renderer.render` call after the menu
         // quads). The bg-under-text order finally matches reality.
         if let Some(menu) = &overlay.context_menu {
-            let chrome = menu_chrome_quads(menu, theme, cfg.resolved_accent(theme), cw, ch);
+            let chrome = menu_chrome_quads(menu, theme, self.ui_accent(cfg, theme), cw, ch);
             menu_q.extend(chrome);
             // Row labels — collected into `menu_areas` so the second
             // TextRenderer can prepare them as their own batch.
@@ -2523,10 +2549,10 @@ impl Renderer {
             let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
             let px = ((sw - panel_w) * 0.5).max(0.0);
             let py = ((sh - panel_h) * 0.5).max(0.0);
-            // Cycle 937: the settings overlay's accent follows the resolved
-            // chrome accent (the theme signature / Peacock / explicit), so it
-            // matches the focus border + active tab rather than always-blue.
-            let acc = cfg.resolved_accent(theme);
+            // Cycle 937 + multi-window: the settings overlay's accent follows
+            // this WINDOW's chrome accent, so it matches the focus border +
+            // active tab rather than always-blue.
+            let acc = self.ui_accent(cfg, theme);
             // Dim backdrop over the whole window so the panel reads as modal.
             menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, 0.55));
             // Panel background (near-opaque) + accent border.
@@ -3455,16 +3481,19 @@ fn build_rich_spans<'a>(
 pub(crate) fn pick_titlebar_bg(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
+    // Multi-window cycle: the already-resolved per-window accent (the live
+    // renderer passes its `ui_accent`; tests and any cfg-only caller pass
+    // `cfg.resolved_accent(theme)`).
+    accent: Rgb,
     focused: bool,
     broadcast: bool,
 ) -> Rgb {
     if focused {
         cfg.title_transmit_bg_color
             .or(cfg.focused_split_color)
-            .unwrap_or_else(|| cfg.resolved_accent(theme))
+            .unwrap_or(accent)
     } else if broadcast {
-        cfg.title_receive_bg_color
-            .unwrap_or_else(|| cfg.resolved_accent(theme))
+        cfg.title_receive_bg_color.unwrap_or(accent)
     } else {
         cfg.title_inactive_bg_color.unwrap_or(theme.palette[8])
     }
@@ -5033,7 +5062,7 @@ mod pick_titlebar_bg_tests {
         cfg.accent_color = None;
         // Default fallback is the theme's signature accent (Mocha mauve), not
         // the hardcoded `#c80003` red nor a bare `palette[4]`.
-        let bg = pick_titlebar_bg(&cfg, &theme, true, false);
+        let bg = pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), true, false);
         assert_eq!(bg, theme.accent);
         assert_eq!(
             theme.accent,
@@ -5048,16 +5077,25 @@ mod pick_titlebar_bg_tests {
         // 3. accent_color wins over palette[4].
         let accent = Rgb::new(0x00, 0xaa, 0x00);
         cfg.accent_color = Some(accent);
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), accent);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), true, false),
+            accent
+        );
         // 2. focused_split_color wins over accent_color.
         let split = Rgb::new(0xff, 0x88, 0x00);
         cfg.focused_split_color = Some(split);
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), split);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), true, false),
+            split
+        );
         // 1. explicit title_transmit_bg_color wins over all (preserves
         //    the Terminator-look pin for any user who set it).
         let pinned = Rgb::new(0xc8, 0x00, 0x03);
         cfg.title_transmit_bg_color = Some(pinned);
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, true, false), pinned);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), true, false),
+            pinned
+        );
     }
 
     /// Cycle 920: unfocused + non-broadcast derives from the theme's surface
@@ -5070,12 +5108,15 @@ mod pick_titlebar_bg_tests {
         let mut cfg = Config::default();
         cfg.title_inactive_bg_color = None;
         assert_eq!(
-            pick_titlebar_bg(&cfg, &theme, false, false),
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), false, false),
             theme.palette[8]
         );
         let pinned = Rgb::new(0x33, 0x33, 0x33);
         cfg.title_inactive_bg_color = Some(pinned);
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, false, false), pinned);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), false, false),
+            pinned
+        );
     }
 
     /// Cycle 920/937: unfocused + broadcast mirrors the focused cascade
@@ -5088,11 +5129,17 @@ mod pick_titlebar_bg_tests {
         let mut cfg = Config::default();
         cfg.title_receive_bg_color = None;
         cfg.accent_color = None;
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, false, true), theme.accent);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), false, true),
+            theme.accent
+        );
         // accent_color wins over the theme fallback.
         let accent = Rgb::new(0x12, 0x34, 0x56);
         cfg.accent_color = Some(accent);
-        assert_eq!(pick_titlebar_bg(&cfg, &theme, false, true), accent);
+        assert_eq!(
+            pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), false, true),
+            accent
+        );
     }
 }
 

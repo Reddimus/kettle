@@ -26,6 +26,20 @@ use crate::app::{
 };
 use crate::mux::Mux;
 
+/// Multi-window cycle (Peacock): the accent this window resolved + claimed.
+pub(crate) struct WindowAccent {
+    /// The live color (recomputed from `slot` when the theme changes).
+    pub(crate) color: kettle_config::Rgb,
+    /// Index into `kettle_config::peacock_pool(theme)` — kept across theme
+    /// switches so a window holds its position in the new theme's pool.
+    pub(crate) slot: usize,
+    /// Theme name the color was resolved against (cheap change detector for
+    /// the per-frame sync).
+    pub(crate) theme_name: String,
+    /// Cross-process presence claim; released when the window drops.
+    pub(crate) presence: Option<kettle_ctl::presence::PresenceGuard>,
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API (C8) and used as the map key — never
@@ -153,6 +167,11 @@ pub(crate) struct WindowState {
     /// The fan-out `UserEvent::Wakeup` compares against the live counters to
     /// decide whether THIS window has anything new to paint.
     pub(crate) seen_output_gen: std::collections::HashMap<u64, u64>,
+    /// Multi-window cycle (Peacock): this window's resolved accent claim.
+    /// `None` while unresolved (first frame) or when the user opted out
+    /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
+    /// each frame by `App::sync_window_accent`.
+    pub(crate) accent: Option<WindowAccent>,
 }
 
 impl WindowState {
@@ -209,6 +228,7 @@ impl WindowState {
             pending_pane_restarts: Vec::new(),
             window_shown: false,
             seen_output_gen: std::collections::HashMap::new(),
+            accent: None,
         }
     }
 }

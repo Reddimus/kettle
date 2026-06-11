@@ -4368,6 +4368,9 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // B (Peacock): resolve/refresh this window's accent claim (cheap in
+        // the steady state; full pool walk only on first frame/theme switch).
+        self.sync_window_accent(ws);
         // C4: record the per-pane output generations this paint consumes —
         // BEFORE drain_events pulls the channels, so output landing during
         // the paint stays "unseen" and re-triggers a wakeup repaint (an
@@ -9346,6 +9349,29 @@ enum WindowOpen {
     Restore(crate::session::SWindow),
 }
 
+/// B (Peacock): pure pool-slot picker — start at the seed's slot, advance to
+/// the first hue no live window uses; a fully-claimed pool accepts the seed
+/// slot (a rare same-color pair beats inventing off-theme colors).
+fn pick_accent_slot(
+    pool: &[kettle_config::Rgb],
+    seed: u64,
+    in_use: &[kettle_config::Rgb],
+) -> usize {
+    if pool.is_empty() {
+        return 0;
+    }
+    let start = (seed % pool.len() as u64) as usize;
+    (0..pool.len())
+        .map(|i| (start + i) % pool.len())
+        .find(|&i| !in_use.contains(&pool[i]))
+        .unwrap_or(start)
+}
+
+/// B (Peacock): `#rrggbb` for the presence registry's wire format.
+fn rgb_hex(c: kettle_config::Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+}
+
 /// C7: the live monitor rects, for clamping a saved window geometry whose
 /// monitor is gone (see `session::clamp_geometry_to_monitors`).
 fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
@@ -9638,6 +9664,100 @@ impl App {
         }
         self.windows.insert(seq, ws);
         Ok(())
+    }
+
+    /// B (Peacock): resolve + claim this window's accent — walk the theme's
+    /// pool from the cwd-seed slot, skipping hues live windows already use:
+    /// in-process siblings (authoritative) plus other kettle processes via
+    /// the presence registry (best-effort; see kettle-ctl/src/presence.rs).
+    fn assign_window_accent(&self, ws: &mut WindowState) {
+        let pool = kettle_config::peacock_pool(&self.cfg.theme);
+        if pool.is_empty() {
+            return;
+        }
+        let mut in_use: Vec<kettle_config::Rgb> = self
+            .windows
+            .values()
+            .filter(|w| w.seq != ws.seq)
+            .filter_map(|w| w.accent.as_ref().map(|a| a.color))
+            .collect();
+        let dir = kettle_ctl::presence::presence_dir();
+        let me = std::process::id();
+        for e in kettle_ctl::presence::live_entries(&dir) {
+            // Skip only THIS window's own (re-)claim. Own-process siblings
+            // are deliberately counted from presence too: during a window
+            // open the OPENER is checked out of `self.windows` (the
+            // take-out dispatch), so the map alone misses its claim —
+            // exactly the bug the first 3-window live test caught (windows
+            // 1+2 both mauve). Double-counting an in-map sibling is
+            // harmless (`in_use` is a contains-set).
+            if e.pid == me && e.win == ws.seq {
+                continue;
+            }
+            if let Some(c) = kettle_config::Rgb::parse(&e.rgb) {
+                in_use.push(c);
+            }
+        }
+        let slot = pick_accent_slot(&pool, self.cfg.accent_seed, &in_use);
+        let color = pool[slot];
+        let presence = kettle_ctl::presence::claim(
+            &dir,
+            kettle_ctl::presence::PresenceEntry {
+                v: 1,
+                pid: me,
+                win: ws.seq,
+                rgb: rgb_hex(color),
+                auto: true,
+                started_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            },
+        );
+        if let Some(r) = ws.renderer.as_mut() {
+            r.set_accent_override(Some(color));
+        }
+        ws.accent = Some(crate::window_state::WindowAccent {
+            color,
+            slot,
+            theme_name: self.cfg.theme_name.clone(),
+            presence,
+        });
+    }
+
+    /// B (Peacock): keep this window's accent in sync, called once per frame
+    /// from `redraw` — cheap steady state (an Option check + string compare).
+    /// Covers: the first frame (claim), a theme switch (re-resolve the SAME
+    /// pool slot against the new theme, so every window shifts consistently),
+    /// and reconfiguration to a pinned hex / `accent-color = theme` (drops
+    /// the claim and clears the renderer override).
+    fn sync_window_accent(&self, ws: &mut WindowState) {
+        if self.cfg.accent_color.is_some() || !self.cfg.accent_auto {
+            if ws.accent.take().is_some()
+                && let Some(r) = ws.renderer.as_mut()
+            {
+                r.set_accent_override(None);
+            }
+            return;
+        }
+        match &mut ws.accent {
+            Some(acc) if acc.theme_name == self.cfg.theme_name => {}
+            Some(acc) => {
+                let pool = kettle_config::peacock_pool(&self.cfg.theme);
+                let color = pool[acc.slot % pool.len()];
+                acc.theme_name = self.cfg.theme_name.clone();
+                if color != acc.color {
+                    acc.color = color;
+                    if let Some(g) = acc.presence.as_mut() {
+                        g.set_rgb(&rgb_hex(color));
+                    }
+                }
+                if let Some(r) = ws.renderer.as_mut() {
+                    r.set_accent_override(Some(color));
+                }
+            }
+            None => self.assign_window_accent(ws),
+        }
     }
 
     /// C4: does any pane in this window have PTY output newer than the
@@ -11879,6 +11999,32 @@ mod tests {
             head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
             "the Resized handler must early-return on a 0-dimension size"
         );
+    }
+
+    /// B (Peacock) drift guard: the live-dedupe pool walk. Same project →
+    /// same starting slot; a collision with a live window advances to the
+    /// next free hue; a fully-claimed pool accepts the seed slot.
+    #[test]
+    fn accent_slot_walk_dedupes_live_windows() {
+        let pool: Vec<kettle_config::Rgb> =
+            (0u8..4).map(|i| kettle_config::Rgb::new(i, i, i)).collect();
+        // Empty in-use → the seed's own slot.
+        assert_eq!(super::pick_accent_slot(&pool, 1, &[]), 1);
+        assert_eq!(super::pick_accent_slot(&pool, 5, &[]), 1, "seed wraps modulo");
+        // Seed slot taken → next free.
+        assert_eq!(super::pick_accent_slot(&pool, 1, &[pool[1]]), 2);
+        // Walk wraps past the end.
+        assert_eq!(super::pick_accent_slot(&pool, 3, &[pool[3], pool[0]]), 1);
+        // Fully claimed → fall back to the seed slot (accept the collision).
+        assert_eq!(
+            super::pick_accent_slot(&pool, 2, &[pool[0], pool[1], pool[2], pool[3]]),
+            2
+        );
+        // Degenerate empty pool.
+        assert_eq!(super::pick_accent_slot(&[], 7, &[]), 0);
+        // Presence wire format round-trips through Rgb::parse.
+        let c = kettle_config::Rgb::new(0xcb, 0xa6, 0xf7);
+        assert_eq!(kettle_config::Rgb::parse(&super::rgb_hex(c)), Some(c));
     }
 
     /// C7 regression guard. `resumed_inner` must take ONLY the consumed-once

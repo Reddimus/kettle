@@ -1169,10 +1169,13 @@ pub struct Config {
     /// identity color.
     pub accent_color: Option<Rgb>,
     /// Cycle 937 (Peacock parity): `accent-color = auto` — derive a distinct
-    /// chrome accent per *working directory*, so a new kettle window in a
-    /// different project is a visually different color (VS Code Peacock style)
-    /// while a given project stays consistent across launches. Off by default;
-    /// an explicit `accent-color = <hex>` or `--accent` always wins over it.
+    /// chrome accent per *working directory* AND per window, so a new kettle
+    /// window in a different project is a visually different color (VS Code
+    /// Peacock style) while a given project stays consistent across launches;
+    /// two live windows never share a hue while the theme's pool has a free
+    /// one (multi-window cycle). ON by default since the multi-window cycle —
+    /// opt out with `accent-color = theme` (or `off`/`none`); an explicit
+    /// `accent-color = <hex>` / `--accent` always wins and pins every window.
     pub accent_auto: bool,
     /// Cycle 937: runtime-only seed for `accent_auto` (a hash of the window's
     /// startup working directory). Set by the App at launch, NOT parsed from the
@@ -1704,7 +1707,10 @@ impl Default for Config {
             split_divider_color: None,
             focused_split_color: None,
             accent_color: None,
-            accent_auto: false,
+            // Multi-window cycle: Peacock accents are the default — each
+            // window gets a distinct theme hue (`accent-color = theme` opts
+            // back into the single static accent).
+            accent_auto: true,
             accent_seed: 0,
             cursor_blink_interval: 530,
             tab_silence_threshold_ms: 10_000,
@@ -1756,12 +1762,17 @@ fn decode_config_text(bytes: &[u8]) -> String {
     }
 }
 
-/// Cycle 937 (Peacock): pick a distinct, theme-appropriate accent for `seed`
-/// (a hash of the window's working directory). The candidate set is a spread of
-/// the theme's most distinct hues — including the theme's own signature accent —
-/// so adjacent projects land on visibly different colors while a given project
-/// is stable across launches. Pure.
-fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
+/// Cycle 937 (Peacock) / multi-window cycle: the theme's deduped pool of
+/// distinct accent hues — the candidate set `peacock_accent` indexes, public
+/// so the multi-window LIVE dedupe can walk it (same project → same color,
+/// but two windows never share a hue while the pool has a free one).
+///
+/// The spread covers the theme's most distinct hues, signature accent first.
+/// Dedup preserves order (cycle 942): for a theme without an explicit
+/// `accent` line `accent == palette[4]`, which would double blue's share and
+/// shrink the pool; palettes that repeat hues (magenta == bright magenta)
+/// collapse too. Pure; never empty.
+pub fn peacock_pool(theme: &Theme) -> Vec<crate::color::Rgb> {
     let raw = [
         theme.accent,      // the signature (mauve on Mocha)
         theme.palette[4],  // blue
@@ -1772,17 +1783,19 @@ fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
         theme.palette[5],  // magenta/pink
         theme.palette[13], // bright magenta
     ];
-    // Cycle 942 (audit): dedup preserving order. For a theme without an
-    // explicit `accent` line (most of the bundled set) `accent == palette[4]`,
-    // which would double blue's share of the spread and shrink the distinct-
-    // color pool; themes whose palette repeats hues (e.g. magenta == bright
-    // magenta) collapse those too.
     let mut candidates: Vec<crate::color::Rgb> = Vec::with_capacity(raw.len());
     for c in raw {
         if !candidates.contains(&c) {
             candidates.push(c);
         }
     }
+    candidates
+}
+
+/// Cycle 937 (Peacock): pick a distinct, theme-appropriate accent for `seed`
+/// (a hash of the window's working directory) from [`peacock_pool`]. Pure.
+fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
+    let candidates = peacock_pool(theme);
     candidates[(seed % candidates.len() as u64) as usize]
 }
 
@@ -2340,10 +2353,16 @@ impl Config {
                 | "title_receive_fg_color"
                 | "title-inactive-fg-color"
                 | "title_inactive_fg_color" => Rgb::parse(v).is_some(),
-                // Cycle 937: `accent-color` accepts a hex color OR the special
-                // `auto` (Peacock — vary by working directory).
+                // Cycle 937: `accent-color` accepts a hex color, `auto`
+                // (Peacock — vary by working directory + window; the
+                // default), or `theme`/`off`/`none` (static theme accent).
                 "accent-color" | "accent_color" => {
-                    v.trim().eq_ignore_ascii_case("auto") || Rgb::parse(v).is_some()
+                    let t = v.trim();
+                    t.eq_ignore_ascii_case("auto")
+                        || t.eq_ignore_ascii_case("theme")
+                        || t.eq_ignore_ascii_case("off")
+                        || t.eq_ignore_ascii_case("none")
+                        || Rgb::parse(t).is_some()
                 }
                 // `keybind = <trigger>=<action>` — both halves have to
                 // parse (same predicate `apply_keybind` uses, just split
@@ -3509,11 +3528,22 @@ impl Config {
                     }
                 }
                 "accent-color" => {
-                    // `auto` = Peacock: vary the accent per working directory.
-                    if e.value.trim().eq_ignore_ascii_case("auto") {
+                    // `auto` = Peacock: vary the accent per working directory
+                    // and per window (the default since the multi-window
+                    // cycle). `theme` / `off` / `none` opt OUT — every window
+                    // uses the theme's static signature accent. A hex pins an
+                    // explicit color (and skips the live dedupe).
+                    let v = e.value.trim();
+                    if v.eq_ignore_ascii_case("auto") {
                         cfg.accent_auto = true;
                         cfg.accent_color = None;
-                    } else if let Some(c) = Rgb::parse(&e.value) {
+                    } else if v.eq_ignore_ascii_case("theme")
+                        || v.eq_ignore_ascii_case("off")
+                        || v.eq_ignore_ascii_case("none")
+                    {
+                        cfg.accent_auto = false;
+                        cfg.accent_color = None;
+                    } else if let Some(c) = Rgb::parse(v) {
                         cfg.accent_color = Some(c);
                         cfg.accent_auto = false;
                     }
@@ -5273,18 +5303,34 @@ tab-bar-width = 200\n";
         );
     }
 
-    /// Cycle 937: accent resolution + Peacock. Default → the theme's signature
-    /// accent (Mocha mauve). `accent-color = auto` → a per-cwd Peacock color
-    /// (deterministic for a seed, spread across seeds). An explicit hex /
-    /// `--accent` wins over both.
+    /// Cycle 937 + multi-window cycle: accent resolution + Peacock. Peacock
+    /// (`auto`) is the DEFAULT now — seed 0 lands on the theme's signature
+    /// accent (Mocha mauve), other seeds spread across the pool.
+    /// `accent-color = theme` (or `off`/`none`) opts back into the static
+    /// signature accent; an explicit hex / `--accent` wins over everything.
     #[test]
     fn accent_resolution_and_peacock() {
         let theme = Theme::default(); // Catppuccin Mocha, accent = mauve
         let mauve = crate::color::Rgb::new(0xcb, 0xa6, 0xf7);
 
-        // Default config (no accent set) → the theme's signature accent.
+        // Default config: Peacock ON, seed 0 → the pool's first entry, which
+        // is the theme's signature accent (so a fresh home-dir window still
+        // matches the app icon).
         let cfg = Config::default();
+        assert!(cfg.accent_auto, "Peacock is the default");
         assert_eq!(cfg.resolved_accent(&theme), mauve);
+
+        // `theme` / `off` / `none` opt out → static signature accent.
+        for opt_out in ["theme", "off", "none"] {
+            let cfg = Config::parse_text(&format!("accent-color = {opt_out}"));
+            assert!(!cfg.accent_auto, "{opt_out} disables Peacock");
+            assert!(cfg.accent_color.is_none());
+            assert_eq!(cfg.resolved_accent(&theme), mauve);
+            assert!(
+                Config::detect_malformed_values(&format!("accent-color = {opt_out}\n")).is_empty(),
+                "{opt_out} validates clean"
+            );
+        }
 
         // Explicit hex wins.
         let cfg = Config::parse_text("accent-color = #112233");
@@ -5299,6 +5345,14 @@ tab-bar-width = 200\n";
         assert!(cfg.accent_auto);
         assert!(cfg.accent_color.is_none());
         assert!(Config::detect_malformed_values("accent-color = auto\n").is_empty());
+
+        // The public pool is deduped, non-empty, signature-first.
+        let pool = crate::peacock_pool(&theme);
+        assert!(!pool.is_empty());
+        assert_eq!(pool[0], mauve, "signature accent leads the pool");
+        let mut uniq = pool.clone();
+        uniq.dedup();
+        assert_eq!(uniq.len(), pool.len(), "pool has no duplicate hues");
 
         // Peacock is deterministic per seed and spreads across seeds.
         let mut cfg = Config::parse_text("accent-color = auto");

@@ -13,6 +13,9 @@
 
 pub mod client;
 pub mod discovery;
+// Multi-window cycle: cross-process window-presence registry (Peacock accent
+// dedupe). No endpoint, always on, best-effort — see the module docs.
+pub mod presence;
 pub mod protocol;
 pub mod transport;
 
