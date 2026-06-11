@@ -292,36 +292,69 @@ fn augment_wslenv(existing: &str, vars: &[&str]) -> String {
 /// the argv to spawn for it.
 pub type ShellChoice = (String, Vec<String>);
 
-/// Cycle 805: auto-detect the shells to offer in the new-tab dropdown,
-/// Windows-Terminal style. Always returns at least one entry.
-/// - Windows: Command Prompt, Windows PowerShell, PowerShell 7 (each only when
-///   found on `PATH`), then one entry per installed WSL distro.
+/// Cycle 805 / dropdown-parity cycle: auto-detect the shells to offer in
+/// the new-tab dropdown, Windows-Terminal style (and in WT's order). Always
+/// returns at least one entry.
+/// - Windows: PowerShell (pwsh 7), Windows PowerShell, Command Prompt (each
+///   only when found on `PATH`), one entry per installed WSL distro, the
+///   VS 2022 Developer Command Prompt / Developer PowerShell (via vswhere),
+///   and Git Bash (registry / well-known paths / derived from git.exe).
 /// - Other platforms: `$SHELL` first, then bash/zsh/fish found on `PATH`
 ///   (de-duped by basename).
 ///
-/// Detection is injected into the inner helpers so they are unit-testable
-/// without depending on what is installed on the host.
+/// Process-wide `OnceLock` cache: the probes spawn bounded externals
+/// (`wsl.exe -l -q`, `vswhere.exe` — 2s timeout each), so they run at most
+/// once per session. `prewarm_shell_detection` lets the App pay that cost on
+/// a background thread at startup instead of the first dropdown open or
+/// `Ctrl+Shift+N` press. Detection is injected into the inner helpers so
+/// they are unit-testable without depending on what is installed.
 pub fn detect_shells() -> Vec<ShellChoice> {
-    #[cfg(windows)]
-    {
-        detect_shells_windows(|e| find_on_path(e).is_some(), list_wsl_distros)
-    }
-    #[cfg(not(windows))]
-    {
-        detect_shells_unix(std::env::var("SHELL").ok(), unix_on_path)
-    }
+    static CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                detect_shells_windows(
+                    |e| find_on_path(e).is_some(),
+                    list_wsl_distros,
+                    vs_dev_info,
+                    git_bash_path,
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                detect_shells_unix(std::env::var("SHELL").ok(), unix_on_path)
+            }
+        })
+        .clone()
 }
 
-#[cfg(windows)]
+/// Dropdown-parity cycle: warm the `detect_shells` cache off the UI thread
+/// (the probes can block up to ~4s worst-case on a wedged WSL service + a
+/// slow vswhere). Spawned once from `App::resumed`.
+pub fn prewarm_shell_detection() {
+    let _ = std::thread::Builder::new()
+        .name("kettle-shell-probe".into())
+        .spawn(|| {
+            let _ = detect_shells();
+        });
+}
+
+#[cfg(any(windows, test))]
 fn detect_shells_windows(
     available: impl Fn(&str) -> bool,
     distros: impl Fn() -> Vec<String>,
+    vs: impl Fn() -> Option<VsDevInfo>,
+    git_bash: impl Fn() -> Option<std::path::PathBuf>,
 ) -> Vec<ShellChoice> {
     let mut out: Vec<ShellChoice> = Vec::new();
+    // Dropdown-parity cycle: Windows Terminal's order (and its "PowerShell"
+    // label for pwsh 7 — was "PowerShell 7"). The order matters beyond looks:
+    // `Ctrl+Shift+N` opens the Nth entry, matching WT's profile shortcuts.
     for (label, exe) in [
-        ("Command Prompt", "cmd.exe"),
+        ("PowerShell", "pwsh.exe"),
         ("Windows PowerShell", "powershell.exe"),
-        ("PowerShell 7", "pwsh.exe"),
+        ("Command Prompt", "cmd.exe"),
     ] {
         if available(exe) {
             out.push((label.to_string(), vec![exe.to_string()]));
@@ -335,11 +368,250 @@ fn detect_shells_windows(
             ));
         }
     }
+    // VS 2022 Developer shells (WT auto-generates these when VS is present).
+    if let Some(info) = vs() {
+        let year = vs_year_from_install_path(&info.install_path).unwrap_or("2022");
+        if info.has_dev_cmd_bat {
+            out.push((
+                format!("Developer Command Prompt for VS {year}"),
+                vs_dev_cmd_argv(&info.install_path),
+            ));
+        }
+        if info.has_dev_shell_dll {
+            let host = if available("pwsh.exe") {
+                "pwsh.exe"
+            } else {
+                "powershell.exe"
+            };
+            out.push((
+                format!("Developer PowerShell for VS {year}"),
+                vs_dev_powershell_argv(host, &info.install_path),
+            ));
+        }
+    }
+    if let Some(bash) = git_bash() {
+        out.push((
+            "Git Bash".to_string(),
+            vec![
+                bash.to_string_lossy().into_owned(),
+                "-i".to_string(),
+                "-l".to_string(),
+            ],
+        ));
+    }
     // Never hand back an empty menu — the `▾` click must always do something.
     if out.is_empty() {
         out.push(("Command Prompt".to_string(), vec!["cmd.exe".to_string()]));
     }
     out
+}
+
+/// Dropdown-parity cycle: what the vswhere probe learned about the newest
+/// Visual Studio. Built by the impure `vs_dev_info`, consumed by the pure
+/// `detect_shells_windows` (test-injectable).
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq)]
+struct VsDevInfo {
+    /// e.g. `C:\Program Files\Microsoft Visual Studio\2022\Community`.
+    install_path: String,
+    /// `Common7\Tools\VsDevCmd.bat` exists → offer the Developer Command
+    /// Prompt.
+    has_dev_cmd_bat: bool,
+    /// `Common7\Tools\Microsoft.VisualStudio.DevShell.dll` exists → offer
+    /// the Developer PowerShell.
+    has_dev_shell_dll: bool,
+}
+
+/// Pure: the first non-empty trimmed line of vswhere's `-property
+/// installationPath` output (it prints one path, but be lenient).
+#[cfg(any(windows, test))]
+fn parse_vs_install_path(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// Pure: the year segment of a VS install path
+/// (`...\Microsoft Visual Studio\2022\Community` → `"2022"`), so the
+/// label stays truthful for a future VS without pinning a version range.
+#[cfg(any(windows, test))]
+fn vs_year_from_install_path(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\'])
+        .find(|seg| seg.len() == 4 && seg.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Pure: the Developer Command Prompt argv — `cmd.exe /k <VsDevCmd.bat>`
+/// (portable-pty quotes the spaced path when building the Win32 command
+/// line). Matches the shortcut VS itself installs.
+#[cfg(any(windows, test))]
+fn vs_dev_cmd_argv(install_path: &str) -> Vec<String> {
+    vec![
+        "cmd.exe".to_string(),
+        "/k".to_string(),
+        format!("{install_path}\\Common7\\Tools\\VsDevCmd.bat"),
+    ]
+}
+
+/// Pure: the Developer PowerShell argv — import the DevShell module and
+/// enter the dev environment, staying in the current directory
+/// (`-SkipAutomaticLocation`, like Windows Terminal's generated profile;
+/// the `-VsInstallPath` form avoids the second vswhere/JSON round-trip the
+/// instanceId form needs). Single quotes in the path are doubled (the
+/// PowerShell single-quote escape).
+#[cfg(any(windows, test))]
+fn vs_dev_powershell_argv(host: &str, install_path: &str) -> Vec<String> {
+    let q = install_path.replace('\'', "''");
+    vec![
+        host.to_string(),
+        "-NoExit".to_string(),
+        "-Command".to_string(),
+        format!(
+            "&{{ Import-Module '{q}\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; \
+             Enter-VsDevShell -VsInstallPath '{q}' -SkipAutomaticLocation }}"
+        ),
+    ]
+}
+
+/// Dropdown-parity cycle: probe the newest VS via
+/// `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe`
+/// (a fixed location Microsoft documents as stable). Worker thread + 2s
+/// timeout, same shape as `list_wsl_distros` — a hung probe must not freeze
+/// the UI thread (the `detect_shells` cache means this runs once).
+#[cfg(windows)]
+fn vs_dev_info() -> Option<VsDevInfo> {
+    let pf86 = std::env::var_os("ProgramFiles(x86)")?;
+    let vswhere = std::path::PathBuf::from(pf86)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    if !std::fs::symlink_metadata(&vswhere)
+        .map(|m| !m.is_dir())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            std::process::Command::new(vswhere)
+                .args([
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.CoreEditor",
+                    "-property",
+                    "installationPath",
+                ])
+                .output(),
+        );
+    });
+    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(2)) else {
+        return None;
+    };
+    if !out.status.success() {
+        return None;
+    }
+    let install_path = parse_vs_install_path(&String::from_utf8_lossy(&out.stdout))?;
+    let tools = std::path::Path::new(&install_path)
+        .join("Common7")
+        .join("Tools");
+    let exists = |p: &std::path::Path| {
+        std::fs::symlink_metadata(p)
+            .map(|m| !m.is_dir())
+            .unwrap_or(false)
+    };
+    Some(VsDevInfo {
+        has_dev_cmd_bat: exists(&tools.join("VsDevCmd.bat")),
+        has_dev_shell_dll: exists(&tools.join("Microsoft.VisualStudio.DevShell.dll")),
+        install_path,
+    })
+}
+
+/// Pure: candidate `bash.exe` locations for a found `git.exe` —
+/// `<root>\cmd\git.exe` and `<root>\mingw64\bin\git.exe` both map to
+/// `<root>\bin\bash.exe`; a flat `<dir>\git.exe` maps to
+/// `<dir>\bash.exe`. Testable without a filesystem.
+#[cfg(any(windows, test))]
+fn git_bash_from_git_exe(git_exe: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = git_exe.parent() {
+        let dir_name = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase());
+        match dir_name.as_deref() {
+            // <root>\cmd\git.exe → <root>\bin\bash.exe
+            Some("cmd") => {
+                if let Some(root) = dir.parent() {
+                    out.push(root.join("bin").join("bash.exe"));
+                }
+            }
+            // <root>\mingw64\bin\git.exe → <root>\bin\bash.exe
+            Some("bin") => {
+                if let Some(mingw) = dir.parent()
+                    && mingw.file_name().is_some_and(|n| {
+                        n.to_string_lossy()
+                            .to_ascii_lowercase()
+                            .starts_with("mingw")
+                    })
+                    && let Some(root) = mingw.parent()
+                {
+                    out.push(root.join("bin").join("bash.exe"));
+                }
+                // <root>\bin\git.exe → sibling bash.exe
+                out.push(dir.join("bash.exe"));
+            }
+            _ => out.push(dir.join("bash.exe")),
+        }
+    }
+    out
+}
+
+/// Dropdown-parity cycle: locate Git Bash. Order: the Git-for-Windows
+/// registry key (HKLM → HKCU → the WOW6432Node 32-bit view), the well-known
+/// install dirs, then derive from a `git.exe` on `PATH`. All checks are
+/// local filesystem/registry reads (microseconds) — no worker thread needed.
+#[cfg(windows)]
+fn git_bash_path() -> Option<std::path::PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let exists = |p: &std::path::Path| {
+        std::fs::symlink_metadata(p)
+            .map(|m| !m.is_dir())
+            .unwrap_or(false)
+    };
+    let from_install_dir = |root: String| {
+        let bash = std::path::PathBuf::from(root).join("bin").join("bash.exe");
+        exists(&bash).then_some(bash)
+    };
+    for (hive, key) in [
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\GitForWindows"),
+        (HKEY_CURRENT_USER, r"SOFTWARE\GitForWindows"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\GitForWindows"),
+    ] {
+        if let Ok(k) = RegKey::predef(hive).open_subkey(key)
+            && let Ok(install) = k.get_value::<String, _>("InstallPath")
+            && let Some(bash) = from_install_dir(install)
+        {
+            return Some(bash);
+        }
+    }
+    for base in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Some(v) = std::env::var_os(base) {
+            let root = if base == "LOCALAPPDATA" {
+                std::path::PathBuf::from(v).join("Programs").join("Git")
+            } else {
+                std::path::PathBuf::from(v).join("Git")
+            };
+            let bash = root.join("bin").join("bash.exe");
+            if exists(&bash) {
+                return Some(bash);
+            }
+        }
+    }
+    let git = find_on_path("git.exe")?;
+    git_bash_from_git_exe(&git).into_iter().find(|p| exists(p))
 }
 
 #[cfg(not(windows))]
@@ -1807,29 +2079,152 @@ mod detect_shells_tests {
         assert!(super::parse_wsl_distros("\u{feff}\r\n  \r\n").is_empty());
     }
 
-    #[cfg(windows)]
+    /// Dropdown-parity cycle: the full Windows menu in Windows Terminal's
+    /// order, with every probe succeeding. Runs on every platform — the
+    /// builder is pure over injected closures.
     #[test]
-    fn detect_shells_windows_lists_available_plus_distros() {
-        let avail = |e: &str| matches!(e, "cmd.exe" | "pwsh.exe" | "wsl.exe");
+    fn detect_shells_windows_orders_like_windows_terminal() {
+        let avail = |e: &str| matches!(e, "cmd.exe" | "powershell.exe" | "pwsh.exe" | "wsl.exe");
         let distros = || vec!["Ubuntu".to_string()];
-        let got = super::detect_shells_windows(avail, distros);
-        assert!(
-            got.iter()
-                .any(|(l, a)| l == "Command Prompt" && a.as_slice() == ["cmd.exe"])
+        let vs = || {
+            Some(super::VsDevInfo {
+                install_path: r"C:\Program Files\Microsoft Visual Studio\2022\Community"
+                    .to_string(),
+                has_dev_cmd_bat: true,
+                has_dev_shell_dll: true,
+            })
+        };
+        let git = || {
+            Some(std::path::PathBuf::from(
+                r"C:\Program Files\Git\bin\bash.exe",
+            ))
+        };
+        let got = super::detect_shells_windows(avail, distros, vs, git);
+        let labels: Vec<&str> = got.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "PowerShell",
+                "Windows PowerShell",
+                "Command Prompt",
+                "WSL: Ubuntu",
+                "Developer Command Prompt for VS 2022",
+                "Developer PowerShell for VS 2022",
+                "Git Bash",
+            ],
+            "Windows Terminal's dropdown order (Ctrl+Shift+N indexes this)"
         );
-        assert!(got.iter().any(|(l, _)| l == "PowerShell 7"));
-        // powershell.exe was NOT "available" → Windows PowerShell is absent.
+        // Git Bash spawns an interactive login shell from its full path.
+        let (_, bash_argv) = got.iter().find(|(l, _)| l == "Git Bash").unwrap();
+        assert_eq!(
+            bash_argv.as_slice(),
+            [r"C:\Program Files\Git\bin\bash.exe", "-i", "-l"]
+        );
+    }
+
+    /// Dropdown-parity cycle: hosts without VS / Git get no phantom rows.
+    #[test]
+    fn detect_shells_windows_skips_vs_and_git_when_absent() {
+        let avail = |e: &str| matches!(e, "cmd.exe" | "pwsh.exe" | "wsl.exe");
+        let got = super::detect_shells_windows(avail, || vec!["Ubuntu".into()], || None, || None);
+        assert!(got.iter().any(|(l, _)| l == "PowerShell"));
+        assert!(got.iter().any(|(l, _)| l == "WSL: Ubuntu"));
+        // powershell.exe was NOT "available" → Windows PowerShell absent.
         assert!(!got.iter().any(|(l, _)| l == "Windows PowerShell"));
-        assert!(
-            got.iter()
-                .any(|(l, a)| l == "WSL: Ubuntu" && a.as_slice() == ["wsl.exe", "-d", "Ubuntu"])
+        assert!(!got.iter().any(|(l, _)| l.starts_with("Developer")));
+        assert!(!got.iter().any(|(l, _)| l == "Git Bash"));
+    }
+
+    /// Dropdown-parity cycle: the Developer PowerShell host prefers pwsh 7
+    /// and falls back to Windows PowerShell.
+    #[test]
+    fn vs_dev_powershell_host_prefers_pwsh() {
+        let vs = || {
+            Some(super::VsDevInfo {
+                install_path: r"C:\VS\2022\BuildTools".to_string(),
+                has_dev_cmd_bat: false,
+                has_dev_shell_dll: true,
+            })
+        };
+        // Only powershell.exe on PATH → it hosts the dev shell.
+        let got = super::detect_shells_windows(|e| e == "powershell.exe", Vec::new, vs, || None);
+        let (_, argv) = got
+            .iter()
+            .find(|(l, _)| l.starts_with("Developer PowerShell"))
+            .unwrap();
+        assert_eq!(argv[0], "powershell.exe");
+    }
+
+    /// Dropdown-parity cycle: the dev-shell argvs are byte-pinned — these
+    /// strings are what actually spawns, so a drift here breaks the feature
+    /// invisibly (the menu row would still render).
+    #[test]
+    fn vs_dev_argv_strings_are_canonical() {
+        let argv =
+            super::vs_dev_cmd_argv(r"C:\Program Files\Microsoft Visual Studio\2022\Community");
+        assert_eq!(
+            argv.as_slice(),
+            [
+                "cmd.exe",
+                "/k",
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat",
+            ]
         );
+        let argv = super::vs_dev_powershell_argv("pwsh.exe", r"C:\VS\O'Brien\2022\Community");
+        assert_eq!(argv[0], "pwsh.exe");
+        assert_eq!(argv[1], "-NoExit");
+        assert_eq!(argv[2], "-Command");
+        // Single quotes in the path are doubled (PowerShell escaping); the
+        // command imports DevShell.dll then enters the dev environment
+        // without changing directory.
+        assert_eq!(
+            argv[3],
+            r"&{ Import-Module 'C:\VS\O''Brien\2022\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell -VsInstallPath 'C:\VS\O''Brien\2022\Community' -SkipAutomaticLocation }"
+        );
+    }
+
+    #[test]
+    fn parse_vs_install_path_takes_first_nonempty_line() {
+        assert_eq!(
+            super::parse_vs_install_path("\r\n C:\\VS\\2022\\Community \r\n"),
+            Some(r"C:\VS\2022\Community".to_string())
+        );
+        assert_eq!(super::parse_vs_install_path("\n  \n"), None);
+    }
+
+    #[test]
+    fn vs_year_from_install_path_finds_the_year_segment() {
+        assert_eq!(
+            super::vs_year_from_install_path(
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community"
+            ),
+            Some("2022")
+        );
+        assert_eq!(
+            super::vs_year_from_install_path("/c/vs/2026/Preview"),
+            Some("2026")
+        );
+        assert_eq!(super::vs_year_from_install_path(r"C:\VS\Preview"), None);
+    }
+
+    #[test]
+    fn git_bash_from_git_exe_covers_cmd_bin_and_mingw_layouts() {
+        use std::path::{Path, PathBuf};
+        // <root>\cmd\git.exe → <root>\bin\bash.exe
+        let c = super::git_bash_from_git_exe(Path::new(r"C:\Git\cmd\git.exe"));
+        assert_eq!(c, vec![PathBuf::from(r"C:\Git\bin\bash.exe")]);
+        // <root>\mingw64\bin\git.exe → <root>\bin\bash.exe (+ sibling)
+        let c = super::git_bash_from_git_exe(Path::new(r"C:\Git\mingw64\bin\git.exe"));
+        assert!(c.contains(&PathBuf::from(r"C:\Git\bin\bash.exe")));
+        // flat dir → sibling bash.exe
+        let c = super::git_bash_from_git_exe(Path::new(r"D:\tools\git.exe"));
+        assert_eq!(c, vec![PathBuf::from(r"D:\tools\bash.exe")]);
     }
 
     #[cfg(windows)]
     #[test]
     fn detect_shells_windows_never_empty() {
-        let got = super::detect_shells_windows(|_| false, Vec::new);
+        let got = super::detect_shells_windows(|_| false, Vec::new, || None, || None);
         assert_eq!(
             got,
             vec![("Command Prompt".to_string(), vec!["cmd.exe".to_string()])]
@@ -1856,22 +2251,6 @@ mod detect_shells_tests {
             got,
             vec![("Shell".to_string(), vec!["/bin/sh".to_string()])]
         );
-    }
-
-    /// Cycle 917 (#4): the new-tab `▾` dropdown is gated on `detect_shells()`
-    /// returning more than one choice. A stock Ubuntu (`$SHELL=/bin/bash`, only
-    /// bash on PATH) must produce exactly ONE choice so the dropdown is hidden;
-    /// adding zsh makes it two so the dropdown reappears. Pins the gate's input.
-    #[cfg(not(windows))]
-    #[test]
-    fn detect_shells_unix_single_shell_gates_dropdown_off() {
-        let only_bash = |e: &str| e == "bash";
-        let one = super::detect_shells_unix(Some("/bin/bash".to_string()), only_bash);
-        assert_eq!(one.len(), 1, "one shell (bash) → dropdown hidden");
-
-        let bash_and_zsh = |e: &str| matches!(e, "bash" | "zsh");
-        let two = super::detect_shells_unix(Some("/bin/bash".to_string()), bash_and_zsh);
-        assert!(two.len() >= 2, "bash + zsh → dropdown shown");
     }
 }
 

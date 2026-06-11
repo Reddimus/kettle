@@ -1635,6 +1635,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "serde_json",
+ "winreg",
 ]
 
 [[package]]

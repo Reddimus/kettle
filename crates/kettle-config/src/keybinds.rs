@@ -95,8 +95,30 @@ impl Trigger {
 pub fn action_label(a: &Action) -> String {
     match a {
         Action::GotoTab(i) => format!("Goto tab {}", i + 1),
+        Action::NewTabShell(i) => format!("New tab: dropdown shell {}", i + 1),
         other => format!("{other:?}"),
     }
+}
+
+/// Dropdown-parity cycle: the display label of a trigger bound to `action`
+/// in the LIVE map (defaults + user overrides), for right-aligned shortcut
+/// hints in menus — a rebind shows the user's actual chord, never a
+/// hardcoded string. Deterministic despite the map's iteration order:
+/// prefer a trigger whose key is a bare alphanumeric (`Ctrl+Shift+1` over
+/// its US-shifted twin `Ctrl+Shift+!`), then the shortest label, then
+/// lexicographic. `None` when the action is unbound.
+pub fn hint_label(bindings: &Bindings, action: &Action) -> Option<String> {
+    bindings
+        .iter()
+        .filter(|(_, a)| *a == action)
+        .map(|(t, _)| t.label())
+        .min_by_key(|l| {
+            let alnum = l
+                .rsplit('+')
+                .next()
+                .is_some_and(|k| k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()));
+            (!alnum, l.len(), l.clone())
+        })
 }
 
 /// Human-readable lines for the default keymap, sorted by trigger label —
@@ -460,6 +482,14 @@ pub enum Action {
     /// default (see `OpenUpdate`).
     DismissUpdate,
     GotoTab(u8),
+    /// Dropdown-parity cycle: open the Nth entry of the new-tab `▾` dropdown
+    /// (0-based internally; the `new_tab_shell_N` config form is 1-based like
+    /// `goto_tab:N`). Windows Terminal's Ctrl+Shift+1..9 profile shortcuts.
+    NewTabShell(u8),
+    /// Dropdown-parity cycle: open the About panel (version + git hash,
+    /// update status, GitHub link) — the dropdown's bottom row, mirroring
+    /// Windows Terminal's; also reachable from the command palette.
+    About,
 }
 
 /// Every accepted action token, in the canonical form the user types in
@@ -678,6 +708,10 @@ pub fn action_names() -> Vec<&'static str> {
         "open-update",
         "dismiss_update",
         "dismiss-update",
+        // Dropdown-parity cycle — the About panel.
+        "about",
+        "show_about",
+        "show-about",
         // Cycle 918: these two bindable actions had `from_name` aliases + tests
         // but were omitted from the discovery list, so `kettle --list-actions`
         // silently hid them. The reverse-coverage drift guard below now catches
@@ -888,6 +922,8 @@ impl Action {
             // Cycle 809 (audit): keyboard access to the cycle-794 update banner.
             "open_update" | "open-update" => OpenUpdate,
             "dismiss_update" | "dismiss-update" => DismissUpdate,
+            // Dropdown-parity cycle: the About panel.
+            "about" | "show_about" | "show-about" => About,
             // `goto_tab:N` where N is 1-based (Terminator / kitty syntax —
             // "Alt+1 = first tab" is the user mental model). Internally we
             // store the zero-based index so the handler can clamp against
@@ -909,6 +945,17 @@ impl Action {
                     && n >= 1
                 {
                     return Some(GotoTab(n - 1));
+                }
+                // Dropdown-parity cycle: `new_tab_shell_N` (1-based) opens the
+                // Nth new-tab `▾` dropdown entry — Windows Terminal's
+                // Ctrl+Shift+N profile shortcuts. Kebab accepted too.
+                if let Some(rest) = other
+                    .strip_prefix("new_tab_shell_")
+                    .or_else(|| other.strip_prefix("new-tab-shell-"))
+                    && let Ok(n) = rest.parse::<u8>()
+                    && n >= 1
+                {
+                    return Some(NewTabShell(n - 1));
                 }
                 return None;
             }
@@ -1125,6 +1172,20 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     // already clamps against `tabs.len()`.
     for n in 1u8..=9 {
         bind(a, Char((b'0' + n) as char), GotoTab(n - 1));
+    }
+    // Dropdown-parity cycle (Windows Terminal's Ctrl+Shift+1..9 profile
+    // shortcuts): open the Nth new-tab `▾` dropdown entry. Shift+digit
+    // arrives as the US-shifted SYMBOL from winit (see the font-zoom
+    // rationale above), so bind both spellings of each chord. None of
+    // `! @ # $ % ^ & * (` collides with an existing Ctrl+Shift default.
+    const US_SHIFTED_DIGITS: [char; 9] = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
+    for n in 1u8..=9 {
+        bind(cs, Char((b'0' + n) as char), NewTabShell(n - 1));
+        bind(
+            cs,
+            Char(US_SHIFTED_DIGITS[(n - 1) as usize]),
+            NewTabShell(n - 1),
+        );
     }
     (m, triggers)
 }
@@ -1489,6 +1550,74 @@ mod tests {
                 "{t:?} should map to {expected:?}"
             );
         }
+    }
+
+    /// Dropdown-parity cycle: `new_tab_shell_N` parses like the established
+    /// `switch_to_tab_N` shape — 1-based config form, 0-based variant, kebab
+    /// alias accepted, 0 rejected.
+    #[test]
+    fn new_tab_shell_parses_like_switch_to_tab() {
+        assert_eq!(
+            Action::from_name("new_tab_shell_1"),
+            Some(Action::NewTabShell(0))
+        );
+        assert_eq!(
+            Action::from_name("new-tab-shell-9"),
+            Some(Action::NewTabShell(8))
+        );
+        assert_eq!(Action::from_name("new_tab_shell_0"), None);
+        assert_eq!(Action::from_name("new_tab_shell_"), None);
+        assert_eq!(Action::from_name("about"), Some(Action::About));
+        assert_eq!(Action::from_name("show-about"), Some(Action::About));
+    }
+
+    /// Dropdown-parity cycle: Ctrl+Shift+1..9 must work on a US layout where
+    /// winit reports the SHIFTED symbol (the font-zoom precedent) — both the
+    /// digit and its symbol map to the same NewTabShell entry.
+    #[test]
+    fn ctrl_shift_digit_binds_cover_us_layout_shift_variants() {
+        let d = defaults();
+        let cs = Mods::CTRL | Mods::SHIFT;
+        let shifted = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
+        for n in 0u8..9 {
+            for k in [(b'1' + n) as char, shifted[n as usize]] {
+                let t = Trigger::new(cs, Key::Char(k));
+                assert_eq!(
+                    d.get(&t),
+                    Some(&Action::NewTabShell(n)),
+                    "Ctrl+Shift+{k:?} should open dropdown shell {}",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    /// Dropdown-parity cycle: `hint_label` reverse-lookup — prefers the
+    /// alphanumeric spelling of a chord and follows user rebinds.
+    #[test]
+    fn hint_label_prefers_alphanumeric_trigger_and_follows_rebinds() {
+        let d = defaults();
+        // Both Ctrl+Shift+1 and Ctrl+Shift+! are bound; the hint shows the
+        // digit spelling.
+        assert_eq!(
+            hint_label(&d, &Action::NewTabShell(0)).as_deref(),
+            Some("Ctrl+Shift+1")
+        );
+        assert_eq!(
+            hint_label(&d, &Action::OpenSettings).as_deref(),
+            Some("Ctrl+,")
+        );
+        // An unbound action yields no hint.
+        assert_eq!(hint_label(&d, &Action::OpenUpdate), None);
+        // A rebind takes over once the defaults are unbound.
+        let mut m = d.clone();
+        apply_keybind(&mut m, "ctrl+shift+1=unbind");
+        apply_keybind(&mut m, "ctrl+shift+!=unbind");
+        apply_keybind(&mut m, "ctrl+f9=new_tab_shell_1");
+        assert_eq!(
+            hint_label(&m, &Action::NewTabShell(0)).as_deref(),
+            Some("Ctrl+F9")
+        );
     }
 
     #[test]

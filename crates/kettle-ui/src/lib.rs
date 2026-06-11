@@ -64,6 +64,10 @@ pub use lua::{LuaCommand, LuaEngine, LuaEvent};
 pub struct Options {
     /// Run this argv in the first tab instead of the shell (`kettle -e …`).
     pub command: Option<Vec<String>>,
+    /// Dropdown-parity cycle: the bin crate's full version string (crate
+    /// version + git hash — what `--version` prints) for the About panel.
+    /// kettle-ui has no build script, so the hash can't be derived here.
+    pub version: Option<String>,
     /// Working directory for the first tab (`kettle -d DIR`).
     pub cwd: Option<std::path::PathBuf>,
     /// Explicit config file (`kettle --config FILE`); `None` = default path.

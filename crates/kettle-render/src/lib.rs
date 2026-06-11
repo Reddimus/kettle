@@ -136,6 +136,34 @@ pub struct ContextMenuRow {
     /// gives the user a sense of "this is an option that's not
     /// available right now," but not selectable.
     pub enabled: bool,
+    /// Dropdown-parity cycle: a right-aligned, dimmed shortcut hint
+    /// (e.g. `Ctrl+Shift+1`). Empty = no hint. The App computes it from the
+    /// LIVE keybind map so user rebinds show their actual chord.
+    pub hint: String,
+}
+
+/// Dropdown-parity cycle: a menu row's character budget — the label plus
+/// its right-aligned shortcut hint (2 spacer columns between them). One
+/// formula shared by the renderer's shape + draw passes; the App's
+/// anchor-clamp and hit-test twins mirror it.
+pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
+    row.label.chars().count()
+        + if row.hint.is_empty() {
+            0
+        } else {
+            row.hint.chars().count() + 2
+        }
+}
+
+/// Disabled / secondary menu text: blend the foreground toward the panel
+/// background (~55% mute) without alpha-blending through to whatever lives
+/// under the panel.
+fn dim_blend(fg: Rgb, bg: Rgb) -> Rgb {
+    Rgb::new(
+        ((fg.r as u16 + bg.r as u16 * 5) / 6) as u8,
+        ((fg.g as u16 + bg.g as u16 * 5) / 6) as u8,
+        ((fg.b as u16 + bg.b as u16 * 5) / 6) as u8,
+    )
 }
 
 /// Right-click context menu (Terminator / GNOME Terminal / iTerm2
@@ -481,6 +509,9 @@ pub struct Renderer {
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
+    /// Dropdown-parity cycle: one buffer per row's right-aligned shortcut
+    /// hint (empty-hint rows shape nothing). Pooled like its sibling.
+    context_menu_hint_buffers: Vec<TextBuffer>,
     /// Cycle 756: one text buffer per display line of the settings overlay
     /// (title, category tabs, field rows, footer). Grown + truncated like the
     /// context-menu pool.
@@ -795,6 +826,7 @@ impl Renderer {
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
+            context_menu_hint_buffers: Vec::new(),
             settings_buffers: Vec::new(),
             tabbar_buffer,
             new_tab_arrow_buffer,
@@ -2097,25 +2129,32 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Context-menu row labels (one buffer per row, separators skipped).
+        // Context-menu row labels (one buffer per row, separators skipped)
+        // + right-aligned shortcut hints (dropdown-parity cycle).
         if let Some(menu) = &overlay.context_menu {
             while self.context_menu_buffers.len() < menu.rows.len() {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_buffers.push(b);
+            }
+            while self.context_menu_hint_buffers.len() < menu.rows.len() {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.context_menu_hint_buffers.push(b);
             }
             // Cycle 788 (audit B2): shrink to the current row count so a small
             // menu after a large one (common with dynamic Lua menus) doesn't
             // keep the peak's worth of shaped-glyph buffers. The field doc
             // promised this trim; the code never did it until now.
             self.context_menu_buffers.truncate(menu.rows.len());
-            // Approximate widest label so the panel fits without
-            // wrapping; the renderer doesn't try to measure precisely
-            // because the labels are short and we pad generously.
+            self.context_menu_hint_buffers.truncate(menu.rows.len());
+            // Approximate widest row (label + right-aligned hint) so the
+            // panel fits without wrapping; the renderer doesn't try to
+            // measure precisely because the labels are short and we pad
+            // generously.
             let max_chars = menu
                 .rows
                 .iter()
                 .filter(|r| !r.separator)
-                .map(|r| r.label.chars().count())
+                .map(menu_row_chars)
                 .max()
                 .unwrap_or(0) as f32;
             // Panel sizing — more generous than v1.3.0's tight box so
@@ -2143,6 +2182,19 @@ impl Renderer {
                     None,
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
+                if !row.hint.is_empty() {
+                    let hb = &mut self.context_menu_hint_buffers[i];
+                    hb.set_metrics(&mut self.font_system, metrics);
+                    hb.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                    hb.set_text(
+                        &mut self.font_system,
+                        &row.hint,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    hb.shape_until_scroll(&mut self.font_system, false);
+                }
             }
         }
 
@@ -2477,7 +2529,7 @@ impl Renderer {
                 .rows
                 .iter()
                 .filter(|r| !r.separator)
-                .map(|r| r.label.chars().count())
+                .map(menu_row_chars)
                 .max()
                 .unwrap_or(0) as f32;
             let panel_w = (max_chars * cw + 40.0).max(180.0);
@@ -2515,26 +2567,37 @@ impl Renderer {
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
-                    Rgb::new(
-                        ((theme.foreground.r as u16 + theme.background.r as u16 * 5) / 6) as u8,
-                        ((theme.foreground.g as u16 + theme.background.g as u16 * 5) / 6) as u8,
-                        ((theme.foreground.b as u16 + theme.background.b as u16 * 5) / 6) as u8,
-                    )
+                    dim_blend(theme.foreground, theme.background)
+                };
+                let bounds = TextBounds {
+                    left: ax as i32,
+                    top: row_y as i32,
+                    right: (ax + panel_w) as i32,
+                    bottom: (row_y + row_h) as i32,
                 };
                 menu_areas.push(TextArea {
                     buffer: &self.context_menu_buffers[i],
                     left: ax + 16.0,
                     top: row_y + 6.0,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: ax as i32,
-                        top: row_y as i32,
-                        right: (ax + panel_w) as i32,
-                        bottom: (row_y + row_h) as i32,
-                    },
+                    bounds,
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
+                // Dropdown-parity cycle: the right-aligned dimmed hint.
+                if !row.hint.is_empty() {
+                    let hint_fg = dim_blend(theme.foreground, theme.background);
+                    let hint_w = row.hint.chars().count() as f32 * cw;
+                    menu_areas.push(TextArea {
+                        buffer: &self.context_menu_hint_buffers[i],
+                        left: ax + panel_w - 16.0 - hint_w,
+                        top: row_y + 6.0,
+                        scale: 1.0,
+                        bounds,
+                        default_color: GColor::rgb(hint_fg.r, hint_fg.g, hint_fg.b),
+                        custom_glyphs: &[],
+                    });
+                }
                 row_y += row_h;
             }
         }
@@ -3701,11 +3764,14 @@ fn menu_chrome_quads(
     ch: f32,
 ) -> Vec<QuadInstance> {
     let mut out: Vec<QuadInstance> = Vec::new();
+    // Dropdown-parity cycle: the panel must budget for the right-aligned
+    // shortcut hints too — same `menu_row_chars` formula as the text passes,
+    // or hints would render past the panel background.
     let max_chars = menu
         .rows
         .iter()
         .filter(|r| !r.separator)
-        .map(|r| r.label.chars().count())
+        .map(menu_row_chars)
         .max()
         .unwrap_or(0) as f32;
     let panel_w = (max_chars * cw + 40.0).max(180.0);
@@ -4480,41 +4546,49 @@ pub fn capture_png_with_annotation(
                     label: "Copy".into(),
                     separator: false,
                     enabled: false,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: "Paste".into(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: String::new(),
                     separator: true,
                     enabled: false,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: "Split Right".into(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: "Split Down".into(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: "Close Pane".into(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: String::new(),
                     separator: true,
                     enabled: false,
+                    hint: String::new(),
                 },
                 ContextMenuRow {
                     label: "New Tab".into(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
             ];
             let menu = ContextMenu {
@@ -4544,7 +4618,7 @@ pub fn capture_png_with_annotation(
                 .rows
                 .iter()
                 .filter(|r| !r.separator)
-                .map(|r| r.label.chars().count())
+                .map(menu_row_chars)
                 .max()
                 .unwrap_or(0) as f32;
             let panel_w = (max_chars * cw + 40.0).max(180.0);

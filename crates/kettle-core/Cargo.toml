@@ -31,6 +31,12 @@ regex.workspace = true
 log = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Dropdown-parity cycle: Git-for-Windows discovery via the registry
+# (HKLM/HKCU `SOFTWARE\GitForWindows\InstallPath`). Zero new lockfile
+# entries — winreg 0.10 is already in the graph as portable-pty's own dep.
+winreg = "0.10"
+
 [dev-dependencies]
 # Cycle 911: parse asciicast v2 (.cast) traces in the e2e replay test — the
 # format record.rs writes — so a recorded session can be replayed through

@@ -31,6 +31,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Send newline (Shift+Return) to focused pane", SendNewline),
         ("Open layout picker", OpenLayoutPicker),
         ("Open settings", OpenSettings),
+        ("About kettle", About),
         ("Edit config file in $EDITOR", EditConfig),
         ("Preferences: scrollbar always-on", SetScrollbarAlways),
         ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
@@ -161,7 +162,8 @@ mod tests {
             ResizeDown,
             ResizeLeft,
             ResizeRight,
-            GotoTab(0), // placeholder for the parametric family
+            GotoTab(0),     // placeholder for the parametric family
+            NewTabShell(0), // dropdown-parity: parametric, like GotoTab
             CommandPalette,
             // Cycle 245: OpenContextMenu is the right-click handler
             // itself — surfacing it inside the palette would be a
@@ -299,6 +301,10 @@ mod tests {
             OpenUpdate,
             DismissUpdate,
             GotoTab(0),
+            // Dropdown-parity cycle: About is palette-listed; NewTabShell is
+            // parametric like GotoTab (the dropdown + Ctrl+Shift+N reach it).
+            About,
+            NewTabShell(0),
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
         // added, this match must be updated, which forces the developer
@@ -409,7 +415,9 @@ mod tests {
                 | OpenUpdate
                 | DismissUpdate
                 | TogglePaneReadOnly
-                | GotoTab(_) => {}
+                | GotoTab(_)
+                | NewTabShell(_)
+                | About => {}
             }
         }
         let missing: Vec<&Action> = every_action

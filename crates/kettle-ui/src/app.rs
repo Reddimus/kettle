@@ -1306,6 +1306,13 @@ enum ContextMenuItem {
         url: String,
         copy: bool,
     },
+    /// Dropdown-parity cycle: a static, non-dispatchable information line
+    /// (the About panel's version/update rows). Rendered like a disabled row
+    /// (dimmed), survives `filter_disabled`, never highlighted, claims no
+    /// mnemonic, and maps to no click.
+    Info {
+        label: String,
+    },
 }
 
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
@@ -1481,15 +1488,11 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
 /// the arrow always shows there. The Unix count is a cheap PATH probe, cached
 /// process-wide since the installed shells don't change during a session.
 fn new_tab_dropdown_visible() -> bool {
-    #[cfg(windows)]
-    {
-        true
-    }
-    #[cfg(not(windows))]
-    {
-        static MULTI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *MULTI.get_or_init(|| kettle_core::term::detect_shells().len() > 1)
-    }
+    // Dropdown-parity cycle: ALWAYS visible, superseding the cycle-917
+    // single-shell gating — the dropdown now carries Settings / Command
+    // palette / About rows (Windows Terminal's bottom section), so it is
+    // never a pointless one-item menu even on a bash-only Ubuntu.
+    true
 }
 
 /// Cycle 708 (Terminator parity, `layoutlauncher.py`): rank saved
@@ -1525,6 +1528,8 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
+            // Info rows are non-dispatchable — no mnemonic to claim.
+            ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
         })
         .collect();
@@ -1591,6 +1596,7 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
             label.to_ascii_lowercase().starts_with(&needle)
         }
         ContextMenuItem::UrlItem { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
 }
@@ -1740,7 +1746,8 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
             // Cycle 941: the URL-aware "Open Link" / "Copy Link Address" rows.
-            | ContextMenuItem::UrlItem { .. }
+            | ContextMenuItem::UrlItem { .. } // ContextMenuItem::Info is deliberately absent: a static info line
+                                              // (About panel) is not highlightable or clickable.
     )
 }
 
@@ -1789,6 +1796,7 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
         }),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
+        | ContextMenuItem::Info { .. }
         | ContextMenuItem::Separator => None,
     }
 }
@@ -1919,10 +1927,10 @@ pub struct App {
     /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Esc dismisses; Enter opens the URL.
     update_available: Option<(String, String)>,
-    /// Cycle 834 (audit): cached new-tab `▾` shell list. `detect_shells()` can
-    /// spawn `wsl.exe` (bounded, but still a one-off cost), so compute it at
-    /// most once per session instead of on every dropdown open.
-    detected_shells: Option<Vec<(String, Vec<String>)>>,
+    /// Dropdown-parity cycle: the full version string the About panel shows —
+    /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
+    /// what `--version` prints); falls back to the bare crate version.
+    version_line: String,
 }
 
 /// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
@@ -2105,6 +2113,11 @@ impl App {
             kettle_config::WindowState::Fullscreen
         );
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
+        // Dropdown-parity cycle: capture before `startup` moves into the App.
+        let startup_version = startup
+            .version
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
         // was set, init a LuaEngine + run the script once. Failures
         // log::warn but don't block the launch (same shape as the
@@ -2275,7 +2288,7 @@ impl App {
             lua_engine,
             lua_startup_fired: false,
             update_available: None,
-            detected_shells: None,
+            version_line: startup_version,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -5244,8 +5257,7 @@ impl App {
         // Cycle 713 (Terminator menu UX, C4): every visible row is actionable.
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
-        let (cw, ch) = self.cell_px(ws);
-        let (cw, ch) = (cw as f32, ch as f32);
+        let (cw, ch) = self.menu_cell(ws);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         let panel_h: f32 = items
@@ -5260,29 +5272,47 @@ impl App {
                 | ContextMenuItem::ThemeChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
-                | ContextMenuItem::UrlItem { .. } => row_h,
+                | ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
+        // Dropdown-parity cycle: the width budget includes each row's
+        // right-aligned shortcut hint (+2 spacer columns) — the same formula
+        // the renderer's `menu_row_chars` uses, kept in lockstep.
+        let hints = self.menu_item_hints(&items);
         let max_chars = items
             .iter()
-            .filter_map(|it| match it {
-                ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
-                // Cycle 941: count DynamicItem labels too — the hit-test twin
-                // (`context_menu_geometry`) already did, so the anchor clamp
-                // here used to underestimate the panel the renderer draws.
-                ContextMenuItem::DynamicItem { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
-                // Cycle 684: submenu rows show "label ▸" so the
-                // max-width budget needs +2 for the suffix.
-                ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
-                // Cycle 685/686: Theme/Profile choices surface only inside an
-                // open flyout; the parent menu's width budget shouldn't grow.
-                ContextMenuItem::ThemeChoice { .. } => None,
-                ContextMenuItem::ProfileChoice { .. } => None,
-                _ => None,
+            .zip(hints.iter())
+            .filter_map(|(it, hint)| {
+                let hint_chars = if hint.is_empty() {
+                    0
+                } else {
+                    hint.chars().count() + 2
+                };
+                match it {
+                    ContextMenuItem::Item { label, .. } => Some(label.chars().count() + hint_chars),
+                    // Cycle 941: count DynamicItem labels too — the hit-test twin
+                    // (`context_menu_geometry`) already did, so the anchor clamp
+                    // here used to underestimate the panel the renderer draws.
+                    ContextMenuItem::DynamicItem { label, .. } => {
+                        Some(label.chars().count() + hint_chars)
+                    }
+                    ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
+                    ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
+                    ContextMenuItem::NewTabShell { label, .. } => {
+                        Some(label.chars().count() + hint_chars)
+                    }
+                    ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
+                    ContextMenuItem::Info { label } => Some(label.chars().count()),
+                    // Cycle 684: submenu rows show "label ▸" so the
+                    // max-width budget needs +2 for the suffix.
+                    ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
+                    // Cycle 685/686: Theme/Profile choices surface only inside an
+                    // open flyout; the parent menu's width budget shouldn't grow.
+                    ContextMenuItem::ThemeChoice { .. } => None,
+                    ContextMenuItem::ProfileChoice { .. } => None,
+                    _ => None,
+                }
             })
             .max()
             .unwrap_or(0) as f32;
@@ -5311,33 +5341,136 @@ impl App {
         }
     }
 
-    /// Cycle 805: open the new-tab `▾` shell-chooser dropdown at `(px, py)`.
-    /// Auto-detects available shells; if none are detected (shouldn't happen —
-    /// `detect_shells` always returns ≥1), falls back to opening a default tab
-    /// so the click is never a dead no-op.
-    fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
-        self.close_all_modals(ws);
-        // Cycle 834 (audit): cache the detection — it can spawn `wsl.exe` (now
-        // bounded by a timeout in `list_wsl_distros`), so don't re-run it on
-        // every dropdown open.
-        let shells = self
-            .detected_shells
-            .get_or_insert_with(kettle_core::term::detect_shells)
-            .clone();
-        if shells.is_empty() {
-            let area = self.area(ws);
-            let (cols, rows) = self.grid_of(ws, area);
-            let (cw, ch) = self.cell_px(ws);
-            match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
-                Ok(()) => self.fire_tab_add_event(ws),
-                Err(e) => log::warn!("could not open a new tab (▾ fallback): {e}"),
-            }
-            return;
-        }
-        let items = shells
-            .into_iter()
+    /// Dropdown-parity cycle: the renderer's FRACTIONAL cell metrics, for
+    /// menu geometry. `cell_px` rounds to integers for the PTY grid; the
+    /// renderer positions menu rows with the f32 metrics, and using the
+    /// rounded value here under-measured the panel by ~0.5px per row —
+    /// enough, once the dropdown grew to 9 rows, to clip the last row and
+    /// draw a phantom "more rows" scroll marker.
+    fn menu_cell(&self, ws: &WindowState) -> (f32, f32) {
+        ws.renderer
+            .as_ref()
+            .map(|r| (r.cell_w, r.cell_h))
+            .unwrap_or((8.0, 16.0))
+    }
+
+    /// Dropdown-parity cycle: per-row shortcut hints for a menu, from the
+    /// LIVE keybind map (a user rebind shows their actual chord). `Item` /
+    /// `DynamicItem` rows look up their own Action; the Nth `NewTabShell`
+    /// row maps to `Action::NewTabShell(N)` (the Ctrl+Shift+N family).
+    /// Everything else gets no hint. Empty string = none.
+    fn menu_item_hints(&self, items: &[ContextMenuItem]) -> Vec<String> {
+        let mut shell_ordinal: u8 = 0;
+        items
+            .iter()
+            .map(|it| match it {
+                ContextMenuItem::Item { action, .. }
+                | ContextMenuItem::DynamicItem { action, .. } => {
+                    kettle_config::keybinds::hint_label(&self.cfg.keybinds, action)
+                        .unwrap_or_default()
+                }
+                ContextMenuItem::NewTabShell { .. } => {
+                    let h = if shell_ordinal < 9 {
+                        kettle_config::keybinds::hint_label(
+                            &self.cfg.keybinds,
+                            &Action::NewTabShell(shell_ordinal),
+                        )
+                        .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    shell_ordinal = shell_ordinal.saturating_add(1);
+                    h
+                }
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    /// Dropdown-parity cycle: the new-tab `▾` dropdown's rows — the detected
+    /// shells, then Windows Terminal's bottom section (Settings / Command
+    /// palette / About) behind a separator. Pure over the shell list so the
+    /// menu shape is unit-testable.
+    fn new_tab_menu_items(shells: &[kettle_core::term::ShellChoice]) -> Vec<ContextMenuItem> {
+        let mut items: Vec<ContextMenuItem> = shells
+            .iter()
+            .cloned()
             .map(|(label, argv)| ContextMenuItem::NewTabShell { label, argv })
             .collect();
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Item {
+            label: "Settings…",
+            action: Action::OpenSettings,
+            enabled: true,
+        });
+        items.push(ContextMenuItem::Item {
+            label: "Command palette",
+            action: Action::CommandPalette,
+            enabled: true,
+        });
+        items.push(ContextMenuItem::Item {
+            label: "About kettle",
+            action: Action::About,
+            enabled: true,
+        });
+        items
+    }
+
+    /// Dropdown-parity cycle: the About panel — version + git hash, update
+    /// status, and link rows, reusing the context-menu machinery (Info rows
+    /// render dimmed and are not clickable; UrlItem rows copy/open).
+    fn open_about_panel(&mut self, ws: &mut WindowState) {
+        self.close_all_modals(ws);
+        let v = &self.version_line;
+        let mut items = vec![
+            ContextMenuItem::Info {
+                label: format!("kettle {v}"),
+            },
+            match &self.update_available {
+                Some((tag, _)) => ContextMenuItem::Info {
+                    label: format!("Update available: {tag}"),
+                },
+                None => ContextMenuItem::Info {
+                    label: "Up to date".to_string(),
+                },
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::UrlItem {
+                label: "Copy version info",
+                url: format!("kettle {v}"),
+                copy: true,
+            },
+            ContextMenuItem::UrlItem {
+                label: "Open GitHub page",
+                url: "https://github.com/Reddimus/kettle".to_string(),
+                copy: false,
+            },
+        ];
+        if let Some((_, url)) = &self.update_available {
+            items.push(ContextMenuItem::UrlItem {
+                label: "Open release page",
+                url: url.clone(),
+                copy: false,
+            });
+        }
+        let (sw, sh) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
+    }
+
+    /// Cycle 805 / dropdown-parity cycle: open the new-tab `▾` dropdown at
+    /// `(px, py)` — detected shells (process-cached in kettle-core, prewarmed
+    /// at startup) plus the Settings / Command palette / About bottom rows.
+    fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
+        self.close_all_modals(ws);
+        let shells = kettle_core::term::detect_shells();
+        let items = Self::new_tab_menu_items(&shells);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -5373,8 +5506,8 @@ impl App {
         let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
             return;
         };
-        let (_, ch) = self.cell_px(ws);
-        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -5411,8 +5544,8 @@ impl App {
         let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
             return;
         };
-        let (_, ch) = self.cell_px(ws);
-        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -5460,8 +5593,8 @@ impl App {
         if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
             return None;
         }
-        let (_, ch) = self.cell_px(ws);
-        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: row-walk starts at scroll_offset; only the
         // visible slice is hit-tested. Off-by-one is handled by
@@ -5630,8 +5763,8 @@ impl App {
         if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
             return None;
         }
-        let (_, ch) = self.cell_px(ws);
-        let row_h = ch as f32 + kettle_render::menu::ROW_PAD;
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         // Cycle 714: skip the scrolled-off rows above scroll_offset
         // before walking. `row_y` starts at the panel top; iteration
@@ -5649,7 +5782,8 @@ impl App {
                 | ContextMenuItem::ThemeChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
-                | ContextMenuItem::UrlItem { .. } => row_h,
+                | ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Info { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
                 // Cycle 890: shared mapper — the same row→click table the
@@ -5667,8 +5801,7 @@ impl App {
     /// re-derive the layout. `None` when the menu isn't open.
     fn context_menu_geometry(&self, ws: &WindowState) -> Option<((f32, f32), (f32, f32))> {
         let menu = ws.context_menu.as_ref()?;
-        let (cw, ch) = self.cell_px(ws);
-        let (cw, ch) = (cw as f32, ch as f32);
+        let (cw, ch) = self.menu_cell(ws);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         // Natural height: sum every row + separator.
@@ -5695,20 +5828,37 @@ impl App {
             .unwrap_or((800.0, 600.0));
         let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING).max(row_h);
         let panel_h = natural_h.min(max_h);
+        // Dropdown-parity cycle: include the right-aligned hint budget —
+        // kept in lockstep with `show_context_menu` and the renderer's
+        // `menu_row_chars`.
+        let hints = self.menu_item_hints(&menu.items);
         let max_chars = menu
             .items
             .iter()
-            .filter_map(|it| match it {
-                ContextMenuItem::Item { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::DynamicItem { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
-                ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
-                // Cycle 805: count shell-dropdown labels so this hit-test width
-                // matches the panel `show_context_menu` actually rendered.
-                ContextMenuItem::NewTabShell { label, .. } => Some(label.chars().count()),
-                // Cycle 941: same for the URL-aware leading rows.
-                ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
-                _ => None,
+            .zip(hints.iter())
+            .filter_map(|(it, hint)| {
+                let hint_chars = if hint.is_empty() {
+                    0
+                } else {
+                    hint.chars().count() + 2
+                };
+                match it {
+                    ContextMenuItem::Item { label, .. } => Some(label.chars().count() + hint_chars),
+                    ContextMenuItem::DynamicItem { label, .. } => {
+                        Some(label.chars().count() + hint_chars)
+                    }
+                    ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
+                    ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
+                    // Cycle 805: count shell-dropdown labels so this hit-test width
+                    // matches the panel `show_context_menu` actually rendered.
+                    ContextMenuItem::NewTabShell { label, .. } => {
+                        Some(label.chars().count() + hint_chars)
+                    }
+                    // Cycle 941: same for the URL-aware leading rows.
+                    ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
+                    ContextMenuItem::Info { label } => Some(label.chars().count()),
+                    _ => None,
+                }
             })
             .max()
             .unwrap_or(0) as f32;
@@ -5721,34 +5871,43 @@ impl App {
     /// actions so the renderer stays Action-agnostic.
     fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
         let menu = ws.context_menu.as_ref()?;
+        // Dropdown-parity cycle: per-row shortcut hints from the LIVE keybind
+        // map (computed per frame; the map only changes on reload).
+        let hints = self.menu_item_hints(&menu.items);
         let rows = menu
             .items
             .iter()
-            .map(|it| match it {
+            .zip(hints)
+            .map(|(it, hint)| match it {
                 ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
                     label: (*label).to_string(),
                     separator: false,
                     enabled: *enabled,
+                    hint,
                 },
                 ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: *enabled,
+                    hint,
                 },
                 ContextMenuItem::Separator => ContextMenuRow {
                     label: String::new(),
                     separator: true,
                     enabled: false,
+                    hint: String::new(),
                 },
                 ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
                     // Cycle 684: append "▸" to signal "this row
@@ -5758,6 +5917,7 @@ impl App {
                     label: format!("{label} ▸"),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 // Cycle 687 (theme-submenu sub-cycle 3 drill-in):
                 // ThemeChoice and ProfileChoice ARE rendered when
@@ -5772,17 +5932,20 @@ impl App {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 ContextMenuItem::ProfileChoice { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
                 },
                 // Cycle 805: new-tab ▾ shell choice — a normal clickable row.
                 ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
+                    hint,
                 },
                 // Cycle 941: URL-aware leading rows ("Open Link" /
                 // "Copy Link Address") — normal clickable rows.
@@ -5790,6 +5953,15 @@ impl App {
                     label: (*label).to_string(),
                     separator: false,
                     enabled: true,
+                    hint: String::new(),
+                },
+                // Dropdown-parity cycle: Info renders as a dimmed
+                // (disabled-style) static line.
+                ContextMenuItem::Info { label } => ContextMenuRow {
+                    label: label.clone(),
+                    separator: false,
+                    enabled: false,
+                    hint: String::new(),
                 },
             })
             .collect();
@@ -6798,6 +6970,18 @@ impl App {
             Action::MoveTabRight => {
                 ws.mux.move_active_tab(1);
             }
+            Action::NewTabShell(n) => {
+                // Dropdown-parity cycle: Ctrl+Shift+N opens the Nth dropdown
+                // entry (Windows Terminal's profile shortcuts). The list is
+                // process-cached + prewarmed; out-of-range is a silent no-op,
+                // same as GotoTab clamping.
+                let shells = kettle_core::term::detect_shells();
+                if let Some((_, argv)) = shells.get(n as usize) {
+                    let argv = argv.clone();
+                    self.open_tab_with_argv(ws, &argv);
+                }
+            }
+            Action::About => self.open_about_panel(ws),
             Action::GotoTab(n) => {
                 let i = n as usize;
                 if i < ws.mux.tabs.len() {
@@ -10190,6 +10374,10 @@ impl App {
         if self.cfg.update_check {
             crate::update_check::maybe_spawn_check(self.proxy.clone(), env!("CARGO_PKG_VERSION"));
         }
+        // Dropdown-parity cycle: warm the shell-detection cache (wsl.exe /
+        // vswhere probes, bounded ~2s each) off the UI thread so the first
+        // dropdown open / Ctrl+Shift+N press doesn't pay it.
+        kettle_core::term::prewarm_shell_detection();
     }
 
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
@@ -12031,6 +12219,74 @@ mod tests {
             head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
             "the Resized handler must early-return on a 0-dimension size"
         );
+    }
+
+    /// Dropdown-parity cycle: the `▾` menu is shells → separator → Windows
+    /// Terminal's bottom section (Settings / Command palette / About).
+    #[test]
+    fn new_tab_menu_items_has_wt_bottom_rows() {
+        let shells = vec![
+            ("PowerShell".to_string(), vec!["pwsh.exe".to_string()]),
+            ("Git Bash".to_string(), vec!["bash.exe".to_string()]),
+        ];
+        let items = App::new_tab_menu_items(&shells);
+        assert_eq!(items.len(), 6, "2 shells + separator + 3 bottom rows");
+        assert!(matches!(
+            &items[0],
+            ContextMenuItem::NewTabShell { label, .. } if label == "PowerShell"
+        ));
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert!(matches!(
+            items[3],
+            ContextMenuItem::Item {
+                label: "Settings…",
+                action: Action::OpenSettings,
+                enabled: true
+            }
+        ));
+        assert!(matches!(
+            items[4],
+            ContextMenuItem::Item {
+                label: "Command palette",
+                action: Action::CommandPalette,
+                enabled: true
+            }
+        ));
+        assert!(matches!(
+            items[5],
+            ContextMenuItem::Item {
+                label: "About kettle",
+                action: Action::About,
+                enabled: true
+            }
+        ));
+        // Every dispatchable row gets a distinct mnemonic; the two-pass
+        // assignment (cycle 942) must keep working with the new bottom rows.
+        let mn = assign_mnemonics(&items);
+        let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
+        assert_eq!(letters.len(), 5, "all 5 dispatchable rows get mnemonics");
+        letters.sort_unstable();
+        letters.dedup();
+        assert_eq!(letters.len(), 5, "mnemonics are distinct");
+    }
+
+    /// Dropdown-parity cycle: an `Info` row (About panel) is inert — not
+    /// dispatchable, no click mapping, survives filter_disabled.
+    #[test]
+    fn info_rows_are_inert_but_visible() {
+        let info = ContextMenuItem::Info {
+            label: "kettle 9.9.9".to_string(),
+        };
+        assert!(!super::item_is_dispatchable(&info));
+        assert!(super::item_to_click(&info, 0).is_none());
+        let kept = filter_disabled(vec![
+            ContextMenuItem::Info {
+                label: "x".to_string(),
+            },
+            ContextMenuItem::Separator,
+            item("Copy version info", true),
+        ]);
+        assert_eq!(kept.len(), 3, "Info + separator + item all survive");
     }
 
     /// PERF (key-repeat stutter fix) drift guard: output inside the typing

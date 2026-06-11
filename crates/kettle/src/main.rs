@@ -982,6 +982,10 @@ fn main() -> anyhow::Result<()> {
             println!("{name}");
         }
         println!("goto_tab:N    (parametric; N is 1-based, 1..=255)");
+        println!(
+            "new_tab_shell_N    (parametric; N is 1-based — opens the Nth new-tab \
+         dropdown entry, Ctrl+Shift+1..9 by default)"
+        );
         println!("unbind        (sentinel; removes the default — also: none, null, false, empty)");
         return Ok(());
     }
@@ -1401,6 +1405,9 @@ fn main() -> anyhow::Result<()> {
     }
     kettle_ui::run_with(kettle_ui::Options {
         command: (!cli.exec.is_empty()).then_some(cli.exec),
+        // Dropdown-parity cycle: the About panel shows exactly what
+        // `--version` prints (crate version + git hash).
+        version: Some(KETTLE_VERSION.to_string()),
         cwd: cli.working_directory,
         config: config_path,
         layout: cli.layout,
