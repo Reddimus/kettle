@@ -67,6 +67,77 @@ impl CtlStream {
             CtlStream::Windows(f) => Ok(CtlStream::Windows(f.try_clone()?)),
         }
     }
+
+    /// v2.20.0 (review fix): has the peer hung up? Non-destructive and
+    /// non-blocking (a zero-byte peek). Lets `wait_for`'s poll loop notice a
+    /// vanished client instead of pinning one of the MAX_CONNECTIONS slots —
+    /// and hammering the UI thread with probes — for up to the full timeout.
+    /// This does NOT violate the one-thread sequential read→write rule: the
+    /// caller IS the connection thread, with no other I/O outstanding on the
+    /// handle. Errs toward "alive" on anything ambiguous (a false `dead`
+    /// would cut short a legitimate wait).
+    pub fn peer_disconnected(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            CtlStream::Unix(s) => {
+                use std::os::unix::io::AsRawFd;
+                let mut probe = [0u8; 1];
+                // recv with MSG_PEEK|MSG_DONTWAIT (UnixStream::peek is still
+                // unstable on the MSRV): 0 = orderly EOF (dead); >0 = request
+                // bytes pending (alive); EWOULDBLOCK/EINTR = idle (alive);
+                // anything else = reset (dead). Never consumes, never blocks.
+                // SAFETY: the fd is valid for the stream's lifetime; the
+                // buffer outlives the call.
+                let n = unsafe {
+                    libc::recv(
+                        s.as_raw_fd(),
+                        probe.as_mut_ptr() as *mut libc::c_void,
+                        1,
+                        libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                    )
+                };
+                match n {
+                    0 => true,
+                    n if n > 0 => false,
+                    _ => {
+                        let e = io::Error::last_os_error();
+                        !matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        )
+                    }
+                }
+            }
+            #[cfg(windows)]
+            CtlStream::Windows(f) => {
+                use std::os::windows::io::AsRawHandle;
+                let mut avail: u32 = 0;
+                // SAFETY: a valid pipe handle we own; a null buffer with zero
+                // length is the documented query-only form of PeekNamedPipe.
+                let ok = unsafe {
+                    windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                        f.as_raw_handle() as _,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut avail,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok != 0 {
+                    return false;
+                }
+                // Only definitive hangup codes count as dead.
+                const ERROR_BROKEN_PIPE: u32 = 109;
+                const ERROR_PIPE_NOT_CONNECTED: u32 = 233;
+                const ERROR_INVALID_HANDLE: u32 = 6;
+                matches!(
+                    unsafe { windows_sys::Win32::Foundation::GetLastError() },
+                    ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | ERROR_INVALID_HANDLE
+                )
+            }
+        }
+    }
 }
 
 // ===================== Unix =====================

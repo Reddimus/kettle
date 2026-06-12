@@ -187,6 +187,10 @@ pub enum Action {
     ResizeDown,
     ResizeLeft,
     ResizeRight,
+    /// v2.20.0 (Ghostty `equalize_splits` / Terminator parity): rebalance
+    /// every split in the focused tab so each leaf pane gets equal area —
+    /// each split node's ratio becomes `leaves(a) / (leaves(a)+leaves(b))`.
+    EqualizeSplits,
     ToggleZoom,
     /// Cycle 695 Terminator parity (`key_help`).
     /// Terminator's F1 opens its HTML manual via `open_url`
@@ -551,6 +555,8 @@ pub fn action_names() -> Vec<&'static str> {
         "resize_down",
         "resize_left",
         "resize_right",
+        "equalize_splits",
+        "balance_splits",
         "toggle_split_zoom",
         "toggle_zoom",
         "scaled_zoom",
@@ -780,6 +786,9 @@ impl Action {
             "resize_down" => ResizeDown,
             "resize_left" => ResizeLeft,
             "resize_right" => ResizeRight,
+            "equalize_splits" | "equalize-splits" | "balance_splits" | "balance-splits" => {
+                EqualizeSplits
+            }
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,

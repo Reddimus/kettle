@@ -22,3 +22,21 @@ flate2 = "1.1.9"
 # none of which kettle's inline-image path ever decodes. Cuts ~3 MB
 # off the release binary.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
+# v2.20.0 P3 (perf): SIMD scan for the next ESC / ST / BEL so the extractor
+# bulk-copies plain runs instead of walking the PTY stream byte-by-byte.
+# Already in the dependency tree via `vte` — this adds no new build cost.
+memchr = "2.7"
+# v2.20.0 (review fix): the OSC 7 hostname validation needs the REAL machine
+# name — env vars alone fail open on Linux/macOS (interactive bash does not
+# export HOSTNAME). Tiny wrapper over gethostname(2) / GetComputerNameExW.
+gethostname = "1"
+
+[dev-dependencies]
+# v2.20.0 P3: first criterion benches in the repo (`benches/extract.rs` —
+# plain-text flood, SGR-heavy, OSC-spam). Slim feature set: no rayon, no
+# plotters/HTML reports — CI and the gauntlet only need `cargo bench` to run.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "extract"
+harness = false

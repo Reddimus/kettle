@@ -29,7 +29,15 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// v2.20.0 P5 (perf): how often buffered events are flushed to disk. Events
+/// between flushes sit in the `BufWriter` (which also self-flushes whenever
+/// its 8KiB buffer fills, so a flood can't grow the loss window); a hard
+/// crash loses at most this much trailing trace. `finish` / `Drop` still
+/// flush, so every clean close path produces a complete, replayable file —
+/// the cycle-908 closure verification is unaffected.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// An append-only asciicast writer. One per recording session.
 pub struct Recorder {
@@ -45,6 +53,14 @@ pub struct Recorder {
     /// the next `record_output` chunk, so a codepoint split across two PTY reads
     /// is decoded whole instead of being mangled into U+FFFD on each side.
     utf8_carry: Vec<u8>,
+    /// v2.20.0 P5: when the buffer was last explicitly flushed (see
+    /// [`FLUSH_INTERVAL`]).
+    last_flush: Instant,
+    /// v2.20.0 (review fix): lines written since the last flush. Without
+    /// this, a burst followed by silence left the tail buffered FOREVER
+    /// (the interval flush is event-driven) — `flush_if_stale` lets the
+    /// app's timer loop bound staleness to ~FLUSH_INTERVAL in wall time.
+    dirty: bool,
 }
 
 impl Recorder {
@@ -62,6 +78,8 @@ impl Recorder {
             disabled: false,
             raw_input,
             utf8_carry: Vec::new(),
+            last_flush: Instant::now(),
+            dirty: false,
         })
     }
 
@@ -76,14 +94,50 @@ impl Recorder {
         }
         let secs = self.start.elapsed().as_secs_f64();
         let line = event_line(secs, code, data);
-        // Flush each event so a crash mid-session still leaves a usable trace.
-        if writeln!(self.writer, "{line}")
-            .and_then(|()| self.writer.flush())
-            .is_err()
-        {
+        // v2.20.0 P5: flush on a ~250ms interval instead of per event. The
+        // old per-event flush put a write syscall on the UI thread for every
+        // PTY read under flood — and the installed dev-record build records
+        // EVERY session. Crash exposure is bounded by FLUSH_INTERVAL;
+        // `finish`/`Drop` keep the clean-close trace complete.
+        let flush_due = self.last_flush.elapsed() >= FLUSH_INTERVAL;
+        let result = writeln!(self.writer, "{line}").and_then(|()| {
+            if flush_due {
+                self.last_flush = Instant::now();
+                self.dirty = false;
+                self.writer.flush()
+            } else {
+                self.dirty = true;
+                Ok(())
+            }
+        });
+        if result.is_err() {
             log::warn!("record: write failed; disabling the recorder");
             self.disabled = true;
         }
+    }
+
+    /// v2.20.0 (review fix): flush buffered events if any have been sitting
+    /// unflushed past `FLUSH_INTERVAL` (250ms). The interval flush in `emit` is
+    /// EVENT-driven — a burst followed by silence would otherwise leave its
+    /// tail buffered until the next event or a clean close. The app's timer
+    /// loop calls this (see `flush_deadline`) to bound the staleness in
+    /// wall-clock time.
+    pub fn flush_if_stale(&mut self) {
+        if self.disabled || !self.dirty || self.last_flush.elapsed() < FLUSH_INTERVAL {
+            return;
+        }
+        self.last_flush = Instant::now();
+        self.dirty = false;
+        if self.writer.flush().is_err() {
+            log::warn!("record: flush failed; disabling the recorder");
+            self.disabled = true;
+        }
+    }
+
+    /// When `flush_if_stale` next needs to run, or `None` when nothing is
+    /// buffered. Lets the caller schedule a precise wake instead of polling.
+    pub fn flush_deadline(&self) -> Option<Instant> {
+        (!self.disabled && self.dirty).then(|| self.last_flush + FLUSH_INTERVAL)
     }
 
     /// Record a chunk of terminal OUTPUT (`o`). A multibyte codepoint split
@@ -171,6 +225,7 @@ impl Recorder {
             self.utf8_carry.clear();
             self.emit("o", &tail);
         }
+        self.dirty = false;
         let _ = self.writer.flush();
     }
 }

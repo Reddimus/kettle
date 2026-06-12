@@ -80,6 +80,44 @@ pub fn tool_specs() -> Vec<Value> {
                 "required": ["command"]
             }
         }),
+        json!({
+            "name": "kettle_send_keys",
+            "description": "Press named keys / chords in a kettle pane — the way to drive \
+                INTERACTIVE programs (vim, htop, fzf, tmux). Each token is one key: a name \
+                (escape, enter, tab, backspace, delete, insert, space, up/down/left/right, \
+                home/end, pageup/pagedown, f1–f12, plus/comma/minus/equal for the literal \
+                characters), a chord (ctrl+c, alt+enter, shift+tab), or a single character \
+                ('G' sends shift-g; multi-character text belongs in kettle_send_text). Keys \
+                encode through the same path as real keystrokes, honoring the app's terminal \
+                modes. Requires the agent server in `full` mode. Example: [\"escape\", \":\", \
+                \"w\", \"q\", \"enter\"] saves and quits vim.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane": {"type": "integer", "description": "pane id (default: focused)"},
+                    "keys": {"type": "array", "items": {"type": "string"}, "description": "key tokens, pressed in order"}
+                },
+                "required": ["keys"]
+            }
+        }),
+        json!({
+            "name": "kettle_wait_for",
+            "description": "Wait until a kettle pane's screen matches a condition — replaces \
+                sleep-and-pray when driving interactive apps. Conditions (AND when combined): \
+                'text' (substring appears), 'regex' (pattern matches the screen), 'quiet_ms' \
+                (screen unchanged for N ms — output settled). Returns {matched, elapsed_ms}; a \
+                timeout returns matched=false rather than an error. Works in read-only mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane": {"type": "integer", "description": "pane id (default: focused)"},
+                    "text": {"type": "string", "description": "substring that must appear on screen"},
+                    "regex": {"type": "string", "description": "regex the screen text must match"},
+                    "quiet_ms": {"type": "integer", "description": "require the screen unchanged for N ms"},
+                    "timeout_ms": {"type": "integer", "description": "overall deadline (default 30000, max 300000)"}
+                }
+            }
+        }),
     ]
 }
 
@@ -130,6 +168,35 @@ pub fn call_tool(params: &Value) -> Value {
                 p.insert("timeout_s".into(), t.clone());
             }
             ctl_call("run_command", Value::Object(p))
+        }
+        // v2.20.0 (agent plane).
+        "kettle_send_keys" => {
+            let Some(keys) = args.get("keys").and_then(|k| k.as_array()) else {
+                return error_result("kettle_send_keys requires a 'keys' string array");
+            };
+            if keys.is_empty() {
+                return error_result("kettle_send_keys 'keys' must be non-empty");
+            }
+            let mut p = serde_json::Map::new();
+            p.insert("keys".into(), Value::Array(keys.clone()));
+            if let Some(pane) = args.get("pane") {
+                p.insert("pane".into(), pane.clone());
+            }
+            ctl_call("send_keys", Value::Object(p))
+        }
+        "kettle_wait_for" => {
+            let mut p = serde_json::Map::new();
+            for k in ["pane", "text", "regex", "quiet_ms", "timeout_ms"] {
+                if let Some(v) = args.get(k) {
+                    p.insert(k.into(), v.clone());
+                }
+            }
+            if !p.contains_key("text") && !p.contains_key("regex") && !p.contains_key("quiet_ms") {
+                return error_result(
+                    "kettle_wait_for needs at least one of 'text', 'regex', 'quiet_ms'",
+                );
+            }
+            ctl_call("wait_for", Value::Object(p))
         }
         other => error_result(&format!("unknown tool '{other}'")),
     }
@@ -225,7 +292,7 @@ mod tests {
     #[test]
     fn tool_specs_have_required_shape() {
         let specs = tool_specs();
-        assert!(specs.len() >= 5);
+        assert!(specs.len() >= 7, "v2.20.0 added send_keys + wait_for");
         for s in &specs {
             assert!(s["name"].is_string(), "tool missing name: {s}");
             assert!(s["description"].is_string(), "tool missing description");
@@ -255,6 +322,29 @@ mod tests {
     fn kettle_run_rejects_empty_command() {
         let r = call_tool(&json!({"name": "kettle_run", "arguments": {"command": []}}));
         assert_eq!(r["isError"], true);
+    }
+
+    /// v2.20.0: the new agent-plane tools validate their arguments BEFORE
+    /// touching the control client, so a malformed call gets a crisp message
+    /// even with no server running.
+    #[test]
+    fn send_keys_and_wait_for_validate_args_first() {
+        let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {}}));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("keys"));
+
+        let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {"keys": []}}));
+        assert_eq!(r["isError"], true);
+
+        let r = call_tool(&json!({"name": "kettle_wait_for", "arguments": {"timeout_ms": 5}}));
+        assert_eq!(r["isError"], true);
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("at least one of"),
+            "wait_for must demand a condition"
+        );
     }
 
     #[test]

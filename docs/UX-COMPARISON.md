@@ -317,3 +317,285 @@ Xvfb :97 -screen 0 1000x650x24 & DISPLAY=:97 \
   xterm -e bash -c 'ls --color=always; sleep 6' &
 DISPLAY=:97 import -window root docs/images/refs/xterm.png
 ```
+
+## v2.20.0 Terminator + Ghostty deep-dive — integration matrix
+
+An 11-agent source-level analysis walked the **full Terminator
+(`terminatorlib/`) and Ghostty (`src/`) trees** against kettle's codebase:
+130 features inventoried with value/effort scoring, and the 42
+highest-relevance claims **adversarially cross-checked against kettle source
+with file:line evidence** (the cross-check corrected 11 inventory statuses —
+see the note at the end). Verdicts below; the six "now" picks that fit the
+v2.20.0 decision gate shipped, the rest are tracked.
+
+### Shipped in v2.20.0
+
+| Feature | Source | What it is | Value · Effort |
+|---|---|---|---|
+| Resize overlay | Ghostty `resize-overlay` | Transient `cols×rows` popup during live resize (`always\|never\|after-first` mode key only; `-position`/`-duration` not adopted — chip centered, 750 ms fixed) | high · S |
+| OSC 7 cwd emission in kettle's own shell-integration snippets (incl. PowerShell) | Ghostty shell-integration | Every prompt reports cwd, activating the cwd-inherit pipeline (new tab/split in same dir) kettle had already built | high · S |
+| `kitty-shell-cwd://` OSC 7 scheme + hostname validation | Ghostty | Accept kitty's verbatim-path OSC 7 flavor and reject reports from non-local hostnames (ssh safety) | high · S |
+| Prompt-aware close confirmation | Ghostty `confirm-close-surface` | Ask before closing a pane/window with a command running — skip silently when idle at a prompt (OSC 133 prompt state) | high · M |
+| Regex capture-group substitution in `trigger = REGEX :: cmd` | Terminator `run_cmd_on_match` parity completion | `{n}` tokens (`{0}` = whole match) substitute match groups per argv element — open-file-at-line style automation, command stays data not shell | high · S |
+| `equalize_splits` action | Ghostty / Terminator | One action rebalances every split in the tab to equal ratios | low · S |
+
+### Next-cycle headliners (tracked)
+
+- **Kitty keyboard protocol (CSI-u progressive enhancement)** — the single
+  biggest TUI-compat unlock left: Neovim, fish 4.x, helix, kakoune, zellij
+  and crossterm-based TUIs all negotiate it and silently fall back today.
+  The engine flag already exists; the work is a CSI-u encoder honoring the
+  TermMode bits (M effort). Deliberately **not** landed alongside this
+  release's render refactors.
+- **Terminal-reply layer cluster** — XTGETTCAP, DECRQSS, structured DA1
+  advertisement (sixel=4, clipboard=52), kitty graphics `a=q` query replies:
+  one shared pre-engine plumbing effort in `kettle-vt` (the `extract.rs`
+  interception seam) over the existing `PtyWrite` reply channel. Four
+  features, roughly one plumbing pass.
+- **Clipboard paste-protection bundle** — confirm pastes with embedded
+  newlines (copy-paste command injection), bracketed pastes safe by default;
+  packaged with the existing OSC 52 deny-read posture as a coherent
+  "kettle clipboard protections" story.
+- **System light/dark theme following** — `theme = light:X,dark:Y`
+  semantics via winit `ThemeChanged`; every other piece (theme pair keys,
+  live swap, reload) already exists.
+- **Native global hotkey** — `global:`-prefix keybinds, `RegisterHotKey` on
+  Windows first. Ghostty has no Windows port at all — kettle can leapfrog
+  upstream on its primary platform.
+- **Row-level damage tracking + persistent GPU cell buffers** — the natural
+  successor to v2.20.0's per-line shaping cache: persist last frame's quads
+  per row, splice only dirty rows.
+- **Byte-budget scrollback** — `scrollback-limit` in bytes (Ghostty defaults
+  10MB, lazily allocated): a deterministic worst-case memory bound vs
+  kettle's line-count key.
+
+### Full matrix — all 130 features
+
+Status: ✅ have · 🟡 partial · ⛔ missing · ❔ unverified. Statuses reflect
+the adversarial cross-check where one exists (11 rows differ from the raw
+inventory). Two features were independently inventoried twice by different
+area agents (resize overlay; prompt-aware close confirm) — duplicate rows
+are marked, so the 6 shipped features occupy 8 "now" rows.
+
+#### Verdict: now — 39 rows (6 features shipped; the rest capped by the v2.20.0 decision gate)
+
+| Feature | Source | kettle | Value | Effort | Verdict | Rationale |
+|---|---|---|---|---|---|---|
+| System-appearance theme following (`theme = light:X,dark:Y`) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | All theme-swap machinery exists; only winit `ThemeChanged` wiring is missing — schedule mode is a workaround for this. |
+| `clipboard-paste-protection` + `clipboard-paste-bracketed-safe` | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Confirm-dialog primitive and centralized paste path exist; matches kettle's OSC 52 security stance. |
+| `confirm-close-surface` (prompt-aware close confirmation) | Ghostty | 🟡 | high | M | ✅ shipped v2.20.0 | Data-loss guard every mainstream terminal has; kettle already had the confirm dialog and OSC 133 prompt state. |
+| `window-width`/`window-height` (grid cells) + position | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Common ask; session restore already does monitor-clamped placement, so the hard parts are written. |
+| `env` (repeatable KEY=VALUE injection) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Trivial next to the existing term/colorterm export site; frequently wanted (EDITOR, LANG overrides). |
+| `resize-overlay` (+ `-position`, `-duration`) | Ghostty | ⛔ | medium | S | ✅ shipped v2.20.0 (mode key only; `-position`/`-duration` not adopted — chip centered, 750 ms fixed) | Isolated render feature on existing overlay machinery; pairs with `geometry-hinting`. |
+| Custom theme files + user theme directory | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A theme file is a constrained reuse of the existing key=value parser; unlocks the iTerm2/Gogh ecosystem. |
+| `command-palette-entry` (user-defined palette commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Palette and parsed action grammar both exist; mirrors `menu-item`, compounds with the agent server. |
+| Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ | high | M | → backlog (capped by the v2.20.0 decision gate) | Biggest TUI-compat unlock (Neovim/fish/helix); engine flag exists, needs a CSI-u encoder honoring TermMode bits. |
+| Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
+| XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
+| DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | kettle ships a 426-line sixel decoder DA1 probers cannot discover; cheap truth-in-advertising fix. |
+| Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A few lines in the extractor; the notification dispatcher exists. Unlocks ntfy-style long-build alerts. |
+| Hardened shell-integration scripts (robust OSC 133 marking) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Pure script work improving shipped jump-to-prompt; re-implement from spec — Ghostty's scripts are GPLv3. |
+| OSC 7 cwd emission in kettle snippets (incl. PowerShell) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | One emission per prompt activates the cwd-inherit pipeline kettle already built; best cost/value in the inventory. |
+| OSC 7 `kitty-shell-cwd://` scheme + hostname validation | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | Interop bug-fix: docs already claimed kitty integration is picked up — untrue for this scheme until now. |
+| Prompt-aware close confirmation (skip when idle at prompt) | Ghostty | ⛔ | medium | S | ✅ shipped v2.20.0 (dup of the `confirm-close-surface` row) | The signal already exists in term.rs; a small command-running predicate, big perceived polish. |
+| `KETTLE_SHELL_FEATURES` env contract | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Cheap contract making snippet features config-controllable; crosses WSL via the existing WSLENV handling. |
+| Title reporting from shell (cwd at prompt, command while running) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Script-only, feature-gated; the tab strip shows live command names. |
+| Cursor shape at prompt (bar at prompt, reset for commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Script-only DECSCUSR emission; the engine already renders the shapes. |
+| Resize overlay (transient cols×rows popup) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 (dup of the `resize-overlay` row) | Same feature inventoried by the UX-area agent, which scored it high. |
+| File-path linkification (URL-detection regex parity) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | kettle owns both the path regex and the link-open pipeline; this wires them together. Ghostty's url.zig test corpus is liftable. |
+| System dark/light appearance following | Ghostty | 🟡 | high | S | → backlog (capped by the v2.20.0 decision gate) | Duplicate of the theme-following row; the current `system` alias spelling implies it works today. |
+| Native global hotkey (`global:` keybinds) for quake mode | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Removes quake-mode's biggest friction; Windows-first RegisterHotKey — Ghostty has no Windows port to copy. |
+| Link previews (hover destination strip) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Anti-spoofing win for OSC 8; a status-strip preview gets most of the value cheaply. |
+| User theme directory (custom theme files) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Duplicate of the theme-files row; user-over-bundled precedence is hours of loader work. |
+| `equalize_splits` action | Ghostty | ⛔ | low | S | ✅ shipped v2.20.0 | Walk the split tree, reset ratios, one resize; rounds out split parity nearly free. |
+| Row-level damage tracking + persistent GPU cell buffers | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Natural successor to the new per-line content keys: persist quads per row, splice only dirty rows. |
+| Distinct curly/dotted/dashed underline rendering | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Neovim/helix squiggles are currently indistinguishable from plain underline; render-side only, flags already plumbed. |
+| Font-metric modifier knobs (`adjust-cell-width/height`, underline pos/thickness) | Ghostty | 🟡 | medium | S | → backlog (capped by the v2.20.0 decision gate) | Pure arithmetic at existing quad call sites; underline thickness should scale with font size anyway. |
+| Minimum-contrast exemption for box/powerline glyphs | Ghostty | ⛔ | low | S | → backlog (capped by the v2.20.0 decision gate) | One codepoint-range check in the CPU contrast-lift path; prevents seam artifacts. |
+| Cross-window broadcast scope (`broadcast_all` + named groups span windows) | Terminator | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Multi-window removed the old IPC blocker; an App-level target loop makes groups window-spanning — the marquee Terminator use case. |
+| Remotinator-parity structural agent API (new_tab/split/set_title via ctl) | Terminator | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Additive ctl methods on the existing dispatch/drift-guard scaffolding; directly serves the agent-first direction. |
+| Broadcast-aware `insert_number` / `insert_padded` | Terminator | 🟡 | medium | S | → backlog (capped by the v2.20.0 decision gate) | Converts a hollow parity row into the real feature: each broadcast pane types its own fleet index. |
+| Vertical tab-bar drag-reorder (y-axis) | Terminator | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Twice-deferred follow-up; the tear-off work made the drag FSM axis-aware, the y-flip is identical-shape work. |
+| Auto-theme: follow OS dark/light (`auto_theme.py`) | Terminator | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Terminator flavor of the same theme-following gap; skip the sunrise/sunset half — the OS schedules dark mode. |
+| Capture-group substitution in `trigger = REGEX :: cmd` | Terminator | ⛔ | high | S | ✅ shipped v2.20.0 | Turns triggers from notify-only into automation; per-argv `{n}` substitution (`{0}` = whole match) keeps the command-as-data security posture. |
+| Lua plugins directory auto-load (`<config-dir>/plugins/*.lua`) | Terminator | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Drop-in .lua files = a plugin distribution story; every safety rail exists, this is a loader loop. |
+| `kettle.on('remote_detect')` Lua event + per-host profiles | Terminator | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Completes a documented design promise; nine events already follow the same emission pattern. |
+
+#### Verdict: backlog — 54 rows
+
+| Feature | Source | kettle | Value | Effort | Verdict | Rationale |
+|---|---|---|---|---|---|---|
+| Quick-terminal option suite (position/size/screen/animation) | Ghostty | 🟡 | medium | L | backlog | Per-platform global-hotkey and edge-anchoring stories differ; `--toggle` covers the core need today. |
+| `window-padding-balance` + `window-padding-color=extend` | Ghostty | ⛔ | medium | M | backlog | `extend` is Ghostty's most-praised cosmetic (full-bleed TUIs); the heuristics need OSC 133 marks, which exist. |
+| `custom-shader` + `custom-shader-animation` | Ghostty | ⛔ | medium | XL | backlog | Community magnet, but touches the whole present path mid perf-hardening. |
+| Shell-integration auto-injection + feature flags | Ghostty | 🟡 | medium | L | backlog | Zero-rc-edit setup is great UX but per-shell fragile; pwsh is not covered by the mechanism at all. |
+| `font-codepoint-map` (per-codepoint font pinning) | Ghostty | ⛔ | medium | M | backlog | The standard fix for wrong-fallback icons; the bundled Nerd Font mutes the pain today. |
+| `adjust-*` font-metric modifiers (13 keys) | Ghostty | 🟡 | medium | M | backlog | Line-height adjustment alone is a top-requested knob; the percent-or-int MetricModifier design is worth copying. |
+| `clipboard-read = ask` (interactive OSC 52 consent) | Ghostty | 🟡 | medium | M | backlog | Adds flexibility, not safety — the static deny already blocks exfil; the PTY reply must defer during the dialog. |
+| `link-previews` (OSC 8 destination reveal) | Ghostty | ⛔ | medium | M | backlog | Dup of the now-table link-previews row (UX agent scored it S); OSC 8 spoofing countermeasure either way. |
+| `osc-color-report-format` | Ghostty | 🟡 | low | S | backlog | Only legacy apps care; bundle into a future VT-compat sweep. |
+| `mouse-shift-capture` (XTSHIFTESCAPE) + reporting switch | Ghostty | 🟡 | low | M | backlog | Defaults already match Ghostty's; a `toggle_mouse_reporting` action is the useful slice. |
+| Audible bell (`bell-features` audio + path + volume) | Ghostty | 🟡 | low | M | backlog | Visual/attention bell coverage is already rich; pulling an audio stack in for BEL is a dependency decision. |
+| `palette-generate` + `palette-harmonious` | Ghostty | ⛔ | low | M | backlog | Theme-author tool, off by default even upstream; wait for custom theme files. |
+| `clipboard-codepoint-map` (copy-time rewriting) | Ghostty | ⛔ | low | S | backlog | Cheap char-map pass in the copy helper; few users discover they want it. |
+| DECRQSS (DCS `$q`) status-string reports | Ghostty | ⛔ | low | S | backlog | Rides the XTGETTCAP DCS-reply plumbing; vim cursor-shape restore is the classic consumer. |
+| Mode 2048 in-band window size reports | Ghostty | ⛔ | medium | M | backlog | Neovim 0.10+ and modern tmux consume it; needs kettle-vt mode tracking once the DCS layer exists. |
+| Kitty graphics `t=f/t/s` transmission mediums | Ghostty | ⛔ | medium | M | backlog | Faster local images, but terminal-reads-client-paths is security-sensitive; deserves its own careful pass. |
+| Mode 2031 color-scheme change reports | Ghostty | ⛔ | low | M | backlog | Only meaningful once kettle follows the OS theme; bundle with that feature. |
+| Automatic shell-integration injection (no rc-file edit) | Ghostty | ⛔ | high | L | backlog | Ghostty's most fragile integration code, and pwsh is uncovered — script-quality and OSC 7 wins come first. |
+| Full OSC 133 kind/option parser (k=, cl=, redraw, cmdline) | Ghostty | 🟡 | medium | M | backlog | Substrate for click-to-move and prompt-redraw; implement when a tier-2 consumer is selected. |
+| Per-row reflow-safe semantic-prompt state | Ghostty | 🟡 | medium | L | backlog | The single engine investment unlocking the whole tier-2 cluster; right-sized as its own effort. |
+| Prompt redraw on resize (`redraw`/`redraw=last`) | Ghostty | ⛔ | medium | L | backlog | Real polish for powerline prompts; gated on per-row semantic state. |
+| Cursor click-to-move at prompt | Ghostty | ⛔ | medium | L | backlog | Large edge-case surface; depends on input-area tracking from per-row state. |
+| Selection respects prompt boundaries | Ghostty | ⛔ | medium | M | backlog | Blocked on per-row state; an interim `copy_last_output` from the existing prompt ring is cheaper. |
+| Nushell (and elvish) integration snippets | Ghostty | ⛔ | low | S | backlog | Easy add when touching snippets; newer nushell emits some marks natively — verify first. |
+| `jump_to_prompt` with signed count (±N) | Ghostty | 🟡 | low | S | backlog | Pressing the key N times is equivalent; wait for numeric keybind args. |
+| Keybind trigger sequences (`a>b` multi-key chords) | Ghostty | ⛔ | medium | M | backlog | Loved by tmux refugees; needs a pending-leader input state plus hint rendering for two-step chords. |
+| `performable:`/`unconsumed:`/`all:` keybind flags | Ghostty | ⛔ | medium | M | backlog | `performable:` generalizes smart-copy but needs a can-perform predicate across all 110 actions; adopt with sequences. |
+| Custom shaders (Shadertoy-compatible GLSL post-processing) | Ghostty | ⛔ | medium | L | backlog | Dup of the `custom-shader` row; strong next-release headline, wrong scope for days. |
+| Quick-terminal window dressing (position/size/autohide) | Ghostty | 🟡 | medium | M | backlog | Completes the quake story; geometry first, slide animation is garnish. |
+| Terminal inspector (in-app debugger) | Ghostty | 🟡 | medium | XL | backlog | Reject the ImGui route; the kettle-native version is ctl/MCP cell-style queries plus a VT-sequence tap. |
+| Undo/redo of surface lifecycle with live-process preservation | Ghostty | 🟡 | medium | L | backlog | A limbo pool keeping PTYs alive beats respawn; interacts with the hardened close funnel — careful refactor. |
+| `copy-on-select` clipboard-target tri-state | Ghostty | 🟡 | low | S | backlog | Linux middle-click-paste nicety; back-compat parse in the existing key. |
+| `selection-clear-on-typing` | Ghostty | ❔ | low | S | backlog | Verify current behavior first; minutes-to-hours either way. |
+| Built-in sprite renderer (box/blocks/braille/powerline/legacy) | Ghostty | ⛔ | high | L | backlog | Highest visual-quality win for TUI users; a box+block+powerline subset is an M-sized first slice. |
+| Glyph constraint system for unpatched Nerd Font icons | Ghostty | 🟡 | medium | L | backlog | Only matters with non-bundled fonts; the generated table is portable, the raster hook is not kettle's today. |
+| Linear-corrected alpha blending (gamma-aware glyph weight) | Ghostty | 🟡 | medium | L | backlog | The most important render-correctness idea here, but it means forking glyphon's pipeline; cheap partial possible. |
+| Documented font-fallback algorithm + size normalization | Ghostty | 🟡 | medium | L | backlog | cosmic-text covers the 90% case; ordered multi-family `font-family` is the stealable standalone slice. |
+| `font-codepoint-map` (per-range font overrides) | Ghostty | ⛔ | medium | M | backlog | Dup of the pinning row; mechanical span-splitting in kettle's own rich-text builder. |
+| Synthetic bold/italic faces with per-style opt-out | Ghostty | ⛔ | medium | M | backlog | Faux-bold/italic gets 90% of the benefit in days if demanded; the bundled font has true styles. |
+| Emoji presentation (VS15/VS16 + UCD default) | Ghostty | ❔ | low | M | backlog | A 30-minute live verification first; width is entangled with the engine's wcwidth. |
+| Background-color padding extension heuristics | Ghostty | ❔ | low | S | backlog | Pure polish; the skip-prompt/powerline heuristic list is the stealable part if padding extension lands. |
+| Custom post-process shaders with cursor uniforms | Ghostty | ⛔ | medium | XL | backlog | Third shader row; architecturally clean for kettle (one extra post pass) but release-sized. |
+| Shared font grid across windows + atlas generation counters | Ghostty | ⛔ | medium | L | backlog | Real memory win now that multi-window is core; `FontSystem` is not Sync — a deliberate refactor. |
+| Pane drag-and-drop re-splitting with quadrant drop | Terminator | ⛔ | high | L | backlog | THE missed Terminator feature; the tear-off work built every prerequisite and the 25-line diagonal classifier ports verbatim. Needs a design doc. |
+| Transmit/receive broadcast color coding on pane titlebars | Terminator | 🟡 | medium | S | backlog | Safety affordance against typing a password into 8 panes; ship with cross-window broadcast. |
+| Single-instance CLI routing (`--new-tab` into the running kettle) | Terminator | ⛔ | medium | M | backlog | Nearly free after the ctl structural methods; the presence registry already discovers the instance. |
+| Full preferences-editor coverage (prefseditor inventory) | Terminator | 🟡 | medium | M | backlog | Grow the settings catalogue opportunistically; add a "Save current layout as…" field. |
+| Random/Greek default group names + titlebar group UX | Terminator | 🟡 | low | S | backlog | Friction-removal polish; bundle with a groups release. |
+| Confirm-close dialog mouse hit-test | Terminator | 🟡 | low | S | backlog | kettle's own tracked deferral; waits on the centered-panel renderer per its own sequencing. |
+| Auto-clone remote session on split (`auto_clone`) | Terminator | 🟡 | medium | S | backlog | Auto behavior surprises (split into a dying container); manual duplicate covers the workflow — ship on request. |
+| Silence-notification escalation (InactivityWatch notify) | Terminator | 🟡 | medium | S | backlog | Covers the no-shell-integration case; the silence timer already runs for the dot. command-notify handles the 80%. |
+| Lua timer primitive `kettle.every(ms, fn)` | Terminator | ⛔ | medium | M | backlog | The missing primitive for watch-style plugin ports; interacts with the instruction-budget watchdog — needs care. |
+| Lua keybind registration `kettle.bind_key(chord, fn)` | Terminator | ⛔ | medium | M | backlog | Multiplies every other Lua hook; defer until the plugins dir lands and conflict policy is designed. |
+| `pane_add` Lua event (event-surface completeness) | Terminator | ⛔ | low | S | backlog | Pure symmetry fix on the established emission pattern; bundle with the next Lua work. |
+
+#### Verdict: reject — 37 rows
+
+| Feature | Source | kettle | Value | Effort | Verdict | Rationale |
+|---|---|---|---|---|---|---|
+| `font-thicken` + `font-thicken-strength` | Ghostty | ⛔ | low | L | reject | CoreText-specific; `minimum-contrast` and a future gamma fix serve the need at the right layer. |
+| `key-remap` (in-terminal modifier remapping) | Ghostty | ⛔ | low | M | reject | PowerToys/Karabiner/keyd solve it OS-wide; app-scoped remapping invites confusion for near-zero demand. |
+| Grapheme clustering / mode 2027 | Ghostty | ⛔ | medium | XL | reject | Requires forking the engine's per-cell storage; advertising 2027 without real clustering is worse than absence. |
+| Kitty color protocol (OSC 21) + kitty clipboard (OSC 5522) | Ghostty | ⛔ | low | M | reject | Kitty-ecosystem-only with near-zero outside adoption; the standard OSC variants cover the same needs. |
+| Kitty text-sizing protocol (OSC 66) | Ghostty | ⛔ | low | XL | reject | Bleeding-edge, essentially one client; would force variable-height cells through the grid pipeline. Watch adoption. |
+| Synchronized output (DEC mode 2026) | Ghostty | ✅ | high | S | reject | Already at parity, including the freeze/flush/DECRPM report paths. Nothing to adopt. |
+| OSC 8 hyperlinks | Ghostty | ✅ | high | S | reject | Parity; kettle's autodetect is a superset of Ghostty's explicit-only handling. |
+| OSC 52 clipboard (write + policy-gated read) | Ghostty | ✅ | high | S | reject | Parity including the deny-read security posture with protocol-valid empty reply. |
+| OSC 133 semantic prompts / shell integration | Ghostty | ✅ | high | S | reject | Parity-plus: kettle also derives command-finished notifications and output timing from the marks. |
+| Bracketed paste (2004) + focus reporting (1004) | Ghostty | ✅ | medium | S | reject | Parity; sanitize-on-paste addresses the same threat as Ghostty's confirmation flow. |
+| Sixel graphics | Ghostty | ✅ | medium | S | reject | Reversal row: Ghostty has no sixel decoder; kettle leads — which strengthens the DA1-advertisement item. |
+| Sudo terminfo wrapper | Ghostty | ⛔ | low | S | reject | Exists to compensate for Ghostty's custom TERM; kettle ships xterm-256color, so it is moot by design. |
+| SSH integration (ssh-env / ssh-terminfo / `+ssh` wrapper) | Ghostty | ⛔ | low | M | reject | Solves the custom-TERM problem kettle does not have; COLORTERM forwarding is blocked by sshd AcceptEnv anyway. |
+| Command-finished events: exit code + duration | both | ✅ | high | S | reject | Anchor row: kettle already exceeds both upstreams; snippet upgrades compound this strength. |
+| Scrollback search (Ghostty parity check) | Ghostty | ✅ | low | S | reject | kettle arguably leads (regex + smart-case); the off-render-thread search architecture is the only steal. |
+| Rectangle selection + `window-save-state` | Ghostty | ✅ | low | S | reject | Both at or beyond parity; recorded so the matrix shows the areas were audited, not skipped. |
+| Position-independent shaped-run cache | Ghostty | 🟡 | low | M | reject | The new per-line skip already eliminates the steady-state cost; a run-level cache would fight cosmic-text. |
+| Renderer thread with draw timers (120fps tick, blink timer) | Ghostty | 🟡 | low | XL | reject | The single-event-loop model is load-bearing for tear-off; off-thread wgpu reintroduces the race class just eliminated. |
+| Layouts: save/restore incl. commands, geometry, ratios | Terminator | ✅ | low | S | reject | Parity for everything users notice; per-pane profile/group fields fold into a future groups release. |
+| Profiles system (named profiles, cycling, split inheritance) | Terminator | ✅ | low | S | reject | Done; confirms the earlier parity claim holds. |
+| Zoom/maximize (incl. scaled zoom) + rotate splits | Terminator | ✅ | low | S | reject | Confirmed shipped, including the obscure scaled variant. |
+| Custom commands menu + URL handlers + plugin system | Terminator | ✅ | low | S | reject | The Lua hook surface structurally covers the plugin system. Nothing to take. |
+| Search overlay (case toggle, invert/backward) | Terminator | ✅ | low | S | reject | At or above parity; smart-case is a superset. |
+| Window behavior flags (sticky / hide_from_taskbar / etc.) | Terminator | 🟡 | low | M | reject | Blocked on winit; documented accepted divergence — re-check on winit upgrades. |
+| `http_proxy` per-profile wiring | Terminator | 🟡 | low | S | reject | Semantically void in kettle's architecture; the parse-only stub is the correct end state. |
+| Per-handler context-menu verbs (nameopen/namecopy) | Terminator | ⛔ | low | M | reject | Polish on a power-user niche of a power-user feature; poor value/effort ratio. |
+| ActivityWatch per-pane notify toggle | Terminator | ✅ | low | S | reject | Three overlapping mechanisms cover it; notify-on-any-output is the spammiest variant. |
+| `command_notify.py` (long-command-finished notification) | Terminator | ✅ | low | S | reject | kettle is a superset: OSC 133 + duration threshold vs a distro-patched-VTE-only signal. |
+| `logger.py` (per-terminal output logging) | Terminator | ✅ | low | S | reject | Superset: raw replayable bytes or ANSI-stripped text; dev-record covers the deep-trace case. |
+| `terminalshot.py` (screenshot focused terminal) | Terminator | ✅ | low | S | reject | Strict superset: chord-triggered, headless offscreen, and caption-annotated screenshots. |
+| `custom_commands.py` remainder (GUI editor, Alt+b bookmark) | Terminator | ✅ | low | L | reject | Config + Lua is kettle's idiom; bookmark-last-command relies on an `fc` hack that breaks on pwsh/cmd. |
+| `dir_open.py` (open cwd in file manager) | Terminator | ✅ | low | S | reject | Shipped, cross-platform, menu-exposed. Nothing left. |
+| `insert_term_name.py` (type pane title into input) | Terminator | ✅ | low | S | reject | Shipped. Done. |
+| `url_handlers.py` defaults (Launchpad / APT patterns) | Terminator | ✅ | low | S | reject | Ported as opt-in Lua recipes — Ubuntu-specific patterns should not be default-on cross-platform. |
+| `mousefree_url_handler.py` (keyboard URL selection) | Terminator | ✅ | low | S | reject | Hint mode (labeled hints) is strictly better UX than sequential Alt+j/k cycling. |
+| `save_last/user_session_layout.py` (layout persistence) | Terminator | ✅ | low | S | reject | Session v2 is a generation ahead of the SIGTERM-handler plugin, which races by its own comments. |
+| `maven.py` (Maven plugin-name → docs URL) | Terminator | ⛔ | low | S | reject | Domain-specific and bit-rotted upstream (dead Codehaus URLs); fully expressible as a user Lua handler. |
+
+### Architecture observations
+
+Condensed from the seven per-area architecture notes — the ideas worth
+stealing (or explicitly avoiding) independent of any single feature pick:
+
+- **Byte-budget scrollback** — Ghostty's `scrollback-limit` is *bytes*
+  (default 10MB, lazily allocated to the cap): a deterministic worst-case
+  memory bound vs kettle's line-count `scrollback` key. Directly relevant to
+  the perf-hardening work.
+- **Config-as-docs** — Ghostty's entire config reference site is generated
+  from `Config.zig` doc comments. kettle already lives this philosophy for
+  actions (`--list-actions` prints straight from the parser); extending it
+  to config keys would stop CONFIG.md drift (~120 hand-maintained rows).
+- **Conditional config / theme-as-config** — theme files are just config
+  files, and a conditional-config engine re-resolves the conditional key set
+  when the system light/dark state flips. The right shape for
+  `theme-mode = system` without ad-hoc theme-swap code.
+- **Typed Duration values** — `750ms`, `1h30m`, max-clamped, vs kettle's
+  growing pile of `*-ms` integer keys. A one-time Duration parser cleans up
+  existing and future keys with old spellings kept as aliases.
+- **Keybind grammar prefixes** — `global:` (system-wide), `all:` (every
+  surface), `performable:` (consume only if actionable), `unconsumed:`
+  (also forward), plus multi-chord sequences, all parsed outside the config
+  core. `global:` is the enabler for a real quick terminal; `performable:`
+  generalizes kettle's bespoke smart-copy bool to every action.
+- **Mechanism vs policy in shell integration** — a tiny engine-side parser
+  with all behavior in feature-gated scripts behind one env contract.
+  kettle's pre-engine extractor seam is already the cleaner half; exporting
+  `KETTLE_SHELL_FEATURES` at PTY spawn (next to TERM_PROGRAM, crossing the
+  WSL boundary via the existing WSLENV handling) adds the policy lever in
+  ~20 lines.
+- **Per-row semantic-prompt state is the tier-2 unlock** — storing
+  prompt/input/output classification on every grid row (reflow-safe) is the
+  single engine investment behind click-to-move, prompt redraw, selection
+  boundaries and precision close-confirm. Do it once, as its own effort; the
+  existing command-running signal suffices for smart close-confirm today.
+- **Table-driven mode registry** — Ghostty's modes are one comptime table
+  generating the struct, reset logic, and DECRQM/DECRPM reporting. If kettle
+  intercepts engine-unknown modes (2048, 2031), a small table-driven
+  registry in kettle-vt prevents drift.
+- **Device attributes as data** — DA1/DA2/DA3 modeled as a conformance level
+  plus a feature list rather than a hardcoded string, so new capabilities
+  (sixel=4, clipboard=52) are one-line additions.
+- **One pre-engine reply layer** — kettle-vt's extractor is the proven
+  interception point and the PtyWrite reply channel already exists; the
+  protocol cluster (XTGETTCAP, DECRQSS, DA1, graphics `a=q`, OSC 9 notify)
+  collapses into roughly two plumbing efforts instead of five features.
+- **Row-wise GPU data model for damage** — persist per-row instance lists
+  and splice only dirty rows (cursor at a reserved index for under/over-text
+  ordering); dirty bits should originate from the terminal write path (the
+  engine's damage API) with the renderer only consuming them.
+- **Broadcast chokepoint + created-pane detection** — Terminator answers
+  "who receives this input" in one global function; lifting kettle's
+  per-window equivalent to App level makes every broadcast feature
+  window-spanning at once. Its before/after set-difference trick is the
+  robust pattern for ctl methods that must return new pane ids.
+- **Windows is greenfield** — Ghostty has no Windows port; every adopted
+  feature is unconstrained by upstream on kettle's primary platform, and
+  several (RegisterHotKey global hotkey, pwsh integration) can exceed
+  Ghostty's own coverage.
+- **Linear-corrected alpha blending** — gamma-correct glyph blending with a
+  luminance-based correction that keeps traditional stroke weight; the best
+  concise reference for the trick anywhere. Adopting it means owning the
+  text pipeline — note for if kettle ever outgrows glyphon.
+- **GPLv3 warning** — Ghostty's bash and zsh shell-integration scripts are
+  kitty-derived and carry GPLv3 headers; kettle is MIT. Borrow techniques
+  and re-implement from the published OSC 133/7 specs (plus MIT-licensed
+  bash-preexec) — never copy the script text.
+
+**Cross-check note:** all 42 high-relevance claims were adversarially
+re-verified against kettle source with file:line evidence; the cross-check
+**corrected 11 of the inventory's status claims** (e.g. paste-protection and
+close-confirm were *partial*, not missing — the confirm primitive exists;
+DA1 advertisement, shell title reporting, the Lua plugins dir, trigger
+capture-groups and vertical-bar drag-reorder were *missing*, not partial).
+The matrix above prints the corrected statuses. Row count: 39 now + 54
+backlog + 37 reject = 130.

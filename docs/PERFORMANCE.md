@@ -1,5 +1,121 @@
 # Performance
 
+## v2.20.0 — the cross-terminal benchmark harness + the perf overhaul
+
+v2.20.0 added the committed harness this doc previously listed as an open
+follow-up (`scripts/perf/` — one pinned methodology applied to every
+terminal) and a seven-part performance overhaul driven by what it measured.
+All numbers below: Surface Book 3 (Intel Iris Plus, Win11 26200), release
+builds, identical 1280×800 windows, medians of 5 runs, deterministic
+generated payloads written from *inside* each terminal in 32 KiB chunks
+(the termbench principle — the terminal's own parse+render path is the
+bottleneck being measured, not a pipe).
+
+### Throughput (parse + render under flood)
+
+| payload | kettle v2.19.0 | **kettle v2.20.0** | Windows Terminal | Alacritty 0.17 | WezTerm |
+|---|---:|---:|---:|---:|---:|
+| ascii (16 MB) | 0.55 MB/s | **1.90 MB/s** | 4.33 | 3.59 | 2.56 |
+| sgr-heavy (6.1 MB) | 0.42 MB/s | **1.63 MB/s** | 4.12 | 3.06 | 2.67 |
+| unicode/CJK (4.3 MB) | 0.80 MB/s | **3.48 MB/s** | 9.04 | 5.79 | 5.03 |
+| post-flood working set (terminal+conhost+shell) | 241.5 MB | 485.7 MB | 2977.7 MB | 396.6 MB | 411.4 MB |
+
+**3.5–4.4× faster than v2.19.0** across every payload. Honest position:
+still behind Windows Terminal (2.3–2.6×, ~2.5× typical) and Alacritty
+(1.7–1.9×), closest to WezTerm (1.3–1.6× behind on all three payloads —
+see the follow-ups below). The post-flood working set grew with the speedup (more distinct
+frames actually render now, growing the glyph atlas) but stays ~6× leaner
+than Windows Terminal under the same flood.
+
+What the overhaul changed (each lands with a regression guard):
+
+1. **Lock-free rendering (P2)** — the renderer previously held every
+   pane's terminal mutex across the whole GPU frame (shaping +
+   `get_current_texture` + present), starving the PTY reader. It now
+   works from a pooled `PaneSnapshot` captured under the lock in
+   microseconds.
+2. **Per-line shaping cache (P1)** — cosmic-text re-shaped 100 % of the
+   visible viewport on every painted frame (`set_rich_text` resets all
+   lines). Pane text now keeps one `BufferLine` per grid row keyed by its
+   content; an idle blink frame re-shapes zero rows, a cursor move one.
+   Chrome labels (titlebar/tab/status) gained the same equality gates.
+3. **SIMD extractor (P3)** — the image-protocol front stage walked the
+   stream byte-by-byte; it now `memchr`-scans to the next ESC/ST/BEL and
+   bulk-copies plain runs. `cargo bench -p kettle-vt` pins it (the first
+   criterion benches in the repo).
+4. **Wakeup dedup (P4)** — floods enqueued one event-loop wakeup per
+   64 KiB read; an atomic latch now allows one per paint window.
+5. **Recorder batching (P5)**, **link-scan debounce (P6)**, **session-log
+   lock skip (P7)** — per-frame/per-read costs off the hot paths.
+
+### Startup, idle CPU, memory at rest
+
+| | kettle v2.19.0 | **kettle v2.20.0** | Windows Terminal | Alacritty | WezTerm |
+|---|---:|---:|---:|---:|---:|
+| spawn → first visible window (median of 5) | 2189 ms | 2202 ms | 268 ms¹ | 277 ms | 506 ms |
+| fresh working set (tree) | 306.9 MB | 306.8 MB | —¹ | 201.7 MB | 166.7 MB |
+| idle CPU, 60 s, cursor blinking | 55.89 % | **28.28 %** | —¹ | 0.36 % | 0.52 % |
+
+¹ Windows Terminal on this machine runs `windowingBehavior = useExisting`:
+`wt.exe` opens a window inside the already-running process, so its
+"startup" is not a cold process start and its working set / idle CPU are
+not attributable to one window (the harness deliberately refuses to
+measure or kill a shared instance).
+
+The idle cost **halved** (the P1 cache removed the full-viewport reshape
+that ran on every blink frame) but remains far above Alacritty/WezTerm:
+each blink frame still rebuilds the full quad list and glyphon vertex
+data. The fix is row-level damage tracking + persistent GPU cell buffers
+— the tracked follow-up below. Startup (~2.2 s) is GPU-adapter init +
+the embedded font set + 500 themes, untouched this cycle and now tracked
+with a number against it.
+
+### Input latency
+
+`scripts/perf/latency.ps1` — SendInput a key, poll
+`PrintWindow(PW_RENDERFULLCONTENT)` until the client pixels change beyond
+an auto-calibrated blink-noise floor. Capture cost bounds resolution at
+~5–15 ms, so these are **comparative between terminals captured the same
+way**, not absolute input-to-photon numbers. The probe requires an
+INTERACTIVE session: Windows does not let a background process steal
+foreground, and the script refuses to inject keystrokes unless the
+spawned terminal verifiably holds focus. In the autonomous v2.20.0 run
+only WezTerm took foreground — its guarded 20-sample dataset is in
+`target/perf-results/v2.20.0/latency.json` (median ≈116 ms by this
+capture method) — while kettle, Windows Terminal and Alacritty failed
+the foreground guard, so no cross-terminal comparison is published; that
+needs an interactive session.
+
+### Methodology / reproducing
+
+```pwsh
+cargo build --release
+pwsh -File scripts/perf/throughput.ps1       # all four terminals
+pwsh -File scripts/perf/startup-idle.ps1
+pwsh -File scripts/perf/latency.ps1
+pwsh -File scripts/perf/vtebench-wsl.ps1     # vtebench inside WSL panes
+```
+
+Caveats pinned in `scripts/perf/README.md`: GDI captures cannot see
+flip-model swapchains (hence PrintWindow), `wt.exe` may route into an
+existing WindowsTerminal process (the harness never kills pre-existing
+pids), thermals on a Surface-class device make medians-of-5 the floor for
+honest numbers.
+
+### Known follow-ups (tracked)
+
+- Row-level damage tracking + persistent GPU cell buffers (the natural
+  successor to the per-line shaping cache — Ghostty's architecture; see
+  docs/UX-COMPARISON.md).
+- Glyph-atlas growth under sustained unicode flood (the post-flood WS
+  delta above).
+- Byte-budget scrollback (`scrollback-limit` in bytes, Ghostty model) to
+  bound worst-case memory deterministically.
+
+---
+
+## Historical numbers (v1.x — kept for reference)
+
 Real measurements from kettle's release binary, captured across two
 reference platforms:
 

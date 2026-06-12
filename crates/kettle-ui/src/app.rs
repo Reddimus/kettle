@@ -8,8 +8,8 @@ use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
 use kettle_config::{TabBarMode, TabBarPos};
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
-    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneView, Renderer,
-    TabActivity as RenderTabActivity, TabBar, TabSeg,
+    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneSnapshot, PaneView,
+    Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -265,6 +265,11 @@ pub enum ConfirmKey {
     ShiftTab,
     Left,
     Right,
+    /// v2.20.0 (`vim-menu-nav`): `y` — answer the dialog's QUESTION with
+    /// yes, regardless of which button is focused.
+    Yes,
+    /// v2.20.0 (`vim-menu-nav`): `n` — dismiss without dispatching.
+    No,
 }
 
 /// Cycle 652: outcome of a key press in the confirm dialog.
@@ -335,6 +340,11 @@ fn confirm_dialog_keypress(
                 ConfirmKeyResult::Move(current_focus + 1)
             }
         }
+        // v2.20.0 (`vim-menu-nav`): `y`/`n` answer the dialog directly —
+        // unlike Enter (which fires the FOCUSED button, cycle 861), `y` is
+        // an explicit answer to the question, so focus is irrelevant.
+        ConfirmKey::Yes => ConfirmKeyResult::Confirm,
+        ConfirmKey::No => ConfirmKeyResult::Cancel,
     }
 }
 
@@ -1130,10 +1140,72 @@ fn match_triggers(
     text: &str,
     triggers: &[(regex::Regex, kettle_config::TriggerAction)],
 ) -> Option<kettle_config::TriggerAction> {
-    triggers
-        .iter()
-        .find(|(re, _)| re.is_match(text))
-        .map(|(_, action)| action.clone())
+    triggers.iter().find_map(|(re, action)| {
+        let caps = re.captures(text)?;
+        Some(match action {
+            // v2.20.0 (Terminator `run_cmd_on_match.py` parity completion):
+            // the matched pattern's capture groups substitute into the
+            // command's argv (`{0}` whole match, `{1}`… numbered groups) —
+            // Terminator does `cmd.format(*groups)`.
+            kettle_config::TriggerAction::RunCommand(argv) => {
+                kettle_config::TriggerAction::RunCommand(substitute_trigger_groups(argv, &caps))
+            }
+            other => other.clone(),
+        })
+    })
+}
+
+/// v2.20.0: replace `{0}`/`{1}`… in each argv element with the trigger
+/// match's capture groups (`{0}` = whole match; a non-participating group
+/// substitutes empty; an OUT-OF-RANGE reference like `{9}` with two groups
+/// stays literal so the config typo is visible in the spawned command
+/// rather than silently vanishing). Substitution is per-element string
+/// replacement and argv STAYS argv — matched output can inject an
+/// argument's VALUE but never new arguments or shell metacharacters (the
+/// spawn is `std::process::Command`, no shell). Pure (unit-tested).
+fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Vec<String> {
+    argv.iter()
+        .map(|a| {
+            if !a.contains('{') {
+                return a.clone();
+            }
+            // Single LEFT-TO-RIGHT pass over the TEMPLATE (review fix): the
+            // old sequential `String::replace` loop re-scanned its own
+            // output, so a capture whose MATCHED TEXT contained `{2}` got
+            // expanded a second time with attacker-controlled content.
+            // Substituted text is emitted verbatim and never re-scanned.
+            let bytes = a.as_bytes();
+            let mut out = String::with_capacity(a.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'{' {
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > i + 1
+                        && j < bytes.len()
+                        && bytes[j] == b'}'
+                        && let Ok(idx) = a[i + 1..j].parse::<usize>()
+                        && idx < caps.len()
+                    {
+                        out.push_str(caps.get(idx).map(|m| m.as_str()).unwrap_or(""));
+                        i = j + 1;
+                        continue;
+                    }
+                    // Not a valid in-range placeholder: the `{` stays
+                    // literal (an out-of-range `{9}` keeps the typo visible).
+                    out.push('{');
+                    i += 1;
+                } else {
+                    let ch = a[i..].chars().next().expect("in-bounds char");
+                    out.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// Cycle 288 smart selection (iTerm2 parity). When a double-click
@@ -1550,7 +1622,14 @@ fn new_tab_dropdown_visible() -> bool {
 /// fall through to subsequent letters only if the first letter is
 /// already taken by an earlier row. Pure so the collision rules
 /// are unit-tested without spinning up App.
-fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
+/// v2.20.0 (`vim-menu-nav`): letters the menu's vim navigation layer consumes
+/// (`g`/`G` first/last, `h` back, `j`/`k` move, `l` activate). While the
+/// setting is on, `assign_mnemonics` must not hand any of these to a row —
+/// the nav layer intercepts them BEFORE mnemonic dispatch, so a row keyed on
+/// one would silently lose its hotkey.
+const VIM_NAV_RESERVED: &[char] = &['g', 'h', 'j', 'k', 'l'];
+
+fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<(usize, char)>> {
     let labels: Vec<&str> = items
         .iter()
         .map(|it| match it {
@@ -1590,6 +1669,10 @@ fn assign_mnemonics(items: &[ContextMenuItem]) -> Vec<Option<(usize, char)>> {
                     continue;
                 }
                 let low = c.to_ascii_lowercase();
+                // v2.20.0: letters owned by vim-menu-nav are never assignable.
+                if reserved.contains(&low) {
+                    continue;
+                }
                 if !claimed.contains(&low) {
                     claimed.insert(low);
                     chosen = Some((bi, low));
@@ -1752,6 +1835,34 @@ pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
         .collect()
 }
 
+/// v2.20.0 (`vim-menu-nav`): the `Ctrl+d`/`Ctrl+u` half-page target. Moves
+/// `current` by `rows` items in `dir` (no wrap — vim half-page semantics
+/// clamp at the ends), then snaps to the nearest dispatchable row in the
+/// direction of travel (falling back to the other direction so a
+/// trailing separator can't strand the highlight). Pure so the
+/// clamp+snap math is unit-testable without App state.
+fn half_page_menu_target(
+    items: &[ContextMenuItem],
+    current: usize,
+    rows: usize,
+    dir: isize,
+) -> usize {
+    if items.is_empty() {
+        return current;
+    }
+    let n = items.len() as isize;
+    let step = rows.max(1) as isize;
+    let raw = (current as isize + dir * step).clamp(0, n - 1) as usize;
+    let scan_down = |from: usize| (from..items.len()).find(|&i| item_is_dispatchable(&items[i]));
+    let scan_up = |from: usize| (0..=from).rev().find(|&i| item_is_dispatchable(&items[i]));
+    let snapped = if dir > 0 {
+        scan_down(raw).or_else(|| scan_up(raw))
+    } else {
+        scan_up(raw).or_else(|| scan_down(raw))
+    };
+    snapped.unwrap_or(current)
+}
+
 /// Pure: walk the menu item list to find the next enabled, non-
 /// separator row index, given a `delta` (±1) and a wrap-around at the
 /// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
@@ -1877,7 +1988,24 @@ pub(crate) type FocusKey = (usize, Option<u64>);
 pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
 /// Cycle 803 cache key for the viewport link re-scan: `(focus, tab last-output,
 /// scroll display_offset)`.
-pub(crate) type LinksScanKey = (FocusKey, Option<std::time::Instant>, Option<usize>);
+/// v2.20.0 (review fix): the middle component is the focused pane's
+/// `output_generation` — the old key used the tab's `last_output_at`, which
+/// the activity latch only updates for BACKGROUND tabs, so active-tab output
+/// never invalidated the link scan at all (links went stale until a scroll
+/// or focus change) and the P6 debounce was unreachable.
+pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>);
+
+/// v2.20.0 P6 (perf): minimum interval between viewport link re-scans when
+/// only the OUTPUT timestamp changed (streaming). Focus/scroll changes bypass
+/// it. 150ms keeps worst-case link-detection latency imperceptible while
+/// cutting the per-frame regex pass under flood by ~9×.
+pub(crate) const LINKS_SCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// v2.20.0 (Ghostty `resize-overlay` parity): how long the transient
+/// `cols×rows` chip stays up after the last resize event (Ghostty's
+/// `resize-overlay-duration` default).
+pub(crate) const RESIZE_OVERLAY_DURATION: std::time::Duration =
+    std::time::Duration::from_millis(750);
 
 pub struct App {
     cfg: Config,
@@ -1913,6 +2041,14 @@ pub struct App {
     #[cfg(feature = "dev-record")]
     recorder: Option<crate::dev_record::Recorder>,
     proxy: EventLoopProxy<UserEvent>,
+    /// v2.20.0 P4 (perf): wakeup-dedup latch shared by every pane's `Waker`.
+    /// Under output flood the PTY readers fire once per 64KiB read — dozens
+    /// of queued `UserEvent::Wakeup`s per paint window, each one fanning out
+    /// over every window just to discover the generations already matched.
+    /// The waker enqueues only when it flips this false→true; the Wakeup arm
+    /// re-opens the latch BEFORE reading generations, so output that lands
+    /// after the clear enqueues a fresh event (no lost wakeups).
+    wake_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cycle 928 (agent-first A2): the in-process control server, present when
     /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
     /// zero-cost default path. Started in `resumed`, dropped on exit (which
@@ -2357,6 +2493,7 @@ impl App {
             #[cfg(feature = "dev-record")]
             recorder: None,
             proxy,
+            wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Cycle 928 (agent-first A2): server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
             ctl: None,
@@ -2531,8 +2668,20 @@ impl App {
 
     fn waker(&self) -> kettle_core::Waker {
         let p = self.proxy.clone();
+        let pending = self.wake_pending.clone();
         Arc::new(move || {
-            let _ = p.send_event(UserEvent::Wakeup);
+            // v2.20.0 P4: enqueue at most ONE Wakeup per paint window. A
+            // queued Wakeup re-checks every pane's output generation when it
+            // lands, so every enqueue past the first is pure event-loop spam
+            // (a flood produced one per 64KiB read). `swap` returning false
+            // means this call owns the enqueue; the Wakeup arm reopens the
+            // latch before it reads generations, so nothing is ever missed.
+            // Events the proxy queues on the crossbeam channel before waking
+            // are drained by that same pending Wakeup — suppression never
+            // delays them.
+            if !pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                let _ = p.send_event(UserEvent::Wakeup);
+            }
         })
     }
 
@@ -3871,7 +4020,8 @@ impl App {
     /// user clicks X — would be dropped with the pane: the sidechannel is
     /// unbounded + lossless so it accumulates, but it's never read once the
     /// pane is gone. Call this immediately before `mux.reap()` and on close so
-    /// the trace keeps its tail. Per-event flush makes each chunk durable. No-op
+    /// the trace keeps its tail. Events batch through the recorder's BufWriter
+    /// (~250ms interval flush); clean close paths flush via `finish()`. No-op
     /// when not recording. Verified by `dev-record`-feature test
     /// `recorder_captures_fast_command_tail` + the live close-path tests.
     #[cfg(feature = "dev-record")]
@@ -3913,8 +4063,9 @@ impl App {
     }
 
     /// Drain every pane's recorder output sidechannel into the trace once.
-    /// Returns whether any bytes were captured. (Per-event flush in the Recorder
-    /// makes each chunk durable immediately.)
+    /// Returns whether any bytes were captured. (Events batch through the
+    /// Recorder's BufWriter with a ~250ms interval flush; clean close paths
+    /// flush via `finish()`.)
     #[cfg(feature = "dev-record")]
     fn drain_recorder_output_once(&mut self, ws: &mut WindowState) -> bool {
         // Collect first (immutable borrow of the panes), then feed the recorder
@@ -4333,6 +4484,11 @@ impl App {
                 if e >= 0.30 { 0.0 } else { 1.0 - e / 0.30 }
             })
             .unwrap_or(0.0);
+        // v2.20.0: the transient resize chip (about_to_wait drives the
+        // expiry repaint and clears the state).
+        let resize_overlay = ws
+            .resize_overlay
+            .and_then(|(c, r, t)| (t.elapsed() < RESIZE_OVERLAY_DURATION).then_some((c, r)));
 
         let context_menu = self.context_menu_overlay(ws);
         // Cycle 372: marshal the in-progress Edit-title state for
@@ -4427,6 +4583,7 @@ impl App {
                     })
                     .collect(),
                 focused_row: fld,
+                vim_nav: self.cfg.vim_menu_nav,
             }
         });
         let s = &ws.mux.search;
@@ -4444,6 +4601,7 @@ impl App {
                 window_focused,
                 cursor_visible,
                 bell,
+                resize_overlay,
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
@@ -4485,6 +4643,7 @@ impl App {
             window_focused,
             cursor_visible,
             bell,
+            resize_overlay,
             context_menu,
             vi_cursor: ws.vi_mode.map(|v| (v.row, v.col)),
             vi_visual_anchor: ws.vi_mode.and_then(|v| v.visual_anchor),
@@ -4500,19 +4659,35 @@ impl App {
         // can't have changed. The brief lock to read display_offset is cheap;
         // the avoided work is `kettle_core::links`' per-cell regex pass.
         let key = {
-            let out_at = ws
-                .mux
-                .tabs
-                .get(ws.mux.active)
-                .and_then(|t| t.last_output_at);
+            // v2.20.0 (review fix): the FOCUSED pane's output generation (a
+            // cheap atomic read) — the old `last_output_at` component was
+            // never updated for the ACTIVE tab (the activity latch skips
+            // it), so active-tab output left `ws.links` stale until a
+            // scroll/focus change.
+            let out_gen = ws.mux.focused().map(|p| p.term.output_generation());
             let off = ws
                 .mux
                 .focused()
                 .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
-            (self.focus_key(ws), out_at, off)
+            (self.focus_key(ws), out_gen, off)
         };
         if ws.links_scan_key.as_ref() == Some(&key) {
             return;
+        }
+        // v2.20.0 P6: during streaming, `last_output_at` moves with every
+        // read, so the cycle-803 key misses on EVERY painted frame and the
+        // per-cell regex pass ran at up to 60/s. Debounce output-only
+        // changes; focus / scroll changes still rescan immediately (there
+        // the viewport jumped — stale link rects would be visibly wrong).
+        // While debounced, `links_scan_key` is left at the old value so the
+        // next painted frame re-evaluates; any interaction that could USE a
+        // link (mouse move for hover, key for hint mode) repaints first, so
+        // a post-stream stale window can't be observed by the user.
+        if let (Some(prev), Some(at)) = (ws.links_scan_key.as_ref(), ws.last_links_scan) {
+            let output_only = prev.0 == key.0 && prev.2 == key.2 && prev.1 != key.1;
+            if output_only && at.elapsed() < LINKS_SCAN_DEBOUNCE {
+                return;
+            }
         }
         ws.links = ws
             .mux
@@ -4520,6 +4695,7 @@ impl App {
             .and_then(|p| p.term.term.lock().ok().map(|t| kettle_core::links(&t)))
             .unwrap_or_default();
         ws.links_scan_key = Some(key);
+        ws.last_links_scan = Some(std::time::Instant::now());
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
@@ -4699,22 +4875,34 @@ impl App {
             return;
         };
 
-        // Lock every visible pane, then hand references to the renderer.
+        // v2.20.0 P2 (perf): capture each visible pane's renderable state into
+        // a pooled snapshot UNDER the Term lock, then drop the guard
+        // immediately — a µs-scale flat copy per pane. The renderer works from
+        // the snapshots, so the GPU frame (shaping + surface-acquire + submit
+        // + present, milliseconds) no longer serializes the PTY reader
+        // threads. Before this, `redraw` held EVERY pane's Term mutex across
+        // the whole frame; under output flood (frames at the 16ms coalescer
+        // budget) the parser starved on `term.lock()` nearly continuously —
+        // the v2.19.0 baseline measured 0.42–0.8 MB/s throughput vs 3–9 MB/s
+        // for WT / Alacritty / WezTerm on the identical harness.
         // Cycle 382: also pass the pane's title so the cycle-379
         // titlebar can render the text.
-        let mut guards = Vec::with_capacity(layout.len());
+        let mut snaps = std::mem::take(&mut ws.pane_snapshots);
+        let mut metas = Vec::with_capacity(layout.len());
         for (id, r) in &layout {
             if let Some(p) = ws.mux.panes.get(id) {
                 let mut imgs = p.term.placements();
                 imgs.extend(p.term.placeholder_tiles());
                 imgs.extend(p.term.relative_tiles());
                 if let Ok(g) = p.term.term.lock() {
-                    use kettle_core::Dimensions;
-                    let cols = g.columns() as u16;
-                    let rows = g.screen_lines() as u16;
-                    guards.push((
+                    let si = metas.len();
+                    if snaps.len() <= si {
+                        snaps.push(PaneSnapshot::default());
+                    }
+                    snaps[si].capture(&g);
+                    drop(g); // lock released — the render below is lock-free
+                    metas.push((
                         *r,
-                        g,
                         Some(*id) == focus,
                         imgs,
                         compose_pane_title(
@@ -4723,24 +4911,27 @@ impl App {
                             p.read_only,
                             &p.title,
                         ),
-                        cols,
-                        rows,
+                        snaps[si].columns as u16,
+                        snaps[si].screen_lines as u16,
                         false,
                         p.group_name.clone(),
                     ));
                 }
             }
         }
-        // Cycle 852 (audit): hand the renderer borrows into `guards` (which lives
+        snaps.truncate(metas.len());
+        // Cycle 852 (audit): hand the renderer borrows into `metas` (which lives
         // for the whole frame) instead of a second per-pane clone of the images
-        // Vec / title String / group_name. `term` already borrowed the guard the
-        // same way; the data outlives `panes` because `guards` is dropped after.
-        let panes: Vec<PaneView> = guards
+        // Vec / title String / group_name. `snap` borrows the pooled snapshot
+        // the same way; both outlive `panes`, which drops before the pool
+        // returns to `ws.pane_snapshots`.
+        let panes: Vec<PaneView> = metas
             .iter()
+            .zip(snaps.iter())
             .map(
-                |(r, g, f, imgs, title, cols, rows, bell, group_name)| PaneView {
+                |((r, f, imgs, title, cols, rows, bell, group_name), snap)| PaneView {
                     rect: *r,
-                    term: g,
+                    snap,
                     focused: *f,
                     images: imgs.as_slice(),
                     title: title.as_str(),
@@ -4758,6 +4949,9 @@ impl App {
         {
             log::warn!("render error: {e}");
         }
+        // Return the snapshot pool (cell-Vec capacity recycles next frame).
+        drop(panes);
+        ws.pane_snapshots = snaps;
         // Cycle 785: now that the first frame is on the surface, reveal the
         // window (created hidden to avoid the unpainted-window flash during GPU
         // init). Runs after the render attempt — even on a render *error* we
@@ -5627,6 +5821,20 @@ impl App {
     /// current)` so the wrap+skip math is unit-testable independent of
     /// the App / cursor state.
     fn step_context_menu_highlight(&mut self, ws: &mut WindowState, delta: isize) {
+        let next = ws
+            .context_menu
+            .as_ref()
+            .map(|m| next_context_menu_highlight(&m.items, m.highlight, delta));
+        if let Some(next) = next {
+            self.set_context_menu_highlight(ws, next);
+        }
+    }
+
+    /// Move the context-menu highlight to `next` and sync `scroll_offset` so
+    /// it stays visible (cycle 714). Split out of
+    /// `step_context_menu_highlight` in v2.20.0 so the vim-menu-nav jumps
+    /// (`g`/`G`, `Ctrl+d`/`Ctrl+u`) reuse the exact same scroll-window math.
+    fn set_context_menu_highlight(&mut self, ws: &mut WindowState, next: usize) {
         let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
             return;
         };
@@ -5636,7 +5844,6 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let next = next_context_menu_highlight(&menu.items, menu.highlight, delta);
         menu.highlight = next;
         // Cycle 714: if the new highlight is outside the visible
         // window, advance scroll_offset to bring it into view.
@@ -5644,15 +5851,20 @@ impl App {
         if next < menu.scroll_offset {
             menu.scroll_offset = next;
         } else if next >= menu.scroll_offset + visible {
-            // Pull scroll_offset forward until `next` is the last
-            // fully visible row.
+            // Pull scroll_offset back until `next` is the LAST fully visible
+            // row. v2.20.0 (review fix): probe the candidate one above the
+            // current offset — the old form checked the current offset, so a
+            // far jump (`G` into a 500-row theme list) stopped immediately at
+            // `off = next` and rendered the highlight as the panel's only
+            // row with an empty page below it.
             let mut off = next;
-            loop {
-                let fit = count_rows_fitting(&menu.items, off, panel_h, row_h, sep_h);
-                if off + fit > next || off == 0 {
+            while off > 0 {
+                let fit = count_rows_fitting(&menu.items, off - 1, panel_h, row_h, sep_h);
+                if off - 1 + fit > next {
+                    off -= 1;
+                } else {
                     break;
                 }
-                off -= 1;
             }
             menu.scroll_offset = off;
         }
@@ -6281,7 +6493,16 @@ impl App {
                 // close prompts when ask_before_closing = Always.
                 // MultipleTerminals doesn't prompt (single pane); see
                 // cycle-638's should_prompt for the matrix.
-                if self.cfg.ask_before_closing.should_prompt(1) {
+                // v2.20.0 (Ghostty `confirm-close-surface` parity): a pane
+                // sitting idle at an integrated-shell prompt has no work to
+                // lose — skip the confirm. Plain shells (no OSC 133 marks)
+                // never report idle, so their behavior is unchanged.
+                let busy = ws
+                    .mux
+                    .focused()
+                    .map(|p| !p.term.shell_idle())
+                    .unwrap_or(true);
+                if busy && self.cfg.ask_before_closing.should_prompt(1) {
                     self.close_all_modals(ws);
                     ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: "Close this pane?".to_string(),
@@ -6355,7 +6576,29 @@ impl App {
                     .get(ws.mux.active)
                     .map(|t| count_leaves(&t.root))
                     .unwrap_or(1);
-                if self.cfg.ask_before_closing.should_prompt(panes_in_tab) {
+                // v2.20.0 (Ghostty parity): only panes NOT idle at an
+                // integrated-shell prompt count toward the confirm decision
+                // (an idle prompt has no work to lose; no marks → counts
+                // as busy → unchanged behavior).
+                let busy_in_tab = ws
+                    .mux
+                    .tabs
+                    .get(ws.mux.active)
+                    .map(|t| {
+                        t.root
+                            .leaf_ids()
+                            .iter()
+                            .filter(|id| {
+                                ws.mux
+                                    .panes
+                                    .get(id)
+                                    .map(|p| !p.term.shell_idle())
+                                    .unwrap_or(true)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(panes_in_tab);
+                if busy_in_tab > 0 && self.cfg.ask_before_closing.should_prompt(busy_in_tab) {
                     self.close_all_modals(ws);
                     ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close tab with {panes_in_tab} pane(s)?"),
@@ -6395,7 +6638,15 @@ impl App {
                 // dispatch (in the key handler) re-runs the close
                 // path below.
                 let scope = ws.mux.panes.len();
-                if self.cfg.ask_before_closing.should_prompt(scope) {
+                // v2.20.0 (Ghostty parity): idle-at-prompt panes don't
+                // count (see ClosePane above).
+                let busy = ws
+                    .mux
+                    .panes
+                    .values()
+                    .filter(|p| !p.term.shell_idle())
+                    .count();
+                if busy > 0 && self.cfg.ask_before_closing.should_prompt(busy) {
                     self.close_all_modals(ws);
                     ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close {scope} pane(s)?"),
@@ -6569,6 +6820,16 @@ impl App {
             Action::ToggleZoom => {
                 ws.mux.toggle_zoom();
                 self.resize_all(ws);
+            }
+            // v2.20.0 (Ghostty `equalize_splits` parity): rebalance the
+            // active tab's split tree to equal pane areas, then push the new
+            // geometry into the PTYs.
+            Action::EqualizeSplits => {
+                if let Some(t) = ws.mux.tabs.get_mut(ws.mux.active) {
+                    t.root.equalize();
+                }
+                self.resize_all(ws);
+                self.save_session(ws);
             }
             // Cycle 702 Terminator parity (`key_send_newline`).
             // Write a literal `\n` to the focused pane's PTY.
@@ -6997,16 +7258,12 @@ impl App {
                 // Cycle 621 (Terminator parity, `plugins/logger.py`):
                 // toggle the focused pane's session log. Pure helper
                 // computes the file path; this arm does the I/O.
+                // v2.20.0 P7: routed through `Terminal::set_log_file` so the
+                // reader thread's lock-skip flag stays in sync.
                 if let Some(pane) = ws.mux.focused() {
-                    let mut guard = match pane.term.log_file.lock() {
-                        Ok(g) => g,
-                        Err(_) => return,
-                    };
-                    if guard.is_some() {
+                    if pane.term.log_enabled() {
                         // Drop the file handle to stop logging.
-                        // The reader thread will check is_some() on
-                        // its next read + skip the write.
-                        *guard = None;
+                        pane.term.set_log_file(None);
                         log::info!("toggle-session-log: stopped");
                     } else {
                         let secs = std::time::SystemTime::now()
@@ -7025,13 +7282,15 @@ impl App {
                         {
                             Ok(f) => {
                                 log::info!("toggle-session-log: writing to {}", path.display());
-                                *guard = Some(f);
                                 // Cycle 625: propagate the config's
                                 // strip-ANSI choice to the reader
-                                // thread's per-Terminal flag.
+                                // thread's per-Terminal flag BEFORE the
+                                // log goes live, so the first logged
+                                // read already honors it.
                                 if let Ok(mut strip) = pane.term.log_strip_ansi.lock() {
                                     *strip = self.cfg.log_strip_ansi;
                                 }
+                                pane.term.set_log_file(Some(f));
                             }
                             Err(e) => log::warn!(
                                 "toggle-session-log: open {} failed: {e}",
@@ -7990,6 +8249,11 @@ impl App {
         if msgs.is_empty() {
             return;
         }
+        // v2.20.0 (review fix): only repaint when the batch could have
+        // changed visible state. `wait_for` probes are pure reads arriving
+        // at up to 20/s for the whole wait — repainting an otherwise-idle
+        // window for each one burned CPU for nothing.
+        let mut needs_redraw = false;
         for msg in msgs {
             match msg {
                 CtlServerMsg::NewConn { conn_id, event_tx } => {
@@ -8005,8 +8269,15 @@ impl App {
                     conn_id,
                     req,
                     reply,
+                    internal_probe,
                 } => {
-                    self.handle_ctl_request(ws, conn_id, &req, reply);
+                    // Mutations + first-time attaches change visible state
+                    // (pane content, agent badge); wait_for's internal
+                    // probes never do.
+                    if !internal_probe {
+                        needs_redraw = true;
+                    }
+                    self.handle_ctl_request(ws, conn_id, &req, reply, internal_probe);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -8029,10 +8300,11 @@ impl App {
                     self.pending_runs
                         .retain(|_, p: &mut PendingRun| p.conn_id != conn_id);
                     log::info!("agent-server: connection {conn_id} closed");
+                    needs_redraw = true; // the agent badge may have cleared
                 }
             }
         }
-        if let Some(w) = &ws.window {
+        if needs_redraw && let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
@@ -8046,6 +8318,7 @@ impl App {
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
         reply: crate::ctl_server::ReplyTx,
+        internal_probe: bool,
     ) {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let mode = self
@@ -8055,10 +8328,15 @@ impl App {
             .unwrap_or(kettle_config::AgentServer::Off);
         // Annotate the dev-record trace with each agent action (cheap; the
         // recorder only exists in dev-record builds with --record).
+        // v2.20.0 (review fix): wait_for's internal read_screen probes are
+        // NOT annotated — a 300s wait at 50ms polls would land ~6000
+        // markers; the wait itself is visible via the client's own calls.
         #[cfg(feature = "dev-record")]
-        if let Some(rec) = self.recorder.as_mut() {
+        if !internal_probe && let Some(rec) = self.recorder.as_mut() {
             rec.record_marker(&format!("kettle:agent {} conn={conn_id}", req.method));
         }
+        #[cfg(not(feature = "dev-record"))]
+        let _ = internal_probe;
         // Single mutation gate (a drift-guard test pins that every mutating
         // method routes through this check).
         let require_full = |id: u64, method: &str| -> Option<Response> {
@@ -8083,6 +8361,8 @@ impl App {
             }
             "send_text" => require_full(req.id, "send_text")
                 .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
+            "send_keys" => require_full(req.id, "send_keys")
+                .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
@@ -8228,6 +8508,9 @@ impl App {
                     "history_size": s.history_size,
                     "display_offset": s.display_offset,
                     "cursor": [s.cursor.0, s.cursor.1],
+                    // v2.20.0 (agent plane): DEC ?25 — vim/fzf/less hide the
+                    // cursor; agents must know when `cursor` is meaningless.
+                    "cursor_visible": s.cursor_visible,
                 }),
             ),
             None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
@@ -8270,6 +8553,95 @@ impl App {
         Response::ok(
             req.id,
             serde_json::json!({"pane": pane, "bytes": text.len()}),
+        )
+    }
+
+    /// v2.20.0 (agent plane): `send_keys` — press named keys / chords in a
+    /// pane. `send_text` can only type literal characters (CR included), so
+    /// an agent could not press Escape, arrows, Ctrl-chords or F-keys — the
+    /// keys interactive apps (vim, htop, fzf, tmux) are driven with. Tokens
+    /// are encoded through the SAME `input::encode` path as GUI keystrokes,
+    /// against the pane's LIVE terminal mode — so arrows honor DECCKM
+    /// application-cursor mode exactly like a human's key press.
+    ///
+    /// Params: `{pane?: u64, keys: ["escape", "ctrl+c", "down", "G", …]}`.
+    /// All tokens are parsed BEFORE any byte is written — a typo mid-sequence
+    /// must not leave the target app half-keyed.
+    fn ctl_send_keys(
+        &mut self,
+        ws: &mut WindowState,
+        conn_id: u64,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let pane = match self.ctl_resolve_pane(ws, &req.params) {
+            Ok(p) => p,
+            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+        };
+        let Some(keys) = req.params.get("keys").and_then(|v| v.as_array()) else {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "missing 'keys' array of key tokens (e.g. [\"escape\",\"ctrl+c\"])",
+            );
+        };
+        if keys.is_empty() {
+            return Response::err(req.id, ec::BAD_PARAMS, "'keys' is empty");
+        }
+        let mut parsed = Vec::with_capacity(keys.len());
+        for k in keys {
+            let Some(tok) = k.as_str() else {
+                return Response::err(req.id, ec::BAD_PARAMS, "non-string entry in 'keys'");
+            };
+            match parse_send_key(tok) {
+                Some(p) => parsed.push(p),
+                None => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        format!("unrecognized key token '{tok}'"),
+                    );
+                }
+            }
+        }
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
+            return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
+        };
+        // The live mode decides the byte form (app-cursor arrows etc.).
+        let mode = p
+            .term
+            .term
+            .lock()
+            .ok()
+            .map(|t| *t.mode())
+            .unwrap_or_else(kettle_core::TermMode::empty);
+        let mut bytes = Vec::new();
+        for (mods, key) in &parsed {
+            if let Some(b) = crate::input::encode(key, None, *mods, mode) {
+                // Review fix: honor the user's backspace-binding /
+                // delete-binding remap, exactly like the GUI key path.
+                let b = apply_bs_del_binding(&self.cfg, key, *mods, b);
+                bytes.extend_from_slice(&b);
+            }
+        }
+        // Cycle 941 semantics: the per-pane read-only toggle blocks agents
+        // like any other input, with an explicit error.
+        if !p.feed_input(&bytes) {
+            return Response::err(
+                req.id,
+                ec::READ_ONLY,
+                "pane is read-only (user toggled 'Read only')",
+            );
+        }
+        log::info!(
+            "agent-server: send_keys conn={conn_id} pane={pane} ({} keys, {} bytes)",
+            parsed.len(),
+            bytes.len()
+        );
+        self.ctl_attach(ws, conn_id, pane);
+        Response::ok(
+            req.id,
+            serde_json::json!({"pane": pane, "keys": parsed.len(), "bytes": bytes.len()}),
         )
     }
 
@@ -8711,6 +9083,14 @@ impl App {
                             );
                             s.push(t.grid()[p].c);
                         }
+                        // v2.20.0 (review fix): trim the row's grid padding
+                        // BEFORE the newline — a capture group like `(.+)$`
+                        // otherwise embedded up-to-a-full-row of trailing
+                        // spaces into the spawned command's argv. Safe: the
+                        // previous row already ends in '\n', so the trim can
+                        // never eat earlier rows.
+                        let keep = s.trim_end_matches(' ').len();
+                        s.truncate(keep);
                         s.push('\n');
                     }
                     out.push(s);
@@ -8756,30 +9136,27 @@ impl App {
                 self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Enter) => {
-                let s = &mut ws.mux.search;
-                if !s.matches.is_empty() {
-                    // Cycle 358 (Terminator parity, terminatorlib/config.py:93
-                    // `invert_search`): flip the default-direction.
-                    // - Default: Enter → next match, Shift+Enter → previous.
-                    // - With invert_search = true: Enter → previous match,
-                    //   Shift+Enter → next. Matches Terminator's "search
-                    //   reverse" toggle.
-                    let go_back = ws.mods.shift_key() ^ self.cfg.invert_search;
-                    let n = s.matches.len();
-                    // Cycle 940 (Terminator parity): `search-wrap = false` stops
-                    // at the ends instead of cycling around.
-                    s.index = if self.cfg.search_wrap {
-                        if go_back {
-                            (s.index + n - 1) % n
-                        } else {
-                            (s.index + 1) % n
-                        }
-                    } else if go_back {
-                        s.index.saturating_sub(1)
-                    } else {
-                        (s.index + 1).min(n - 1)
-                    };
-                }
+                // Cycle 358 (Terminator parity, terminatorlib/config.py:93
+                // `invert_search`): flip the default-direction.
+                // - Default: Enter → next match, Shift+Enter → previous.
+                // - With invert_search = true: Enter → previous match,
+                //   Shift+Enter → next. Matches Terminator's "search
+                //   reverse" toggle.
+                let go_back = ws.mods.shift_key() ^ self.cfg.invert_search;
+                self.search_step_match(ws, go_back);
+            }
+            // v2.20.0 (`vim-menu-nav`): Ctrl+j/Ctrl+k (+ Ctrl+n/Ctrl+p) step
+            // to the next/previous match from the home row — search had no
+            // arrow-key nav at all before this. The direction is literal:
+            // `invert-search` only flips Enter's *default*, not an explicit
+            // directional key.
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
+            {
+                self.search_step_match(ws, matches!(s.as_str(), "k" | "p"));
             }
             Key::Named(NamedKey::Backspace) => {
                 ws.mux.search.query.pop();
@@ -8796,6 +9173,29 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Advance the search selection one match forward (`go_back = false`) or
+    /// backward, honoring `search-wrap` (cycle 940: `false` stops at the ends
+    /// instead of cycling). Extracted from `search_key`'s Enter arm in
+    /// v2.20.0 so vim-menu-nav's Ctrl+j/Ctrl+k share the exact stepping.
+    fn search_step_match(&mut self, ws: &mut WindowState, go_back: bool) {
+        let s = &mut ws.mux.search;
+        if s.matches.is_empty() {
+            return;
+        }
+        let n = s.matches.len();
+        s.index = if self.cfg.search_wrap {
+            if go_back {
+                (s.index + n - 1) % n
+            } else {
+                (s.index + 1) % n
+            }
+        } else if go_back {
+            s.index.saturating_sub(1)
+        } else {
+            (s.index + 1).min(n - 1)
+        };
     }
 
     /// Command-palette key handling: fuzzy-filter as you type, `Tab`/`↑↓`
@@ -9008,6 +9408,24 @@ impl App {
                     self.handle_action(ws, a, event_loop);
                 }
             }
+            // v2.20.0 (`vim-menu-nav`): Ctrl+j/Ctrl+k (plus the telescope/
+            // fzf Ctrl+n/Ctrl+p idiom) move the selection — bare letters
+            // keep typing into the query. Other Ctrl-chords fall through to
+            // the catch-all unchanged.
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
+            {
+                let n = kettle_config::palette::rank(q, &cmds).len();
+                if n > 0 {
+                    *sel = match s.as_str() {
+                        "j" | "n" => (*sel + 1) % n,
+                        _ => (*sel + n - 1) % n,
+                    };
+                }
+            }
             _ => {
                 if let Some(t) = text
                     && !t.is_empty()
@@ -9114,55 +9532,40 @@ impl App {
             | Key::Named(NamedKey::ArrowLeft)
             | Key::Named(NamedKey::Space)
             | Key::Named(NamedKey::Enter) => {
-                let field = &cats[cat].fields[fld];
-                if crate::settings::is_keybind(field) {
-                    // Enter/Space on a keybind row → enter chord-capture; ←/→ no-op.
-                    if matches!(
-                        key,
-                        Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter)
-                    ) {
-                        if let Some(n) = ws.settings_nav.as_mut() {
-                            n.category = cat;
-                            n.field = fld;
-                            n.capturing = true;
-                        }
-                        return;
+                let dir = match key {
+                    Key::Named(NamedKey::ArrowRight) => 1,
+                    Key::Named(NamedKey::ArrowLeft) => -1,
+                    _ => 0, // Space / Enter = activate (cycle forward / toggle)
+                };
+                self.settings_adjust(ws, &cats, cat, fld, dir);
+            }
+            // v2.20.0 (`vim-menu-nav`): j/k mirror ↓/↑, h/l mirror ←/→,
+            // g/G jump to the first/last field, Ctrl+d / Ctrl+u move half a
+            // page. Chord-capture mode (handled before this match) already
+            // consumed the key, so capturing a chord like bare `j` (refused
+            // anyway) or `Ctrl+d` still reaches the capture branch.
+            Key::Character(s)
+                if self.cfg.vim_menu_nav && !ws.mods.alt_key() && !ws.mods.super_key() =>
+            {
+                let half = (field_count / 2).max(1);
+                // v2.20.0 (review fix): case-fold so CapsLock can't kill the
+                // nav layer; g-vs-G derives from the physical Shift state.
+                let folded = s.to_ascii_lowercase();
+                match (folded.as_str(), ws.mods.control_key()) {
+                    ("j", false) => fld = (fld + 1) % field_count,
+                    ("k", false) => fld = (fld + field_count - 1) % field_count,
+                    ("g", false) => {
+                        fld = if ws.mods.shift_key() {
+                            field_count - 1
+                        } else {
+                            0
+                        };
                     }
-                } else {
-                    let dir = match key {
-                        Key::Named(NamedKey::ArrowRight) => 1,
-                        Key::Named(NamedKey::ArrowLeft) => -1,
-                        _ => 0, // Space / Enter = activate (cycle forward / toggle)
-                    };
-                    // Scope the cfg borrow so reload_config (&mut self) is free.
-                    let (key_str, new_val) = {
-                        (
-                            field.key,
-                            crate::settings::next_value(&self.cfg, field, dir),
-                        )
-                    };
-                    // Cycle 919 (audit L4): notify if the Settings change can't
-                    // be written — it's live this session but lost on restart.
-                    if !self.persist_pref(key_str, &new_val) {
-                        fire_notify(
-                            "kettle: setting not saved",
-                            "Applied for this session — couldn't write it to your config file.",
-                        );
-                    }
-                    // Cycle 856 (audit): the single "Window padding" control is
-                    // meant to set *uniform* padding, but persisted only the X
-                    // axis — leaving `window-padding-y` at its default produced
-                    // visibly lopsided padding. Mirror the value to the Y axis.
-                    if key_str == "window-padding-x" {
-                        self.persist_pref("window-padding-y", &new_val);
-                    }
-                    self.reload_config(ws);
-                    // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid
-                    // is gone. It existed only to defend against startup's
-                    // session-theme override (now removed) reverting a Settings
-                    // pick after an unclean exit. The pick is durably written to
-                    // the config `theme =` line by `persist_pref` above, which is
-                    // the single source of truth on restart.
+                    ("h", false) => self.settings_adjust(ws, &cats, cat, fld, -1),
+                    ("l", false) => self.settings_adjust(ws, &cats, cat, fld, 1),
+                    ("d", true) => fld = (fld + half).min(field_count - 1),
+                    ("u", true) => fld = fld.saturating_sub(half),
+                    _ => {}
                 }
             }
             _ => {}
@@ -9171,6 +9574,62 @@ impl App {
             n.category = cat;
             n.field = fld;
         }
+    }
+
+    /// ←/→ (`dir = ±1`) or Space/Enter (`dir = 0`) on the focused settings
+    /// row. Keybind rows enter chord-capture on activate (±1 no-ops); value
+    /// rows persist the stepped value, mirror padding, and live-reload.
+    /// Extracted from `settings_key`'s arrow arm in v2.20.0 so vim-menu-nav's
+    /// `h`/`l` share the exact code path.
+    fn settings_adjust(
+        &mut self,
+        ws: &mut WindowState,
+        cats: &[crate::settings::Category],
+        cat: usize,
+        fld: usize,
+        dir: i32,
+    ) {
+        let field = &cats[cat].fields[fld];
+        if crate::settings::is_keybind(field) {
+            // Activate on a keybind row → enter chord-capture; ←/→ no-op.
+            if dir == 0
+                && let Some(n) = ws.settings_nav.as_mut()
+            {
+                n.category = cat;
+                n.field = fld;
+                n.capturing = true;
+            }
+            return;
+        }
+        // Scope the cfg borrow so reload_config (&mut self) is free.
+        let (key_str, new_val) = {
+            (
+                field.key,
+                crate::settings::next_value(&self.cfg, field, dir),
+            )
+        };
+        // Cycle 919 (audit L4): notify if the Settings change can't
+        // be written — it's live this session but lost on restart.
+        if !self.persist_pref(key_str, &new_val) {
+            fire_notify(
+                "kettle: setting not saved",
+                "Applied for this session — couldn't write it to your config file.",
+            );
+        }
+        // Cycle 856 (audit): the single "Window padding" control is
+        // meant to set *uniform* padding, but persisted only the X
+        // axis — leaving `window-padding-y` at its default produced
+        // visibly lopsided padding. Mirror the value to the Y axis.
+        if key_str == "window-padding-x" {
+            self.persist_pref("window-padding-y", &new_val);
+        }
+        self.reload_config(ws);
+        // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid
+        // is gone. It existed only to defend against startup's
+        // session-theme override (now removed) reverting a Settings
+        // pick after an unclean exit. The pick is durably written to
+        // the config `theme =` line by `persist_pref` above, which is
+        // the single source of truth on restart.
     }
 
     /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
@@ -9204,6 +9663,22 @@ impl App {
                     *sel = (*sel + n - 1) % n;
                 }
             }
+            // v2.20.0 (`vim-menu-nav`): Ctrl+j/k (+ Ctrl+n/p) move the
+            // selection; bare letters keep typing into the filter.
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
+            {
+                let n = rank_layouts(q, &layouts).len();
+                if n > 0 {
+                    *sel = match s.as_str() {
+                        "j" | "n" => (*sel + 1) % n,
+                        _ => (*sel + n - 1) % n,
+                    };
+                }
+            }
             Key::Named(NamedKey::Enter) => {
                 let ranked = rank_layouts(q, &layouts);
                 let name = ranked.get(*sel).map(|&i| layouts[i].clone());
@@ -9235,12 +9710,137 @@ impl App {
         }
     }
 
-    /// Keyboard routing while the right-click context menu is open.
-    /// `Esc` closes, `↑/↓` step the highlight (skipping separators +
-    /// disabled rows via `next_context_menu_highlight`), `Enter` fires
-    /// the highlighted action. Any other key is swallowed so a stray
-    /// keypress doesn't leak into the focused pane while the menu is
-    /// expecting nav input.
+    /// Esc / `h` semantics: pop a drilled-in submenu back to its parent, or
+    /// close the menu when at the top level. Extracted from the Esc arm in
+    /// v2.20.0 so vim-menu-nav's `h` shares the exact code path.
+    fn context_menu_back(&mut self, ws: &mut WindowState) {
+        // Cycle 687 (theme-submenu sub-cycle 3): Esc on
+        // a drilled-in submenu pops back to the parent
+        // instead of closing the menu entirely. Only
+        // when drill_stack is empty does Esc close.
+        if let Some(menu) = ws.context_menu.as_mut()
+            && let Some(parent) = menu.drill_stack.pop()
+        {
+            menu.items = parent;
+            // Cycle 714: restore the parent level's
+            // scroll_offset so popping out of a deep theme
+            // list doesn't snap the parent's scroll position
+            // to 0.
+            menu.scroll_offset = menu.scroll_stack.pop().unwrap_or(0);
+            menu.highlight = menu
+                .items
+                .iter()
+                .position(item_is_dispatchable)
+                .unwrap_or(0);
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        ws.context_menu = None;
+        self.reset_blink_phase(ws);
+    }
+
+    /// Enter / Space / `l` semantics: dispatch the highlighted row through the
+    /// shared mapper. Extracted from the Enter arm in v2.20.0 so
+    /// vim-menu-nav's `l` shares the exact code path.
+    fn context_menu_activate(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
+        // Cycle 890 (audit): resolve the highlighted row through the
+        // shared mapper so Enter / Space dispatches *every* row type
+        // — submenu (drills in), Lua item, config command, theme /
+        // profile choice, new-tab ▾ shell — not just `Item`. The
+        // mapper + dispatcher also own the close-or-keep decision, so
+        // a submenu Enter no longer wrongly closes the menu.
+        let chosen = ws.context_menu.as_ref().and_then(|m| {
+            m.items
+                .get(m.highlight)
+                .and_then(|it| item_to_click(it, m.highlight))
+        });
+        self.reset_blink_phase(ws);
+        match chosen {
+            Some(click) => self.dispatch_context_menu_click(ws, click, event_loop),
+            // Highlight on a non-dispatchable row (shouldn't happen —
+            // nav skips them — but close rather than trap the user).
+            None => ws.context_menu = None,
+        }
+    }
+
+    /// v2.20.0 (`vim-menu-nav`): the context menu's vim layer. Returns `true`
+    /// when the key was consumed. Called BEFORE the mnemonic/typeahead
+    /// catch-all (which eats every bare a–z) so nav letters always navigate;
+    /// `assign_mnemonics` reserves the same letters (`VIM_NAV_RESERVED`) so
+    /// no row ever points at a key this layer intercepts.
+    fn context_menu_vim_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let Key::Character(s) = key else {
+            return false;
+        };
+        if ws.mods.alt_key() || ws.mods.super_key() {
+            return false;
+        }
+        let ctrl = ws.mods.control_key();
+        // v2.20.0 (review fix): case-fold so CapsLock can't kill the nav
+        // layer (letters arrive uppercased); g-vs-G derives from the
+        // PHYSICAL Shift state, not character case, so CapsLock+g still
+        // means "first" (the user didn't press Shift).
+        let folded = s.to_ascii_lowercase();
+        match (folded.as_str(), ctrl) {
+            ("j", false) => {
+                self.step_context_menu_highlight(ws, 1);
+                true
+            }
+            ("k", false) => {
+                self.step_context_menu_highlight(ws, -1);
+                true
+            }
+            ("g", false) => {
+                let last = ws.mods.shift_key();
+                let next = ws.context_menu.as_ref().and_then(|m| {
+                    if last {
+                        m.items.iter().rposition(item_is_dispatchable)
+                    } else {
+                        m.items.iter().position(item_is_dispatchable)
+                    }
+                });
+                if let Some(next) = next {
+                    self.set_context_menu_highlight(ws, next);
+                }
+                true
+            }
+            ("h", false) => {
+                self.context_menu_back(ws);
+                true
+            }
+            ("l", false) => {
+                self.context_menu_activate(ws, event_loop);
+                true
+            }
+            ("d", true) | ("u", true) => {
+                let dir: isize = if s.as_str() == "d" { 1 } else { -1 };
+                let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
+                    return true;
+                };
+                let (_, ch) = self.menu_cell(ws);
+                let row_h = ch + kettle_render::menu::ROW_PAD;
+                let sep_h = kettle_render::menu::SEP_H;
+                let next = ws.context_menu.as_ref().map(|m| {
+                    let visible =
+                        count_rows_fitting(&m.items, m.scroll_offset, panel_h, row_h, sep_h);
+                    half_page_menu_target(&m.items, m.highlight, (visible / 2).max(1), dir)
+                });
+                if let Some(next) = next {
+                    self.set_context_menu_highlight(ws, next);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn context_menu_key(
         &mut self,
         ws: &mut WindowState,
@@ -9248,33 +9848,22 @@ impl App {
         text: Option<&str>,
         event_loop: &ActiveEventLoop,
     ) {
+        // v2.20.0: vim navigation intercepts BEFORE the mnemonic/typeahead
+        // catch-all below — otherwise bare `j`/`k`/… would be eaten as
+        // mnemonic/typeahead input. Disabled (`vim-menu-nav = false`)
+        // restores the pre-v2.20.0 behavior byte-for-byte.
+        // Keyboard routing while the right-click context menu is open:
+        // `Esc` closes (or pops a submenu), `↑/↓` step the highlight
+        // (skipping separators + disabled rows), `Enter`/`Space` fire the
+        // highlighted action, and bare letters dispatch mnemonics /
+        // typeahead. Any other key is swallowed so a stray keypress doesn't
+        // leak into the focused pane while the menu is expecting nav input.
+        if self.cfg.vim_menu_nav && self.context_menu_vim_key(ws, key, event_loop) {
+            return;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
-                // Cycle 687 (theme-submenu sub-cycle 3): Esc on
-                // a drilled-in submenu pops back to the parent
-                // instead of closing the menu entirely. Only
-                // when drill_stack is empty does Esc close.
-                if let Some(menu) = ws.context_menu.as_mut()
-                    && let Some(parent) = menu.drill_stack.pop()
-                {
-                    menu.items = parent;
-                    // Cycle 714: restore the parent level's
-                    // scroll_offset so popping out of a deep theme
-                    // list doesn't snap the parent's scroll position
-                    // to 0.
-                    menu.scroll_offset = menu.scroll_stack.pop().unwrap_or(0);
-                    menu.highlight = menu
-                        .items
-                        .iter()
-                        .position(item_is_dispatchable)
-                        .unwrap_or(0);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                ws.context_menu = None;
-                self.reset_blink_phase(ws);
+                self.context_menu_back(ws);
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
                 self.step_context_menu_highlight(ws, 1);
@@ -9283,24 +9872,7 @@ impl App {
                 self.step_context_menu_highlight(ws, -1);
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
-                // Cycle 890 (audit): resolve the highlighted row through the
-                // shared mapper so Enter / Space dispatches *every* row type
-                // — submenu (drills in), Lua item, config command, theme /
-                // profile choice, new-tab ▾ shell — not just `Item`. The
-                // mapper + dispatcher also own the close-or-keep decision, so
-                // a submenu Enter no longer wrongly closes the menu.
-                let chosen = ws.context_menu.as_ref().and_then(|m| {
-                    m.items
-                        .get(m.highlight)
-                        .and_then(|it| item_to_click(it, m.highlight))
-                });
-                self.reset_blink_phase(ws);
-                match chosen {
-                    Some(click) => self.dispatch_context_menu_click(ws, click, event_loop),
-                    // Highlight on a non-dispatchable row (shouldn't happen —
-                    // nav skips them — but close rather than trap the user).
-                    None => ws.context_menu = None,
-                }
+                self.context_menu_activate(ws, event_loop);
             }
             _ => {
                 // Cycle 715 (Terminator menu UX, C6): mnemonics +
@@ -9332,11 +9904,18 @@ impl App {
                 // (single-char). On a hit, dispatch the row + close
                 // the menu (matches Win32 / GTK convention). On a
                 // miss, accumulate into typeahead.
+                // v2.20.0: with vim-menu-nav on, the nav letters are reserved
+                // — they were intercepted above and must never match a row.
+                let reserved: &[char] = if self.cfg.vim_menu_nav {
+                    VIM_NAV_RESERVED
+                } else {
+                    &[]
+                };
                 let mnemonic_hit = ws.context_menu.as_ref().and_then(|menu| {
                     if !menu.typeahead_buf.is_empty() {
                         return None;
                     }
-                    let mn = assign_mnemonics(&menu.items);
+                    let mn = assign_mnemonics(&menu.items, reserved);
                     mn.iter().enumerate().find_map(|(idx, slot)| {
                         slot.and_then(|(_, ch)| (ch == lower).then_some(idx))
                     })
@@ -9443,6 +10022,150 @@ impl App {
             }
         }
     }
+}
+
+/// Cycle 352 (Terminator parity): remap encoded Backspace/Delete bytes per
+/// the user's `backspace-binding`/`delete-binding`. Extracted in v2.20.0
+/// (review fix) so `send_keys` honors the same remap as GUI keystrokes —
+/// the "same path as a human key press" contract.
+fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Vec<u8>) -> Vec<u8> {
+    let Key::Named(named) = key else {
+        return bytes;
+    };
+    use kettle_config::{BackspaceBinding, DeleteBinding};
+    if *named == NamedKey::Backspace && !mods.control_key() && !mods.alt_key() {
+        match cfg.backspace_binding {
+            BackspaceBinding::AsciiDel => vec![0x7f],
+            BackspaceBinding::ControlH => vec![0x08],
+            BackspaceBinding::EscapeSequence => b"\x1b[3~".to_vec(),
+            BackspaceBinding::Automatic => bytes,
+        }
+    } else if *named == NamedKey::Delete {
+        match cfg.delete_binding {
+            DeleteBinding::AsciiDel => vec![0x7f],
+            DeleteBinding::ControlH => vec![0x08],
+            DeleteBinding::EscapeSequence => b"\x1b[3~".to_vec(),
+            DeleteBinding::Automatic => bytes,
+        }
+    } else {
+        bytes
+    }
+}
+
+/// v2.20.0 (agent plane): parse one `send_keys` token — `"escape"`,
+/// `"ctrl+c"`, `"shift+tab"`, `"f5"`, `"alt+enter"`, a bare character like
+/// `"G"` — into the `(mods, key)` pair the GUI's PTY encoder
+/// (`input::encode`) consumes. Same `+`-separated grammar and modifier
+/// aliases as config keybind triggers (`parse_trigger`), plus the named keys
+/// the keybind grammar has no variant for (escape, backspace, delete,
+/// insert, space) — those are exactly the keys agents drive TUIs with.
+/// Character case is preserved (`"G"` sends `G`, like a human holding
+/// Shift). `None` on an unrecognized token, so the caller can name the bad
+/// token instead of sending wrong bytes. Pure (unit-tested).
+fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
+    let parts: Vec<&str> = token.split('+').collect();
+    let last = parts.len().checked_sub(1)?;
+    let mut mods = ModifiersState::empty();
+    let mut key: Option<Key> = None;
+    for (i, part) in parts.iter().enumerate() {
+        let raw = part.trim();
+        let lower = raw.to_ascii_lowercase();
+        match lower.as_str() {
+            "ctrl" | "control" => mods |= ModifiersState::CONTROL,
+            "alt" | "opt" | "option" => mods |= ModifiersState::ALT,
+            "shift" => mods |= ModifiersState::SHIFT,
+            "super" | "cmd" | "command" | "win" | "windows" | "meta" | "logo" => {
+                mods |= ModifiersState::SUPER;
+            }
+            _ => {
+                // Only the LAST slot may be a key (same rule as parse_trigger:
+                // a typo'd modifier must fail loudly, not bind a plain key).
+                if i != last {
+                    return None;
+                }
+                // Named characters first (review fix: `,` was unreachable
+                // from the CLI's comma-split `--keys`, `+` from every client
+                // because it's the chord separator). Mirrors `parse_key`'s
+                // plus/minus/equal aliases.
+                match lower.as_str() {
+                    "plus" => {
+                        key = Some(Key::Character("+".into()));
+                        continue;
+                    }
+                    "comma" => {
+                        key = Some(Key::Character(",".into()));
+                        continue;
+                    }
+                    "minus" => {
+                        key = Some(Key::Character("-".into()));
+                        continue;
+                    }
+                    "equal" => {
+                        key = Some(Key::Character("=".into()));
+                        continue;
+                    }
+                    _ => {}
+                }
+                let named = match lower.as_str() {
+                    "escape" | "esc" => Some(NamedKey::Escape),
+                    "enter" | "return" => Some(NamedKey::Enter),
+                    "tab" => Some(NamedKey::Tab),
+                    "backspace" | "bs" => Some(NamedKey::Backspace),
+                    "delete" | "del" => Some(NamedKey::Delete),
+                    "insert" | "ins" => Some(NamedKey::Insert),
+                    "space" => Some(NamedKey::Space),
+                    "up" => Some(NamedKey::ArrowUp),
+                    "down" => Some(NamedKey::ArrowDown),
+                    "left" => Some(NamedKey::ArrowLeft),
+                    "right" => Some(NamedKey::ArrowRight),
+                    "home" => Some(NamedKey::Home),
+                    "end" => Some(NamedKey::End),
+                    "page_up" | "pageup" | "prior" => Some(NamedKey::PageUp),
+                    "page_down" | "pagedown" | "next" => Some(NamedKey::PageDown),
+                    "f1" => Some(NamedKey::F1),
+                    "f2" => Some(NamedKey::F2),
+                    "f3" => Some(NamedKey::F3),
+                    "f4" => Some(NamedKey::F4),
+                    "f5" => Some(NamedKey::F5),
+                    "f6" => Some(NamedKey::F6),
+                    "f7" => Some(NamedKey::F7),
+                    "f8" => Some(NamedKey::F8),
+                    "f9" => Some(NamedKey::F9),
+                    "f10" => Some(NamedKey::F10),
+                    "f11" => Some(NamedKey::F11),
+                    "f12" => Some(NamedKey::F12),
+                    _ => None,
+                };
+                key = Some(match named {
+                    Some(n) => Key::Named(n),
+                    None => {
+                        // A single character, case preserved.
+                        let mut ch = raw.chars();
+                        let mut c = ch.next()?;
+                        if ch.next().is_some() {
+                            return None;
+                        }
+                        // Review fixes: `super+<char>` has NO PTY encoding —
+                        // fail loudly rather than silently dropping the
+                        // modifier. `shift+<letter>` normalizes to the
+                        // uppercase character with SHIFT cleared (exactly
+                        // what a human's Shift press delivers; the encoder's
+                        // Character arm ignores SHIFT, so `shift+g` would
+                        // otherwise silently send lowercase `g`).
+                        if mods.contains(ModifiersState::SUPER) {
+                            return None;
+                        }
+                        if mods.contains(ModifiersState::SHIFT) && c.is_ascii_alphabetic() {
+                            c = c.to_ascii_uppercase();
+                            mods.remove(ModifiersState::SHIFT);
+                        }
+                        Key::Character(c.to_string().into())
+                    }
+                });
+            }
+        }
+    }
+    key.map(|k| (mods, k))
 }
 
 fn to_kkey(key: &Key) -> Option<KKey> {
@@ -9600,6 +10323,17 @@ impl ApplicationHandler<UserEvent> for App {
             // gates per window on the panes' output generations, so only
             // windows with fresh output repaint.
             UserEvent::Wakeup | UserEvent::ReloadConfig => {
+                // v2.20.0 P4: reopen the wakeup latch BEFORE any generation
+                // reads below — a reader that bumps its generation after this
+                // store enqueues a fresh Wakeup, so the new output is painted
+                // either by this pass (we see the bump) or by the next event
+                // (we already woke for it). Clearing on ReloadConfig too is
+                // harmless: the worst case is one extra queued event.
+                // (swap with AcqRel rather than a plain Release store: the
+                // acquire edge pairs with the reader's swap — the textbook
+                // consumer side of a wake flag.)
+                self.wake_pending
+                    .swap(false, std::sync::atomic::Ordering::AcqRel);
                 let seqs: Vec<u64> = self.windows.keys().copied().collect();
                 for seq in seqs {
                     let Some(mut ws) = self.windows.remove(&seq) else {
@@ -10158,13 +10892,11 @@ impl App {
                     theme: None,
                     windows: Vec::new(),
                 };
-                let proxy = self.proxy.clone();
-                let mk = move || -> kettle_core::Waker {
-                    let p = proxy.clone();
-                    std::sync::Arc::new(move || {
-                        let _ = p.send_event(UserEvent::Wakeup);
-                    })
-                };
+                // v2.20.0 (review fix): route through the LATCHED waker
+                // constructor — this hand-rolled closure bypassed the P4
+                // wakeup-dedup latch, so restored panes re-created the
+                // one-wakeup-per-read flood the latch eliminates.
+                let mk = || self.waker();
                 if !ws.mux.restore(&sess, &self.cfg, cw, ch, &mk) {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
@@ -11124,13 +11856,10 @@ impl App {
                     // changed (the exact "theme didn't update to Catppuccin" bug).
                     // `s.theme` is ignored (kept on the struct only for back-compat
                     // parsing of older session.json files).
-                    let proxy = self.proxy.clone();
-                    let mk = move || -> kettle_core::Waker {
-                        let p = proxy.clone();
-                        std::sync::Arc::new(move || {
-                            let _ = p.send_event(UserEvent::Wakeup);
-                        })
-                    };
+                    // v2.20.0 (review fix): the latched waker constructor —
+                    // the old hand-rolled closure bypassed the P4 dedup
+                    // latch for every session-restored pane.
+                    let mk = || self.waker();
                     // C7 (multi-window): window 1 of the session restores into
                     // THIS window; each additional saved window opens via
                     // open_window(Restore) — possible here because the GPU
@@ -11425,6 +12154,27 @@ impl App {
                     r.resize(size.width, size.height);
                 }
                 self.resize_all(ws);
+                // v2.20.0 (Ghostty `resize-overlay` parity): arm the
+                // transient size chip. `after-first` (default) skips the
+                // initial placement resize that fires at window creation.
+                let show_chip = match self.cfg.resize_overlay {
+                    kettle_config::ResizeOverlayMode::Never => false,
+                    kettle_config::ResizeOverlayMode::Always => true,
+                    // Review fix: placement events arrive as a short STORM
+                    // at window birth (session restore re-positions,
+                    // `window-state = maximised` applies post-create, a
+                    // tear-off window materializes mid-drag) — swallow the
+                    // whole birth window, not just the literal first event.
+                    kettle_config::ResizeOverlayMode::AfterFirst => {
+                        ws.seen_first_resize
+                            && ws.spawned_at.elapsed() > std::time::Duration::from_millis(1500)
+                    }
+                };
+                ws.seen_first_resize = true;
+                if show_chip {
+                    let (cols, rows) = self.grid_of(ws, self.area(ws));
+                    ws.resize_overlay = Some((cols as u16, rows as u16, std::time::Instant::now()));
+                }
                 // Cycle 875: record the new grid size into the asciicast trace.
                 #[cfg(feature = "dev-record")]
                 if self.recorder.is_some() {
@@ -12710,6 +13460,25 @@ impl App {
                         }
                         Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
                         Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+                        // v2.20.0 (`vim-menu-nav`): y/n answer directly;
+                        // h/l move button focus like ←/→. The modal swallows
+                        // all other keys either way, so disabling the setting
+                        // restores the old behavior exactly.
+                        Key::Character(s)
+                            if self.cfg.vim_menu_nav
+                                && !ws.mods.control_key()
+                                && !ws.mods.alt_key()
+                                && !ws.mods.super_key() =>
+                        {
+                            // Case-folded so CapsLock can't disable y/n/h/l.
+                            match s.to_ascii_lowercase().as_str() {
+                                "y" => Some(ConfirmKey::Yes),
+                                "n" => Some(ConfirmKey::No),
+                                "h" => Some(ConfirmKey::Left),
+                                "l" => Some(ConfirmKey::Right),
+                                _ => None,
+                            }
+                        }
                         _ => None,
                     };
                     if let Some(k) = key
@@ -12811,28 +13580,9 @@ impl App {
                     // `backspace_binding` + `delete_binding`): remap the
                     // encoded bytes when the user picked a non-default
                     // binding. Same as VTE's per-profile override.
-                    if let winit::keyboard::Key::Named(named) = &event.logical_key {
-                        use kettle_config::{BackspaceBinding, DeleteBinding};
-                        use winit::keyboard::NamedKey;
-                        if *named == NamedKey::Backspace
-                            && !ws.mods.control_key()
-                            && !ws.mods.alt_key()
-                        {
-                            bytes = match self.cfg.backspace_binding {
-                                BackspaceBinding::AsciiDel => vec![0x7f],
-                                BackspaceBinding::ControlH => vec![0x08],
-                                BackspaceBinding::EscapeSequence => b"\x1b[3~".to_vec(),
-                                BackspaceBinding::Automatic => bytes,
-                            };
-                        } else if *named == NamedKey::Delete {
-                            bytes = match self.cfg.delete_binding {
-                                DeleteBinding::AsciiDel => vec![0x7f],
-                                DeleteBinding::ControlH => vec![0x08],
-                                DeleteBinding::EscapeSequence => b"\x1b[3~".to_vec(),
-                                DeleteBinding::Automatic => bytes,
-                            };
-                        }
-                    }
+                    // v2.20.0: shared with `send_keys` (review fix) so the
+                    // agent plane honors the same remap as GUI keystrokes.
+                    bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, ws.mods, bytes);
                     // Any keystroke that produces PTY bytes also dismisses
                     // an active selection — alacritty/iTerm2/WezTerm all do
                     // this so typing after a select doesn't leave a stale
@@ -12921,6 +13671,18 @@ impl App {
             .last_bell
             .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
             .unwrap_or(false);
+        // v2.20.0: the resize chip needs repaints until it expires (then one
+        // more to erase it); clear the state once it has.
+        let resize_chip_active = ws
+            .resize_overlay
+            .map(|(_, _, t)| t.elapsed() < RESIZE_OVERLAY_DURATION)
+            .unwrap_or(false);
+        if !resize_chip_active && ws.resize_overlay.is_some() {
+            ws.resize_overlay = None;
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
         let blink_active = self.cfg.cursor_blink && ws.window_focused;
         let anim_active = ws
             .mux
@@ -12946,7 +13708,13 @@ impl App {
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= OUTPUT_FRAME_BUDGET)
                 .unwrap_or(true);
-        if bell_active || blink_active || anim_active || autoscroll_active || coalesce_due {
+        if bell_active
+            || blink_active
+            || anim_active
+            || autoscroll_active
+            || coalesce_due
+            || resize_chip_active
+        {
             if let Some(w) = &ws.window {
                 w.request_redraw();
             }
@@ -12955,15 +13723,16 @@ impl App {
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
-        // autoscroll, 120 ms for cursor-blink alone, or the pending coalesced
-        // output paint's deadline.
-        let mut wait_ms: Option<u64> = if bell_active || anim_active || autoscroll_active {
-            Some(33)
-        } else if blink_active {
-            Some(120)
-        } else {
-            None
-        };
+        // autoscroll / the resize chip, 120 ms for cursor-blink alone, or the
+        // pending coalesced output paint's deadline.
+        let mut wait_ms: Option<u64> =
+            if bell_active || anim_active || autoscroll_active || resize_chip_active {
+                Some(33)
+            } else if blink_active {
+                Some(120)
+            } else {
+                None
+            };
         if ws.coalescing_paint {
             let remaining = ws
                 .last_paint
@@ -12980,6 +13749,18 @@ impl App {
         if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
             let ms = (soonest.saturating_duration_since(now).as_millis() as u64).clamp(1, 500);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+        }
+        // v2.20.0 (review fix): bound the dev-record staleness in WALL time.
+        // The recorder's interval flush is event-driven, so a burst followed
+        // by silence left its buffered tail unflushed until the next event;
+        // flush here when stale and, while dirty, wake at the deadline.
+        #[cfg(feature = "dev-record")]
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.flush_if_stale();
+            if let Some(deadline) = rec.flush_deadline() {
+                let ms = (deadline.saturating_duration_since(now).as_millis() as u64).max(1);
+                wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+            }
         }
         wait_ms
     }
@@ -13329,6 +14110,135 @@ mod tests {
         );
     }
 
+    /// v2.20.0 (agent plane): `parse_send_key` is the entire vocabulary an
+    /// agent can press — pin the grammar: named keys (incl. the ones the
+    /// keybind grammar lacks), chords with every modifier alias, preserved
+    /// character case, and loud failure on typos.
+    #[test]
+    fn parse_send_key_grammar() {
+        use super::parse_send_key;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let none = ModifiersState::empty();
+        // Named keys the keybind grammar has no variant for.
+        assert_eq!(
+            parse_send_key("escape"),
+            Some((none, Key::Named(NamedKey::Escape)))
+        );
+        assert_eq!(
+            parse_send_key("backspace"),
+            Some((none, Key::Named(NamedKey::Backspace)))
+        );
+        assert_eq!(
+            parse_send_key("space"),
+            Some((none, Key::Named(NamedKey::Space)))
+        );
+        // Chords, with aliases.
+        assert_eq!(
+            parse_send_key("ctrl+c"),
+            Some((ModifiersState::CONTROL, Key::Character("c".into())))
+        );
+        assert_eq!(
+            parse_send_key("shift+tab"),
+            Some((ModifiersState::SHIFT, Key::Named(NamedKey::Tab)))
+        );
+        assert_eq!(
+            parse_send_key("alt+enter"),
+            Some((ModifiersState::ALT, Key::Named(NamedKey::Enter)))
+        );
+        assert_eq!(
+            parse_send_key("control+shift+f5"),
+            Some((
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                Key::Named(NamedKey::F5)
+            ))
+        );
+        // Character case is PRESERVED — `G` (vim: jump to end) is not `g`.
+        assert_eq!(
+            parse_send_key("G"),
+            Some((none, Key::Character("G".into())))
+        );
+        assert_eq!(
+            parse_send_key(":"),
+            Some((none, Key::Character(":".into())))
+        );
+        // Review fixes: shift+letter normalizes to the uppercase char with
+        // SHIFT cleared (what a human's Shift press delivers — the encoder's
+        // Character arm ignores SHIFT); super+char has no PTY encoding and
+        // fails loudly; the chord/CLI separator characters are reachable
+        // via their names.
+        assert_eq!(
+            parse_send_key("shift+g"),
+            Some((none, Key::Character("G".into())))
+        );
+        assert_eq!(parse_send_key("super+x"), None, "super+char unencodable");
+        assert_eq!(
+            parse_send_key("plus"),
+            Some((none, Key::Character("+".into())))
+        );
+        assert_eq!(
+            parse_send_key("comma"),
+            Some((none, Key::Character(",".into())))
+        );
+        assert_eq!(
+            parse_send_key("ctrl+minus"),
+            Some((ModifiersState::CONTROL, Key::Character("-".into())))
+        );
+        // Typos fail loudly instead of degrading.
+        assert_eq!(parse_send_key("cttrl+c"), None, "typo'd modifier");
+        assert_eq!(parse_send_key("ctrl+"), None, "missing key");
+        assert_eq!(parse_send_key("f13"), None, "no such F-key");
+        assert_eq!(parse_send_key("escape+x"), None, "named key as modifier");
+    }
+
+    /// v2.20.0 (agent plane): the encoded bytes must match what a human
+    /// pressing the same keys produces — same encoder, same mode handling.
+    #[test]
+    fn send_keys_tokens_encode_like_gui_keystrokes() {
+        use super::parse_send_key;
+        use kettle_core::TermMode;
+        let enc = |tok: &str, mode: TermMode| {
+            let (mods, key) = parse_send_key(tok).expect(tok);
+            crate::input::encode(&key, None, mods, mode)
+        };
+        let plain = TermMode::empty();
+        assert_eq!(enc("escape", plain), Some(vec![0x1b]));
+        assert_eq!(enc("ctrl+c", plain), Some(vec![0x03]));
+        assert_eq!(enc("enter", plain), Some(vec![b'\r']));
+        assert_eq!(enc("up", plain), Some(b"\x1b[A".to_vec()));
+        // DECCKM application-cursor mode flips arrows to SS3 — the reason
+        // send_keys reads the pane's LIVE mode (vim sets it).
+        assert_eq!(enc("up", TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
+        assert_eq!(enc("shift+tab", plain), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(enc("G", plain), Some(b"G".to_vec()));
+    }
+
+    /// v2.20.0 (`vim-menu-nav`) drift guards: (1) the vim layer must run
+    /// BEFORE the mnemonic/typeahead catch-all in `context_menu_key` — moved
+    /// after it, bare `j`/`k` would be eaten as typeahead input and the nav
+    /// would silently die; (2) the catch-all's mnemonic lookup must pass the
+    /// reservation set so a row can never claim a nav letter while the
+    /// setting is on. Both are ordering/wiring contracts a behavioral test
+    /// can't see without a live window; pin them at the source.
+    #[test]
+    fn vim_menu_nav_intercepts_before_mnemonic_catchall() {
+        let src = include_str!("app.rs");
+        let body = src
+            .split("fn context_menu_key(")
+            .nth(1)
+            .and_then(|s| s.split("\n    fn ").next())
+            .expect("context_menu_key present");
+        let vim = body
+            .find("self.context_menu_vim_key(ws, key, event_loop)")
+            .expect("context_menu_key must consult the vim layer");
+        let catchall = body
+            .find("assign_mnemonics(&menu.items, reserved)")
+            .expect("the mnemonic lookup must pass the reservation set");
+        assert!(
+            vim < catchall,
+            "vim nav must intercept BEFORE the mnemonic/typeahead catch-all"
+        );
+    }
+
     /// Cycle 856 (audit) drift guard. The single "Window padding" Settings
     /// control must persist BOTH `window-padding-x` and `-y` so the result is
     /// symmetric — persisting only X leaves Y at its default (lopsided). A
@@ -13399,7 +14309,7 @@ mod tests {
         ));
         // Every dispatchable row gets a distinct mnemonic; the two-pass
         // assignment (cycle 942) must keep working with the new bottom rows.
-        let mn = assign_mnemonics(&items);
+        let mn = assign_mnemonics(&items, &[]);
         let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
         assert_eq!(letters.len(), 5, "all 5 dispatchable rows get mnemonics");
         letters.sort_unstable();
@@ -13733,7 +14643,7 @@ mod tests {
             item("Tab", true),   // 'T' taken → 'a' taken → 'b'
             item("12345", true), // no A-Z → None
         ];
-        let mn = assign_mnemonics(&menu);
+        let mn = assign_mnemonics(&menu, &[]);
         assert_eq!(mn[0], Some((0, 'c')));
         // "Close Pane": C taken, so next alphabetic is 'l' at byte 1.
         assert_eq!(mn[1], Some((1, 'l')));
@@ -13768,7 +14678,7 @@ mod tests {
             item("Copy", true),
             item("Paste", true),
         ];
-        let mn = assign_mnemonics(&menu);
+        let mn = assign_mnemonics(&menu, &[]);
         // Core rows keep their stable letters…
         assert_eq!(mn[3], Some((0, 'c'))); // Copy = c (not stolen)
         assert_eq!(mn[4], Some((0, 'p'))); // Paste = p (not stolen)
@@ -13777,6 +14687,64 @@ mod tests {
         // "Copy Link Address": c, o, p taken → 'y' (byte 3).
         assert_eq!(mn[1], Some((3, 'y')));
         assert_eq!(mn[2], None); // separator
+    }
+
+    /// v2.20.0 (`vim-menu-nav`) drift guard: while the setting is on, the
+    /// vim navigation letters must never be assigned as mnemonics — the nav
+    /// layer intercepts them first, so a row keyed on one would silently
+    /// lose its hotkey. Rows fall through to their next free letter instead.
+    #[test]
+    fn vim_nav_letters_are_excluded_from_mnemonics() {
+        let menu = vec![
+            item("Jump", true),      // 'j' reserved → 'u'
+            item("Kill Pane", true), // 'k' reserved → 'i'
+            item("Hold", true),      // 'h' reserved → 'o'
+            item("List", true),      // 'l' reserved → 'i' taken → 's'
+            item("Go", true),        // 'g' reserved → 'o' taken → None
+        ];
+        let mn = assign_mnemonics(&menu, super::VIM_NAV_RESERVED);
+        for (i, slot) in mn.iter().enumerate() {
+            if let Some((_, c)) = slot {
+                assert!(
+                    !super::VIM_NAV_RESERVED.contains(c),
+                    "row {i} was assigned reserved nav letter {c:?}"
+                );
+            }
+        }
+        assert_eq!(mn[0], Some((1, 'u'))); // Jump → 'u'
+        assert_eq!(mn[1], Some((1, 'i'))); // Kill Pane → 'i'
+        assert_eq!(mn[2], Some((1, 'o'))); // Hold → 'o'
+        assert_eq!(mn[3], Some((2, 's'))); // List → 's'
+        // "Go": both letters reserved/taken → no mnemonic at all.
+        assert_eq!(mn[4], None);
+        // And with the reservation off, first letters win as before.
+        let plain = assign_mnemonics(&menu, &[]);
+        assert_eq!(plain[0], Some((0, 'j')));
+        assert_eq!(plain[1], Some((0, 'k')));
+    }
+
+    /// v2.20.0 (`vim-menu-nav`): `Ctrl+d`/`Ctrl+u` clamp at the list ends
+    /// (no wrap — vim half-page semantics) and snap off separators in the
+    /// direction of travel.
+    #[test]
+    fn half_page_menu_target_clamps_and_snaps() {
+        let menu = vec![
+            item("A", true),            // 0
+            item("B", true),            // 1
+            ContextMenuItem::Separator, // 2
+            item("C", true),            // 3
+            item("D", true),            // 4
+        ];
+        // Down by 2 from row 0 lands on the separator → snaps DOWN to 3.
+        assert_eq!(super::half_page_menu_target(&menu, 0, 2, 1), 3);
+        // Down by 10 from row 0 clamps to the last row.
+        assert_eq!(super::half_page_menu_target(&menu, 0, 10, 1), 4);
+        // Up by 2 from row 4 lands on the separator → snaps UP to 1.
+        assert_eq!(super::half_page_menu_target(&menu, 4, 2, -1), 1);
+        // Up by 10 clamps to the first row.
+        assert_eq!(super::half_page_menu_target(&menu, 4, 10, -1), 0);
+        // Empty list: target stays put.
+        assert_eq!(super::half_page_menu_target(&[], 0, 3, 1), 0);
     }
 
     /// Cycle 715 drift guard. Typeahead prefix-match is case-
@@ -15060,6 +16028,70 @@ mod tests {
         assert!(match_triggers("here is the valid_pattern token", &compiled_mixed).is_some());
     }
 
+    /// v2.20.0 (Terminator `run_cmd_on_match.py` parity completion): a
+    /// trigger's capture groups substitute into the spawned argv — `{0}` is
+    /// the whole match, `{1}`… numbered groups; an out-of-range reference
+    /// stays LITERAL (the typo stays visible); argv stays argv (substitution
+    /// can change a VALUE, never add arguments).
+    #[test]
+    fn trigger_capture_groups_substitute_into_argv() {
+        use super::{compile_triggers, match_triggers};
+        use kettle_config::{OutputTrigger, TriggerAction};
+        let cfg = vec![OutputTrigger {
+            pattern: r"ERROR in ([\w./-]+) line (\d+)".into(),
+            action: TriggerAction::RunCommand(vec![
+                "notify-send".into(),
+                "build error".into(),
+                "{1}:{2}".into(),
+                "match={0}".into(),
+                "{9}".into(), // out of range → stays literal
+            ]),
+        }];
+        let compiled = compile_triggers(&cfg);
+        let action =
+            match_triggers("xx ERROR in src/main.rs line 42 yy", &compiled).expect("trigger fires");
+        let TriggerAction::RunCommand(argv) = action else {
+            panic!("expected RunCommand");
+        };
+        assert_eq!(
+            argv,
+            vec![
+                "notify-send".to_string(),
+                "build error".to_string(),
+                "src/main.rs:42".to_string(),
+                "match=ERROR in src/main.rs line 42".to_string(),
+                "{9}".to_string(),
+            ]
+        );
+        // Argv arity is unchanged — a match can never ADD arguments.
+        assert_eq!(argv.len(), 5);
+        // Review fix: a capture whose MATCHED TEXT contains a placeholder
+        // must not expand again (single template pass, no re-scan of
+        // substituted output).
+        let nested = vec![OutputTrigger {
+            pattern: r"E:(\S+):(\S+)".into(),
+            action: TriggerAction::RunCommand(vec!["log".into(), "{1}".into()]),
+        }];
+        let action = match_triggers("E:{2}:secret", &compile_triggers(&nested))
+            .expect("nested trigger fires");
+        let TriggerAction::RunCommand(argv) = action else {
+            panic!("expected RunCommand");
+        };
+        assert_eq!(
+            argv[1], "{2}",
+            "substituted text must be emitted verbatim, never re-expanded"
+        );
+        // Urgency triggers are untouched by capture plumbing.
+        let urgency = vec![OutputTrigger {
+            pattern: r"(panic)".into(),
+            action: TriggerAction::Urgency,
+        }];
+        assert!(matches!(
+            match_triggers("a panic b", &compile_triggers(&urgency)),
+            Some(TriggerAction::Urgency)
+        ));
+    }
+
     #[test]
     fn smart_selection_at_returns_full_token_range() {
         use super::smart_selection_at;
@@ -15222,6 +16254,33 @@ mod tests {
         assert_eq!(
             confirm_dialog_keypress(0, 1, ConfirmKey::Tab),
             ConfirmKeyResult::Move(0)
+        );
+    }
+
+    /// v2.20.0 (`vim-menu-nav`): `y` confirms regardless of focus (it
+    /// answers the QUESTION, unlike Enter which fires the focused button —
+    /// cycle 861), `n` cancels regardless of focus.
+    #[test]
+    fn confirm_dialog_y_and_n_answer_directly() {
+        use super::{ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
+        assert_eq!(
+            confirm_dialog_keypress(0, 2, ConfirmKey::Yes),
+            ConfirmKeyResult::Confirm,
+            "y must confirm even with Cancel focused"
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::Yes),
+            ConfirmKeyResult::Confirm
+        );
+        assert_eq!(
+            confirm_dialog_keypress(1, 2, ConfirmKey::No),
+            ConfirmKeyResult::Cancel,
+            "n must cancel even with Confirm focused"
+        );
+        // Degenerate zero-button dialog still cancels safely.
+        assert_eq!(
+            confirm_dialog_keypress(0, 0, ConfirmKey::Yes),
+            ConfirmKeyResult::Cancel
         );
     }
 

@@ -692,6 +692,18 @@ pub enum ScrollbarMode {
     Always,
 }
 
+/// v2.20.0 (Ghostty `resize-overlay` parity): when the transient
+/// `cols×rows` chip is shown during a live window resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeOverlayMode {
+    /// Every resize, including the initial window placement.
+    Always,
+    Never,
+    /// Every resize EXCEPT the first one after window creation (the
+    /// initial placement isn't a user action) — Ghostty's default.
+    AfterFirst,
+}
+
 /// One OpenType feature override: a 4-byte tag (space-padded, e.g. `liga`,
 /// `calt`, `ss01`, `zero`, `cv01`) and its value (`0` = off, `1` = on, or a
 /// font-specific alternate index).
@@ -847,6 +859,22 @@ pub struct Config {
     /// wraps around — advancing past the last match returns to the first. When
     /// false, Next stops at the last match and Previous stops at the first.
     pub search_wrap: bool,
+    /// v2.20.0: vim-style navigation in kettle's menus and overlays
+    /// (default ON). List overlays — context menu, new-tab dropdown,
+    /// settings panel — take `j`/`k` (down/up, wrapping), `g`/`G`
+    /// (first/last), `Ctrl+d`/`Ctrl+u` (half page); in the context menu
+    /// and new-tab dropdown `h` goes back/closes and `l` drills in /
+    /// activates, while in the settings panel `h`/`l` step the
+    /// highlighted row's value (same as `←`/`→`); confirm dialogs take
+    /// `y`/`n`. Text-input
+    /// overlays with a selection list (palette, search, layout picker) keep
+    /// letters for typing and use `Ctrl+j`/`Ctrl+k` (plus the
+    /// `Ctrl+n`/`Ctrl+p` telescope/fzf idiom) to move it. When enabled, the
+    /// context menu's mnemonic auto-assignment skips the nav letters so no
+    /// row silently loses its hotkey; all other mnemonics and the
+    /// type-to-search prefix keep working. Set `false` to restore plain
+    /// arrow-key navigation everywhere.
+    pub vim_menu_nav: bool,
     /// Cycle 617 (Terminator parity, terminatorlib/config.py:117
     /// `case_sensitive`): scrollback-search case-sensitivity
     /// override. kettle's default is `smart` (ripgrep/vim:
@@ -1150,6 +1178,10 @@ pub struct Config {
     /// `{n}` (1-based tab index), `{title}` (focused pane's title).
     pub tab_format: String,
     pub scrollbar: ScrollbarMode,
+    /// v2.20.0 (Ghostty parity): when to show the transient `cols×rows`
+    /// chip during a live window resize. Default `after-first` (every
+    /// resize except the initial window placement).
+    pub resize_overlay: ResizeOverlayMode,
     /// Explicit split-divider/border color for *inactive* panes (else
     /// theme `palette[8]`, the dim color).
     pub split_divider_color: Option<Rgb>,
@@ -1630,6 +1662,7 @@ impl Default for Config {
             smart_copy: true,
             invert_search: false,
             search_wrap: true,
+            vim_menu_nav: true,
             search_case_sensitive: SearchCaseSensitivity::Smart,
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
@@ -1704,6 +1737,7 @@ impl Default for Config {
             agent_badge: "[agent] ".to_string(),
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
+            resize_overlay: ResizeOverlayMode::AfterFirst,
             split_divider_color: None,
             focused_split_color: None,
             accent_color: None,
@@ -2168,6 +2202,8 @@ impl Config {
         "use_custom_url_handler",
         "use_system_font",
         "use_theme_colors",
+        "vim-menu-nav",
+        "vim_menu_nav",
         "visible-bell",
         "visible_bell",
     ];
@@ -2550,6 +2586,11 @@ impl Config {
                 "scrollbar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
+                ),
+                "resize-overlay" | "resize_overlay" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "never" | "off" | "false" | "always" | "on" | "true" | "after-first"
+                        | "after_first"
                 ),
                 // `font-feature` is comma-separated; every token must
                 // parse via the documented `FontFeature::parse` shape
@@ -3012,6 +3053,11 @@ impl Config {
                 "search-wrap" | "search_wrap" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.search_wrap = b;
+                    }
+                }
+                "vim-menu-nav" | "vim_menu_nav" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.vim_menu_nav = b;
                     }
                 }
                 "search-case-sensitive"
@@ -3515,6 +3561,13 @@ impl Config {
                         "never" | "off" | "false" => ScrollbarMode::Never,
                         "always" => ScrollbarMode::Always,
                         _ => ScrollbarMode::Auto,
+                    }
+                }
+                "resize-overlay" | "resize_overlay" => {
+                    cfg.resize_overlay = match e.value.to_ascii_lowercase().as_str() {
+                        "never" | "off" | "false" => ResizeOverlayMode::Never,
+                        "always" | "on" | "true" => ResizeOverlayMode::Always,
+                        _ => ResizeOverlayMode::AfterFirst,
                     }
                 }
                 "split-divider-color" => {
@@ -4370,6 +4423,52 @@ tab-bar-width = 200\n";
         assert!(!Config::parse_text("restore-session = false\n").restore_session);
         // It is in BOOL_KEYS so `--check-config` validates it.
         assert!(Config::BOOL_KEYS.contains(&"restore-session"));
+    }
+
+    /// v2.20.0 (Ghostty parity): `resize-overlay` defaults to `after-first`,
+    /// parses all three modes (+ bool courtesy spellings), and flags typos
+    /// via `--check-config`.
+    #[test]
+    fn resize_overlay_parses_and_flags_typos() {
+        assert_eq!(
+            Config::default().resize_overlay,
+            ResizeOverlayMode::AfterFirst
+        );
+        assert_eq!(
+            Config::parse_text("resize-overlay = never\n").resize_overlay,
+            ResizeOverlayMode::Never
+        );
+        assert_eq!(
+            Config::parse_text("resize_overlay = always\n").resize_overlay,
+            ResizeOverlayMode::Always
+        );
+        assert_eq!(
+            Config::parse_text("resize-overlay = after-first\n").resize_overlay,
+            ResizeOverlayMode::AfterFirst
+        );
+        let bad = Config::detect_malformed_values("resize-overlay = sometimes\n");
+        assert!(
+            bad.iter().any(|m| m.contains("resize-overlay")),
+            "typo'd resize-overlay value must be flagged: {bad:?}"
+        );
+        assert!(Config::detect_malformed_values("resize-overlay = after-first\n").is_empty());
+    }
+
+    /// v2.20.0: vim-style menu navigation ships ON by default (the explicit
+    /// ask), with `vim-menu-nav = false` as the documented opt-out. Pin the
+    /// default + both key spellings + BOOL_KEYS coverage.
+    #[test]
+    fn vim_menu_nav_defaults_on_and_parses() {
+        assert!(
+            Config::default().vim_menu_nav,
+            "vim-menu-nav must default ON"
+        );
+        assert!(!Config::parse_text("vim-menu-nav = false\n").vim_menu_nav);
+        assert!(!Config::parse_text("vim_menu_nav = false\n").vim_menu_nav);
+        assert!(Config::parse_text("vim-menu-nav = true\n").vim_menu_nav);
+        // In BOOL_KEYS (both spellings) so `--check-config` validates it.
+        assert!(Config::BOOL_KEYS.contains(&"vim-menu-nav"));
+        assert!(Config::BOOL_KEYS.contains(&"vim_menu_nav"));
     }
 
     #[test]

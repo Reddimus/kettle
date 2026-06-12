@@ -36,6 +36,23 @@ if (-not $global:__kettle_prompt_installed) {
         # D = last command's exit code, A = this prompt's start.
         # Emitted together at the top of the prompt function.
         [Console]::Write("$esc]133;D;$code$bel$esc]133;A$bel")
+        # OSC 7 cwd report (v2.20): powers new-tab/split cwd inheritance and
+        # "Open folder" in kettle. Windows paths travel in URL form
+        # (`file://HOST/C:/Users/...`, forward slashes, each segment
+        # percent-encoded); kettle normalizes the drive-letter form back.
+        # Only filesystem locations report (a registry/cert PSDrive cwd is
+        # not a directory another pane could start in).
+        $loc = $ExecutionContext.SessionState.Path.CurrentLocation
+        if ($loc.Provider.Name -eq 'FileSystem') {
+            $segs = $loc.ProviderPath -replace '\\', '/' -split '/'
+            $enc = ($segs | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+            # Drive paths ("C:/…") need the URL path slash prepended; a UNC
+            # path ("//server/share/…") already starts with one — prepending
+            # again would yield file://HOST///server/… (host-relative parse
+            # breaks and cwd inheritance dies on network shares).
+            if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
+            [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
+        }
         # Render the user's original prompt (or PowerShell's built-in
         # default if none was set).
         $rendered = if ($null -ne $global:__kettle_original_prompt) {

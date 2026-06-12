@@ -14,6 +14,15 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Close |
 
+With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
+`j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
+jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
+same scheme works in the right-click context menu and the new-tab dropdown
+(`h` closes / pops a submenu, `l` drills in or activates), `y`/`n` answer
+confirm dialogs, and text-input overlays with a selection (palette, search's
+match stepping, layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`)
+so plain letters keep typing. Turn it off with `vim-menu-nav = false`.
+
 Every change applies **immediately** and is written to your config file (shown
 by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 
@@ -42,6 +51,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Hide mouse while typing | `mouse-hide-while-typing` | on / off |
 | Focus mode | `focus` | click · follows-mouse · system |
 | Check for updates | `update-check` | on / off |
+| Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new

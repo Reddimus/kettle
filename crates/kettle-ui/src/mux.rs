@@ -386,6 +386,25 @@ impl Node {
         }
     }
 
+    /// v2.20.0 (`equalize_splits`, Ghostty/Terminator parity): rebalance the
+    /// whole tree so every LEAF gets equal area. Each split's ratio becomes
+    /// `leaves(a) / (leaves(a) + leaves(b))` — for a chain of N panes along
+    /// one axis that yields 1/N each; mixed orientations get equal areas
+    /// proportionally. Returns the subtree's leaf count. Pure tree math
+    /// (unit-tested); the caller follows with `resize_all` to push the new
+    /// geometry into the PTYs.
+    pub(crate) fn equalize(&mut self) -> usize {
+        match self {
+            Node::Leaf(_) => 1,
+            Node::Split { a, b, ratio, .. } => {
+                let la = a.equalize();
+                let lb = b.equalize();
+                *ratio = (la as f32 / (la + lb) as f32).clamp(0.05, 0.95);
+                la + lb
+            }
+        }
+    }
+
     /// Adjust the ratio of the innermost split matching `dir` that contains
     /// `focus`.
     fn resize(&mut self, focus: u64, dir: Dir, delta: f32) -> bool {

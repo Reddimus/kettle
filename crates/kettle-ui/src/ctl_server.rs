@@ -56,6 +56,11 @@ pub enum CtlServerMsg {
         conn_id: u64,
         req: Request,
         reply: ReplyTx,
+        /// v2.20.0 (review fix): true for `wait_for`'s internal `read_screen`
+        /// probes — the App skips the per-request dev-record marker (a 300s
+        /// wait at 50ms polls would otherwise land ~6000 markers) and the
+        /// post-drain redraw for them.
+        internal_probe: bool,
     },
     /// A malformed line that parsed into a ready-to-send error response.
     BadRequest { reply: ReplyTx, resp: Response },
@@ -305,12 +310,25 @@ fn connection_loop(
             let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
             let is_subscribe;
             match kettle_ctl::protocol::parse_request_line(trimmed) {
+                // v2.20.0 (agent plane): `wait_for` blocks THIS connection
+                // thread, never the UI thread — it polls the screen via cheap
+                // internal `read_screen` requests (≥50ms apart) until the
+                // condition holds or the deadline passes. The UI thread only
+                // ever answers individual snapshot probes.
+                Ok(req) if req.method == "wait_for" => {
+                    let resp = wait_for_poll(&mut conn, &tx, &wake, conn_id, &req);
+                    if write_line(&mut conn, &resp).is_err() {
+                        break 'outer;
+                    }
+                    continue;
+                }
                 Ok(req) => {
                     is_subscribe = req.method == "subscribe";
                     let _ = tx.send(CtlServerMsg::Request {
                         conn_id,
                         req,
                         reply: rtx,
+                        internal_probe: false,
                     });
                 }
                 Err(resp) => {
@@ -386,11 +404,183 @@ fn write_line<T: serde::Serialize>(conn: &mut CtlStream, value: &T) -> std::io::
     conn.flush()
 }
 
+/// v2.20.0 (agent plane): the `wait_for` poll loop. Runs on the CONNECTION
+/// thread; each iteration sends one internal `read_screen` request to the UI
+/// thread (the same cheap snapshot `read_screen` serves) and checks the
+/// condition against the returned text. Params:
+///
+/// - `pane?: u64`      — target pane (default: focused)
+/// - `text?: string`   — substring that must appear on screen
+/// - `regex?: string`  — regex that must match the screen text
+/// - `quiet_ms?: u64`  — additionally require the screen to have been
+///   UNCHANGED for this long (output settled — TUI finished painting)
+/// - `timeout_ms?: u64`— overall deadline (default 30 000, capped 300 000)
+/// - `poll_ms?: u64`   — poll interval (default 100, floor 50 so a tight
+///   caller can't hammer the UI thread)
+///
+/// Multiple conditions AND together. Returns `{matched, elapsed_ms, polls}`
+/// — a timeout is an `ok` response with `matched: false` (the agent decides
+/// what a non-appearance means; it is not a transport error).
+fn wait_for_poll(
+    conn: &mut CtlStream,
+    tx: &Sender<CtlServerMsg>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+    conn_id: u64,
+    req: &Request,
+) -> Response {
+    use kettle_ctl::protocol::error_codes as ec;
+    let text = req
+        .params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let regex = match req.params.get("regex").and_then(|v| v.as_str()) {
+        Some(src) => match regex::Regex::new(src) {
+            Ok(re) => Some(re),
+            Err(e) => return Response::err(req.id, ec::BAD_PARAMS, format!("bad regex: {e}")),
+        },
+        None => None,
+    };
+    let quiet_ms = req.params.get("quiet_ms").and_then(|v| v.as_u64());
+    if text.is_none() && regex.is_none() && quiet_ms.is_none() {
+        return Response::err(
+            req.id,
+            ec::BAD_PARAMS,
+            "wait_for needs at least one of 'text', 'regex', 'quiet_ms'",
+        );
+    }
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30_000)
+        .min(300_000);
+    let poll_ms = req
+        .params
+        .get("poll_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100)
+        .clamp(50, 5_000);
+    let start = std::time::Instant::now();
+    let mut last_change = std::time::Instant::now();
+    let mut last_fingerprint: Option<u64> = None;
+    let mut polls = 0u64;
+    // v2.20.0 (review fix): pin the target pane for the WHOLE wait. Without
+    // this, a no-`pane` wait re-resolved "focused" on every probe — a focus
+    // change mid-wait silently retargeted the watch and corrupted the
+    // quiet_ms fingerprint (two panes' screens interleaving looks like
+    // constant change). `read_screen` echoes the resolved pane id in its
+    // result, so the first probe's reply pins it.
+    let mut pinned_pane: Option<serde_json::Value> = req.params.get("pane").cloned();
+    loop {
+        // v2.20.0 (review fix): a vanished client (Ctrl+C'd `kettle ctl`,
+        // crashed MCP host) must not keep this loop polling — it pins one of
+        // the MAX_CONNECTIONS slots and wakes the UI thread every poll for
+        // up to the full timeout. The zero-byte peek is safe here: this IS
+        // the connection thread, with no other I/O outstanding.
+        if conn.peer_disconnected() {
+            return Response::err(req.id, ec::INTERNAL, "client disconnected during wait_for");
+        }
+        // Compose the internal probe (pinned pane addressing).
+        let mut params = serde_json::Map::new();
+        if let Some(p) = &pinned_pane {
+            params.insert("pane".into(), p.clone());
+        }
+        let probe = Request {
+            v: kettle_ctl::protocol::PROTOCOL_VERSION,
+            id: req.id,
+            method: "read_screen".into(),
+            params: serde_json::Value::Object(params),
+        };
+        let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
+        let _ = tx.send(CtlServerMsg::Request {
+            conn_id,
+            req: probe,
+            reply: rtx,
+            internal_probe: true,
+        });
+        wake();
+        polls += 1;
+        let resp = match rrx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(r) => r,
+            Err(_) => {
+                return Response::err(
+                    req.id,
+                    ec::INTERNAL,
+                    "wait_for: the UI thread did not answer a screen probe",
+                );
+            }
+        };
+        // Propagate probe errors (no_such_pane, …) verbatim under our id.
+        if let Some(err) = &resp.error {
+            return Response::err(req.id, &err.code, err.message.clone());
+        }
+        // Pin the resolved pane after the first successful probe.
+        if pinned_pane.is_none() {
+            pinned_pane = resp.result.get("pane").cloned();
+        }
+        let screen = resp
+            .result
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Change detection for quiet_ms: text + cursor + history fingerprint.
+        if quiet_ms.is_some() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            screen.hash(&mut h);
+            resp.result
+                .get("cursor")
+                .map(|c| c.to_string())
+                .hash(&mut h);
+            resp.result
+                .get("history_size")
+                .and_then(|v| v.as_u64())
+                .hash(&mut h);
+            let fp = h.finish();
+            if last_fingerprint != Some(fp) {
+                last_fingerprint = Some(fp);
+                last_change = std::time::Instant::now();
+            }
+        }
+        let content_hit = text.as_deref().is_none_or(|t| screen.contains(t))
+            && regex.as_ref().is_none_or(|re| re.is_match(screen));
+        let quiet_hit = quiet_ms.is_none_or(|q| {
+            // The first poll has no baseline; require at least one interval.
+            polls > 1 && last_change.elapsed().as_millis() as u64 >= q
+        });
+        let elapsed = start.elapsed().as_millis() as u64;
+        if content_hit && quiet_hit {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "matched": true,
+                    "elapsed_ms": elapsed,
+                    "polls": polls,
+                    "pane": resp.result.get("pane").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            );
+        }
+        if elapsed >= timeout_ms {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "matched": false,
+                    "timed_out": true,
+                    "elapsed_ms": elapsed,
+                    "polls": polls,
+                }),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+    }
+}
+
 /// The set of mutating methods. A drift-guard test pins that every method the
 /// server dispatches is classified here, and that `handle_ctl_request` gates
 /// the mutating ones on `agent-server = full`. (Used by the drift-guard tests.)
 #[cfg_attr(not(test), allow(dead_code))]
-pub const MUTATING_METHODS: &[&str] = &["send_text", "run_command"];
+pub const MUTATING_METHODS: &[&str] = &["send_text", "send_keys", "run_command"];
 
 /// The read-only methods (allowed in `read-only` mode).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -401,6 +591,14 @@ pub const READ_ONLY_METHODS: &[&str] = &[
     "read_screen",
     "subscribe",
 ];
+
+/// v2.20.0: methods handled entirely on the CONNECTION thread (never reach
+/// `handle_ctl_request`). `wait_for` is read-only by construction — it only
+/// ever issues `read_screen` probes — so it works in `read-only` mode; it is
+/// listed separately because the dispatch-block drift guard below scans the
+/// UI-thread match, which these never appear in.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const CONN_THREAD_METHODS: &[&str] = &["wait_for"];
 
 #[cfg(test)]
 mod tests {
@@ -429,6 +627,23 @@ mod tests {
                 !READ_ONLY_METHODS.contains(m),
                 "method {m} is both mutating and read-only"
             );
+            assert!(
+                !CONN_THREAD_METHODS.contains(m),
+                "method {m} is both mutating and connection-thread"
+            );
+        }
+        for m in CONN_THREAD_METHODS {
+            assert!(
+                !READ_ONLY_METHODS.contains(m),
+                "method {m} is both connection-thread and read-only"
+            );
+            // Connection-thread methods must be special-cased in
+            // connection_loop, BEFORE the UI-thread forward.
+            let src = include_str!("ctl_server.rs");
+            assert!(
+                src.contains(&format!("req.method == \"{m}\"")),
+                "conn-thread method {m} has no connection_loop arm"
+            );
         }
     }
 
@@ -438,11 +653,13 @@ mod tests {
     #[test]
     fn every_dispatched_method_is_classified() {
         let src = include_str!("app.rs");
-        // The dispatch block is between these markers.
+        // The dispatch block is between these markers. (Window widened in
+        // v2.20.0 when the send_keys arm landed; the `other =>` fallback arm
+        // bounds the real block well inside it.)
         let start = src
             .find("let resp = match req.method.as_str() {")
             .expect("dispatch block present");
-        let block = &src[start..start + 1600];
+        let block = &src[start..start + 2600];
         for m in READ_ONLY_METHODS.iter().chain(MUTATING_METHODS) {
             assert!(
                 block.contains(&format!("\"{m}\"")),

@@ -42,22 +42,21 @@ mod bg_image;
 mod color;
 mod imgpipe;
 mod quad;
+mod snapshot;
 
 pub use bg_image::{BgImage, decode_bg_image, decode_bg_image_with_blur};
+pub use snapshot::{PaneSnapshot, SnapCell};
 
 use std::sync::Arc;
 
-use alacritty_terminal::Term;
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
-use glyphon::cosmic_text::{FeatureTag, FontFeatures};
+use glyphon::cosmic_text::{AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use kettle_config::{Config, Rgb, ScrollbarMode};
-use kettle_core::EventProxy;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use color::{
@@ -256,6 +255,10 @@ pub struct Overlay {
     /// Cycle 756: `Some` while the in-app settings overlay is open. Painted
     /// centered, above panes but below the confirm dialog.
     pub settings: Option<SettingsOverlay>,
+    /// v2.20.0 (Ghostty `resize-overlay` parity): `Some((cols, rows))` while
+    /// the transient size chip should paint (the app owns the timing; the
+    /// renderer just draws a centered `cols×rows` chip above everything).
+    pub resize_overlay: Option<(u16, u16)>,
     /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Rendered as a passive, lowest-priority
     /// bottom bar — any real modal (search/palette/…) takes the bar instead,
@@ -297,6 +300,9 @@ pub struct SettingsOverlay {
     pub rows: Vec<SettingsRow>,
     /// Index into `rows` of the focused field (gets the accent highlight).
     pub focused_row: usize,
+    /// v2.20.0: `cfg.vim_menu_nav` — the footer hint advertises the vim keys
+    /// when the setting is on.
+    pub vim_nav: bool,
 }
 
 /// Cycle 756: one settings row — a human label and its current value string.
@@ -437,18 +443,24 @@ impl TabBar {
 pub struct PaneView<'a> {
     /// Pixel rect `(x, y, w, h)` within the surface.
     pub rect: (f32, f32, f32, f32),
-    pub term: &'a Term<EventProxy>,
+    /// v2.20.0 P2 (perf): RAW terminal state captured under the Term lock by
+    /// `redraw` (µs-scale flat copy, pooled per window), borrowed here so the
+    /// whole GPU frame runs with the lock RELEASED — the PTY reader no longer
+    /// stalls behind shaping/acquire/present. Replaces the former
+    /// `&'a Term<EventProxy>` borrowed from a frame-held `MutexGuard`.
+    pub snap: &'a PaneSnapshot,
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
     ///
     /// Borrowed (cycle 852, audit): the backing `Vec` lives in the per-frame
-    /// `guards` collection for the whole frame — exactly like `term` borrows the
-    /// `MutexGuard` — so the renderer reads it without a second per-pane clone.
+    /// `metas` collection for the whole frame — exactly like `snap` borrows
+    /// the pooled snapshot — so the renderer reads it without a second
+    /// per-pane clone.
     pub images: &'a [kettle_core::Placement],
     /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 3 follow-up): the pane's title — rendered into
     /// the cycle-379 titlebar background quad when
-    /// cfg.show_titlebar = true. Borrowed from `guards` (cycle 852).
+    /// cfg.show_titlebar = true. Borrowed from `metas` (cycle 852).
     pub title: &'a str,
     /// Cycle 386 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 6): pane terminal size in cols × rows. Appended
@@ -463,7 +475,7 @@ pub struct PaneView<'a> {
     /// Cycle 406 (Terminator parity, titlebar Bucket-D sub-cycle 8):
     /// optional named broadcast group. When `Some(name)`, the
     /// titlebar prefixes `[name]` (group label in brackets)
-    /// before the pane title. Borrowed from `guards` (cycle 852).
+    /// before the pane title. Borrowed from `metas` (cycle 852).
     pub group_name: Option<&'a str>,
 }
 
@@ -501,6 +513,43 @@ pub struct Renderer {
     span_scratch: Vec<(String, Rgb, bool, bool)>,
     /// Cycle 827: pooled scratch for `build_pane`'s line-break indices.
     span_breaks_scratch: Vec<usize>,
+    /// v2.20.0 P1 (perf): per-pane, per-row content keys for the line-level
+    /// shaping cache. `build_pane` hashes each grid row's style runs (text,
+    /// fg, bold, italic); a row whose key matches last frame is SKIPPED
+    /// entirely — its `BufferLine` keeps its shaped+laid-out caches. The old
+    /// whole-buffer `set_rich_text` reset every line's shaping every frame,
+    /// so an idle blink repaint re-shaped 100% of all visible text. Grown /
+    /// truncated in lockstep with `pane_buffers` (the keys describe what is
+    /// IN the buffer at that index, so they must live and die with it).
+    pane_line_keys: Vec<Vec<u64>>,
+    /// v2.20.0 P1: per-pane key over the inputs that change how a row SHAPES
+    /// without changing its run tuples — font-family variants, ligature
+    /// toggle, font-features, shaping mode. On mismatch the pane's row keys
+    /// are wiped so every row re-sets via `reset_new` (the only path that
+    /// updates a `BufferLine`'s internal shaping mode).
+    pane_style_keys: Vec<u64>,
+    /// v2.20.0 P1: pooled scratch for assembling one row's text.
+    line_text_scratch: String,
+    /// v2.20.0 P1b: chrome-label caches (titlebar / tab / status / glyph
+    /// buttons) gate their `Buffer::set_text` (which re-shapes
+    /// unconditionally) on text equality. Text-only keys are sound while the
+    /// font family is stable; this key invalidates them all when it changes.
+    chrome_style_key: u64,
+    /// v2.20.0 P1b: last text shaped into each `pane_titlebar_buffers` slot.
+    pane_titlebar_texts: Vec<String>,
+    /// v2.20.0 P1b: last text shaped into each `tab_buffers` slot.
+    tab_texts: Vec<String>,
+    /// v2.20.0 P1b: last text shaped into `tab_close_buffer` / `tabbar_buffer`
+    /// / `new_tab_arrow_buffer` / `status_bar_buffer`. The first three are
+    /// constant glyphs, so after frame 1 these gates always hold.
+    tab_close_text: String,
+    tabbar_text: String,
+    new_tab_arrow_text: String,
+    status_bar_text: String,
+    /// v2.20.0 (Ghostty parity): the transient resize chip's text buffer +
+    /// its P1b equality gate (re-shaped only when the grid size changes).
+    resize_overlay_buffer: TextBuffer,
+    resize_overlay_text: String,
     /// Cycle 853 (audit): pooled scratch for the per-frame cell/UI quad list
     /// (`render_frame_with_status` filled a fresh `Vec` of `panes*16+256`
     /// `QuadInstance`s every frame). Taken + cleared at the top of the frame,
@@ -800,6 +849,7 @@ impl Renderer {
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let search_buffer = TextBuffer::new(&mut font_system, metrics);
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
         // Cycle 636: honor cfg.cell_width / cell_height multipliers
@@ -830,6 +880,18 @@ impl Renderer {
             span_scratch: Vec::new(),
             quad_scratch: Vec::new(),
             span_breaks_scratch: Vec::new(),
+            pane_line_keys: Vec::new(),
+            pane_style_keys: Vec::new(),
+            line_text_scratch: String::new(),
+            chrome_style_key: 0,
+            pane_titlebar_texts: Vec::new(),
+            tab_texts: Vec::new(),
+            tab_close_text: String::new(),
+            tabbar_text: String::new(),
+            new_tab_arrow_text: String::new(),
+            status_bar_text: String::new(),
+            resize_overlay_buffer,
+            resize_overlay_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
@@ -1055,7 +1117,7 @@ impl Renderer {
         let default_bg = panes
             .iter()
             .find(|p| p.focused)
-            .and_then(|p| p.term.colors()[257])
+            .and_then(|p| p.snap.colors[257])
             .map(|c| Rgb::new(c.r, c.g, c.b))
             .unwrap_or(theme.background);
         let pad_x = cfg.padding_x;
@@ -1076,15 +1138,46 @@ impl Renderer {
         } else {
             0.0
         };
+        // v2.20.0 P1b: the chrome-label caches below compare TEXT only, which
+        // is sound while the font family is stable — invalidate them all once
+        // when it changes (config reload with a new `font-family`).
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            family.hash(&mut h);
+            let k = h.finish();
+            if self.chrome_style_key != k {
+                self.chrome_style_key = k;
+                self.pane_titlebar_texts.clear();
+                self.tab_texts.clear();
+                self.tab_close_text.clear();
+                self.tabbar_text.clear();
+                self.new_tab_arrow_text.clear();
+                self.status_bar_text.clear();
+                self.resize_overlay_text.clear();
+            }
+        }
         // Ensure one text buffer per pane.
         while self.pane_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_buffers.push(b);
         }
+        // v2.20.0 P1: the line-key / style-key pools live and die with
+        // `pane_buffers` — a key must always describe the content actually
+        // shaped into the buffer at the same index.
+        while self.pane_line_keys.len() < panes.len() {
+            self.pane_line_keys.push(Vec::new());
+        }
+        while self.pane_style_keys.len() < panes.len() {
+            self.pane_style_keys.push(0);
+        }
         // Cycle 382: parallel grow for per-pane titlebar buffers.
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_titlebar_buffers.push(b);
+        }
+        while self.pane_titlebar_texts.len() < panes.len() {
+            self.pane_titlebar_texts.push(String::new());
         }
         // Cycle 749: release buffers for panes that have closed. The grow
         // loops above only ever extend, so without this the two vecs sat at
@@ -1093,7 +1186,10 @@ impl Renderer {
         // runs) allocated for the rest of the session. Truncation is safe:
         // every later loop indexes by enumerate position `< panes.len()`.
         self.pane_buffers.truncate(panes.len());
+        self.pane_line_keys.truncate(panes.len());
+        self.pane_style_keys.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
+        self.pane_titlebar_texts.truncate(panes.len());
         // Cycle 382: write each pane's title into its titlebar
         // buffer NOW (before the later loops borrow self
         // immutably). pane_titlebar_h was computed earlier as
@@ -1133,13 +1229,18 @@ impl Renderer {
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
-                buf.set_text(
-                    &mut self.font_system,
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Basic,
-                    None,
-                );
+                // v2.20.0 P1b: `Buffer::set_text` re-shapes unconditionally —
+                // gate it on text change so a steady title costs nothing.
+                if self.pane_titlebar_texts[i] != label {
+                    buf.set_text(
+                        &mut self.font_system,
+                        &label,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Basic,
+                        None,
+                    );
+                    self.pane_titlebar_texts[i] = label;
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -1664,9 +1765,8 @@ impl Renderer {
 
             // Image placements, anchored history-aware so they scroll.
             {
-                let g = pv.term.grid();
-                let top = g.history_size() as i64 - g.display_offset() as i64;
-                let nrows = g.screen_lines() as i64;
+                let top = pv.snap.history_size as i64 - pv.snap.display_offset as i64;
+                let nrows = pv.snap.screen_lines as i64;
                 // Cycle 791 (audit C1): most panes carry 0–1 image placements,
                 // so skip the per-frame `Vec` alloc + sort in that common case
                 // (z-order is meaningless for fewer than two) and iterate the
@@ -1780,8 +1880,8 @@ impl Renderer {
                 over.push(rect(rx, ry, rw, rh, theme.background, composed_dim));
             }
             if cfg.scrollbar != ScrollbarMode::Never {
-                let g = pv.term.grid();
-                let (rows, hist, off) = (g.screen_lines(), g.history_size(), g.display_offset());
+                let s = pv.snap;
+                let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
                 let show = cfg.scrollbar == ScrollbarMode::Always
                     || (cfg.scrollbar == ScrollbarMode::Auto && off > 0);
                 if show && let Some((ty, th)) = kettle_core::scrollbar::thumb(rows, hist, off, rh) {
@@ -1815,15 +1915,27 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
+            // v2.20.0: advertise the Ctrl+j/k match stepping when
+            // `vim-menu-nav` is on (the keys themselves live app-side).
+            // Review fix: ^j/^k are LITERAL directions while `invert-search`
+            // flips Enter's default — the hint pairs them accordingly so it
+            // never claims an equivalence the keys don't have.
+            let nav_hint = match (cfg.vim_menu_nav, cfg.invert_search) {
+                (true, false) => "(Enter/^j next · Shift+Enter/^k prev · Esc close)",
+                (true, true) => "(Shift+Enter/^j next · Enter/^k prev · Esc close)",
+                (false, false) => "(Enter next · Shift+Enter prev · Esc close)",
+                (false, true) => "(Enter prev · Shift+Enter next · Esc close)",
+            };
             let label = format!(
-                "  search: {}_    [{}/{}]   (Enter next · Shift+Enter prev · Esc close)",
+                "  search: {}_    [{}/{}]   {}",
                 q,
                 if overlay.search_count == 0 {
                     0
                 } else {
                     overlay.search_index + 1
                 },
-                overlay.search_count
+                overlay.search_count,
+                nav_hint
             );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
@@ -2022,6 +2134,11 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.tab_buffers.push(b);
             }
+            // v2.20.0 P1b: label cache lives and dies with `tab_buffers`.
+            while self.tab_texts.len() < tabbar.segments.len() {
+                self.tab_texts.push(String::new());
+            }
+            self.tab_texts.truncate(tabbar.segments.len());
             // Cycle 788 (audit B4): shrink the pool when tabs close, matching
             // `pane_buffers`/`settings_buffers` — otherwise it stuck at the
             // peak tab count for the whole session (open 50, close to 5 → 50
@@ -2059,13 +2176,17 @@ impl Renderer {
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(w), Some(tabbar.height));
-                buf.set_text(
-                    &mut self.font_system,
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
+                // v2.20.0 P1b: re-shape only when the label actually changed.
+                if self.tab_texts[bi] != label {
+                    buf.set_text(
+                        &mut self.font_system,
+                        &label,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.tab_texts[bi] = label;
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
             // Shared `✕` glyph buffer for every tab's close button.
@@ -2077,13 +2198,17 @@ impl Renderer {
                 Some(tabbar.height),
                 Some(tabbar.height),
             );
-            self.tab_close_buffer.set_text(
-                &mut self.font_system,
-                "✕",
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.20.0 P1b: constant glyph — shaped once per font family.
+            if self.tab_close_text != "✕" {
+                self.tab_close_buffer.set_text(
+                    &mut self.font_system,
+                    "✕",
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.tab_close_text = "✕".into();
+            }
             self.tab_close_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // `+` button glyph.
@@ -2094,13 +2219,17 @@ impl Renderer {
                 Some(tabbar.new_tab.2),
                 Some(tabbar.height),
             );
-            self.tabbar_buffer.set_text(
-                &mut self.font_system,
-                " +",
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.20.0 P1b: constant glyph — shaped once per font family.
+            if self.tabbar_text != " +" {
+                self.tabbar_buffer.set_text(
+                    &mut self.font_system,
+                    " +",
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.tabbar_text = " +".into();
+            }
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // Cycle 805: the `▾` dropdown arrow, shaped in its own buffer so it
@@ -2113,13 +2242,17 @@ impl Renderer {
                     Some(tabbar.new_tab_menu.2),
                     Some(tabbar.height),
                 );
-                self.new_tab_arrow_buffer.set_text(
-                    &mut self.font_system,
-                    " ▾",
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
+                // v2.20.0 P1b: constant glyph — shaped once per font family.
+                if self.new_tab_arrow_text != " ▾" {
+                    self.new_tab_arrow_buffer.set_text(
+                        &mut self.font_system,
+                        " ▾",
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.new_tab_arrow_text = " ▾".into();
+                }
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
@@ -2136,14 +2269,49 @@ impl Renderer {
                 Some(sw - 16.0),
                 Some(status.height),
             );
-            self.status_bar_buffer.set_text(
-                &mut self.font_system,
-                &status.text,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.20.0 P1b: the status line changes at most once a second (the
+            // HH:MM:SS clock) — don't re-shape it on every painted frame.
+            if self.status_bar_text != status.text {
+                self.status_bar_buffer.set_text(
+                    &mut self.font_system,
+                    &status.text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.status_bar_text.clear();
+                self.status_bar_text.push_str(&status.text);
+            }
             self.status_bar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // v2.20.0 (Ghostty `resize-overlay` parity): shape the transient
+        // size chip's text ("120×40"). Drawn later in the menu pass so it
+        // sits above pane content; the P1b equality gate means a live
+        // resize only re-shapes when the GRID size actually changed.
+        if let Some((rcols, rrows)) = overlay.resize_overlay {
+            let label = format!("{rcols}×{rrows}");
+            // Metrics/size stay OUTSIDE the text gate (review fix): a DPI
+            // change can re-show the chip with an UNCHANGED label, and the
+            // gated form left the glyphs shaped at the old monitor's scale.
+            // Both calls early-out when unchanged, like the other chrome
+            // buffers.
+            self.resize_overlay_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.resize_overlay_buffer
+                .set_size(&mut self.font_system, Some(sw), Some(ch * 2.0));
+            if self.resize_overlay_text != label {
+                self.resize_overlay_buffer.set_text(
+                    &mut self.font_system,
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Basic,
+                    None,
+                );
+                self.resize_overlay_text = label;
+            }
+            self.resize_overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
@@ -2293,6 +2461,41 @@ impl Renderer {
         // pass.
         // Cycle 761: pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
+        // v2.20.0 (Ghostty parity): the transient resize chip — centered,
+        // drawn in the menu pass (last) so it reads over any pane content.
+        if let Some((rcols, rrows)) = overlay.resize_overlay {
+            let label_cells = format!("{rcols}×{rrows}").chars().count() as f32;
+            let pad = 14.0_f32;
+            let chip_w = label_cells * cw + pad * 2.0;
+            let chip_h = ch + pad;
+            let cx = (sw - chip_w) / 2.0;
+            let cy = (sh - chip_h) / 2.0;
+            menu_q.push(rect(cx, cy, chip_w, chip_h, theme.palette[0], 0.92));
+            // 1px accent outline so the chip reads on same-color content.
+            let acc = cfg.accent_color.unwrap_or(theme.palette[4]);
+            menu_q.push(rect(cx, cy, chip_w, 1.0, acc, 1.0));
+            menu_q.push(rect(cx, cy + chip_h - 1.0, chip_w, 1.0, acc, 1.0));
+            menu_q.push(rect(cx, cy, 1.0, chip_h, acc, 1.0));
+            menu_q.push(rect(cx + chip_w - 1.0, cy, 1.0, chip_h, acc, 1.0));
+            menu_areas.push(TextArea {
+                buffer: &self.resize_overlay_buffer,
+                left: cx + pad,
+                top: cy + pad / 2.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: cx as i32,
+                    top: cy as i32,
+                    right: (cx + chip_w) as i32,
+                    bottom: (cy + chip_h) as i32,
+                },
+                default_color: GColor::rgb(
+                    theme.foreground.r,
+                    theme.foreground.g,
+                    theme.foreground.b,
+                ),
+                custom_glyphs: &[],
+            });
+        }
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
@@ -2301,7 +2504,7 @@ impl Renderer {
             // whitespace / IME composition / chrome strings ride the
             // default. Matches the OSC 11 chrome path landed in cycle 65 —
             // engine override (Colors[256]) wins, theme is fallback.
-            let pane_fg = pv.term.colors()[256]
+            let pane_fg = pv.snap.colors[256]
                 .map(|c| Rgb::new(c.r, c.g, c.b))
                 .unwrap_or(theme.foreground);
             areas.push(TextArea {
@@ -2964,26 +3167,27 @@ impl Renderer {
         let oy = ry + cfg.padding_y + pane_titlebar_h;
         let cw = self.cell_w;
         let ch = self.cell_h;
-        let term = pv.term;
-        let content = term.renderable_content();
-        let term_colors = content.colors;
-        let cols = term.grid().columns();
-        // Capture the selection range *before* the display iterator
-        // consumes its sibling field; cells inside this range get their
-        // fg swapped to `theme.selection_foreground` so dark-on-dark
-        // themes stay readable under the highlight. Without this, the
-        // configured `selection-foreground` color was parsed and stored
-        // but the renderer ignored it.
-        let selection_range = content.selection;
-        // Cycle 912 (R1 completion): `display_iter` + `content.selection` yield
+        // v2.20.0 P2: everything below reads the lock-free snapshot captured
+        // by `redraw` — same data `renderable_content()` used to yield, the
+        // Term mutex is just no longer held while we process it.
+        let snap = pv.snap;
+        let term_colors = &snap.colors;
+        let cols = snap.columns;
+        // Cells inside the selection range get their fg swapped to
+        // `theme.selection_foreground` so dark-on-dark themes stay readable
+        // under the highlight. Without this, the configured
+        // `selection-foreground` color was parsed and stored but the
+        // renderer ignored it.
+        let selection_range = snap.selection;
+        // Cycle 912 (R1 completion): snapshot cells + selection carry
         // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
         // bg/underline/strikeout quads and the selection-bg quad position by
         // VIEWPORT row, so convert with `viewport_row = grid_line + display_offset`
         // (alacritty's `point_to_viewport`). The text itself flows correctly off
         // relative line-break deltas, so only the quad Y needs this. No-op when
         // not scrolled (display_offset == 0).
-        let display_off = content.display_offset as i32;
-        let screen_rows = term.grid().screen_lines() as i32;
+        let display_off = snap.display_offset as i32;
+        let screen_rows = snap.screen_lines as i32;
         // Match the surface clear-color so a cell whose bg resolves to the
         // active default (OSC 11 override or theme bg) doesn't paint a
         // redundant quad over the already-correct backdrop.
@@ -3046,12 +3250,12 @@ impl Renderer {
         // exactly its glyph. Only the full Block shape covers the glyph (beam /
         // underline leave it visible, so they aren't recolored).
         let recolor_cursor_cell: Option<(i32, usize)> = {
-            let cp = content.cursor.point;
+            let cp = snap.cursor.point;
             let cvrow = cp.line.0 + display_off;
             if pv.focused
                 && window_focused
                 && cursor_visible
-                && content.cursor.shape == EShape::Block
+                && snap.cursor.shape == EShape::Block
                 && (0..screen_rows).contains(&cvrow)
             {
                 Some((cp.line.0, cp.column.0))
@@ -3075,11 +3279,9 @@ impl Renderer {
         // cell, draw as before.
         let mut cursor_wide_quad: Option<(usize, f32)> = None;
 
-        for indexed in content.display_iter {
-            let point = indexed.point;
-            let cell = indexed.cell;
-            let row = point.line.0;
-            let col = point.column.0;
+        for sc in &snap.cells {
+            let row = sc.line;
+            let col = sc.col;
             // Cycle 912: viewport row for quad placement; `row` (grid-absolute,
             // negative when scrolled) stays for the relative line-break deltas.
             let vrow = row + display_off;
@@ -3091,9 +3293,9 @@ impl Renderer {
                 cur_row = row;
             }
 
-            let flags = cell.flags;
-            let mut fg = color::resolve(cell.fg, theme, term_colors);
-            let mut bg = color::resolve(cell.bg, theme, term_colors);
+            let flags = sc.flags;
+            let mut fg = color::resolve(sc.fg, theme, term_colors);
+            let mut bg = color::resolve(sc.bg, theme, term_colors);
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -3101,7 +3303,7 @@ impl Renderer {
             // selection always wins for readability (alacritty / iTerm2
             // behavior). Without this, a cell with INVERSE under a selection
             // would render as inverse-fg on selection-bg, often invisible.
-            if selection_range.is_some_and(|r| r.contains(point)) {
+            if selection_range.is_some_and(|r| r.contains(sc.point())) {
                 fg = theme.selection_foreground;
             }
             // SGR 2 dim/faint — blend the foreground halfway toward the
@@ -3179,8 +3381,8 @@ impl Renderer {
             // / dashed visual styles want a shader path and are deferred
             // — the presence/absence cue is what matters most.
             if flags.intersects(Flags::ALL_UNDERLINES) {
-                let line_color = cell
-                    .underline_color()
+                let line_color = sc
+                    .underline_color
                     .map(|c| color::resolve(c, theme, term_colors))
                     .unwrap_or(fg);
                 let x = ox + col as f32 * cw;
@@ -3200,7 +3402,7 @@ impl Renderer {
                     1.0,
                 ));
             }
-            let dc = if hidden { ' ' } else { cell.c };
+            let dc = if hidden { ' ' } else { sc.c };
             match cur {
                 Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
                     // Same style — extend the current run (the last live span).
@@ -3228,7 +3430,7 @@ impl Renderer {
         }
 
         // Selection.
-        if let Some(sel) = content.selection {
+        if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
             for r in s.line.0..=e.line.0 {
                 // Cycle 912: selection lines are grid-absolute; map to the
@@ -3267,8 +3469,8 @@ impl Renderer {
         // replace modes. The engine is seeded from `cfg.cursor_style` at pane
         // creation so the default still matches the user's config.
         use alacritty_terminal::vte::ansi::CursorShape as EShape;
-        let cp = content.cursor.point;
-        let shape = content.cursor.shape;
+        let cp = snap.cursor.point;
+        let shape = snap.cursor.shape;
         // Cycle 150: also require cursor_visible. The old check fell
         // through to draw the hollow-outline branch on an unfocused
         // window even when DEC ?25l had hidden the cursor. So a
@@ -3394,6 +3596,10 @@ impl Renderer {
         // rows stay locked to the cursor/quad row step — see `pane_metrics`.
         let pm = pane_metrics(self.metrics.font_size, self.cell_h);
         let buf = &mut self.pane_buffers[idx];
+        // Both calls below are no-ops when the values are unchanged
+        // (cosmic-text's `set_metrics_and_size` early-outs on equality), so
+        // steady-state frames don't relayout; a zoom / pane-resize relayouts
+        // internally while PRESERVING each line's shaping cache.
         buf.set_metrics(&mut self.font_system, pm);
         buf.set_size(
             &mut self.font_system,
@@ -3404,18 +3610,6 @@ impl Renderer {
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
-        // Cycle 806 (audit perf): borrow each span's text as `&str` into the
-        // rich-text vec instead of cloning it to an owned `String`. `spans` is
-        // built above and not touched again, so it outlives this
-        // `set_rich_text` call and the slices stay valid. This drops one heap
-        // allocation per style run per pane per frame — a busy 120×50 pane of
-        // colored output churned dozens–hundreds of `String`s (plus a `"\n"`
-        // per wrapped row) every single frame. The `Vec<(&str, Attrs)>` type
-        // also makes a future re-introduction of `text.clone()` a compile
-        // error rather than a silent regression.
-        // Only the first `n` slots are live this frame (the pool may carry more
-        // from a busier prior frame); `set_rich_text` sees exactly those.
-        let rich = build_rich_spans(&spans[..n], &span_line_breaks, cfg, &ff, &default_attrs);
         // Advanced shaping applies OpenType features (ligatures, ss##,
         // cv##, …). Drop to Basic only when ligatures are off *and* there
         // are no explicit features to honor — the fast path with no shaping.
@@ -3424,14 +3618,122 @@ impl Renderer {
         } else {
             Shaping::Basic
         };
-        // Hand the vec to `set_rich_text` by value: it takes an
-        // `IntoIterator<Item = (&str, Attrs)>`, so consuming `rich` also drops
-        // the per-run `Attrs` clone the old `.iter().map(|(s, a)| (s.as_str(),
-        // a.clone()))` adapter used to make.
-        buf.set_rich_text(&mut self.font_system, rich, &default_attrs, shaping, None);
+
+        // v2.20.0 P1 (perf): per-LINE keyed shaping cache. The old path fed
+        // the whole viewport through `set_rich_text` every frame, which
+        // unconditionally resets every line's shaping — cosmic-text re-shaped
+        // 100% of visible text at up to 60fps even when nothing changed (an
+        // idle blink repaint re-shaped every pane's full viewport). Instead,
+        // keep `buf.lines` row-aligned with the grid and touch ONLY rows
+        // whose content key changed:
+        //   key match    → skip; the `BufferLine`'s shape + layout caches
+        //                  stay warm (`shape_until_scroll` walks them for
+        //                  free).
+        //   key mismatch → `BufferLine::set_text`, which itself resets
+        //                  shaping only on a REAL text/attrs change — the
+        //                  second guard that makes a hash collision across
+        //                  *frames* the only stale-render risk (~2⁻⁶⁴ per
+        //                  changed row, the same exposure rustc accepts for
+        //                  incremental fingerprints).
+        //   no key       → `reset_new` (fresh buffer line, or the style key
+        //                  below changed). This is the only path that updates
+        //                  a line's internal `shaping` mode — `set_text`
+        //                  never touches it.
+        // The row key hashes the row's run tuples (text, fg, bold, italic),
+        // so theme switches, OSC 4/10/11 palette overrides, selection
+        // recolors and the cursor-recolor cell all land in it via the
+        // resolved run colors — each dirties exactly the rows it touches.
+        // Inputs that change how a row SHAPES without changing its runs
+        // (font-family variants, ligature toggle, font-features, shaping
+        // mode) live in the per-pane style key; metrics / pane-size changes
+        // are handled inside the buffer (relayout keeps shaping).
+        use std::hash::{Hash, Hasher};
+        let style_key = {
+            let mut h = std::hash::DefaultHasher::new();
+            for (b, i) in [(false, false), (true, false), (false, true), (true, true)] {
+                cfg.family_for(b, i).hash(&mut h);
+            }
+            cfg.font_ligatures.hash(&mut h);
+            for f in &cfg.font_features {
+                f.tag.hash(&mut h);
+                f.value.hash(&mut h);
+            }
+            matches!(shaping, Shaping::Advanced).hash(&mut h);
+            h.finish()
+        };
+        if self.pane_style_keys[idx] != style_key {
+            self.pane_style_keys[idx] = style_key;
+            // Wipe the row keys: every row below re-sets via `reset_new`,
+            // which is what propagates a changed shaping mode / font stack.
+            self.pane_line_keys[idx].clear();
+        }
+        let rows = screen_rows.max(0) as usize;
+        while buf.lines.len() < rows {
+            buf.lines.push(BufferLine::new(
+                String::new(),
+                LineEnding::Lf,
+                AttrsList::new(&default_attrs),
+                shaping,
+            ));
+        }
+        buf.lines.truncate(rows);
+        let keys = &mut self.pane_line_keys[idx];
+        keys.truncate(rows);
+        let mut row_text = std::mem::take(&mut self.line_text_scratch);
+        // Row r's runs are `spans[breaks[r-1]..breaks[r]]` — `span_line_breaks`
+        // records the live run count at each row transition (one entry per
+        // crossed row, `rows - 1` total), exactly the structure the old
+        // `build_rich_spans` consumed to interleave its `"\n"` markers.
+        let mut start = 0usize;
+        for row in 0..rows {
+            let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
+            let runs = &spans[start.min(end)..end];
+            start = end;
+            let key = {
+                let mut h = std::hash::DefaultHasher::new();
+                for (text, fg, bold, italic) in runs {
+                    text.hash(&mut h);
+                    (fg.r, fg.g, fg.b).hash(&mut h);
+                    (bold, italic).hash(&mut h);
+                }
+                h.finish()
+            };
+            let prev = keys.get(row).copied();
+            if prev == Some(key) {
+                continue;
+            }
+            row_text.clear();
+            let mut attrs_list = AttrsList::new(&default_attrs);
+            for (text, fg, bold, italic) in runs {
+                let s = row_text.len();
+                row_text.push_str(text);
+                let a = run_attrs(cfg, &ff, *fg, *bold, *italic);
+                // Mirror `set_rich_text`: only record a span when it differs
+                // from the row defaults (fewer spans = cheaper compares).
+                if a != attrs_list.defaults() {
+                    attrs_list.add_span(s..row_text.len(), &a);
+                }
+            }
+            if prev.is_some() {
+                buf.lines[row].set_text(&row_text, LineEnding::Lf, attrs_list);
+            } else {
+                buf.lines[row].reset_new(row_text.as_str(), LineEnding::Lf, attrs_list, shaping);
+            }
+            if keys.len() <= row {
+                keys.push(key);
+            } else {
+                keys[row] = key;
+            }
+        }
+        self.line_text_scratch = row_text;
+        // Shapes whatever the loop dirtied; cached rows walk their warm
+        // layout caches. (The buffer's scroll provably stays at the default
+        // (0, 0.0) on this path: `shape_until_scroll` only moves it when
+        // `scroll.vertical` is already non-zero or `scroll.line > 0`, and
+        // nothing here sets either.)
         buf.shape_until_scroll(&mut self.font_system, false);
         // Return the scratch (with its grown String buffers) to the pool for the
-        // next frame/pane. `rich` is already consumed, so `spans` is free.
+        // next frame/pane.
         self.span_scratch = spans;
         self.span_breaks_scratch = span_line_breaks;
     }
@@ -3495,44 +3797,30 @@ fn vi_selection_row_span(
     (last >= first).then_some((first, last))
 }
 
-/// Build a pane's rich-text runs as `(&str, Attrs)` pairs, **borrowing** each
-/// span's text from `spans` rather than cloning it (cycle 806 hot-path
-/// allocation fix). `"\n"` line-break markers are interleaved at the recorded
-/// `line_breaks` indices, each carrying `default_attrs` (the row breaks
-/// inherit the pane's default styling, exactly as before).
-///
-/// The returned `&'a str` slices are tied to `spans`, which every caller keeps
-/// alive until after the `Buffer::set_rich_text` call consumes the vec — so
-/// the per-frame allocation count stays flat no matter how many colored style
-/// runs a pane has. Pre-sized to `spans.len() + line_breaks.len()` so it never
-/// reallocs mid-build (cycle 761).
-fn build_rich_spans<'a>(
-    spans: &'a [(String, Rgb, bool, bool)],
-    line_breaks: &[usize],
+/// Attrs for one style run: the family picks the bold/italic variant
+/// (`cfg.family_for`), the color is the run's resolved fg, weight/style
+/// mirror the SGR bold/italic bits. Split out of the retired whole-buffer
+/// `build_rich_spans` (cycle 806) so the v2.20.0 P1 per-line shaping cache
+/// can build a single row's `AttrsList` at a time — runs that didn't change
+/// never construct an `Attrs` at all.
+fn run_attrs<'a>(
     cfg: &'a Config,
-    ff: &'a FontFeatures,
-    default_attrs: &Attrs<'a>,
-) -> Vec<(&'a str, Attrs<'a>)> {
-    let mut rich: Vec<(&'a str, Attrs<'a>)> = Vec::with_capacity(spans.len() + line_breaks.len());
-    let mut nb = 0usize;
-    for (i, (text, fg, bold, italic)) in spans.iter().enumerate() {
-        while nb < line_breaks.len() && line_breaks[nb] == i {
-            rich.push(("\n", default_attrs.clone()));
-            nb += 1;
-        }
-        let mut a = Attrs::new()
-            .family(Family::Name(cfg.family_for(*bold, *italic)))
-            .font_features(ff.clone())
-            .color(GColor::rgb(fg.r, fg.g, fg.b));
-        if *bold {
-            a = a.weight(Weight::BOLD);
-        }
-        if *italic {
-            a = a.style(Style::Italic);
-        }
-        rich.push((text.as_str(), a));
+    ff: &FontFeatures,
+    fg: Rgb,
+    bold: bool,
+    italic: bool,
+) -> Attrs<'a> {
+    let mut a = Attrs::new()
+        .family(Family::Name(cfg.family_for(bold, italic)))
+        .font_features(ff.clone())
+        .color(GColor::rgb(fg.r, fg.g, fg.b));
+    if bold {
+        a = a.weight(Weight::BOLD);
     }
-    rich
+    if italic {
+        a = a.style(Style::Italic);
+    }
+    a
 }
 
 /// Truncate `s` to at most `n` **display columns** (not chars), adding `…`
@@ -3711,7 +3999,12 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
         lines.push(format!("{mark}{:<26}{}", row.label, row.value));
     }
     lines.push(String::new());
-    lines.push("↑↓ field    ←→ change    Tab category    Esc close".to_string());
+    // v2.20.0: advertise the vim keys when `vim-menu-nav` is on.
+    lines.push(if set.vim_nav {
+        "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close".to_string()
+    } else {
+        "↑↓ field    ←→ change    Tab category    Esc close".to_string()
+    });
     lines
 }
 
@@ -5607,11 +5900,11 @@ mod pane_buffer_lifecycle_tests {
     /// not a per-frame heap alloc + memcpy at 60fps. A behavioral test needs a
     /// GPU `Renderer`; pin the field type at the source level.
     /// Cycle 852 drift guard. `PaneView` must *borrow* its per-frame
-    /// images/title/group_name from the frame's `guards` collection (exactly as
-    /// `term` borrows the `MutexGuard`), not own clones — otherwise `redraw()`
-    /// double-clones every visible pane's image `Vec` + title `String` every
-    /// frame. A behavioral test needs the full app frame loop; pin the borrowed
-    /// field types at the source.
+    /// images/title/group_name from the frame's `metas` collection (exactly as
+    /// `snap` borrows the pooled `PaneSnapshot`), not own clones — otherwise
+    /// `redraw()` double-clones every visible pane's image `Vec` + title
+    /// `String` every frame. A behavioral test needs the full app frame loop;
+    /// pin the borrowed field types at the source.
     #[test]
     fn paneview_borrows_per_frame_data() {
         let src = include_str!("lib.rs");
@@ -5770,62 +6063,52 @@ mod vi_selection_row_span_tests {
 }
 
 #[cfg(test)]
-mod build_rich_spans_tests {
-    use super::{Attrs, Family, Rgb, build_rich_spans, font_features};
+mod run_attrs_tests {
+    use super::{GColor, Rgb, Style, Weight, font_features, run_attrs};
+    use glyphon::Family;
     use kettle_config::Config;
 
-    /// Cycle 806 drift guard (audit perf): the per-pane rich-text builder must
-    /// **borrow** each span's text (`&str`) rather than clone it into an owned
-    /// `String`. A clone allocates once per style run per pane per frame; this
-    /// pins the zero-copy property via pointer identity (a clone would land at
-    /// a different heap address) and confirms the `"\n"` row markers stay
-    /// interleaved at the recorded break indices.
+    /// v2.20.0 P1: `run_attrs` (the per-run half of the retired
+    /// `build_rich_spans`) must map the SGR bits exactly as the old builder
+    /// did — color from the resolved fg, BOLD → `Weight::BOLD`, ITALIC →
+    /// `Style::Italic`, and the family routed through `cfg.family_for` so
+    /// configured bold/italic font variants keep working.
     #[test]
-    fn build_rich_spans_borrows_text_and_interleaves_breaks() {
+    fn run_attrs_maps_color_weight_style_and_family() {
         let cfg = Config::default();
         let ff = font_features(&cfg);
-        let default_attrs = Attrs::new()
-            .family(Family::Name("TestFamily"))
-            .font_features(ff.clone());
-        let spans = vec![
-            ("alpha".to_string(), Rgb::new(10, 20, 30), false, false),
-            ("beta".to_string(), Rgb::new(40, 50, 60), true, true),
-        ];
-        // One line break recorded before span index 1 → "alpha","\n","beta".
-        let line_breaks = vec![1usize];
-        let rich = build_rich_spans(&spans, &line_breaks, &cfg, &ff, &default_attrs);
 
-        let texts: Vec<&str> = rich.iter().map(|(s, _)| *s).collect();
-        assert_eq!(texts, vec!["alpha", "\n", "beta"]);
-        // Zero-copy: span entries point at the SAME heap buffer as the source
-        // `String`s. If this ever fails, someone re-introduced a `text.clone()`.
-        assert_eq!(rich[0].0.as_ptr(), spans[0].0.as_ptr());
-        assert_eq!(rich[2].0.as_ptr(), spans[1].0.as_ptr());
+        let plain = run_attrs(&cfg, &ff, Rgb::new(10, 20, 30), false, false);
+        assert_eq!(plain.color_opt, Some(GColor::rgb(10, 20, 30)));
+        assert_eq!(plain.weight, Weight::NORMAL);
+        assert_eq!(plain.style, Style::Normal);
+        assert_eq!(plain.family, Family::Name(cfg.family_for(false, false)));
+
+        let bold_italic = run_attrs(&cfg, &ff, Rgb::new(40, 50, 60), true, true);
+        assert_eq!(bold_italic.color_opt, Some(GColor::rgb(40, 50, 60)));
+        assert_eq!(bold_italic.weight, Weight::BOLD);
+        assert_eq!(bold_italic.style, Style::Italic);
+        assert_eq!(bold_italic.family, Family::Name(cfg.family_for(true, true)));
     }
 
-    /// A leading break (index 0) and no spans-after edge cases: the marker is
-    /// emitted before the first span, and a run with zero breaks is verbatim.
+    /// v2.20.0 P1 drift guard: two identical run tuples must produce EQUAL
+    /// `Attrs` (the per-line cache's `set_text` second guard compares
+    /// `AttrsList`s — accidental per-call variation would defeat the cache
+    /// and re-shape every row every frame), and differing tuples must
+    /// produce UNEQUAL `Attrs` (or stale styling would survive).
     #[test]
-    fn build_rich_spans_handles_leading_break_and_no_breaks() {
+    fn run_attrs_is_deterministic_and_distinguishes_runs() {
         let cfg = Config::default();
         let ff = font_features(&cfg);
-        let default_attrs = Attrs::new()
-            .family(Family::Name("TestFamily"))
-            .font_features(ff.clone());
-        let spans = vec![("only".to_string(), Rgb::new(1, 2, 3), false, false)];
 
-        let lead = build_rich_spans(&spans, &[0usize], &cfg, &ff, &default_attrs);
-        assert_eq!(
-            lead.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
-            vec!["\n", "only"]
-        );
+        let a = run_attrs(&cfg, &ff, Rgb::new(1, 2, 3), true, false);
+        let b = run_attrs(&cfg, &ff, Rgb::new(1, 2, 3), true, false);
+        assert_eq!(a, b);
 
-        let none = build_rich_spans(&spans, &[], &cfg, &ff, &default_attrs);
-        assert_eq!(
-            none.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
-            vec!["only"]
-        );
-        assert_eq!(none[0].0.as_ptr(), spans[0].0.as_ptr());
+        let other_color = run_attrs(&cfg, &ff, Rgb::new(9, 2, 3), true, false);
+        assert_ne!(a, other_color);
+        let other_weight = run_attrs(&cfg, &ff, Rgb::new(1, 2, 3), false, false);
+        assert_ne!(a, other_weight);
     }
 }
 

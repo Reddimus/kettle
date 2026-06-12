@@ -131,12 +131,26 @@ impl Extractor {
         }
     }
 
+    /// v2.20.0 P3 (perf): the PTY front stage. Plain bytes (the overwhelming
+    /// majority of real output) used to walk a per-byte state machine —
+    /// `match` + bounds-checked `Vec::push` for every single byte of a 64KiB
+    /// read. Now each loop iteration `memchr`-scans (SIMD) to the next byte
+    /// that can change state — ESC in pass-through; ESC / raw ST (and BEL for
+    /// OSC) inside a sequence — and bulk-copies the run before it with
+    /// `extend_from_slice`. That also collapses the old doubling-ladder
+    /// reallocs (a taken `pass` buffer re-grew 0→64KiB in ~17 steps under
+    /// flood) into a single exact `reserve` per run. State semantics are
+    /// byte-identical to the old loop, including ESC / ESC-\ split across
+    /// `feed` calls.
     pub fn feed(&mut self, input: &[u8]) -> Vec<Chunk> {
         let mut out: Vec<Chunk> = Vec::new();
-        for &b in input {
+        let mut i = 0usize;
+        while i < input.len() {
             match self.mode {
                 Mode::Pass => {
                     if self.esc_pending {
+                        let b = input[i];
+                        i += 1;
                         self.esc_pending = false;
                         match b {
                             b'P' => {
@@ -159,32 +173,66 @@ impl Extractor {
                                 self.pass.push(b);
                             }
                         }
-                    } else if b == 0x1b {
-                        self.esc_pending = true;
                     } else {
-                        self.pass.push(b);
+                        // Bulk path: everything up to the next ESC is plain.
+                        match memchr::memchr(0x1b, &input[i..]) {
+                            Some(off) => {
+                                self.pass.extend_from_slice(&input[i..i + off]);
+                                self.esc_pending = true;
+                                i += off + 1;
+                            }
+                            None => {
+                                self.pass.extend_from_slice(&input[i..]);
+                                break;
+                            }
+                        }
                     }
                 }
                 Mode::Dcs | Mode::Apc | Mode::Osc => {
                     if self.st_pending {
+                        let b = input[i];
+                        i += 1;
                         self.st_pending = false;
                         if b == b'\\' {
                             self.term_bel = false;
                             self.finish_seq(&mut out);
                             continue;
-                        } else {
-                            self.seq.push(0x1b);
-                            self.seq.push(b);
                         }
-                    } else if b == 0x1b {
-                        self.st_pending = true;
-                    } else if (b == 0x07 && self.mode == Mode::Osc) || b == 0x9c {
-                        self.term_bel = b == 0x07;
-                        self.finish_seq(&mut out);
-                    } else {
+                        self.seq.push(0x1b);
                         self.seq.push(b);
+                    } else {
+                        // Bulk path: sequence bytes run to the next ESC, raw
+                        // ST (0x9c), or — OSC only — BEL terminator. A BEL
+                        // inside a DCS/APC body is payload, exactly as the
+                        // old per-byte arm treated it.
+                        let hay = &input[i..];
+                        let stop = if self.mode == Mode::Osc {
+                            memchr::memchr3(0x1b, 0x9c, 0x07, hay)
+                        } else {
+                            memchr::memchr2(0x1b, 0x9c, hay)
+                        };
+                        match stop {
+                            Some(off) => {
+                                self.seq.extend_from_slice(&hay[..off]);
+                                let b = hay[off];
+                                i += off + 1;
+                                if b == 0x1b {
+                                    self.st_pending = true;
+                                } else {
+                                    self.term_bel = b == 0x07;
+                                    self.finish_seq(&mut out);
+                                }
+                            }
+                            None => {
+                                self.seq.extend_from_slice(hay);
+                                i = input.len();
+                            }
+                        }
                         if self.seq.len() > MAX_SEQ {
                             // Give up: forward verbatim so we never hang.
+                            // (`seq` is empty when the branch above just
+                            // finished the sequence, so this only fires on a
+                            // genuinely runaway accumulation.)
                             self.bail(&mut out);
                         }
                     }
@@ -213,6 +261,16 @@ impl Extractor {
         out.push(Chunk::Pass(v));
         self.seq.clear();
         self.mode = Mode::Pass;
+        // v2.20.0 review fix: the bulk arm can latch `st_pending` (it just
+        // consumed an ESC stop byte) BEFORE the MAX_SEQ check runs bail —
+        // the old per-byte loop could never bail in that state. Unwind the
+        // latch into a Pass-mode pending ESC so the consumed byte is
+        // re-interpreted exactly as the fresh escape it is; leaving it
+        // latched would corrupt the FIRST byte of the next sequence.
+        if self.st_pending {
+            self.st_pending = false;
+            self.esc_pending = true;
+        }
     }
 
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
@@ -465,15 +523,77 @@ impl Extractor {
 }
 
 fn parse_osc7(s: &str) -> Option<String> {
-    // `file://host/path` — keep the path; percent-decode the common cases.
-    let rest = s.strip_prefix("file://").unwrap_or(s);
-    let path = match rest.find('/') {
-        Some(i) => &rest[i..],
-        None => rest,
+    let local = local_hostname();
+    parse_osc7_with_host(s, local.as_deref())
+}
+
+/// The machine's hostname for OSC 7 validation. Asks the OS
+/// (gethostname(2) / GetComputerNameExW — review fix: the env vars alone
+/// fail OPEN on Linux/macOS, where interactive bash does not export
+/// `HOSTNAME`), falling back to `COMPUTERNAME`/`HOSTNAME`. Cached: one OS
+/// call per process, not one per OSC 7 report. `None` means "unknown" —
+/// validation then only rejects nothing (an unknown local name must not
+/// break every report that carries a host).
+fn local_hostname() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            gethostname::gethostname()
+                .into_string()
+                .ok()
+                .filter(|h| !h.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("COMPUTERNAME")
+                        .or_else(|_| std::env::var("HOSTNAME"))
+                        .ok()
+                        .filter(|h| !h.trim().is_empty())
+                })
+        })
+        .clone()
+}
+
+/// v2.20.0 (Ghostty parity): parse an OSC 7 body, accepting BOTH schemes —
+/// `file://host/path` (percent-encoded) and kitty's `kitty-shell-cwd://host/path`
+/// (raw bytes, NOT percent-encoded — kitty invented the scheme precisely so
+/// shells don't have to URL-encode) — and validating the hostname: a report
+/// whose host is non-empty, not `localhost`, and not THIS machine is dropped.
+/// An ssh session's shell integration reports the REMOTE host's cwd; treating
+/// `/home/user` from another machine as a local directory breaks new-tab
+/// cwd inheritance and `OpenCwdInFileManager`. (Ghostty applies the same
+/// check in its stream handler.) `local_host = None` skips the rejection for
+/// named hosts only when the local name is unknowable.
+fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
+    // Split scheme; kitty-shell-cwd paths are used VERBATIM (no decode).
+    let (rest, percent_encoded) = if let Some(r) = s.strip_prefix("kitty-shell-cwd://") {
+        (r, false)
+    } else {
+        (s.strip_prefix("file://").unwrap_or(s), true)
     };
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => ("", rest),
+    };
+    let host = host.trim();
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        match local_host {
+            Some(local) if host.eq_ignore_ascii_case(local.trim()) => {}
+            // A FQDN report from this machine ("host.lan" vs "host"): accept
+            // when the first label matches.
+            Some(local)
+                if host
+                    .split('.')
+                    .next()
+                    .is_some_and(|l| l.eq_ignore_ascii_case(local.trim())) => {}
+            Some(_) => return None, // someone else's cwd (ssh) — reject
+            None => {}              // local name unknown — accept
+        }
+    }
     let path = path.trim();
     if path.is_empty() {
         return None;
+    }
+    if !percent_encoded {
+        return Some(normalize_drive_path(path.to_string()));
     }
     // Decode into a *byte* buffer first: shells percent-encode each UTF-8
     // byte of a non-ASCII path individually (zsh's `print -P %d` emits
@@ -505,7 +625,23 @@ fn parse_osc7(s: &str) -> Option<String> {
     }
     // Lossy → invalid byte sequences become U+FFFD instead of dropping the
     // whole report; a partly-corrupted path is more useful than no path.
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(normalize_drive_path(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
+}
+
+/// v2.20.0: a Windows drive path travels in URL form as `/C:/Users/x`
+/// (leading slash before the drive letter — the WT / Ghostty convention).
+/// Strip that slash so the reported cwd is a usable Windows path
+/// (`C:/Users/x`; Windows APIs accept forward slashes). Unix paths are
+/// untouched.
+fn normalize_drive_path(path: String) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        path[1..].to_string()
+    } else {
+        path
+    }
 }
 
 /// Parse an OSC 9;4 body (`9;4;<state>[;<pct>]`) into a [`Progress`].
@@ -614,6 +750,129 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(passed, b"$ ");
+    }
+
+    /// v2.20.0 P3 regression guards for the memchr bulk path: byte-exact
+    /// state semantics at every boundary the old per-byte loop handled.
+    fn passed(out: &[Chunk]) -> Vec<u8> {
+        out.iter()
+            .filter_map(|c| match c {
+                Chunk::Pass(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// v2.20.0 (Ghostty parity): OSC 7 accepts the kitty-shell-cwd scheme
+    /// (raw path, no percent-decode) and validates the hostname — a remote
+    /// host's cwd (ssh shell integration) must be DROPPED, not adopted.
+    #[test]
+    fn osc7_kitty_scheme_and_hostname_validation() {
+        use super::parse_osc7_with_host;
+        // kitty scheme: path verbatim, no decode (a literal `%20` stays).
+        assert_eq!(
+            parse_osc7_with_host("kitty-shell-cwd://myhost/home/u/dir%20x", Some("myhost")),
+            Some("/home/u/dir%20x".to_string())
+        );
+        // file scheme still percent-decodes.
+        assert_eq!(
+            parse_osc7_with_host("file://myhost/home/u/dir%20x", Some("myhost")),
+            Some("/home/u/dir x".to_string())
+        );
+        // Empty host + localhost are always local.
+        assert_eq!(
+            parse_osc7_with_host("file:///tmp", Some("myhost")),
+            Some("/tmp".to_string())
+        );
+        assert_eq!(
+            parse_osc7_with_host("file://localhost/tmp", Some("myhost")),
+            Some("/tmp".to_string())
+        );
+        // Case-insensitive + FQDN-first-label matches count as local.
+        assert_eq!(
+            parse_osc7_with_host("file://MyHost/tmp", Some("myhost")),
+            Some("/tmp".to_string())
+        );
+        assert_eq!(
+            parse_osc7_with_host("file://myhost.lan/tmp", Some("myhost")),
+            Some("/tmp".to_string())
+        );
+        // ANOTHER machine's report is rejected (the ssh case).
+        assert_eq!(
+            parse_osc7_with_host("file://buildbox/home/u", Some("myhost")),
+            None
+        );
+        assert_eq!(
+            parse_osc7_with_host("kitty-shell-cwd://buildbox/home/u", Some("myhost")),
+            None
+        );
+        // Unknown local name: named hosts are accepted (can't validate).
+        assert_eq!(
+            parse_osc7_with_host("file://buildbox/home/u", None),
+            Some("/home/u".to_string())
+        );
+        // Windows drive paths arrive URL-form (`/C:/…`) and normalize to a
+        // usable path; the drive colon may be percent-encoded by strict
+        // encoders ([uri]::EscapeDataString in the pwsh snippet).
+        assert_eq!(
+            parse_osc7_with_host("file://myhost/C:/Users/k/dir", Some("myhost")),
+            Some("C:/Users/k/dir".to_string())
+        );
+        assert_eq!(
+            parse_osc7_with_host("file://myhost/C%3A/Users/k/dir%20x", Some("myhost")),
+            Some("C:/Users/k/dir x".to_string())
+        );
+        // A plain unix root path is untouched by drive normalization.
+        assert_eq!(
+            parse_osc7_with_host("file:///c", Some("myhost")),
+            Some("/c".to_string())
+        );
+    }
+
+    #[test]
+    fn bel_inside_dcs_is_payload_not_terminator() {
+        // BEL terminates OSC only; inside a DCS body it is payload. The
+        // non-sixel DCS is forwarded verbatim (ESC \ terminated), BEL intact.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1bPnot-sixel\x07body\x1b\\after");
+        assert_eq!(passed(&out), b"\x1bPnot-sixel\x07body\x1b\\after");
+    }
+
+    #[test]
+    fn raw_st_terminates_a_sequence() {
+        // 0x9c (raw C1 ST) ends an OSC; the forwarded copy is re-terminated
+        // with ESC \ (term_bel = false), exactly as the per-byte loop did.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]2;title\x9cafter");
+        assert_eq!(passed(&out), b"\x1b]2;title\x1b\\after");
+    }
+
+    #[test]
+    fn osc_split_across_feeds_is_reassembled() {
+        // The sequence accumulator must survive a chunk boundary mid-body
+        // (the bulk path's no-terminator arm) and mid-ESC-\ terminator.
+        let mut ex = Extractor::new();
+        let mut out = ex.feed(b"\x1b]133;");
+        out.extend(ex.feed(b"A"));
+        out.extend(ex.feed(b"\x1b"));
+        out.extend(ex.feed(b"\\x"));
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
+            "prompt mark should survive the split, got {out:?}"
+        );
+        assert_eq!(passed(&out), b"x");
+    }
+
+    #[test]
+    fn esc_inside_osc_body_is_kept_when_not_st() {
+        // ESC followed by anything but `\` inside a sequence body is payload
+        // (st_pending unwound), byte-for-byte. The BEL-terminated OSC is
+        // re-emitted BEL-terminated (`term_bel` preserved).
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]2;a\x1bzb\x07after");
+        assert_eq!(passed(&out), b"\x1b]2;a\x1bzb\x07after");
     }
 
     #[test]

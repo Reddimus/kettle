@@ -1,0 +1,34 @@
+# Cross-terminal performance harness
+
+The pinned methodology behind the comparative numbers in `docs/PERFORMANCE.md`.
+Everything runs the SAME way against every terminal (kettle, Windows Terminal,
+Alacritty, WezTerm), windows normalized to the same pixel size, medians of
+repeated runs.
+
+| Script | Measures | How |
+| --- | --- | --- |
+| `gen-payloads.ps1` | — | Deterministic payloads: ~16 MB plain ASCII, ~6.1 MB SGR-heavy, ~4.3 MB CJK/emoji |
+| `run-inside.ps1` | throughput | Runs INSIDE the terminal; times chunked console writes of each payload (termbench principle: the terminal's consumption backpressures the writer); writes JSON, no screen scraping |
+| `throughput.ps1` | throughput + post-flood memory | Orchestrates run-inside per terminal; samples process-tree working set right after the flood |
+| `startup-idle.ps1` | startup, fresh memory, idle CPU | Spawn→first-visible-window (median of 5); process-tree WS after settle; tree CPU-seconds over 60 s focused at a blinking prompt |
+| `latency.ps1` | input latency (comparative) | SendInput a key, poll PrintWindow(PW_RENDERFULLCONTENT) until pixels change beyond an auto-calibrated blink-noise floor; capture-poll resolution ~5-15 ms, so treat results as relative |
+| `vtebench-wsl.ps1` | PTY read speed (WSL) | alacritty/vtebench full suite inside each terminal's WSL session; gnuplot .dat + median summary |
+| `perf-all.ps1` | everything | One label = one results directory under `target/perf-results/<label>/` |
+
+## Prerequisites
+
+- Terminals: `wt` on PATH; Alacritty portable at `C:\Users\kevm9\Repos\research\bin\alacritty.exe`; WezTerm portable at `...\bin\wezterm\wezterm-gui.exe`; kettle from `target\release\kettle.exe` (build first). Paths are overridable parameters on every script.
+- vtebench built in WSL: `CARGO_TARGET_DIR=$HOME/vtebench-target cargo build --release` from a clone of `alacritty/vtebench`.
+- A quiet machine: close other GPU/CPU-heavy apps; plugged in, high-performance power profile; do not move the mouse during the latency probe.
+
+## Caveats (read before quoting numbers)
+
+- All Windows terminals consume output through ConPTY, so the throughput test
+  measures the full real-world pipeline (ConPTY + parser + renderer
+  backpressure), not the renderer alone.
+- The latency probe is bounded by PrintWindow capture cost; numbers are
+  comparative between terminals captured identically, not input-to-photon.
+- GDI screen captures cannot see flip-model (DXGI) windows — that is why the
+  probe uses PrintWindow with PW_RENDERFULLCONTENT.
+- Run-to-run variance on laptop hardware is real: medians of N≥5, and prefer
+  same-session comparisons (same thermal state) over absolute values.

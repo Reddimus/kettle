@@ -25,7 +25,7 @@ and **WezTerm** into one tool.
      SCREENSHOT_DEMO_VERSION = env!("CARGO_PKG_VERSION")), so it never re-stales. -->
 
 
-> **Status: v2.18.0 — production-ready** on Linux, macOS and Windows 11.
+> **Status: v2.20.0 — production-ready** on Linux, macOS and Windows 11.
 > See [latest release](https://github.com/Reddimus/kettle/releases/latest)
 > for prebuilt binaries (Linux tarball with installer + `.sha256`
 > sidecar, macOS universal `.app`, Windows zip with embedded `.ico`).
@@ -144,7 +144,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.18.0 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.20.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -307,6 +307,8 @@ kettle exec -- echo ok           # headless one-shot: real PTY, output → stdou
 kettle --agent-server full       # opt-in control server (off by default)
 kettle ctl list_panes            # drive a running kettle: list/read/send/run
 kettle ctl read_screen           # read the focused pane's visible text
+kettle ctl send_keys --keys "escape,:,w,q,enter"   # press keys/chords (v2.20)
+kettle ctl wait_for --text "INSERT"                # block until on screen (v2.20)
 claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude Code
 ```
 
@@ -314,7 +316,9 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
   VT emulation, no window) and streams its output to stdout, propagating the
   child's exit code (`--strip-ansi` / `--json` output modes).
 - **`kettle --agent-server <mode>` + `kettle ctl <method>`** drives a *running*
-  kettle — list panes, read the screen, send text, run commands. The server is
+  kettle — list panes, read the screen, send text, **press named keys/chords
+  (`send_keys`) and wait for screen conditions (`wait_for`)**, run commands —
+  enough to drive interactive TUIs (vim, htop, tmux) end-to-end. The server is
   **off by default**; `read-only` reads, `full` also sends/runs. Local IPC only
   (Unix socket / Windows named pipe, current-user).
 - **`kettle mcp`** exposes all of the above as Model Context Protocol tools, so

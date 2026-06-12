@@ -25,6 +25,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Split down (horizontal divider)", SplitDown),
         ("Split automatically", SplitAuto),
         ("Close pane", ClosePane),
+        ("Equalize splits (equal pane areas)", EqualizeSplits),
         ("Zoom / unzoom pane", ToggleZoom),
         ("Scaled zoom (zoom + 1.5x font)", ScaledZoom),
         ("Open kettle help / README", ShowHelp),
@@ -219,6 +220,7 @@ mod tests {
             ResizeDown,
             ResizeLeft,
             ResizeRight,
+            EqualizeSplits,
             ToggleZoom,
             ScaledZoom,
             ShowHelp,
@@ -335,6 +337,7 @@ mod tests {
                 | ResizeDown
                 | ResizeLeft
                 | ResizeRight
+                | EqualizeSplits
                 | ToggleZoom
                 | ScaledZoom
                 | ShowHelp

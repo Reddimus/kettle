@@ -183,6 +183,8 @@ pub fn categories() -> Vec<Category> {
                 toggle("Hide mouse while typing", "mouse-hide-while-typing"),
                 // Cycle 794: opt out of the in-app update checker.
                 toggle("Check for updates", "update-check"),
+                // v2.20.0: hjkl navigation in menus/overlays (default ON).
+                toggle("Vim menu navigation", "vim-menu-nav"),
                 choice(
                     "Focus mode",
                     "focus",
@@ -318,6 +320,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "copy-on-select" => cfg.copy_on_select,
         "update-check" => cfg.update_check,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
+        "vim-menu-nav" => cfg.vim_menu_nav,
         _ => false,
     }
 }
@@ -449,6 +452,22 @@ mod tests {
         let before = read_bool(&cfg, "cursor-blink");
         let next = next_value(&cfg, &f, 0);
         assert_eq!(next, (!before).to_string());
+    }
+
+    /// v2.20.0: the `catalogue_keys_are_all_readable` guard can't catch a
+    /// missing `read_bool` arm for a default-ON toggle (the `_ => false`
+    /// fallback shows a plausible "off"). Pin the row to its real default so
+    /// the arm can't silently go missing.
+    #[test]
+    fn vim_menu_nav_row_reads_its_real_default() {
+        let cfg = Config::default();
+        assert!(
+            read_bool(&cfg, "vim-menu-nav"),
+            "vim-menu-nav defaults ON; the settings row must show it"
+        );
+        let f = toggle("Vim menu navigation", "vim-menu-nav");
+        assert_eq!(read(&cfg, &f), "on");
+        assert_eq!(next_value(&cfg, &f, 0), "false");
     }
 
     #[test]

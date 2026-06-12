@@ -144,8 +144,12 @@ mod tests {
         // bytes that together form U+00E9 (é). The old parser pushed
         // each decoded byte as a `char`, which gave the Latin-1 garbage
         // `cafÃ©` and broke prompt-tracking on any non-ASCII directory.
+        // `localhost` host: hostname-neutral so the decode coverage is
+        // deterministic on every machine (v2.20.0 validates real hostnames
+        // against this machine's name — that policy has its own
+        // injected-host test in extract.rs).
         let mut e = Extractor::new();
-        let chunks = e.feed(b"\x1b]7;file://host/home/u/caf%C3%A9\x1b\\");
+        let chunks = e.feed(b"\x1b]7;file://localhost/home/u/caf%C3%A9\x1b\\");
         let cwd = chunks.iter().find_map(|c| match c {
             Chunk::Cwd(p) => Some(p.clone()),
             _ => None,
@@ -172,8 +176,11 @@ mod tests {
         // program writing an OSC 7 report to the PTY. The fix slices the
         // *bytes* and validates via from_utf8, so the stray `%` is kept
         // literally and decoding continues.
+        // `localhost` (hostname-neutral): a REJECTED host short-circuits
+        // before the decoder runs, which would silently skip the
+        // panic-regression path this test exists for.
         let mut e = Extractor::new();
-        let chunks = e.feed("\x1b]7;file://host/p/%€x\x1b\\".as_bytes());
+        let chunks = e.feed("\x1b]7;file://localhost/p/%€x\x1b\\".as_bytes());
         let cwd = chunks.iter().find_map(|c| match c {
             Chunk::Cwd(p) => Some(p.clone()),
             _ => None,
@@ -185,15 +192,15 @@ mod tests {
         // `%` with one trailing byte then EOF, and `%` followed by a
         // non-hex multibyte char, also must not panic.
         let mut e2 = Extractor::new();
-        let _ = e2.feed("\x1b]7;file://h/a%é\x1b\\".as_bytes());
+        let _ = e2.feed("\x1b]7;file://localhost/a%é\x1b\\".as_bytes());
         let mut e3 = Extractor::new();
-        let _ = e3.feed(b"\x1b]7;file://h/trailing%\x1b\\");
+        let _ = e3.feed(b"\x1b]7;file://localhost/trailing%\x1b\\");
     }
 
     #[test]
     fn osc7_and_osc133_are_consumed() {
         let mut e = Extractor::new();
-        let chunks = e.feed(b"x\x1b]7;file://host/tmp/work%20dir\x1b\\y\x1b]133;A\x1b\\z");
+        let chunks = e.feed(b"x\x1b]7;file://localhost/tmp/work%20dir\x1b\\y\x1b]133;A\x1b\\z");
         let cwd = chunks.iter().find_map(|c| match c {
             Chunk::Cwd(p) => Some(p.clone()),
             _ => None,

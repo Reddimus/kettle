@@ -4,6 +4,163 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.20.0] — 2026-06-12
+
+  **Performance overhaul, measured.** A new committed cross-terminal
+  benchmark harness (`scripts/perf/` — throughput / startup / idle CPU /
+  memory / input latency, medians of 5, identical 1280×800 windows)
+  established the v2.19.0 baseline: kettle parsed 0.42–0.8 MB/s under
+  output flood vs 2.6–9.0 MB/s across Windows Terminal, Alacritty and
+  WezTerm (WT, the fastest, 4.1–9.0) — 5–10× behind — with idle CPU
+  near 56% of a core. Root causes
+  were structural, and each fix below is the durable refactor, not a
+  band-aid:
+
+  - **Lock-free rendering (P2)** — `redraw` held every visible pane's
+    terminal mutex across the whole GPU frame (text shaping +
+    `get_current_texture`, which can block a full vsync + submit +
+    present), so the PTY reader thread starved on `term.lock()` under
+    flood. The renderer now works from a pooled **`PaneSnapshot`** — a
+    µs-scale raw copy (cells verbatim from `display_iter`, cursor,
+    selection, color table, grid dims) captured under the lock and
+    rendered after it is released. The per-cell SGR/selection/cursor
+    pipeline is byte-identical; the parser just never waits on a frame
+    again.
+  - **Per-line shaping cache (P1)** — every painted frame re-shaped the
+    entire viewport of every pane through cosmic-text (`set_rich_text`
+    resets all lines unconditionally), including idle cursor-blink
+    frames. Pane text now keeps one `BufferLine` per grid row with a
+    content key (run text + fg + bold/italic); only rows whose key
+    changed are re-set, with `BufferLine::set_text`'s equality check as
+    the second guard and a per-pane style key (font stack, ligatures,
+    font-features, shaping mode) forcing full `reset_new` invalidation
+    when shaping inputs change. An idle blink frame now re-shapes zero
+    rows; a cursor move re-shapes one. Titlebar / tab / status-bar /
+    glyph-button labels got the same equality gate (P1b).
+  - **SIMD extractor fast path (P3)** — the image-protocol extractor
+    walked the PTY stream byte-by-byte. It now `memchr`-scans to the
+    next ESC / ST / BEL and bulk-copies plain runs (also collapsing the
+    per-chunk realloc ladder into one exact reserve). First criterion
+    benches in the repo (`cargo bench -p kettle-vt`: plain flood /
+    SGR-heavy / OSC-spam) pin it.
+  - **Wakeup dedup (P4)** — a flood enqueued one event-loop wakeup per
+    64KiB PTY read, each fanning out across every window. An atomic
+    latch now allows exactly one queued wakeup per paint window, with
+    the latch reopened before generations are read so no output is ever
+    missed.
+  - **Recorder batching (P5)** — `dev-record` flushed to disk per event
+    on the UI thread (the installed build records every session); it
+    now batches through the BufWriter with a 250ms interval flush.
+    Close-path flush is unchanged — clean exits still produce complete,
+    replayable traces.
+  - **Link-scan debounce (P6)** — the viewport URL regex pass re-ran on
+    every painted frame during streaming (the scan key includes the
+    output timestamp); output-only changes are now debounced to 150ms
+    while focus/scroll changes still rescan immediately.
+  - **Hot-path trims (P7)** — the per-read session-log mutex is skipped
+    via an atomic flag when logging is off (new `Terminal::set_log_file`
+    keeps flag and slot in sync).
+
+  **Vim menu navigation (`vim-menu-nav`, default ON).** Every kettle
+  menu and overlay is now traversable from the home row: context menu /
+  new-tab ▾ dropdown and the Settings panel take `j`/`k` (wrapping),
+  `g`/`G` first/last, `Ctrl+d`/`Ctrl+u` half-page; in the context menu
+  and new-tab dropdown `h` goes back/pops a submenu and `l`
+  drills-in/activates, while in the Settings panel `h`/`l` step the
+  highlighted row's value (same as `←`/`→`); confirm dialogs answer to
+  `y`/`n` (`y`
+  confirms the question regardless of which button is focused); the
+  command palette and layout picker move their selection with
+  `Ctrl+j`/`Ctrl+k` (or telescope/fzf-style `Ctrl+n`/`Ctrl+p`) so
+  letters keep typing; search steps next/previous match with the same
+  chords — its first keyboard nav beyond Enter. Menu mnemonics
+  auto-assignment skips the five nav letters while enabled (no row
+  silently loses its hotkey; typeahead still works for everything
+  else), and footer hints advertise the keys. `vim-menu-nav = false`
+  restores the previous arrow-only behavior exactly.
+
+  **Agents can now drive interactive apps.** The control plane (and its
+  MCP tools) gained the two primitives that make vim / htop / fzf / tmux
+  scriptable from Claude Code:
+
+  - **`send_keys`** (full mode) — press named keys and chords:
+    `["escape", "ctrl+c", "down", "G", "f5", "shift+tab", …]`.
+    `send_text` could only type literal characters; this is how an agent
+    presses Escape. Tokens use the keybind-trigger grammar plus the named
+    keys it lacked (escape, backspace, delete, insert, space), parse
+    entirely before any byte is written, and encode through the SAME
+    `input::encode` path as human keystrokes against the pane's live
+    terminal modes — DECCKM application-cursor arrows come out right in
+    vim automatically. CLI: `kettle ctl send_keys --keys
+    "escape,:,w,q,enter"`; MCP: `kettle_send_keys`.
+  - **`wait_for`** (read-only) — block until a pane's screen contains a
+    substring, matches a regex, and/or has been *quiet* (unchanged) for N
+    ms; bounded by `timeout_ms`. Replaces sleep-and-pray agent scripting.
+    Implemented on the ctl connection thread as a ≥50ms poll over cheap
+    screen snapshots — the UI thread is never blocked. A timeout returns
+    `matched: false` rather than an error. CLI: `kettle ctl wait_for
+    --text "INSERT"`; MCP: `kettle_wait_for`.
+  - **`read_screen`** now also reports `cursor_visible` (DEC ?25), so an
+    agent knows when the reported cursor position is meaningless (vim's
+    command line, fzf and less hide the cursor).
+
+  **Terminator + Ghostty deep-dive → six integrations.** An 11-agent
+  source-level analysis of both trees inventoried 130 features (42
+  claims adversarially cross-checked against kettle source); the full
+  ranked matrix — 39 now / 54 backlog / 37 reject, with next-cycle
+  headliners like the kitty keyboard protocol and the terminal-reply
+  layer — landed in docs/UX-COMPARISON.md. Shipped from the "now" tier:
+
+  - **Resize overlay** (Ghostty `resize-overlay`) — a transient centered
+    `cols×rows` chip while the window is resized. `always | never |
+    after-first` (default `after-first`: every resize except the initial
+    placement).
+  - **OSC 7 cwd reporting in kettle's own shell integration** — the
+    bash/zsh/fish/PowerShell snippets now report the working directory
+    every prompt (percent-encoded, hostname-tagged), feeding new-tab/
+    split cwd inheritance and "Open folder". The PowerShell snippet
+    makes kettle one of the few terminals with first-class cwd tracking
+    on stock Windows.
+  - **`kitty-shell-cwd://` + hostname validation** — OSC 7 accepts
+    kitty's raw-path scheme, normalizes URL-form Windows drive paths
+    (`/C:/…`), and **rejects another machine's report**: an ssh
+    session's shell integration reports the remote host's cwd, and
+    adopting it locally broke cwd inheritance (Ghostty applies the same
+    check).
+  - **Prompt-aware close confirmation** (Ghostty `confirm-close-surface`)
+    — panes sitting idle at an integrated-shell prompt (OSC 133 marks
+    seen, no command running) no longer count toward `ask-before-closing`;
+    a shell with no integration counts as busy, so behavior there is
+    unchanged.
+  - **Trigger capture groups** — `trigger = REGEX :: cmd {1}` now
+    substitutes the match's capture groups into the spawned argv
+    (`{0}` whole match), completing Terminator `run_cmd_on_match`
+    parity. Substitution is value-only: argv stays argv, no shell.
+  - **`equalize_splits` action** (bindable + in the palette) — rebalance
+    the active tab's split tree to equal pane areas.
+
+  **Adversarially reviewed before shipping.** A 52-agent, 7-dimension
+  review of the full diff (render correctness, concurrency, security,
+  agent-plane semantics, vim-nav UX, the six integrations, docs drift)
+  raised 45 findings; 36 survived adversarial verification and every one
+  was fixed in this release — among them: `wait_for` now detects a
+  vanished client instead of pinning a connection slot for its full
+  timeout (and pins its target pane against mid-wait focus changes, and
+  no longer repaints idle windows or floods dev-record traces with its
+  probes), the OSC 7 hostname check asks the OS for the real hostname
+  (the env-var form silently failed open on Linux), session-restored
+  panes ride the deduplicated wakeup path, `send_keys` normalizes
+  `shift+letter` and honors `backspace-binding`/`delete-binding` like
+  real keystrokes, trigger capture-group substitution is single-pass
+  (matched output can no longer re-expand placeholders) and trims grid
+  padding, OSC 133;B un-sticks command tracking under user
+  `PROMPT_COMMAND`s, an idle verdict now also requires a working
+  OutputStart source, CapsLock no longer disables the vim-nav layer,
+  `G` in a 500-row theme list scrolls to a full last page, and the
+  resize chip survives DPI changes, font reloads and restore-time
+  placement storms. The 9 refuted claims are retained in the review
+  artifacts with their refutations.
+
 ## [2.19.0] — 2026-06-12
 
   **Chromium-grade live tab tear-off + re-docking.** v2.18.0's tear-off

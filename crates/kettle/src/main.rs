@@ -443,8 +443,8 @@ struct McpArgs {
 #[derive(clap::Args, Debug)]
 struct CtlArgs {
     /// The method to call (`get_state`, `list_tabs`, `list_panes`,
-    /// `read_screen`, `send_text`, `run_command`), or `events` to stream the
-    /// event feed.
+    /// `read_screen`, `send_text`, `send_keys`, `wait_for`, `run_command`),
+    /// or `events` to stream the event feed.
     method: String,
     /// Target a specific pane id (else the focused pane).
     #[arg(long)]
@@ -452,9 +452,21 @@ struct CtlArgs {
     /// Method parameters as a JSON object (merged with `--pane`).
     #[arg(long, value_name = "JSON")]
     json: Option<String>,
-    /// Text for `send_text`, or the command line for `run_command`.
-    #[arg(long)]
+    /// Text for `send_text`, the command line for `run_command`, or the
+    /// substring to wait for with `wait_for`. Hyphen-leading values are
+    /// legitimate text (`--text "-- INSERT --"` waits for vim's mode line).
+    #[arg(long, allow_hyphen_values = true)]
     text: Option<String>,
+    /// Comma-separated key tokens for `send_keys`, e.g.
+    /// `--keys "escape,i,h,i,escape,ctrl+c"` (each segment is ONE key:
+    /// a name like `escape`/`enter`/`f5`, a chord like `ctrl+c`, or a
+    /// single character; a literal comma key is spelled `comma`, and
+    /// `plus`/`minus`/`equal` name those characters).
+    #[arg(long, value_name = "KEYS", allow_hyphen_values = true)]
+    keys: Option<String>,
+    /// Regex for `wait_for` (alternative/addition to `--text`).
+    #[arg(long, value_name = "REGEX", allow_hyphen_values = true)]
+    regex: Option<String>,
     /// Connect to a specific kettle pid (else the newest running server).
     #[arg(long)]
     pid: Option<u32>,
@@ -1920,6 +1932,12 @@ mod tests {
                 embedded.contains("OSC 133") && embedded.contains("]133;"),
                 "{shell}: embedded snippet missing OSC 133 marker — \
                  the file's body probably regressed"
+            );
+            // v2.20.0: every snippet also reports the cwd via OSC 7 (powers
+            // new-tab/split cwd inheritance + "Open folder").
+            assert!(
+                embedded.contains("]7;file://"),
+                "{shell}: embedded snippet missing the OSC 7 cwd report"
             );
             assert!(
                 embedded.lines().count() >= 10,

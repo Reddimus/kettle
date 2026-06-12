@@ -41,7 +41,7 @@ flowchart LR
         app --> panes
     end
     cc -->|kettle_run| exec
-    cc -->|"list_panes / read_screen<br/>send_text / run_command"| mcp["kettle mcp"]
+    cc -->|"list_panes / read_screen<br/>send_text / send_keys<br/>wait_for / run_command"| mcp["kettle mcp"]
     mcp -->|spawn| exec
     mcp -->|"kettle-ctl client"| ipc["local IPC<br/>Unix socket / Windows named pipe"]
     ctl["kettle ctl"] -->|kettle-ctl client| ipc
@@ -116,11 +116,17 @@ kettle ctl get_state                                   # version, theme, pid, mo
 kettle ctl list_panes                                  # id / tab / cwd / size / focus
 kettle ctl read_screen                                 # focused pane's visible text
 kettle ctl read_screen --pane 3 --json '{"scrollback_lines":200}'
-kettle ctl send_text --text "ls -la\n"                 # type into the focused pane
+kettle ctl send_text --text "ls -la"                   # type into the focused pane
+kettle ctl send_keys --keys "enter"                    # …then press Enter
+kettle ctl send_keys --keys "escape,:,w,q,enter"       # press keys/chords (v2.20)
+kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
 kettle ctl get_state --pid 12345                        # target a specific kettle
 ```
+
+Note: `--text` is literal — backslash escapes like `\n` are **not** decoded —
+so press Enter with `send_keys`, not a trailing `\n`.
 
 ### Methods (protocol v1)
 
@@ -129,9 +135,11 @@ kettle ctl get_state --pid 12345                        # target a specific kett
 | `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq) |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
-| `read_screen` | read-only | text + cursor + history (params: `pane`, `scrollback_lines`) |
+| `read_screen` | read-only | text + cursor + `cursor_visible` (DEC ?25) + history (params: `pane`, `scrollback_lines`) |
 | `subscribe` | read-only | switches the connection to the event stream |
+| `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
+| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
@@ -147,8 +155,30 @@ exit code. **Without shell integration** there is no marker, so the call returns
 `kettle --shell-integration <shell>`. Output is still captured either way.
 
 A pane the user has toggled **Read only** (right-click menu /
-`toggle_read_only`) rejects `send_text` and `run_command` with the `read_only`
-error code — the agent is input like any other, and the user's lock wins.
+`toggle_read_only`) rejects `send_text`, `send_keys` and `run_command` with
+the `read_only` error code — the agent is input like any other, and the
+user's lock wins.
+
+### Driving an interactive app (v2.20)
+
+`send_keys` + `wait_for` together make interactive TUIs scriptable without
+sleep-and-pray. Editing a file in vim from an agent:
+
+```sh
+kettle ctl send_text  --text "vim notes.txt"
+kettle ctl send_keys  --keys "enter"
+kettle ctl wait_for   --json '{"quiet_ms":300,"timeout_ms":10000}'   # vim painted
+kettle ctl send_keys  --keys "i"                                     # insert mode
+kettle ctl wait_for   --text "-- INSERT --"
+kettle ctl send_text  --text "hello from an agent"
+kettle ctl send_keys  --keys "escape,:,w,q,enter"                    # save + quit
+kettle ctl wait_for   --json '{"regex":"(?m)\\$$","quiet_ms":200,"timeout_ms":5000}'   # prompt is back
+```
+
+The same flow over MCP uses `kettle_send_keys` / `kettle_wait_for`. Read the
+screen between steps with `read_screen` — its `cursor` + `cursor_visible`
+(DEC ?25) tell you where input would land and whether the app is showing a
+cursor at all (vim's command line, fzf and less hide it).
 
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
 `agent_attached`, `tab_moved` (`{from_window, to_window, tab}` — a tab was
@@ -178,9 +208,10 @@ Or a project-scoped `.mcp.json`:
 
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
 `kettle_list_panes`, `kettle_read_screen`, `kettle_send_text`,
-`kettle_run_command` (these drive a running kettle, so start it with
-`kettle --agent-server full`). When no server is found, the control-backed tools
-return an actionable error pointing at `--agent-server`.
+`kettle_send_keys`, `kettle_wait_for`, `kettle_run_command` (these drive a
+running kettle, so start it with `kettle --agent-server full`). When no
+server is found, the control-backed tools return an actionable error pointing
+at `--agent-server`.
 
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
@@ -204,7 +235,7 @@ If you don't want any of this, do nothing — it stays off.
 ## Future work
 
 - stdin forwarding for `kettle exec` (see Limitations).
-- `send_keys` (named keys / chords) and a live-grid `screenshot` method.
+- A live-grid `screenshot` method (`send_keys` shipped in v2.20).
 - Re-hosting the server on the `kettle-muxd` session daemon
   ([MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)) — clients are unaffected.
 - An "agent waiting for input" surfacing (the command-notify plumbing already

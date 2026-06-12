@@ -105,6 +105,23 @@ fn build_params(args: &CtlArgs) -> Result<Value, String> {
         };
         map.insert(key.into(), Value::String(text.clone()));
     }
+    // v2.20.0: `--regex` → `wait_for`'s regex param.
+    if let Some(re) = &args.regex {
+        map.insert("regex".into(), Value::String(re.clone()));
+    }
+    // v2.20.0: `--keys "escape,ctrl+c"` → the `send_keys` token array.
+    if let Some(keys) = &args.keys {
+        let arr: Vec<Value> = keys
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| Value::String(k.to_string()))
+            .collect();
+        if arr.is_empty() {
+            return Err("--keys is empty".into());
+        }
+        map.insert("keys".into(), Value::Array(arr));
+    }
     Ok(Value::Object(map))
 }
 
@@ -164,6 +181,18 @@ fn pretty(method: &str, result: &Value) -> String {
                 format!("{out}\n[timed out — no exit code]\n")
             } else {
                 format!("{out}\n[exit {}]\n", code.unwrap_or(&Value::Null))
+            }
+        }
+        // v2.20.0 (agent plane).
+        "send_keys" => format!(
+            "sent {} keys ({} bytes) to pane {}\n",
+            result["keys"], result["bytes"], result["pane"]
+        ),
+        "wait_for" => {
+            if result.get("matched").and_then(|m| m.as_bool()) == Some(true) {
+                format!("matched after {} ms\n", result["elapsed_ms"])
+            } else {
+                format!("timed out after {} ms (no match)\n", result["elapsed_ms"])
             }
         }
         _ => format!("{result}\n"),

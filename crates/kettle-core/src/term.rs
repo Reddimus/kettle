@@ -160,15 +160,30 @@ pub struct Terminal {
     /// per-pane session log. When `Some(file)`, the reader thread
     /// writes a copy of every raw PTY byte to the file (best-effort:
     /// I/O errors are swallowed so a full disk doesn't take down
-    /// the reader). When `None`, no-op cost on the hot path —
-    /// just a Mutex lock + Option check per buf read.
-    pub log_file: Arc<Mutex<Option<std::fs::File>>>,
+    /// the reader). When `None`, zero cost on the hot path — the
+    /// v2.20.0 `log_active` flag short-circuits before the lock.
+    /// Private since v2.20.0 (P7): flip it via [`Terminal::set_log_file`]
+    /// so `log_active` can never drift out of sync.
+    log_file: Arc<Mutex<Option<std::fs::File>>>,
     /// Cycle 625: when `true`, the logger strips ANSI escape
     /// sequences (CSI / OSC / single-char ESC) from the bytes
     /// before writing — leaving plain-text-searchable logs.
     /// Default `false` preserves the cycle-621 raw-stream
     /// behavior (replayable via `cat <log>` in a terminal).
     pub log_strip_ansi: Arc<Mutex<bool>>,
+    /// v2.20.0 (`shell_idle`, review fix): true once this pane has seen at
+    /// least one OSC 133 OutputStart (C). An integration that emits A/B/D
+    /// but never C (a clobbered pwsh Enter handler, AcceptLine via other
+    /// chords) must never report "idle" — prompt marks alone don't prove
+    /// command tracking works, and a false idle skips the close-confirm
+    /// dialog over a running command.
+    output_start_seen: Arc<std::sync::atomic::AtomicBool>,
+    /// v2.20.0 P7 (perf): mirrors `log_file.is_some()` so the reader thread
+    /// can skip the per-read `log_file` Mutex entirely when logging is off
+    /// (the overwhelmingly common case — the lock + Option check ran once
+    /// per 64KiB read). Toggled ONLY through [`Terminal::set_log_file`],
+    /// which keeps the pair in sync.
+    log_active: Arc<std::sync::atomic::AtomicBool>,
     cell_px: Arc<Mutex<(u16, u16)>>,
     /// C4 (multi-window): bumped by the reader thread once per PTY read it
     /// processed (right before the wakeup fires). Lets a UI hosting several
@@ -1041,6 +1056,9 @@ impl Terminal {
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
         let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let output_start_seen: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_start_seen_for_struct = output_start_seen.clone();
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
@@ -1054,6 +1072,9 @@ impl Terminal {
         // clone and writes raw PTY bytes when Some.
         let log_file: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(None));
         let log_file_for_struct = log_file.clone();
+        let log_active: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_active_for_struct = log_active.clone();
         // Cycle 625 (Terminator parity): when true, strip ANSI
         // escape sequences from the bytes before writing to the
         // log file. Default false preserves cycle-621 raw-stream
@@ -1075,12 +1096,14 @@ impl Terminal {
             let relatives = relatives.clone();
             let prompts = prompts.clone();
             let output_started_at = output_started_at.clone();
+            let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
             let cwd_cell = cwd_cell.clone();
             let progress_cell = progress_cell.clone();
             let cell_px = cell_px.clone();
             let log_file = log_file.clone();
             let log_strip_ansi = log_strip_ansi.clone();
+            let log_active = log_active.clone();
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
@@ -1112,7 +1135,10 @@ impl Terminal {
                                 // I/O errors are swallowed so a full disk
                                 // doesn't crash the reader. Held lock is
                                 // brief (just the write call).
-                                if let Ok(mut guard) = log_file.lock()
+                                // v2.20.0 P7: the atomic flag short-circuits
+                                // the lock when no log is installed.
+                                if log_active.load(std::sync::atomic::Ordering::Relaxed)
+                                    && let Ok(mut guard) = log_file.lock()
                                     && let Some(f) = guard.as_mut()
                                 {
                                     use std::io::Write as _;
@@ -1289,6 +1315,13 @@ impl Terminal {
                                             if let Ok(mut t) = output_started_at.lock() {
                                                 *t = Some(std::time::Instant::now());
                                             }
+                                            // v2.20.0 (`shell_idle`): the pane has a
+                                            // REAL OutputStart source — prompt marks
+                                            // alone never authorize a close-confirm
+                                            // skip (an A/B/D-only integration would
+                                            // otherwise look permanently idle).
+                                            output_start_seen
+                                                .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         // Cycle 612: OSC 133 CommandEnd (D). Pop the
                                         // most-recent OutputStart timestamp, compute
@@ -1315,7 +1348,24 @@ impl Terminal {
                                                 });
                                             }
                                         }
-                                        Chunk::Prompt(_) => {}
+                                        // v2.20.0 (review fix): B = "end of prompt /
+                                        // input start" — emitted via PS1/prompt AFTER
+                                        // every PROMPT_COMMAND segment ran, so it
+                                        // definitively means the shell is back at a
+                                        // prompt. Clearing here un-sticks
+                                        // `output_started_at` when a user's
+                                        // pre-existing PROMPT_COMMAND echoes through
+                                        // the bash DEBUG trap (which fires a stray C
+                                        // after our D), which otherwise left the pane
+                                        // permanently "running" and made the
+                                        // prompt-aware close-confirm skip inert. No
+                                        // CommandFinished is pushed (B is not a
+                                        // command end).
+                                        Chunk::Prompt(PromptKind::CommandStart) => {
+                                            if let Ok(mut t) = output_started_at.lock() {
+                                                *t = None;
+                                            }
+                                        }
                                         Chunk::Cwd(path) => {
                                             if let Ok(mut c) = cwd_cell.lock() {
                                                 *c = Some(path);
@@ -1364,6 +1414,8 @@ impl Terminal {
             argv: argv.to_vec(),
             log_file: log_file_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
+            log_active: log_active_for_struct,
+            output_start_seen: output_start_seen_for_struct,
             cell_px,
             out_gen,
         })
@@ -1376,6 +1428,52 @@ impl Terminal {
     /// wakeup fires; read with `Acquire`.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's
+    /// shell sitting IDLE at a prompt? True only when shell integration has
+    /// been observed (≥1 OSC 133 prompt mark) AND no command is currently
+    /// running (`output_started_at` is the OutputStart→CommandEnd window —
+    /// a full-screen app like vim counts as running until it exits).
+    /// Without integration this is always `false`, so close-confirmation
+    /// behavior is byte-identical for plain shells; a command whose
+    /// CommandEnd never arrives stays "running", which errs toward asking.
+    pub fn shell_idle(&self) -> bool {
+        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
+        // Review fix: prompt marks alone never authorize an idle verdict —
+        // the pane must ALSO have a working OutputStart source, or a
+        // command could be running invisibly (integration emits A/B/D but
+        // never C) while we report "nothing to lose".
+        let tracks_commands = self
+            .output_start_seen
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let running = self
+            .output_started_at
+            .lock()
+            .map(|s| s.is_some())
+            .unwrap_or(true);
+        seen_prompts && tracks_commands && !running
+    }
+
+    /// v2.20.0 P7: install (`Some`) or remove (`None`) the per-pane session
+    /// log. The ONLY way to flip logging — it updates the reader thread's
+    /// `log_active` fast-path flag inside the same lock scope, so the flag
+    /// can never drift from the slot. Returns `true` if a log was active
+    /// before this call.
+    pub fn set_log_file(&self, file: Option<std::fs::File>) -> bool {
+        let Ok(mut guard) = self.log_file.lock() else {
+            return false;
+        };
+        let was = guard.is_some();
+        self.log_active
+            .store(file.is_some(), std::sync::atomic::Ordering::Relaxed);
+        *guard = file;
+        was
+    }
+
+    /// Whether a session log is currently installed (cycle 621 toggle state).
+    pub fn log_enabled(&self) -> bool {
+        self.log_active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Last working directory reported via OSC 7, if any.
@@ -1775,6 +1873,12 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
         history_size,
         display_offset,
         cursor: (cur.line.0.max(0) as usize, cur.column.0),
+        // v2.20.0 (agent plane): DEC ?25 visibility — vim/fzf/less hide the
+        // cursor; an agent placing keystrokes by cursor position needs to
+        // know when the reported point is meaningless.
+        cursor_visible: t
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
     }
 }
 
@@ -1792,6 +1896,8 @@ pub struct ScreenText {
     pub display_offset: usize,
     /// Cursor (row in the active screen, col).
     pub cursor: (usize, usize),
+    /// v2.20.0: whether the cursor is shown (DEC ?25; vim/fzf/less hide it).
+    pub cursor_visible: bool,
 }
 
 impl Drop for Terminal {

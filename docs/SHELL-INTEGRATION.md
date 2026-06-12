@@ -33,8 +33,15 @@ kettle --shell-integration powershell >> $PROFILE       # PowerShell 5+ / 7+
 
 The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` in
 the source tree (also shipped in the Linux release tarball and the Windows
-zip). The verbatim bodies follow below in case you want to read or tweak
-them first.
+zip).
+
+> **v2.20:** the shipped snippets also report the **working directory via
+> OSC 7** every prompt (percent-encoded, hostname-tagged — PowerShell
+> included), which powers new-tab/split cwd inheritance and "Open
+> folder". The OSC 133 marks additionally make close-confirmation
+> prompt-aware (an idle prompt skips the dialog). The minimal manual
+> blocks below cover the OSC 133 prompt marks only; use the one-liner
+> above (or copy from `shell-integration/`) for the full version.
 
 ### Windows / PowerShell — hands-free alternative
 
@@ -151,6 +158,18 @@ new shell session loads it) won't stack multiple prompt wrappers.
 - `OSC 133;B` — end of prompt / input start
 - `OSC 133;C` — command started executing
 - `OSC 133;D;<code>` — command finished (exit code)
+- `OSC 7` — current working directory, reported every prompt (v2.20).
+  Both `file://host/percent-encoded` and kitty's
+  `kitty-shell-cwd://host/raw` schemes are accepted; the hostname is
+  validated against this machine, so an **ssh session's remote cwd is
+  never adopted locally**. Windows paths travel URL-form
+  (`file://HOST/C:/Users/...`) and normalize back to drive-letter form.
+
+The OSC 133 marks also make close-confirmation **prompt-aware** (v2.20,
+Ghostty `confirm-close-surface` semantics): a pane idle at an
+integrated-shell prompt — marks seen, no command running — skips the
+`ask-before-closing` dialog; a shell without integration always counts
+as busy, so its behavior is unchanged.
 
 Origin: FinalTerm's shell-integration convention, adopted by iTerm2, kitty,
 WezTerm and Ghostty (see [RESEARCH.md](RESEARCH.md)).

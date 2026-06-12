@@ -81,6 +81,10 @@ pub(crate) struct WindowState {
     /// Cycle 803: cache key for the last viewport link-autodetect scan — see
     /// app.rs (`update_links` re-scans only on output, scroll, or focus).
     pub(crate) links_scan_key: Option<LinksScanKey>,
+    /// v2.20.0 P6: when the last link scan actually ran — output-only changes
+    /// within `LINKS_SCAN_DEBOUNCE` of it are skipped (streaming floods moved
+    /// `last_output_at` every painted frame).
+    pub(crate) last_links_scan: Option<std::time::Instant>,
     pub(crate) mouse_btn: Option<u8>,
     /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
     /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
@@ -188,6 +192,27 @@ pub(crate) struct WindowState {
     /// granularity on Windows, which made held-key echo visibly stutter
     /// while Terminator (steady GTK frame clock) stayed smooth.
     pub(crate) last_typed: Option<std::time::Instant>,
+    /// v2.20.0 (Ghostty `resize-overlay` parity): `Some((cols, rows, armed_at))`
+    /// while the transient size chip is visible; expires
+    /// `RESIZE_OVERLAY_DURATION` after the last resize event.
+    pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
+    /// v2.20.0: the first `Resized` after window creation is the initial
+    /// placement, not a user resize — `resize-overlay = after-first`
+    /// (the default) skips it.
+    pub(crate) seen_first_resize: bool,
+    /// v2.20.0 (review fix): when this WindowState was created. Session
+    /// restore / `window-state = maximised` / tear-off creation deliver a
+    /// short STORM of placement `Resized` events, not just one —
+    /// `after-first` also swallows everything in the first moments after
+    /// birth so a restored window doesn't flash a spurious size chip.
+    pub(crate) spawned_at: std::time::Instant,
+    /// v2.20.0 P2 (perf): pooled per-pane render snapshots. `redraw` captures
+    /// each visible pane's viewport into these UNDER the Term lock (a
+    /// µs-scale flat copy) and drops the guard before the GPU frame, so the
+    /// PTY reader threads no longer stall behind shaping / surface-acquire /
+    /// present. High-water pooled: each snapshot's `cells` Vec keeps its
+    /// capacity across frames; truncated to the visible pane count.
+    pub(crate) pane_snapshots: Vec<kettle_render::PaneSnapshot>,
 }
 
 impl WindowState {
@@ -212,6 +237,7 @@ impl WindowState {
             search_revealed: None,
             search_scan_key: None,
             links_scan_key: None,
+            last_links_scan: None,
             mouse_btn: None,
             last_mouse_cell: None,
             links: Vec::new(),
@@ -247,6 +273,10 @@ impl WindowState {
             seen_output_gen: std::collections::HashMap::new(),
             accent: None,
             last_typed: None,
+            resize_overlay: None,
+            seen_first_resize: false,
+            spawned_at: std::time::Instant::now(),
+            pane_snapshots: Vec::new(),
         }
     }
 }
