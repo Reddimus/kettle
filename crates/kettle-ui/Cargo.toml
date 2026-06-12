@@ -95,12 +95,17 @@ libc = "0.2"
 # Cycle 869: `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
 # taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
+# v2.19.0 (tear-off UX): `Win32_Graphics_Dwm` adds DwmGetWindowAttribute /
+# DWMWA_CLOAKED so the re-dock hit-test's z-order walk can skip cloaked
+# windows (suspended UWP apps park full-screen cloaked windows in the
+# z-order that would otherwise read as "a foreign window covers the band").
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
 ] }
 
 # Cycle 768: objc2 / objc2-app-kit for the macOS `sticky = true` window

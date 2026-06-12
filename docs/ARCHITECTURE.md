@@ -399,20 +399,59 @@ Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
 via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
 See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
 
-### Detachable tabs (live in-process tear-off)
+### Detachable tabs (Chromium-style live tear-off + re-dock)
 
-Tab tear-off is a live, in-process move (v2.18.0): the tab's panes —
-PTYs, scrollback, running programs — transfer untouched into a new
-window in the same process.
+Tab tear-off is a live, in-process move: the tab's panes — PTYs,
+scrollback, running programs — transfer untouched into a new window in
+the same process. Since v2.19.0 the tear is the Chromium model: it
+happens **mid-drag at a distance threshold**, the torn window appears
+instantly under the pointer, and the OS's native move loop carries it
+from there.
 
 ```mermaid
 flowchart TD
-    A["mouse-down on a tab<br/>(multi-tab window)"] --> B["detach::DragState FSM<br/>armed"]
-    B --> C["CursorMoved drives it<br/>position-based outside detection<br/>(Windows SetCapture suppresses<br/>CursorLeft mid-drag)"]
-    C -->|"release outside"| D["Mux::detach_tab"]
-    D --> E["open_window(AdoptTab)<br/>at the drop position"]
-    C -->|"Esc / focus loss"| F["cancel (tab stays put)"]
+    A["mouse-down on a tab"] --> B["detach::DragState FSM<br/>armed"]
+    B --> C["CursorMoved drives it<br/>(distance = click-vs-drag,<br/>band distance = tear decision)"]
+    C -->|"≥1.5×bar_h from the tab band"| D["Mux::detach_tab →<br/>open_window(AdoptTab)<br/>source size, cursor − grab"]
+    D --> E["drag_window(): native OS<br/>move loop carries the window<br/>(WM_NCLBUTTONDOWN / HTCAPTION,<br/>_NET_WM_MOVERESIZE, NSWindow drag)"]
+    E -->|"Moved events stream"| G["dock hit-test vs sibling<br/>tab bands (z-order-verified<br/>on Windows) → insertion<br/>marker + translucency"]
+    G -->|"release on a band"| H["attach_tab at the slot;<br/>emptied window closes via<br/>the pending_window_close funnel"]
+    G -->|"release elsewhere"| I["independent window"]
+    C -->|"Esc / focus loss<br/>before the tear"| F["cancel (tab stays put)"]
 ```
+
+Mechanics worth knowing (all verified against the vendored winit 0.30.13
+source and live):
+
+- **Tear threshold** is pure Euclidean distance from the tab *band*
+  (`tear_threshold_crossed`), so the hysteresis is uniform in every
+  direction and dragging along the strip still reorders.
+- The torn window is positioned `cursor − grab` (grab = pointer offset
+  into the dragged segment, frame-relative) and **re-anchored from the
+  live `GetCursorPos` right before the handoff** — the pointer keeps
+  sliding during the ~100ms window creation, and the Windows modal loop
+  anchors at the *current* cursor.
+- **Drop detection**: winit synthesizes a `WM_LBUTTONUP` to the torn
+  window when the Windows modal loop exits (`WM_EXITSIZEMOVE`); on
+  X11/macOS the first client pointer event after the WM's grab ends
+  serves the same role (clients receive no pointer events during the
+  move). A 30s `about_to_wait` failsafe abandons orphaned tracking.
+- **Re-dock hit-testing** runs on the torn window's `Moved` stream
+  (`WM_WINDOWPOSCHANGED` keeps firing inside the modal loop), preferring
+  the live cursor over the frame+grab approximation on Windows. The
+  dragged window goes translucent (`WS_EX_LAYERED` + `LWA_ALPHA`,
+  verified compatible with the wgpu flip-model swapchain) so the target
+  strip and its accent insertion marker stay readable beneath it; a
+  hidden single-tab `auto` bar **materializes** while hovered so the
+  drop target is visible.
+- A **lone-tab** window's tab drags the whole window (`drag_window()`
+  with dock tracking, no detach) — Chromium semantics, and the way a
+  torn-off window merges back.
+- **Wayland** can't position windows client-side and validates move
+  serials, so it keeps the v2.18.0 tear-at-release path (the FSM's
+  `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
+  Wayland tab-drag protocol (KWin 6+/Mutter 48+) — is not exposed by
+  winit 0.30; tracked as a follow-up.
 
 The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
 performs the same live in-process move. The old cross-process handoff

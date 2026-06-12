@@ -300,7 +300,9 @@ into a right-side split).
 v2.18 — tabs can move live between windows), `close_window`,
 `toggle_fullscreen`, `move_tab_to_new_window` (tear the focused tab out
 into its own window LIVE — running programs keep running; dragging a tab
-outside the window does the same with the mouse), `open_settings`
+past the tab bar does the same with the mouse, Chromium-style since
+v2.19: the live window rides the pointer, and dropping it on another
+kettle window's tab bar merges it there), `open_settings`
 (`settings` — the Ctrl+, overlay), `layout_picker`, `about` (also
 `show_about` — version, update status, GitHub link), `screenshot`
 (`take_screenshot` / `terminalshot`).

@@ -44,7 +44,8 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Tab bar position | ✅ `tab-bar-position=top\|bottom` | ✅ | ✅ | ✅ `tab_bar_at_bottom` | ✅ `tab_position` | — |
 | Tab title eliding | ✅ `truncate()` | ✅ | ✅ | ✅ `tab_max_width` | ✅ | — |
 | **Drag-to-reorder tabs** | ✅ + ghost segment (v1.3.0 / v1.3.5) | ✅ | ✅ | ✅ | ✅ (GTK) | — |
-| **Tab tear-off → new window (drag)** | ✅ live in-process move at the drop point, Esc cancels; `move_tab_to_new_window` keybind variant (v2.18.0) | ⛔ | 🟡 (`detach_tab`, keyboard) | ⛔ | ⛔ | — |
+| **Tab tear-off → new window (drag)** | ✅ Chromium model (v2.19.0): tears AT the strip threshold into a live window riding the OS move loop (Snap Layouts mid-drag); inherits source size, pointer holds the tab; Esc-before-tear cancels; `move_tab_to_new_window` keybind variant; Wayland = at-release fallback | ⛔ | 🟡 (`detach_tab`, keyboard) | ⛔ | ⛔ | — |
+| **Tab re-dock (drag window→strip)** | ✅ (v2.19.0): drop a torn window on any kettle strip — dragged window goes translucent, accent insertion line marks the slot, lone-tab windows re-dock by their tab; live PTYs move both ways | ⛔ | ⛔ | ⛔ | ⛔ | — |
 | **Multi-window (one process)** | ✅ N OS windows, shared GPU device, per-window accent hue (v2.18.0) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Activity / bell tab dots** | ✅ palette[6] / palette[3] (v1.3.0) | ⛔ | 🟡 | ✅ `tab_bar.bell` | ✅ (Activity / Urgent Watcher) | — |
 | **Silence-watcher dot** | ✅ palette[8] dim, `tab-silence-threshold-ms` (v1.3.3) | ⛔ | ⛔ | ⛔ | ✅ (Silence Watcher origin) | — |
@@ -162,10 +163,26 @@ dropdown — always visible on every platform (it previously hid on
 single-shell Unix hosts) — listing the detected shells, then Settings… /
 Command palette / About kettle, each row with a right-aligned dimmed hint
 computed from the **live** keybind map (rebinds show the user's actual
-chord). And a left-drag on a tab body that leaves the window **tears the
-tab off live** into a new in-process window at the drop point: PTYs,
-scrollback and running programs move untouched, pane ids stay stable;
-`Esc` (or focus loss) mid-drag cancels.
+chord).
+
+Since v2.19.0 a left-drag that pulls a tab **1.5 bar-heights past the tab
+band** (any direction; pure-distance hysteresis, so dragging along the
+strip still reorders) **tears the tab off instantly** into a live window
+that inherits the source window's size and is positioned so the pointer
+keeps holding the tab. The window is immediately handed to the OS's
+native move loop (`drag_window()`: `WM_NCLBUTTONDOWN`/`HTCAPTION` on
+Windows — Snap Layouts and FancyZones engage mid-drag —
+`_NET_WM_MOVERESIZE` on X11, `performWindowDragWithEvent` on macOS), the
+same handoff Chromium uses; PTYs, scrollback and running programs move
+untouched and pane ids stay stable. Dragging it over another kettle
+window's tab band turns the dragged window translucent (Windows), shows
+an accent insertion line at the landing slot in the target strip —
+materializing the strip on a single-tab `tab-bar = auto` window — and a
+release there merges the tab at that slot and closes the emptied window.
+A **lone-tab** window's tab drags the whole window (Chromium semantics),
+which is how a torn-off window re-docks. `Esc` before the tear cancels;
+within-slop releases never tear. On Wayland — no client-side window
+positioning — the tear falls back to happening at release.
 
 ## Backlog status
 

@@ -466,9 +466,16 @@ palette and About rows; it is always visible on every platform.
 Menu rows show right-aligned shortcut hints taken from the live
 keybind map.
 .PP
-Dragging a tab outside its window tears it off into a new window in
-the same process: the tab's running programs, PTYs and scrollback
-move untouched (Esc or focus loss cancels the drag). The
+Dragging a tab past the tab bar tears it off instantly into a live
+window in the same process that rides the pointer in the OS's native
+move loop \(em the tab's running programs, PTYs and scrollback move
+untouched, and the window inherits the source window's size. Dropping
+a torn window onto another kettle window's tab bar merges the tab
+there at the marked insertion slot (the dragged window turns
+translucent over the target strip on Windows); dragging a lone-tab
+window's tab drags the whole window, which is how a torn-off window
+re-docks. Esc before the tear cancels. On Wayland, where clients
+cannot position windows, the tear happens at release instead. The
 .B move_tab_to_new_window
 action (alias
 .BR detach_tab )

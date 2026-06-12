@@ -47,13 +47,20 @@ and **WezTerm** into one tool.
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
-- **Multi-window** — one process hosts any number of OS windows
-  (`Ctrl+Shift+I`), and **dragging a tab out of the window tears it off
-  live** into its own window at the drop point, Windows Terminal-style —
-  PTYs, scrollback and running programs move untouched (`Esc` mid-drag
-  cancels). Each window claims its own Peacock accent hue from the theme
-  (on by default; pin one with `accent-color`/`--accent`, opt out with
-  `accent-color = theme`) so windows are tellable apart at a glance.
+- **Multi-window with Chromium-grade tab tear-off** — one process hosts
+  any number of OS windows (`Ctrl+Shift+I`). **Drag a tab past the tab
+  bar and it tears off instantly into a live window that rides the
+  pointer** in the OS's native move loop — Snap Layouts and FancyZones
+  work mid-drag, and PTYs, scrollback and running programs move
+  untouched. **Drop it onto another kettle window's tab bar to merge it
+  back**: the dragged window turns translucent over the target strip, an
+  accent line marks the insertion slot, and a lone-tab window can be
+  re-docked the same way by dragging its tab. (`Esc` before the tear
+  cancels; this is the live-window model Chrome uses — Windows Terminal
+  only shows a ghost header and creates the window at drop.) Each window
+  claims its own Peacock accent hue from the theme (on by default; pin
+  one with `accent-color`/`--accent`, opt out with `accent-color =
+  theme`) so windows are tellable apart at a glance.
 - **New-tab dropdown** — the tab bar's `▾` lists every detected shell (on
   Windows, in Windows Terminal's order: PowerShell, Windows PowerShell,
   Command Prompt, WSL distros, the VS 2022 developer shells, Git Bash)
@@ -254,9 +261,12 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 `Ctrl+Shift+I` opens the new window **in-process** (one kettle hosts them
-all; the process exits when the last window closes), and dragging a tab
-out of the window tears it off into a new window — the
-`move_tab_to_new_window` action does the same move from the keyboard.
+all; the process exits when the last window closes). Dragging a tab past
+the tab bar tears it off into a live window under the pointer; dropping
+that window onto another kettle window's tab bar merges it there — the
+`move_tab_to_new_window` action does the tear from the keyboard. (On
+Wayland, where clients can't position windows, the tear happens at
+release instead.)
 
 > **Tip — right-click anywhere in a pane** for the context menu: Copy /
 > Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled

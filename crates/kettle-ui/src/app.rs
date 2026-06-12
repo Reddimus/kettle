@@ -1466,6 +1466,41 @@ fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
     raw.clamp(0, n as isize - 1) as usize
 }
 
+/// v2.19.0 (tear-off UX): Euclidean distance from a point to the nearest
+/// edge of a rect — `0.0` when the point is inside. The tear decision is
+/// "distance from the tab band ≥ threshold", which gives UNIFORM hysteresis
+/// in every direction away from the band (the Chromium model): drag along
+/// the strip = reorder, drag perpendicular past the slop = tear. Because a
+/// `Top` band's upper edge coincides with the window's top edge, "above the
+/// window" falls out of the same math — no separate outside-the-window
+/// clause needed.
+fn dist_to_rect(cx: f32, cy: f32, rect: (f32, f32, f32, f32)) -> f32 {
+    let (rx, ry, rw, rh) = rect;
+    let dx = (rx - cx).max(cx - (rx + rw)).max(0.0);
+    let dy = (ry - cy).max(cy - (ry + rh)).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// v2.19.0 (tear-off UX): has the cursor moved far enough from the tab
+/// band to tear the dragged tab off into its own window? Pure so the
+/// per-orientation cases are unit-testable without a window.
+fn tear_threshold_crossed(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshold: f32) -> bool {
+    threshold > 0.0 && dist_to_rect(cx, cy, band) >= threshold
+}
+
+/// v2.19.0 (tear-off UX, re-dock): insertion index for a tab dropped at
+/// `cursor` (main-axis coordinate) given the existing segments' main-axis
+/// midpoints, in order. First segment whose midpoint exceeds the cursor
+/// wins; past every midpoint appends. Distinct from `tab_drag_target_index`
+/// (which picks the segment UNDER the cursor for reorder): docking inserts
+/// BETWEEN segments, so a strip of n tabs has n+1 valid slots.
+fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
+    seg_mids
+        .iter()
+        .position(|&m| cursor < m)
+        .unwrap_or(seg_mids.len())
+}
+
 /// Width of the strip that horizontal tab segments tile across, given the
 /// surface width and the trailing new-tab button geometry.
 ///
@@ -1931,6 +1966,49 @@ pub struct App {
     /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
     /// what `--version` prints); falls back to the bare crate version.
     version_line: String,
+    /// v2.19.0 (tear-off UX): `Some` while a torn-off window is riding an
+    /// OS-native move loop (`drag_window()`) or the manual-follow fallback.
+    /// Drives the Phase-2 re-dock: hit-testing sibling tab bands on `Moved`,
+    /// the insertion preview, and the drop-merge. App-level (not per-window)
+    /// because exactly one tear-off drag can be in flight per pointer.
+    torn_drag: Option<TornDrag>,
+}
+
+/// v2.19.0 (tear-off UX): tracking for the one in-flight torn-window drag.
+struct TornDrag {
+    /// Seq of the torn-off window being dragged.
+    seq: u64,
+    /// Cursor offset from the torn window's FRAME top-left in physical px,
+    /// chosen at tear time so the pointer holds the tab. `Moved(pos) + grab`
+    /// approximates the live screen cursor during the native move loop
+    /// (winit's `Moved` reports the frame position on Windows — verified in
+    /// the vendored 0.30.13 WM_WINDOWPOSCHANGED handler).
+    grab: (f64, f64),
+    /// Latched dock target: (sibling window seq, insertion index). Updated
+    /// by every hit-test; the drop commits whatever is latched.
+    dock: Option<(u64, usize)>,
+    /// `drag_window()` succeeded — the OS carries the window. The drop then
+    /// arrives as winit's synthesized post-WM_EXITSIZEMOVE left-release
+    /// (Windows) or as the first client pointer event after the WM's pointer
+    /// grab ends (X11/macOS — the client receives NO pointer events while
+    /// the WM moves the window). `false` = manual-follow: the SOURCE window
+    /// still holds mouse capture, repositions the torn window from its own
+    /// CursorMoved stream, and its left-release is the drop.
+    native: bool,
+    /// At least one `Moved` arrived since the handoff. Gates the
+    /// pointer-event drop heuristic against the PostMessage race on
+    /// Windows (a stray client mouse-move can slip in between
+    /// `drag_window()`'s posted WM_NCLBUTTONDOWN and the modal loop
+    /// actually starting) and against an X11 tear the user never moved.
+    saw_move: bool,
+    /// Last signal (tear or `Moved`) — the stale-tracking failsafe: a
+    /// torn drag with no movement for 30s is abandoned by `about_to_wait`
+    /// (covers an X11 tear whose release we never observe).
+    last_signal: std::time::Instant,
+    /// The torn window's HWND (Windows; `None` elsewhere) — the dock-hover
+    /// translucency and the z-order walk both key off it, and tracking
+    /// teardown needs it to restore full opacity from any code path.
+    hwnd: Option<isize>,
 }
 
 /// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
@@ -2289,6 +2367,7 @@ impl App {
             lua_startup_fired: false,
             update_available: None,
             version_line: startup_version,
+            torn_drag: None,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -2627,7 +2706,12 @@ impl App {
     fn tab_bar_h(&self, ws: &WindowState) -> f32 {
         let show = match self.cfg.tab_bar {
             TabBarMode::Off => false,
-            TabBarMode::Auto => ws.mux.tabs.len() > 1,
+            // v2.19.0 (tear-off UX, re-dock): a live dock preview
+            // MATERIALIZES the bar on a single-tab auto window — the
+            // strip appears under the hovering torn window so the drop
+            // target is visible before the drop (Chrome's always-on
+            // strip affordance, on demand).
+            TabBarMode::Auto => ws.mux.tabs.len() > 1 || ws.dock_preview.is_some(),
             TabBarMode::Always => true,
         };
         if show {
@@ -2832,6 +2916,12 @@ impl App {
             } else {
                 None
             },
+            // v2.19.0 (re-dock): vertical 2-px insertion line at the
+            // docked tab's landing slot, full bar height.
+            insert_marker: ws.dock_preview.map(|idx| {
+                let x = x_offsets[idx.min(n)].min(strip - 2.0).max(0.0);
+                (x, y, 2.0, height)
+            }),
         }
     }
 
@@ -2909,6 +2999,14 @@ impl App {
             } else {
                 None
             },
+            // v2.19.0 (re-dock): horizontal 2-px insertion line across
+            // the strip at the docked tab's landing slot.
+            insert_marker: ws.dock_preview.map(|idx| {
+                let iy = (idx.min(titles.len()) as f32 * height)
+                    .min(sh - 2.0)
+                    .max(0.0);
+                (strip_x, iy, strip_w, 2.0)
+            }),
         }
     }
 
@@ -6094,7 +6192,7 @@ impl App {
                 // is shared. Falls back to a new tab if the window can't be
                 // created (degraded but useful, the cycle-425 precedent).
                 if let Err(_unopened) =
-                    self.open_window(event_loop, WindowOpen::Fresh { cwd: None }, None)
+                    self.open_window(event_loop, WindowOpen::Fresh { cwd: None }, None, None)
                 {
                     match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
                         Ok(()) => self.fire_tab_add_event(ws),
@@ -7374,8 +7472,8 @@ impl App {
                 let Some(dt) = ws.mux.detach_tab(closing_idx) else {
                     return;
                 };
-                match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None) {
-                    Ok(()) => {
+                match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None, None) {
+                    Ok(_) => {
                         // The tab LEFT this window; plugins see the same
                         // close event the process-handoff path fired
                         // (cycle 424).
@@ -9511,6 +9609,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // v2.19.0 (tear-off UX): failsafe — torn-drag tracking that lost its
+        // drop signal (an X11 release the WM swallowed, then no further
+        // input) is abandoned after 30s of silence. Can't misfire during a
+        // live drag: Moved events refresh `last_signal`, and the Windows
+        // modal move loop doesn't run about_to_wait at all.
+        if self
+            .torn_drag
+            .as_ref()
+            .is_some_and(|t| t.last_signal.elapsed().as_secs() >= 30)
+        {
+            self.abandon_torn_drag(None);
+        }
         // C4: every window ticks (reap, blink, coalesced-paint deadlines);
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
@@ -9572,6 +9682,142 @@ fn pick_accent_slot(
 /// B (Peacock): `#rrggbb` for the presence registry's wire format.
 fn rgb_hex(c: kettle_config::Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+}
+
+/// v2.19.0 (tear-off UX, T5): is this window's backend Wayland? Runtime
+/// check — X11 vs Wayland is a runtime choice on Linux, so `cfg!` can't
+/// answer it. Wayland gets the tear-at-release fallback (no client-side
+/// window positioning, and `xdg_toplevel.move` is compositor-validated
+/// against a press serial a just-created surface never saw).
+fn window_is_wayland(w: &winit::window::Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    matches!(
+        w.window_handle().map(|h| h.as_raw()),
+        Ok(RawWindowHandle::Wayland(_))
+    )
+}
+
+/// v2.19.0 (tear-off UX, Windows): the LIVE screen cursor. The tear
+/// positions the torn window from the CursorMoved event's coordinates,
+/// but window creation takes ~50-150ms — by the time `drag_window()`'s
+/// posted WM_NCLBUTTONDOWN starts the modal move loop, a fast-moving
+/// pointer has slid well past the event position, and DefWindowProc
+/// anchors the loop at the CURRENT cursor. Without re-anchoring, the
+/// pointer ends up holding the window mid-body instead of at the grab
+/// point (measured: ~97px of slide under a scripted drag). Re-positioning
+/// from the live cursor immediately before the handoff closes the gap to
+/// sub-millisecond.
+#[cfg(target_os = "windows")]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p) }
+        .ok()
+        .map(|()| (f64::from(p.x), f64::from(p.y)))
+}
+
+/// v2.19.0 (re-dock, Windows): per-window alpha for the dock-hover
+/// preview. The torn window rides UNDER the pointer, so at the moment a
+/// dock target latches, the full-size torn window is covering the very
+/// strip the insertion marker draws in — the user would never see it.
+/// Going translucent while a target is latched shows the target strip
+/// (and marker) through the dragged window, Chromium-style. Verified
+/// live against kettle's wgpu flip-model swapchain (renders fine under
+/// WS_EX_LAYERED + LWA_ALPHA). 255 restores and drops the layered bit.
+#[cfg(target_os = "windows")]
+fn set_window_alpha(hwnd: isize, alpha: u8) {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    };
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        if alpha == 255 {
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !(WS_EX_LAYERED_BIT));
+        } else {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED_BIT);
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA);
+        }
+    }
+}
+
+/// `WS_EX_LAYERED` as the isize `GetWindowLongPtrW` works in.
+#[cfg(target_os = "windows")]
+const WS_EX_LAYERED_BIT: isize = 0x0008_0000;
+
+/// v2.19.0 (re-dock): torn-window alpha while a dock target is latched —
+/// translucent enough to read the target strip + insertion marker through
+/// the dragged window, opaque enough that the window still reads as "the
+/// thing you're holding" (probed live at several values).
+#[cfg(target_os = "windows")]
+const DOCK_HOVER_ALPHA: u8 = 150;
+
+/// v2.19.0 (re-dock): HWND of a winit window for the z-order walk.
+/// `None` off-Windows (the `Win32` raw-handle variant exists on every
+/// platform, so this compiles everywhere without cfg noise).
+fn window_hwnd(w: &winit::window::Window) -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match w.window_handle().ok().map(|h| h.as_raw()) {
+        Some(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// v2.19.0 (re-dock, Windows): resolve overlapping dock candidates — and
+/// foreign windows covering a band — against the REAL z-order. Walks down
+/// from the torn window (topmost while dragged); the first visible,
+/// uncloaked window containing the cursor decides: one of ours → that's
+/// the target; a foreign window → it covers the band, no dock. The cloak
+/// check matters: suspended UWP apps park full-screen DWM-cloaked windows
+/// in the z-order that would otherwise always read as "covered".
+#[cfg(target_os = "windows")]
+fn zorder_pick(
+    torn_hwnd: isize,
+    cursor: (f64, f64),
+    candidates: &[(isize, u64, usize)],
+) -> Option<(u64, usize)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDNEXT, GetWindow, GetWindowRect, IsWindowVisible,
+    };
+    let (px, py) = (cursor.0 as i32, cursor.1 as i32);
+    let mut hwnd = unsafe { GetWindow(HWND(torn_hwnd as *mut core::ffi::c_void), GW_HWNDNEXT) };
+    // Bounded walk: the desktop can hold hundreds of top-level windows but
+    // a runaway loop must be impossible.
+    for _ in 0..1024 {
+        let Ok(h) = hwnd else { break };
+        if unsafe { IsWindowVisible(h) }.as_bool() {
+            let mut cloaked: u32 = 0;
+            let _ = unsafe {
+                DwmGetWindowAttribute(
+                    h,
+                    DWMWA_CLOAKED,
+                    (&raw mut cloaked).cast(),
+                    std::mem::size_of::<u32>() as u32,
+                )
+            };
+            let mut r = RECT::default();
+            if cloaked == 0
+                && unsafe { GetWindowRect(h, &mut r) }.is_ok()
+                && px >= r.left
+                && px < r.right
+                && py >= r.top
+                && py < r.bottom
+            {
+                let found = h.0 as isize;
+                return candidates
+                    .iter()
+                    .find(|(ch, _, _)| *ch == found)
+                    .map(|&(_, s, i)| (s, i));
+            }
+        }
+        hwnd = unsafe { GetWindow(h, GW_HWNDNEXT) };
+    }
+    None
 }
 
 /// C7: the live monitor rects, for clamping a saved window geometry whose
@@ -9736,14 +9982,18 @@ impl App {
     }
 
     /// C4: open another OS window in this process — the multi-window core.
-    /// Returns the `WindowOpen` back on failure so an `AdoptTab` caller can
-    /// re-attach the tab to its source window instead of losing live PTYs.
+    /// Returns the new window's seq on success; returns the `WindowOpen`
+    /// back on failure so an `AdoptTab` caller can re-attach the tab to its
+    /// source window instead of losing live PTYs. `size` overrides the
+    /// platform-default inner size (v2.19.0 tear-off: the torn window
+    /// inherits the source window's dimensions, Windows Terminal parity).
     fn open_window(
         &mut self,
         event_loop: &ActiveEventLoop,
         open: WindowOpen,
         pos: Option<winit::dpi::PhysicalPosition<i32>>,
-    ) -> Result<(), WindowOpen> {
+        size: Option<winit::dpi::PhysicalSize<u32>>,
+    ) -> Result<u64, WindowOpen> {
         let Some(gpu) = self.gpu.clone() else {
             log::warn!("open_window: GPU context not ready (window 1 still initializing)");
             return Err(open);
@@ -9771,6 +10021,9 @@ impl App {
         }
         if let Some(p) = pos {
             attrs = attrs.with_position(p);
+        }
+        if let Some(s) = size {
+            attrs = attrs.with_inner_size(s);
         }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -9865,7 +10118,532 @@ impl App {
             w.request_redraw();
         }
         self.windows.insert(seq, ws);
-        Ok(())
+        Ok(seq)
+    }
+
+    /// v2.19.0 (tear-off UX, T1+T2+T3): Chromium-style tear. The moment the
+    /// dragged tab crosses the band threshold, detach it into a live window
+    /// under the cursor — inheriting the source dimensions, positioned so
+    /// the pointer keeps holding the tab — and hand the drag to the OS via
+    /// `drag_window()` (Windows: ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION
+    /// posted to the torn window, the exact Chromium handoff; X11:
+    /// _NET_WM_MOVERESIZE; macOS: performWindowDragWithEvent). Returns true
+    /// when a tear happened — the source window no longer owns the gesture.
+    fn maybe_tear_off(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) -> bool {
+        if !matches!(
+            ws.detach_drag,
+            crate::detach::DragState::DraggingInside { .. }
+                | crate::detach::DragState::DraggingOutside { .. }
+        ) {
+            return false;
+        }
+        let Some(src) = ws.window.clone() else {
+            return false;
+        };
+        // T5: Wayland can neither position the torn window nor (reliably)
+        // start a compositor move for a surface that never saw the press —
+        // tearing mid-drag would drop the window at a compositor-chosen
+        // spot while the user is still dragging. Wayland keeps the v2.18.0
+        // tear-at-release path (see the Released arm).
+        if window_is_wayland(&src) {
+            return false;
+        }
+        let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some(band) = self.dock_band(ws) else {
+            return false;
+        };
+        // 1.5× the bar thickness of slop in EVERY direction away from the
+        // band (uniform hysteresis): drag along the strip = reorder, drag
+        // past the slop = tear. ~36px at the default font.
+        let threshold = 1.5 * self.tab_bar_h(ws);
+        if !tear_threshold_crossed(cx, cy, band, threshold) {
+            return false;
+        }
+        // Lone tab: the tab IS the window — drag the whole window instead
+        // of tearing (Chromium semantics; tearing would just re-create the
+        // same window). The torn-drag tracking still attaches, so the
+        // full re-dock path applies: this is how a previously torn-off
+        // window merges back into a sibling.
+        if ws.mux.tabs.len() <= 1 {
+            ws.tab_drag_active = false;
+            ws.detach_drag = crate::detach::DragState::default();
+            ws.drag_press = None;
+            // Frame-relative grab = where the pointer is right now
+            // (screen cursor − frame origin), so the dock hit-test's
+            // cursor approximation tracks the real pointer.
+            let grab = match (src.inner_position(), src.outer_position()) {
+                (Ok(ip), Ok(op)) => (
+                    f64::from(ip.x - op.x) + ws.cursor.x,
+                    f64::from(ip.y - op.y) + ws.cursor.y,
+                ),
+                _ => (40.0, 12.0),
+            };
+            let native = match src.drag_window() {
+                Ok(()) => true,
+                Err(e) => {
+                    log::info!(
+                        "tab-drag window move: native drag unavailable ({e}); manual follow"
+                    );
+                    false
+                }
+            };
+            self.torn_drag = Some(TornDrag {
+                seq: ws.seq,
+                grab,
+                dock: None,
+                native,
+                saw_move: false,
+                last_signal: std::time::Instant::now(),
+                hwnd: window_hwnd(&src),
+            });
+            return true;
+        }
+        // Grab offset: where the pointer holds the torn window, relative to
+        // its FRAME top-left (winit positions windows AND reports `Moved`
+        // by the frame origin — verified against the vendored 0.30.13
+        // WM_WINDOWPOSCHANGED handler). Derived from the dragged (active)
+        // segment so the pointer stays on the tab, like WT's stashed drag
+        // offset (microsoft/terminal PR #14935); clamped inward so a grab
+        // at a segment edge still lands inside the frame.
+        let bar = self.tab_bar(ws);
+        let vertical = self.cfg.tab_bar_pos.is_vertical();
+        let grab = bar
+            .segments
+            .iter()
+            .find(|s| s.active)
+            .map(|seg| {
+                let (sx, sy, seg_w, seg_h) = seg.rect;
+                if vertical {
+                    (
+                        f64::from(self.cfg.tab_bar_width * 0.5),
+                        f64::from((cy - sy).clamp(8.0, (seg_h - 8.0).max(8.0))),
+                    )
+                } else {
+                    (
+                        f64::from((cx - sx).clamp(16.0, (seg_w - 16.0).max(16.0))),
+                        f64::from(seg_h * 0.5),
+                    )
+                }
+            })
+            .unwrap_or((40.0, 12.0));
+        // Frame origin = screen cursor − grab. `inner_position` is the
+        // client origin in screen coords, so client cursor + it = screen
+        // cursor exactly; `outer_position` is the (rare) fallback.
+        let pos = src
+            .inner_position()
+            .or_else(|_| src.outer_position())
+            .ok()
+            .map(|p| {
+                winit::dpi::PhysicalPosition::new(
+                    (f64::from(p.x) + ws.cursor.x - grab.0) as i32,
+                    (f64::from(p.y) + ws.cursor.y - grab.1) as i32,
+                )
+            });
+        // The torn window inherits the source dimensions (WT tear-off
+        // parity). A maximized/fullscreen source approximates its restored
+        // size at 60% — winit exposes no restore bounds (Chromium uses
+        // them; this is the closest available).
+        let isz = src.inner_size();
+        let scale = if src.is_maximized() || src.fullscreen().is_some() {
+            0.6
+        } else {
+            1.0
+        };
+        let size = winit::dpi::PhysicalSize::new(
+            ((f64::from(isz.width) * scale) as u32).max(400),
+            ((f64::from(isz.height) * scale) as u32).max(300),
+        );
+        // The dragged tab is the ACTIVE tab — the cycle-249 reorder keeps
+        // it active while the FSM's armed index can go stale across
+        // reorders (same invariant the old at-release tear relied on).
+        let closing_idx = ws.mux.active;
+        let Some(dt) = ws.mux.detach_tab(closing_idx) else {
+            return false;
+        };
+        // The gesture leaves this window no matter how open_window goes.
+        ws.tab_drag_active = false;
+        ws.detach_drag = crate::detach::DragState::default();
+        ws.drag_press = None;
+        match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
+            Ok(torn_seq) => {
+                self.fire_tab_close_event(closing_idx);
+                self.ctl_broadcast(
+                    "tab_moved",
+                    None,
+                    serde_json::json!({
+                        "from_window": ws.seq,
+                        "to_window": torn_seq,
+                        "tab": closing_idx,
+                    }),
+                );
+                self.resize_all(ws);
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+                // Re-anchor to the LIVE cursor: the pointer kept moving
+                // during window creation, and the Windows modal move loop
+                // anchors at the cursor's CURRENT position — without this
+                // the grab offset drifts by however far the pointer slid
+                // (see `cursor_screen_pos`).
+                #[cfg(target_os = "windows")]
+                if let Some((lx, ly)) = cursor_screen_pos()
+                    && let Some(tw) = self.windows.get(&torn_seq).and_then(|t| t.window.as_ref())
+                {
+                    tw.set_outer_position(winit::dpi::PhysicalPosition::new(
+                        (lx - grab.0) as i32,
+                        (ly - grab.1) as i32,
+                    ));
+                }
+                // T3: the native handoff. On Err, manual-follow: the source
+                // still holds mouse capture, so its CursorMoved stream
+                // repositions the torn window until release.
+                let native = self
+                    .windows
+                    .get(&torn_seq)
+                    .and_then(|t| t.window.as_ref())
+                    .map(|w| match w.drag_window() {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::info!("tear-off: native drag unavailable ({e}); manual follow");
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                self.torn_drag = Some(TornDrag {
+                    seq: torn_seq,
+                    grab,
+                    dock: None,
+                    native,
+                    saw_move: false,
+                    last_signal: std::time::Instant::now(),
+                    hwnd: self
+                        .windows
+                        .get(&torn_seq)
+                        .and_then(|t| t.window.as_deref())
+                        .and_then(window_hwnd),
+                });
+            }
+            Err(WindowOpen::AdoptTab(dt)) => {
+                log::warn!("tear-off: open_window failed; tab kept in source window");
+                ws.mux.attach_tab(dt, Some(closing_idx));
+            }
+            Err(_) => unreachable!("open_window returns the WindowOpen it was given"),
+        }
+        true
+    }
+
+    /// v2.19.0 (re-dock): the client-px rect where a torn window can dock —
+    /// the tab band, INCLUDING the would-be band of a hidden single-tab
+    /// `auto` bar (the dock preview materializes it on hover). `None` when
+    /// `tab-bar = off` (no strip exists to dock onto). Doubles as the tear
+    /// threshold's band on the source window, where the bar is always
+    /// visible (a tear needs ≥ 2 tabs).
+    fn dock_band(&self, ws: &WindowState) -> Option<(f32, f32, f32, f32)> {
+        if matches!(self.cfg.tab_bar, TabBarMode::Off) {
+            return None;
+        }
+        let (w, h) = ws
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let (sw, sh) = (w as f32, h as f32);
+        let bh = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+        Some(match self.cfg.tab_bar_pos {
+            TabBarPos::Top => (0.0, 0.0, sw, bh),
+            TabBarPos::Bottom => (0.0, sh - bh, sw, bh),
+            TabBarPos::Left => (0.0, 0.0, self.cfg.tab_bar_width, sh),
+            TabBarPos::Right => (sw - self.cfg.tab_bar_width, 0.0, self.cfg.tab_bar_width, sh),
+        })
+    }
+
+    /// v2.19.0 (re-dock): insertion slot if the (approximated) screen
+    /// cursor is over this window's tab band; `None` when it isn't (or
+    /// the window can't host a dock right now).
+    fn dock_index_at(&self, w: &WindowState, cursor: (f64, f64)) -> Option<usize> {
+        let win = w.window.as_ref()?;
+        if win.is_minimized().unwrap_or(false) || !win.is_visible().unwrap_or(true) {
+            return None;
+        }
+        let ip = win.inner_position().ok()?;
+        let (cx, cy) = (
+            (cursor.0 - f64::from(ip.x)) as f32,
+            (cursor.1 - f64::from(ip.y)) as f32,
+        );
+        let band = self.dock_band(w)?;
+        if dist_to_rect(cx, cy, band) > 0.0 {
+            return None;
+        }
+        let bar = self.tab_bar(w);
+        let vertical = self.cfg.tab_bar_pos.is_vertical();
+        if bar.height > 0.0 && !bar.segments.is_empty() {
+            let mids: Vec<f32> = bar
+                .segments
+                .iter()
+                .map(|s| {
+                    let (x, y, sw_, sh_) = s.rect;
+                    if vertical {
+                        y + sh_ * 0.5
+                    } else {
+                        x + sw_ * 0.5
+                    }
+                })
+                .collect();
+            Some(dock_insertion_index(&mids, if vertical { cy } else { cx }))
+        } else {
+            // Hidden bar (single-tab auto, preview not applied yet): one
+            // implied full-band segment → slot 0 (before it) or 1 (after).
+            let (bx, by, bw, bh) = band;
+            let (mid, c) = if vertical {
+                (by + bh * 0.5, cy)
+            } else {
+                (bx + bw * 0.5, cx)
+            };
+            Some(if c < mid { 0 } else { 1 })
+        }
+    }
+
+    /// v2.19.0 (re-dock): which window's tab band is under the screen
+    /// cursor, and at which insertion slot. `extra` is the checked-out
+    /// source window during manual-follow — it isn't in the map but is a
+    /// legal (and common: drag out, change your mind, drop back) target.
+    /// On Windows the candidates are resolved against the real z-order;
+    /// elsewhere newest-window-first is the best approximation available
+    /// (winit exposes no z-order).
+    fn dock_hit_test(
+        &self,
+        cursor: (f64, f64),
+        torn_seq: u64,
+        torn_hwnd: Option<isize>,
+        extra: Option<&WindowState>,
+    ) -> Option<(u64, usize)> {
+        let mut hits: Vec<(Option<isize>, u64, usize)> = Vec::new();
+        for (seq, w) in extra
+            .map(|w| (w.seq, w))
+            .into_iter()
+            .chain(self.windows.iter().rev().map(|(s, w)| (*s, w)))
+        {
+            if seq == torn_seq {
+                continue;
+            }
+            if let Some(idx) = self.dock_index_at(w, cursor) {
+                let hwnd = w.window.as_deref().and_then(window_hwnd);
+                hits.push((hwnd, seq, idx));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(th) = torn_hwnd {
+            let cands: Vec<(isize, u64, usize)> = hits
+                .iter()
+                .filter_map(|&(h, s, i)| h.map(|h| (h, s, i)))
+                .collect();
+            return zorder_pick(th, cursor, &cands);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = torn_hwnd;
+        hits.first().map(|&(_, s, i)| (s, i))
+    }
+
+    /// v2.19.0 (re-dock): re-run the hit-test for the live cursor and move
+    /// the insertion preview (and the latched dock target) accordingly.
+    /// `extra` = the checked-out source window in manual-follow, so the
+    /// preview can land on it even though it's out of the map.
+    fn update_dock_target(
+        &mut self,
+        cursor: (f64, f64),
+        torn_hwnd: Option<isize>,
+        mut extra: Option<&mut WindowState>,
+    ) {
+        let Some(td) = self.torn_drag.as_ref() else {
+            return;
+        };
+        let torn_seq = td.seq;
+        let prev = td.dock;
+        let hit = self.dock_hit_test(cursor, torn_seq, torn_hwnd, extra.as_deref());
+        if prev == hit {
+            return;
+        }
+        if let Some((ps, _)) = prev
+            && hit.map(|(s, _)| s) != Some(ps)
+        {
+            match extra.as_deref_mut() {
+                Some(x) if x.seq == ps => self.apply_dock_preview_ws(x, None),
+                _ => self.apply_dock_preview(ps, None),
+            }
+        }
+        if let Some((ns, idx)) = hit {
+            match extra {
+                Some(x) if x.seq == ns => self.apply_dock_preview_ws(x, Some(idx)),
+                _ => self.apply_dock_preview(ns, Some(idx)),
+            }
+        }
+        // Dock-hover translucency (Windows): the full-size torn window is
+        // covering the very strip the insertion marker draws in — go
+        // see-through while a target is latched so the user can watch the
+        // marker under the pointer; restore on unlatch.
+        #[cfg(target_os = "windows")]
+        if let Some(th) = self.torn_drag.as_ref().and_then(|t| t.hwnd) {
+            match (prev.is_some(), hit.is_some()) {
+                (false, true) => set_window_alpha(th, DOCK_HOVER_ALPHA),
+                (true, false) => set_window_alpha(th, 255),
+                _ => {}
+            }
+        }
+        if let Some(td) = self.torn_drag.as_mut() {
+            td.dock = hit;
+        }
+    }
+
+    /// v2.19.0 (re-dock): set/clear a mapped window's dock preview (the
+    /// checked-out variant below does the actual work).
+    fn apply_dock_preview(&mut self, seq: u64, idx: Option<usize>) {
+        if let Some(mut w) = self.windows.remove(&seq) {
+            self.apply_dock_preview_ws(&mut w, idx);
+            self.windows.insert(seq, w);
+        }
+    }
+
+    /// v2.19.0 (re-dock): set/clear a window's dock preview. When the
+    /// preview MATERIALIZES (or dematerializes) a hidden single-tab auto
+    /// bar, the content area changes — resize the grids so the strip
+    /// doesn't overlap the prompt.
+    fn apply_dock_preview_ws(&mut self, w: &mut WindowState, idx: Option<usize>) {
+        if w.dock_preview == idx {
+            return;
+        }
+        let materializes = matches!(self.cfg.tab_bar, TabBarMode::Auto) && w.mux.tabs.len() <= 1;
+        w.dock_preview = idx;
+        if materializes {
+            self.resize_all(w);
+        }
+        if let Some(win) = &w.window {
+            win.request_redraw();
+        }
+    }
+
+    /// v2.19.0 (re-dock): drop torn-drag tracking without merging (stale
+    /// tracking, cancel, or focus loss) — clears any latched insertion
+    /// preview. `ws` = the checked-out window, in case the preview is on it.
+    fn abandon_torn_drag(&mut self, ws: Option<&mut WindowState>) {
+        if let Some(td) = self.torn_drag.take()
+            && let Some((seq, _)) = td.dock
+        {
+            #[cfg(target_os = "windows")]
+            if let Some(th) = td.hwnd {
+                set_window_alpha(th, 255);
+            }
+            match ws {
+                Some(x) if x.seq == seq => self.apply_dock_preview_ws(x, None),
+                _ => self.apply_dock_preview(seq, None),
+            }
+        }
+    }
+
+    /// v2.19.0 (re-dock, D4): the drop. Commit the latched dock target —
+    /// move the torn window's tab into the target at the insertion slot and
+    /// close the emptied torn window — or just clear tracking + preview.
+    /// `ws` is whatever window's dispatch observed the drop: the torn
+    /// window itself for the native OS loop (winit synthesizes its
+    /// left-release when the Windows modal move loop exits), or the
+    /// capture-holding source for manual-follow.
+    fn finalize_torn_drag(&mut self, ws: &mut WindowState, commit: bool) {
+        let committable = self
+            .torn_drag
+            .as_ref()
+            .is_some_and(|td| commit && td.saw_move && td.dock.is_some());
+        if !committable {
+            self.abandon_torn_drag(Some(ws));
+            return;
+        }
+        let td = self.torn_drag.take().expect("checked committable above");
+        let (target_seq, idx) = td.dock.expect("checked committable above");
+        // The torn window is about to close (merge) — restoring opacity is
+        // moot then, but the defensive multi-tab branch below keeps it
+        // alive, and a no-op restore on a dying HWND is harmless.
+        #[cfg(target_os = "windows")]
+        if let Some(th) = td.hwnd {
+            set_window_alpha(th, 255);
+        }
+        if td.seq == ws.seq {
+            // Native loop: `ws` IS the torn window; the target is mapped.
+            let donor_active = ws.mux.active;
+            let Some(dt) = ws.mux.detach_tab(donor_active) else {
+                return;
+            };
+            let Some(mut target) = self.windows.remove(&target_seq) else {
+                // Target vanished between latch and drop — keep the tab.
+                ws.mux.attach_tab(dt, Some(donor_active));
+                return;
+            };
+            self.dock_tab_into(&mut target, dt, idx, td.seq);
+            self.windows.insert(target_seq, target);
+            self.focused_seq = target_seq;
+            if ws.mux.tabs.is_empty() {
+                // The emptied torn window closes through the normal funnel
+                // (finish_window_dispatch drops it; other windows remain,
+                // so no event-loop exit).
+                self.pending_window_close = true;
+            }
+        } else {
+            // Manual-follow: `ws` is the SOURCE (capture holder); the torn
+            // window is mapped. The target may be `ws` itself or another
+            // mapped window (the hit-test excludes the torn window).
+            let Some(mut torn) = self.windows.remove(&td.seq) else {
+                return;
+            };
+            let donor_active = torn.mux.active;
+            let Some(dt) = torn.mux.detach_tab(donor_active) else {
+                self.windows.insert(td.seq, torn);
+                return;
+            };
+            if target_seq == ws.seq {
+                self.dock_tab_into(ws, dt, idx, td.seq);
+            } else if let Some(mut target) = self.windows.remove(&target_seq) {
+                self.dock_tab_into(&mut target, dt, idx, td.seq);
+                self.windows.insert(target_seq, target);
+            } else {
+                torn.mux.attach_tab(dt, Some(donor_active));
+                self.windows.insert(td.seq, torn);
+                return;
+            }
+            self.focused_seq = target_seq;
+            if torn.mux.tabs.is_empty() {
+                // Dropping outside finish_window_dispatch is safe here: the
+                // map keeps the target (and source), so the "exit only when
+                // the map is empty" invariant can't trip.
+                drop(torn);
+            } else {
+                self.windows.insert(td.seq, torn);
+            }
+        }
+    }
+
+    /// v2.19.0 (re-dock): receive a docked tab — attach at the insertion
+    /// slot (attach_tab makes it active + seen), clear the preview, resize,
+    /// take focus, notify agents.
+    fn dock_tab_into(
+        &mut self,
+        target: &mut WindowState,
+        dt: crate::mux::DetachedTab,
+        idx: usize,
+        from_seq: u64,
+    ) {
+        let landed = target.mux.attach_tab(dt, Some(idx));
+        target.dock_preview = None;
+        self.resize_all(target);
+        if let Some(w) = &target.window {
+            w.focus_window();
+            w.request_redraw();
+        }
+        self.ctl_broadcast(
+            "tab_moved",
+            None,
+            serde_json::json!({
+                "from_window": from_seq,
+                "to_window": target.seq,
+                "tab": landed,
+            }),
+        );
     }
 
     /// B (Peacock): resolve + claim this window's accent — walk the theme's
@@ -10235,7 +11013,12 @@ impl App {
                             }
                             for sw in rest {
                                 if self
-                                    .open_window(event_loop, WindowOpen::Restore(sw.clone()), None)
+                                    .open_window(
+                                        event_loop,
+                                        WindowOpen::Restore(sw.clone()),
+                                        None,
+                                        None,
+                                    )
                                     .is_err()
                                 {
                                     log::warn!(
@@ -10548,6 +11331,37 @@ impl App {
             // in-process detach_tab → open_window(AdoptTab) (the SCM_RIGHTS
             // process-handoff sender is retired). A no-op transition on
             // `Idle` remains harmless.
+            // v2.19.0 (tear-off UX, D2): the torn window streams `Moved`
+            // during the OS move loop (Windows: WM_WINDOWPOSCHANGED inside
+            // the NC modal loop; X11: ConfigureNotify from the WM move —
+            // both verified). Approximate the live cursor as frame origin +
+            // grab offset and drive the re-dock hit-test against every
+            // sibling window's tab band.
+            WindowEvent::Moved(pos) => {
+                let Some(td) = self.torn_drag.as_mut() else {
+                    return;
+                };
+                if td.seq != ws.seq {
+                    return;
+                }
+                td.saw_move = true;
+                td.last_signal = std::time::Instant::now();
+                let grab = td.grab;
+                // Frame + grab approximates the pointer, but the modal
+                // loop's anchor can drift from `grab` by however far the
+                // pointer slid between window creation and loop start
+                // (measured ~10-35px) — enough to miss a band edge. On
+                // Windows the LIVE cursor is one call away; the
+                // approximation stays as the fallback (X11's WM move
+                // keeps the offset we set, so it stays accurate there).
+                let approx = (f64::from(pos.x) + grab.0, f64::from(pos.y) + grab.1);
+                #[cfg(target_os = "windows")]
+                let cursor = cursor_screen_pos().unwrap_or(approx);
+                #[cfg(not(target_os = "windows"))]
+                let cursor = approx;
+                let torn_hwnd = ws.window.as_deref().and_then(window_hwnd);
+                self.update_dock_target(cursor, torn_hwnd, None);
+            }
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_leave_window();
@@ -10564,6 +11378,63 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
+                // v2.19.0 (tear-off UX): client pointer events do NOT reach
+                // the torn window while the OS moves it (Windows: NC modal
+                // loop; X11: the WM holds an active pointer grab). The first
+                // CursorMoved after movement is therefore the post-drop
+                // signal on platforms without Windows' synthesized release
+                // (which arrives first there and wins). Commit the latched
+                // dock, then fall through — this event is real input for
+                // the now-free window.
+                if let Some(td) = self.torn_drag.as_ref()
+                    && td.seq == ws.seq
+                    && td.native
+                    && td.saw_move
+                {
+                    self.finalize_torn_drag(ws, true);
+                    // A committed merge empties this window — it is closing;
+                    // don't process the event against an empty mux.
+                    if self.pending_window_close {
+                        return;
+                    }
+                }
+                // v2.19.0 (tear-off UX, T3 fallback): manual-follow — the
+                // native handoff failed, so the capture holder (the tear's
+                // source window, or the dragged window itself for a
+                // lone-tab whole-window drag) carries the torn window:
+                // reposition it from this cursor stream and drive the
+                // re-dock hit-test. The gesture belongs to the torn window
+                // now; skip normal processing.
+                if let Some(td) = self.torn_drag.as_ref()
+                    && !td.native
+                {
+                    let (grab, torn_seq) = (td.grab, td.seq);
+                    if let Some(ip) = ws.window.as_ref().and_then(|w| w.inner_position().ok()) {
+                        let cursor = (f64::from(ip.x) + position.x, f64::from(ip.y) + position.y);
+                        let torn_win = if torn_seq == ws.seq {
+                            ws.window.as_ref()
+                        } else {
+                            self.windows.get(&torn_seq).and_then(|t| t.window.as_ref())
+                        };
+                        let torn_hwnd = torn_win.map(|w| w.as_ref()).and_then(window_hwnd);
+                        if let Some(tw) = torn_win {
+                            tw.set_outer_position(winit::dpi::PhysicalPosition::new(
+                                (cursor.0 - grab.0) as i32,
+                                (cursor.1 - grab.1) as i32,
+                            ));
+                        }
+                        if let Some(td) = self.torn_drag.as_mut() {
+                            td.saw_move = true;
+                            td.last_signal = std::time::Instant::now();
+                        }
+                        // For a self-drag, `ws` IS the torn window — the
+                        // hit-test already excludes it by seq, so no extra
+                        // candidate is needed.
+                        let extra = if torn_seq == ws.seq { None } else { Some(ws) };
+                        self.update_dock_target(cursor, torn_hwnd, extra);
+                    }
+                    return;
+                }
                 // Cycle 904 (audit): dragging a split divider — recompute the
                 // addressed split's ratio from the cursor and apply. The split
                 // rect is re-fetched from the live seams so a mid-drag layout
@@ -10702,6 +11573,13 @@ impl App {
                     } else {
                         next.on_cursor_reenter_window()
                     };
+                    // v2.19.0 (tear-off UX): Chromium-style — tear the
+                    // moment the cursor crosses the band threshold, not at
+                    // release. The torn window appears live under the
+                    // cursor and rides the OS move loop from here.
+                    if self.maybe_tear_off(ws, event_loop) {
+                        return;
+                    }
                 }
                 if let Some(btn) = ws.mouse_btn {
                     // Drag while a button is held — report motion if tracked.
@@ -10733,6 +11611,13 @@ impl App {
                 button,
                 ..
             } => {
+                // v2.19.0 (tear-off UX): a fresh press anywhere while torn-
+                // drag tracking is live means the drag ended without us
+                // observing its drop (an X11 release the WM swallowed) —
+                // abandon the tracking, never merge on a click.
+                if self.torn_drag.is_some() {
+                    self.finalize_torn_drag(ws, false);
+                }
                 // Cycle 810 (audit): forward Back / Forward (buttons 8 / 9) to
                 // a mouse-tracking app rather than dropping them. No local UI
                 // meaning, so they no-op when tracking is off.
@@ -10922,14 +11807,14 @@ impl App {
                             if bcode == 0 {
                                 ws.tab_drag_active = true;
                                 // C6 (tear-off): arm the detach FSM alongside
-                                // the in-window reorder. Only a multi-tab
-                                // window can tear off — moving a lone tab out
-                                // would just re-create the same window.
-                                if ws.mux.tabs.len() > 1 {
-                                    ws.detach_drag =
-                                        crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
-                                    ws.drag_press = Some((px, py));
-                                }
+                                // the in-window reorder. v2.19.0: armed for a
+                                // LONE tab too — dragging it past the band
+                                // threshold moves the whole window (Chromium
+                                // semantics), which is how a torn-off window
+                                // re-docks into a sibling.
+                                ws.detach_drag =
+                                    crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
+                                ws.drag_press = Some((px, py));
                             }
                         }
                     }
@@ -11149,6 +12034,25 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // v2.19.0 (tear-off UX, D4): a left-release while a torn
+                // window is tracked is the DROP. Two shapes: (a) the
+                // synthesized release winit posts to the TORN window when
+                // the Windows modal move loop exits (WM_EXITSIZEMOVE →
+                // WM_LBUTTONUP — verified in the vendored 0.30.13 source);
+                // (b) the real release on the capture-holding SOURCE in
+                // manual-follow. Commit the latched dock either way. A
+                // left-release on an unrelated window while tracking is
+                // live means the tracking went stale (an X11 drop we never
+                // observed) — abandon it and process the release normally.
+                if bcode == 0
+                    && let Some(td) = self.torn_drag.as_ref()
+                {
+                    if td.seq == ws.seq || !td.native {
+                        self.finalize_torn_drag(ws, true);
+                        return;
+                    }
+                    self.finalize_torn_drag(ws, false);
+                }
                 if ws.mouse_btn == Some(bcode) {
                     ws.mouse_btn = None;
                     if self.send_mouse(ws, bcode, false, false) {
@@ -11168,24 +12072,29 @@ impl App {
                     // during the drag are already committed; this just
                     // disarms the CursorMoved handler.
                     ws.tab_drag_active = false;
-                    // C6 (tear-off): a release while the detach FSM is
-                    // OUTSIDE the window tears the dragged tab off into a
-                    // new in-process window at the drop point (Windows
-                    // Terminal parity). The dragged tab is the ACTIVE tab —
-                    // the cycle-249 reorder keeps it active while the FSM's
-                    // armed index can go stale across reorders.
+                    // C6 (tear-off), WAYLAND ONLY since v2.19.0: a release
+                    // while the detach FSM is OUTSIDE the window tears the
+                    // dragged tab off into a new window. Everywhere else
+                    // the tear fired the moment the cursor crossed the band
+                    // threshold (`maybe_tear_off`), so the FSM is already
+                    // Idle by release — and a release while still inside
+                    // the hysteresis slop deliberately does NOT tear
+                    // (Chromium's within-slop = click/reorder semantics).
+                    // Wayland can't position windows client-side nor hand
+                    // off a drag to a surface that never saw the press, so
+                    // the v2.18.0 at-release behavior remains its path.
                     let dropped_outside = matches!(
                         ws.detach_drag,
                         crate::detach::DragState::DraggingOutside { .. }
                     );
                     ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
                     ws.drag_press = None;
-                    if dropped_outside && ws.mux.tabs.len() > 1 {
+                    let wayland = ws.window.as_deref().is_some_and(window_is_wayland);
+                    if dropped_outside && wayland && ws.mux.tabs.len() > 1 {
                         let closing_idx = ws.mux.active;
                         if let Some(dt) = ws.mux.detach_tab(closing_idx) {
-                            // Open at the drop point: window origin + cursor.
                             // `outer_position` errs on Wayland — `None` lets
-                            // the WM place the window.
+                            // the compositor place the window.
                             let pos = ws
                                 .window
                                 .as_ref()
@@ -11196,8 +12105,9 @@ impl App {
                                         p.y + ws.cursor.y as i32,
                                     )
                                 });
-                            match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos) {
-                                Ok(()) => {
+                            match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, None)
+                            {
+                                Ok(torn_seq) => {
                                     self.fire_tab_close_event(closing_idx);
                                     // C8: agents see the tear-off too.
                                     self.ctl_broadcast(
@@ -11205,7 +12115,7 @@ impl App {
                                         None,
                                         serde_json::json!({
                                             "from_window": ws.seq,
-                                            "to_window": self.focused_seq,
+                                            "to_window": torn_seq,
                                             "tab": closing_idx,
                                         }),
                                     );
@@ -11409,6 +12319,12 @@ impl App {
                     // (the release will land on whatever window took focus).
                     ws.detach_drag = crate::detach::DragState::default();
                     ws.drag_press = None;
+                    // v2.19.0 note: torn-drag tracking deliberately survives
+                    // this disarm — the tear itself moves OS focus to the
+                    // torn window (firing Focused(false) on the source), and
+                    // manual-follow rides the source's mouse CAPTURE, which
+                    // outlives focus. Stale tracking is cleaned by the
+                    // press/release handlers + the about_to_wait failsafe.
                 }
                 // Cycle 344 (Terminator parity, terminatorlib/config.py:77
                 // `hide_on_lose_focus`): Quake-style auto-hide. When
@@ -11457,6 +12373,23 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
+                }
+                // v2.19.0 (tear-off UX): typing in the torn window right
+                // after an X11 drop whose release the WM swallowed — commit
+                // the latched dock first (same shape as the CursorMoved
+                // post-drop heuristic; on Windows the synthesized release
+                // already cleared the tracking before any key can arrive).
+                if let Some(td) = self.torn_drag.as_ref()
+                    && td.seq == ws.seq
+                    && td.native
+                    && td.saw_move
+                {
+                    self.finalize_torn_drag(ws, true);
+                    // A committed merge empties this window — it is closing;
+                    // don't process the key against an empty mux.
+                    if self.pending_window_close {
+                        return;
+                    }
                 }
                 // Cycle 876: record the keystroke (redacted token) BEFORE any
                 // modal/early-return path consumes it, so the trace captures
@@ -13415,6 +14348,105 @@ mod tests {
         // Empty bar or zero strip → 0 (defensive no-op).
         assert_eq!(tab_drag_target_index(50.0, 0, 300.0), 0);
         assert_eq!(tab_drag_target_index(50.0, 3, 0.0), 0);
+    }
+
+    /// v2.19.0 (tear-off UX): the tear decision is uniform hysteresis in
+    /// every direction away from the tab band, for every `tab-bar-pos`.
+    #[test]
+    fn tear_threshold_crossed_per_orientation() {
+        use super::{dist_to_rect, tear_threshold_crossed};
+        // Top band (0,0,800,24), threshold 36 (= 1.5 × 24).
+        let top = (0.0, 0.0, 800.0, 24.0);
+        // Inside the band, anywhere along the strip: reorder, never tear.
+        assert!(!tear_threshold_crossed(5.0, 12.0, top, 36.0));
+        assert!(!tear_threshold_crossed(790.0, 12.0, top, 36.0));
+        // Below the band but within the slop: still no tear.
+        assert!(!tear_threshold_crossed(400.0, 59.0, top, 36.0));
+        // Past the slop downward (into the terminal content): tear.
+        assert!(tear_threshold_crossed(400.0, 60.0, top, 36.0));
+        // Above the window (band edge == window edge): same hysteresis.
+        assert!(!tear_threshold_crossed(400.0, -35.0, top, 36.0));
+        assert!(tear_threshold_crossed(400.0, -36.0, top, 36.0));
+        // Past the strip's right end horizontally: distance is measured
+        // from the band edge, so the slop applies there too.
+        assert!(!tear_threshold_crossed(820.0, 12.0, top, 36.0));
+        assert!(tear_threshold_crossed(836.0, 12.0, top, 36.0));
+        // Diagonal: Euclidean, not Manhattan — 30² + 30² > 36².
+        assert!(tear_threshold_crossed(830.0, 54.0, top, 36.0));
+        // Bottom band on a 600-tall surface.
+        let bottom = (0.0, 576.0, 800.0, 24.0);
+        assert!(!tear_threshold_crossed(400.0, 580.0, bottom, 36.0));
+        assert!(tear_threshold_crossed(400.0, 540.0, bottom, 36.0));
+        // Left vertical band (width = tab_bar_width 200): tearing happens
+        // rightward past the slop.
+        let left = (0.0, 0.0, 200.0, 600.0);
+        assert!(!tear_threshold_crossed(100.0, 300.0, left, 36.0));
+        assert!(!tear_threshold_crossed(235.0, 300.0, left, 36.0));
+        assert!(tear_threshold_crossed(236.0, 300.0, left, 36.0));
+        // Right vertical band: leftward.
+        let right = (600.0, 0.0, 200.0, 600.0);
+        assert!(tear_threshold_crossed(560.0, 300.0, right, 36.0));
+        // A zero threshold can never tear (defensive: hidden bar).
+        assert!(!tear_threshold_crossed(400.0, 500.0, top, 0.0));
+        // dist_to_rect itself: inside = 0, outside = Euclidean.
+        assert_eq!(dist_to_rect(10.0, 10.0, top), 0.0);
+        assert_eq!(dist_to_rect(400.0, 124.0, top), 100.0);
+        assert_eq!(dist_to_rect(803.0, 28.0, top), 5.0); // 3-4-5 corner
+    }
+
+    /// v2.19.0 (re-dock): docking inserts BETWEEN segments — n tabs have
+    /// n+1 slots, decided by segment midpoints.
+    #[test]
+    fn dock_insertion_index_slots_between_segments() {
+        use super::dock_insertion_index;
+        // Three segments at mids 50 / 150 / 250.
+        let mids = [50.0, 150.0, 250.0];
+        assert_eq!(dock_insertion_index(&mids, 0.0), 0); // before first
+        assert_eq!(dock_insertion_index(&mids, 49.0), 0);
+        assert_eq!(dock_insertion_index(&mids, 51.0), 1); // past mid 0
+        assert_eq!(dock_insertion_index(&mids, 149.0), 1);
+        assert_eq!(dock_insertion_index(&mids, 200.0), 2);
+        assert_eq!(dock_insertion_index(&mids, 251.0), 3); // append
+        assert_eq!(dock_insertion_index(&mids, f32::MAX), 3);
+        // No segments (hidden-bar fallback handles this elsewhere): 0.
+        assert_eq!(dock_insertion_index(&[], 100.0), 0);
+    }
+
+    /// v2.19.0 drift guard: the tear-at-threshold call sites and the native
+    /// drag handoff stay wired the way the platform analysis verified them.
+    /// Source-level needles (the cycle-916 concat style) because the flow
+    /// spans winit's event dispatch and can't run headless.
+    #[test]
+    fn tear_off_flow_stays_wired() {
+        let src = include_str!("app.rs");
+        // 1. The CursorMoved FSM block tears at the threshold (Chromium
+        //    model), not at release.
+        assert!(
+            src.contains("if self.maybe_tear_off(ws, event_loop) {"),
+            "CursorMoved must drive the threshold tear"
+        );
+        // 2. The torn window inherits the source size and is positioned by
+        //    the grab offset (open_window's size override).
+        assert!(
+            src.contains("self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size))"),
+            "the tear must open the torn window at the source size"
+        );
+        // 3. The native handoff happens right after the insert.
+        assert!(
+            src.contains(".map(|w| match w.drag_window() {"),
+            "the torn window must be handed to the OS move loop"
+        );
+        // 4. The at-release tear is Wayland-only now.
+        assert!(
+            src.contains("if dropped_outside && wayland && ws.mux.tabs.len() > 1 {"),
+            "the Released-arm tear must be gated to Wayland"
+        );
+        // 5. The drop commits the latched dock from the left-release
+        //    (Windows' synthesized post-modal-loop release included).
+        assert!(
+            src.contains("self.finalize_torn_drag(ws, true);"),
+            "a left-release while tracked must commit the dock"
+        );
     }
 
     /// Cycle 821 drift guard: the drag strip and `tab_bar()`'s segment layout

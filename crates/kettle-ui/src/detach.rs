@@ -2,7 +2,7 @@
 //! machine. Lives in its own module so the App's mouse-handler stays small
 //! and the states are unit-testable as a pure FSM.
 //!
-//! Wired live by C6 of the multi-window cycle — the drop is an IN-PROCESS
+//! Wired live by C6 of the multi-window cycle — the tear is an IN-PROCESS
 //! `detach_tab → open_window(AdoptTab)` (live PTYs, nothing respawns), so
 //! the cross-process IPC machinery the original design sketched is gone:
 //!
@@ -13,14 +13,21 @@
 //!     │                            ├──MouseMove (large)──▶ DraggingInside
 //!     │                            └──MouseUp──▶ click (not drag) → Idle
 //!     │
-//!     │   DraggingInside { tab_idx, ghost_x, ghost_y }
+//!     │   DraggingInside { tab_idx }
 //!     │      │
 //!     │      ├──cursor leaves the window──▶  DraggingOutside
+//!     │      ├──cursor ≥ 1.5×bar_h from the tab band──▶ TEAR (v2.19.0:
+//!     │      │     the FSM is consumed mid-drag — `maybe_tear_off` opens
+//!     │      │     a live window under the cursor and hands the drag to
+//!     │      │     the OS via `drag_window()`; Chromium model)
 //!     │      └──MouseUp inside──▶  reorder within window → Idle
 //!     │
 //!     │   DraggingOutside { tab_idx }
 //!     │      ├──cursor re-enters──▶  DraggingInside
-//!     │      └──MouseUp──▶  tear off: open a new window at the drop point
+//!     │      ├──(non-Wayland) the band threshold already tore — release
+//!     │      │     here only happens within the hysteresis slop → Idle
+//!     │      └──MouseUp──▶  WAYLAND ONLY: tear off at the drop point
+//!     │                     (no client-side positioning mid-drag there)
 //!     │
 //!     └─────────── (Escape / focus loss → cancel) ─────────┘
 //! ```
@@ -44,11 +51,14 @@ pub enum DragState {
     /// (`DRAG_DISTANCE_THRESHOLD_PX`), matching GTK / OS drag thresholds.
     ArmedInside { tab_idx: usize },
     /// Mouse moved enough after ArmedInside to qualify as a drag. The
-    /// cursor is still inside this kettle window.
+    /// cursor is still inside this kettle window. v2.19.0: crossing the
+    /// band threshold from EITHER dragging state tears immediately
+    /// (`maybe_tear_off` consumes the FSM mid-drag).
     DraggingInside { tab_idx: usize },
-    /// Cursor left this kettle window during a drag. A mouse-up here is
-    /// the tear-off: the dragged tab moves live into a new window at the
-    /// drop point (C6 of the multi-window cycle).
+    /// Cursor left this kettle window during a drag. On Wayland a
+    /// mouse-up here is the tear-off (the at-release fallback); on every
+    /// other platform the band threshold already tore before this could
+    /// matter beyond the hysteresis slop.
     DraggingOutside { tab_idx: usize },
 }
 
@@ -197,8 +207,10 @@ mod tests {
     fn end_to_end_drag_walkthrough() {
         // Pure-FSM e2e drift guard: the full C6 tear-off gesture flow.
         // Idle → ArmedInside → DraggingInside → DraggingOutside, then a
-        // cancel restores; a mouse-up while outside is the tear-off (the
-        // caller detaches the tab — see the Released arm in app.rs).
+        // cancel restores. v2.19.0: the caller tears at the band
+        // THRESHOLD mid-drag (`maybe_tear_off` resets the FSM to Idle);
+        // a mouse-up while outside is the Wayland-only at-release tear
+        // (see the Released arm in app.rs).
         let s = DragState::on_mouse_down_on_tab(2);
         assert!(matches!(s, DragState::ArmedInside { .. }));
         let s = s.on_mouse_move(1.0, 1.0);

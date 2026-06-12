@@ -408,6 +408,13 @@ pub struct TabBar {
     /// moved while the underlying segments snap into place via
     /// `Mux::move_active_tab`. `None` while no drag is active.
     pub drag_cursor_x: Option<f32>,
+    /// v2.19.0 (tear-off UX, re-dock): `Some(rect)` while a torn-off
+    /// window hovers this window's tab band — the accent-colored
+    /// insertion marker showing where the dropped tab will land. The
+    /// UI computes the rect (a 2-px line between segments, oriented
+    /// per `tab-bar-pos`) so the renderer stays geometry-free, same
+    /// contract as `hovered_close_idx`.
+    pub insert_marker: Option<Rect4>,
 }
 
 impl TabBar {
@@ -421,6 +428,7 @@ impl TabBar {
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
+            insert_marker: None,
         }
     }
 }
@@ -1537,6 +1545,16 @@ impl Renderer {
                     self.ui_accent(cfg, theme)
                 };
                 over.push(rect(ghost_x, by, 2.0, seg_h, accent, 1.0));
+            }
+            // v2.19.0 (tear-off UX, re-dock): the insertion marker — an
+            // accent line between segments showing where a torn-off
+            // window's tab will dock. Pushed to `over` so it sits above
+            // segment backgrounds AND text (a 2-px line under text would
+            // vanish behind a long title). Rect comes oriented from the
+            // UI (vertical line for horizontal bars, horizontal line for
+            // vertical bars).
+            if let Some((ix, iy, iw, ih)) = tabbar.insert_marker {
+                over.push(rect(ix, iy, iw, ih, self.ui_accent(cfg, theme), 1.0));
             }
         }
 

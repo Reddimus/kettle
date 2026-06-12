@@ -4,6 +4,76 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.19.0] — 2026-06-12
+
+  **Chromium-grade live tab tear-off + re-docking.** v2.18.0's tear-off
+  created the window only at release, at a default size, with nothing
+  visible mid-drag. v2.19.0 replaces that UX with the model Chrome uses —
+  which Windows Terminal itself has not shipped (WT shows a ghost tab
+  header and creates the window at drop; the live-window drag is its
+  open wish, blocked on WinUI 3):
+
+  - **Tear at the strip, not at release** — drag a tab ~1.5 bar-heights
+    past the tab band (pure-distance hysteresis, uniform in every
+    direction: dragging along the strip still reorders) and the tab
+    tears off **instantly into a live window**. It inherits the source
+    window's size (60% approximation from a maximized/fullscreen
+    source), appears positioned so the pointer keeps holding the tab,
+    and is immediately handed to the **OS-native move loop**
+    (`drag_window()`: ReleaseCapture + `WM_NCLBUTTONDOWN`/`HTCAPTION` on
+    Windows — the exact Chromium handoff — `_NET_WM_MOVERESIZE` on X11,
+    `performWindowDragWithEvent` on macOS). **Snap Layouts / FancyZones
+    / aero-snap work mid-drag** (verified live: drag-to-top maximizes);
+    terminal output keeps streaming while the window rides the pointer.
+    A manual-follow fallback covers platforms where the handoff is
+    rejected. The torn window is re-anchored from the live cursor right
+    before the handoff — the pointer slides during the ~100ms window
+    creation, and the modal loop anchors at the current position
+    (measured ~97px of drift without this).
+  - **Re-docking** — drop a torn window onto any kettle window's tab
+    band to merge it there. While hovering a band: the dragged window
+    turns **translucent** (Windows, `WS_EX_LAYERED` alpha — verified
+    against the wgpu flip-model swapchain) so the target strip stays
+    readable beneath it, a **2px accent insertion line** marks the
+    landing slot, and a hidden single-tab `tab-bar = auto` strip
+    **materializes** so the target is visible before the drop. The merge
+    attaches at the marked slot (insertion between segments, n+1 slots),
+    focuses the docked tab, and closes the emptied window through the
+    existing close funnel. Dock targets are resolved against the real
+    z-order on Windows (cloaked-window aware), so a covered band can't
+    false-match.
+  - **Lone-tab windows drag whole** — grabbing the tab of a single-tab
+    window drags the entire window (Chromium semantics; tearing would
+    just re-create the same window), with full dock tracking attached:
+    this is how a previously torn-off window merges back.
+  - **Drop detection without polling** — winit synthesizes the
+    left-release when the Windows modal move loop exits
+    (`WM_EXITSIZEMOVE` → `WM_LBUTTONUP`, verified in the vendored
+    0.30.13 source); X11/macOS commit on the first client pointer event
+    after the WM's pointer grab ends (clients receive none during the
+    move). A 30s failsafe abandons tracking whose drop signal was lost.
+  - **Wayland** keeps the v2.18.0 tear-at-release path (compositors
+    forbid client-side positioning and validate move serials against
+    the press; `xdg_toplevel_drag_v1`, the real protocol for this, is
+    not exposed by winit 0.30 — tracked follow-up). `Esc` before the
+    tear still cancels everywhere; a within-slop release never tears.
+  - Agent surface: tear-off and re-dock both emit the existing
+    `tab_moved` event (`from_window`/`to_window`/`tab`).
+  - Internals: `open_window` returns the new window's seq and takes an
+    inner-size override; `WindowEvent::Moved` drives the dock hit-test
+    (flows during the modal loop via `WM_WINDOWPOSCHANGED`); `TabBar`
+    gains `insert_marker`; per-window `dock_preview` materializes auto
+    bars; no new `event_loop.exit()` sites (allowlist unchanged at 6).
+
+  Verified live on Windows 11 with scripted SendInput drags: tear →
+  instant window at source size under the cursor → rides the OS loop →
+  aero-snap mid-drag → re-dock onto a sibling strip at the marked slot
+  with `ping -t` streaming uninterrupted through tear AND merge; the
+  insertion marker pixel-verified (`#cba6f7` accent line at the slot
+  boundary); Esc-cancel and within-slop releases leave the tabs intact.
+  macOS `performWindowDragWithEvent` is API-correct per the Chrome
+  precedent but needs real-hardware confirmation for drag feel.
+
 ## [2.18.0] — 2026-06-11
 
   **In-process multi-window + live tab tear-off (Windows Terminal parity).**

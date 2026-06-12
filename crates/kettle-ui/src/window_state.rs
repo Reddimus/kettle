@@ -129,6 +129,14 @@ pub(crate) struct WindowState {
     /// `detach_drag` — the origin the FSM's click-vs-drag distance is
     /// measured from. `None` while no tear-off gesture is armed.
     pub(crate) drag_press: Option<(f32, f32)>,
+    /// v2.19.0 (tear-off UX, re-dock): `Some(insertion index)` while a
+    /// torn-off window is hovering this window's tab band. Draws the
+    /// accent insertion marker, and — key affordance — MATERIALIZES the
+    /// tab bar on a single-tab `tab-bar = auto` window (`tab_bar_h`
+    /// treats a live dock preview as "show the bar") so the drop target
+    /// is visible before the drop. Cleared when the hover leaves or the
+    /// drag ends.
+    pub(crate) dock_preview: Option<usize>,
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
@@ -221,6 +229,7 @@ impl WindowState {
             tab_drag_active: false,
             detach_drag: crate::detach::DragState::default(),
             drag_press: None,
+            dock_preview: None,
             hovered_close_idx: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
