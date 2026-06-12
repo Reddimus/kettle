@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.18.0"
+version = "2.19.0"
 # Cycle 213: edition was "2021" but every crate's Cargo.toml declared
 # "2024" individually. Bumped here to match reality and let crates
 # inherit via `edition.workspace = true`.

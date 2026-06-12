@@ -65,14 +65,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     gains `insert_marker`; per-window `dock_preview` materializes auto
     bars; no new `event_loop.exit()` sites (allowlist unchanged at 6).
 
+  **Hardened by a 35-agent adversarial review** (6 dimensions × verify;
+  29 raw → 27 confirmed → 12 distinct fixes, 1 high):
+
+  - **Esc-cancel of the OS move loop no longer commits the merge** (the
+    HIGH): winit synthesizes the same left-release for a cancelled and a
+    completed modal loop, and the latch survives the snap-back — the
+    drop now checks the PHYSICAL primary-button state
+    (`GetAsyncKeyState`, swapped-button aware): still held = Esc-cancel
+    = abandon. X11/macOS commits additionally REVALIDATE the latch
+    against the torn window's final resting position (a WM-cancelled
+    move snapped it off the band). Verified live: Esc while latched
+    snaps back with no merge; real drops still commit.
+  - Manual-follow is **carrier-gated** (only the capture holder's cursor
+    stream drives it — stale tracking can no longer hijack every
+    window's mouse-motion features), other-button presses mid-drag are
+    swallowed instead of killing the gesture, and a torn/carrier window
+    dying mid-drag abandons its tracking eagerly (no leaked insertion
+    marker / permanently materialized auto bar; every finalize early
+    return now clears the latched preview too).
+  - **Native→manual demotion**: a WM that accepts `drag_window()` but
+    never actually moves the window (no `Moved` within 400ms while the
+    capture holder still streams motion) demotes to manual-follow
+    instead of leaving the torn window frozen mid-air; a 300ms
+    post-handoff blackout absorbs stray pointer events racing the WM
+    grab; the stale-tracking failsafe widened to 120s (a motionless X11
+    hover is indistinguishable from staleness — patience is cheaper
+    than aborting a live drag).
+  - **Grab math corrected per `tab-bar-pos`**: the pointer now holds the
+    torn window at its strip — inside the client (caption delta
+    measured from the source), at the bottom/right edge for
+    Bottom/Right bars (it used to hang the window off the wrong side of
+    the pointer) — and macOS routes the torn-window handoff through
+    manual-follow (`performWindowDragWithEvent` would consume a
+    foreign window's NSEvent; the lone-tab whole-window drag keeps the
+    native path since it owns the event).
+  - Dock-preview **materialization is render-only** (no more PTY
+    SIGWINCH spam when hovering across a single-tab auto window's band
+    edge; the one real resize happens at the actual merge), the
+    hidden-bar insertion slot now uses the geometry the bar will have
+    once materialized (the marker can't flip slots as the bar appears),
+    the x-only drag-reorder is gated off vertical bars (it shuffled
+    tabs bogusly from cursor.x), and both merge-close paths save the
+    session like every other window-close path.
+
   Verified live on Windows 11 with scripted SendInput drags: tear →
   instant window at source size under the cursor → rides the OS loop →
   aero-snap mid-drag → re-dock onto a sibling strip at the marked slot
   with `ping -t` streaming uninterrupted through tear AND merge; the
   insertion marker pixel-verified (`#cba6f7` accent line at the slot
-  boundary); Esc-cancel and within-slop releases leave the tabs intact.
-  macOS `performWindowDragWithEvent` is API-correct per the Chrome
-  precedent but needs real-hardware confirmation for drag feel.
+  boundary); Esc before the tear, Esc while latched, and within-slop
+  releases all leave the tabs intact. The X11 threshold tear verified
+  live under WSLg/XWayland (2 windows mid-drag, live PTY move); Wayland
+  keeps the at-release path (WSLg's Wayland EGL is broken in the test
+  env — failure precedes any v2.19.0 code). macOS uses the verified
+  manual-follow path; the native handoff is a tracked follow-up
+  pending real hardware.
 
 ## [2.18.0] — 2026-06-11
 
