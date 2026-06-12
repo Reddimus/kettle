@@ -39,4 +39,4 @@ workspace = true
 # Default features turn on a lot of unused refreshers (disk, net,
 # components). We only need process enumeration; opt-out + opt-in
 # the bare minimum.
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
