@@ -35,7 +35,7 @@ serde_json = { version = "1", optional = true }
 # Dropdown-parity cycle: Git-for-Windows discovery via the registry
 # (HKLM/HKCU `SOFTWARE\GitForWindows\InstallPath`). Zero new lockfile
 # entries — winreg 0.10 is already in the graph as portable-pty's own dep.
-winreg = "0.10"
+winreg = "0.56"
 
 [dev-dependencies]
 # Cycle 911: parse asciicast v2 (.cast) traces in the e2e replay test — the
