@@ -164,6 +164,12 @@ pub(crate) struct WindowState {
     /// bypass this (they call `request_redraw` directly).
     pub(crate) last_paint: Option<std::time::Instant>,
     pub(crate) coalescing_paint: bool,
+    /// v2.21.1 (throughput): consecutive output-coalesced frames — i.e. how
+    /// sustained the current PTY-output flood is. `effective_output_budget`
+    /// stretches the paint budget (60→30→20 fps) as this climbs, so fewer
+    /// per-frame snapshots are taken under the `Term` lock the PTY reader needs;
+    /// reset to 0 by any non-coalesced paint (`redraw`).
+    pub(crate) flood_paints: u32,
     pub(crate) last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     pub(crate) last_title: String,
@@ -267,6 +273,7 @@ impl WindowState {
             last_bell: None,
             last_paint: None,
             coalescing_paint: false,
+            flood_paints: 0,
             last_click: None,
             last_title: String::new(),
             pending_pane_restarts: Vec::new(),

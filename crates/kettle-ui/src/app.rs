@@ -853,6 +853,29 @@ fn should_defer_output_paint(
     }
 }
 
+/// v2.21.1 (throughput): the output-paint budget GROWS under a sustained flood.
+/// Each output-driven frame that had to be coalesced — i.e. output arriving
+/// faster than the base 60 fps budget — bumps the window's `flood_paints`
+/// counter; once a flood is sustained kettle paints less often (30 fps, then
+/// 20 fps). On-screen content during a flood is unreadable scrolling anyway,
+/// and every frame NOT painted is one fewer O(cells) `PaneSnapshot::capture`
+/// taken under the pane's `Term` mutex — the SAME mutex the PTY reader thread
+/// must hold to run `Processor::advance`. At 60 fps the main thread grabs that
+/// lock ~60×/s under flood, throttling the parser on a CPU-contended box;
+/// stretching the budget hands the lock (and the cores) back to the reader, so
+/// flood throughput rises. A brief burst (< 4 coalesced frames ≈ 64 ms) never
+/// throttles, so keystroke echo and short bursts stay at full 60 fps, and the
+/// counter resets the instant output drops below the budget (see `redraw`), so
+/// the settled post-flood frame paints within one budget. Pure; drift-tested in
+/// `effective_output_budget_grows_under_sustained_flood`.
+fn effective_output_budget(flood_paints: u32) -> std::time::Duration {
+    match flood_paints {
+        0..=3 => OUTPUT_FRAME_BUDGET, // 16 ms / 60 fps — responsive default
+        4..=15 => std::time::Duration::from_millis(33), // ~30 fps
+        _ => std::time::Duration::from_millis(50),      // ~20 fps — sustained flood
+    }
+}
+
 /// PERF (key-repeat stutter fix): output that lands within this window of a
 /// keystroke is ECHO — it paints immediately, skipping the coalescer. Long
 /// enough to bridge OS key-repeat intervals (~33ms at default rates) plus
@@ -4699,6 +4722,11 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // v2.21.1 (throughput): is THIS paint flushing coalesced PTY output?
+        // Captured before the clear below so the flood detector can count
+        // consecutive output-coalesced frames and stretch the paint budget
+        // under a sustained flood (see `effective_output_budget`).
+        let was_coalescing_paint = ws.coalescing_paint;
         // B (Peacock): resolve/refresh this window's accent claim (cheap in
         // the steady state; full pool walk only on first frame/theme switch).
         self.sync_window_accent(ws);
@@ -4969,6 +4997,17 @@ impl App {
         // output paint now that this settled frame is on the surface.
         ws.last_paint = Some(std::time::Instant::now());
         ws.coalescing_paint = false;
+        // v2.21.1 (throughput): track sustained-flood depth. A frame that
+        // flushed coalesced output (output faster than the budget) bumps the
+        // counter; any other paint (idle/blink/input echo, or output slower
+        // than the budget) resets it — so a brief burst never throttles and the
+        // settled post-flood frame drops back to 60 fps. Drives
+        // `effective_output_budget`.
+        ws.flood_paints = if was_coalescing_paint {
+            ws.flood_paints.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     /// Cycle 296: compose the status-bar contents (HH:MM:SS · theme ·
@@ -12074,7 +12113,11 @@ impl App {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
-                } else if should_defer_output_paint(now, ws.last_paint, OUTPUT_FRAME_BUDGET) {
+                } else if should_defer_output_paint(
+                    now,
+                    ws.last_paint,
+                    effective_output_budget(ws.flood_paints),
+                ) {
                     ws.coalescing_paint = true;
                 } else if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -13706,10 +13749,11 @@ impl App {
         // Cycle 910 (R2): a deferred (coalesced) output paint becomes due
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
+        let output_budget = effective_output_budget(ws.flood_paints);
         let coalesce_due = ws.coalescing_paint
             && ws
                 .last_paint
-                .map(|t| now.saturating_duration_since(t) >= OUTPUT_FRAME_BUDGET)
+                .map(|t| now.saturating_duration_since(t) >= output_budget)
                 .unwrap_or(true);
         if bell_active
             || blink_due
@@ -13740,7 +13784,7 @@ impl App {
         if ws.coalescing_paint {
             let remaining = ws
                 .last_paint
-                .map(|t| OUTPUT_FRAME_BUDGET.saturating_sub(now.saturating_duration_since(t)))
+                .map(|t| output_budget.saturating_sub(now.saturating_duration_since(t)))
                 .unwrap_or_default();
             let ms = (remaining.as_millis() as u64).max(1);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
@@ -15208,6 +15252,33 @@ mod tests {
             Some(now),
             OUTPUT_FRAME_BUDGET
         ));
+    }
+
+    /// v2.21.1 (throughput): the output-paint budget must GROW under a sustained
+    /// flood so fewer per-frame snapshots are taken under the `Term` lock the
+    /// PTY reader needs — but a brief burst must stay at the responsive 60 fps
+    /// budget so keystroke echo and short bursts don't get throttled.
+    #[test]
+    fn effective_output_budget_grows_under_sustained_flood() {
+        use super::{OUTPUT_FRAME_BUDGET, effective_output_budget};
+        use std::time::Duration;
+        // A brief burst stays at the responsive 60 fps budget.
+        assert_eq!(effective_output_budget(0), OUTPUT_FRAME_BUDGET);
+        assert_eq!(effective_output_budget(3), OUTPUT_FRAME_BUDGET);
+        // A sustained flood steps down to ~30 fps, then ~20 fps.
+        assert_eq!(effective_output_budget(4), Duration::from_millis(33));
+        assert_eq!(effective_output_budget(15), Duration::from_millis(33));
+        assert_eq!(effective_output_budget(16), Duration::from_millis(50));
+        assert_eq!(effective_output_budget(10_000), Duration::from_millis(50));
+        // Monotonic non-decreasing: deeper flood never paints MORE often.
+        let mut prev = Duration::ZERO;
+        for n in 0..40u32 {
+            let b = effective_output_budget(n);
+            assert!(b >= prev, "budget must not shrink as flood deepens");
+            prev = b;
+        }
+        // The throttle is bounded (never starves the settled frame indefinitely).
+        assert!(effective_output_budget(u32::MAX) <= Duration::from_millis(50));
     }
 
     /// Cycle 912 (audit): the `about_to_wait` coalescer must FLUSH a due deferred

@@ -13,19 +13,34 @@ bottleneck being measured, not a pipe).
 
 ### Throughput (parse + render under flood)
 
-| payload | kettle v2.19.0 | **kettle v2.20.0** | Windows Terminal | Alacritty 0.17 | WezTerm |
-|---|---:|---:|---:|---:|---:|
-| ascii (16 MB) | 0.55 MB/s | **1.90 MB/s** | 4.33 | 3.59 | 2.56 |
-| sgr-heavy (6.1 MB) | 0.42 MB/s | **1.63 MB/s** | 4.12 | 3.06 | 2.67 |
-| unicode/CJK (4.3 MB) | 0.80 MB/s | **3.48 MB/s** | 9.04 | 5.79 | 5.03 |
-| post-flood working set (terminal+conhost+shell) | 241.5 MB | 485.7 MB | 2977.7 MB | 396.6 MB | 411.4 MB |
+| payload | v2.19.0 | v2.20.0 | **kettle v2.21.1** | Windows Terminal | Alacritty 0.17 | WezTerm |
+|---|---:|---:|---:|---:|---:|---:|
+| ascii (16 MB) | 0.55 | 1.90 | **4.57 MB/s** | 4.33 | 3.59 | 2.56 |
+| sgr-heavy (6.1 MB) | 0.42 | 1.63 | **3.70 MB/s** | 4.12 | 3.06 | 2.67 |
+| unicode/CJK (4.3 MB) | 0.80 | 3.48 | **7.00 MB/s** | 9.04 | 5.79 | 5.03 |
+| post-flood working set (terminal+conhost+shell) | 241.5 MB | 485.7 MB | 638.1 MB | 2977.7 MB | 396.6 MB | 411.4 MB |
 
-**3.5–4.4× faster than v2.19.0** across every payload. Honest position:
-still behind Windows Terminal (2.3–2.6×, ~2.5× typical) and Alacritty
-(1.7–1.9×), closest to WezTerm (1.3–1.6× behind on all three payloads —
-see the follow-ups below). The post-flood working set grew with the speedup (more distinct
-frames actually render now, growing the glyph atlas) but stays ~6× leaner
-than Windows Terminal under the same flood.
+**v2.21.1 is 2.0–2.4× faster than v2.20.0** and flips kettle from *last* of these
+four to **#1 on ascii (4.57 > WT 4.33 > Alacritty 3.59 > WezTerm 2.56)** and **#2
+on sgr/unicode** — beating Alacritty and WezTerm on all three payloads, behind
+only Windows Terminal (and only on sgr/unicode; WT runs in a shared
+`windowingBehavior = useExisting` process, so its "terminal" is a different
+measurement class). The win came from the v2.21.1 **adaptive output-paint
+budget**: under a sustained flood kettle painted at 60 fps, grabbing each pane's
+`Term` mutex ~60×/s for an O(cells) snapshot — the same lock the PTY reader needs
+to parse — so on a CPU-contended box the parser was starved. Stretching the paint
+budget to 30→20 fps during a flood (content is unreadable scrolling anyway; a
+brief burst and all keystroke echo stay at 60 fps) hands the lock and cores back
+to the reader. The post-flood working set rose (faster consumption accumulates
+scrollback sooner — the byte-budget-scrollback + atlas-bound follow-ups below
+address it); it still stays ~4.7× leaner than Windows Terminal under the same
+flood.
+
+Earlier honest position (now superseded by v2.21.1): at v2.20.0 kettle was last
+of the four, ~1.3–2.5× behind, with row-damage tracking listed as the lever.
+Adaptive flood-throttling captured most of that gap without the full row-damage
+rewrite, which remains the tracked lever for closing the residual WT sgr/unicode
+gap and for steady (non-flood) render cost.
 
 What the overhaul changed (each lands with a regression guard):
 

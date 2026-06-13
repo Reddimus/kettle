@@ -4,6 +4,38 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.21.1] — 2026-06-13
+
+  **Flood throughput 2.0–2.4× — kettle now beats Alacritty and WezTerm on all
+  three payloads (and Windows Terminal on ascii).** Measured on the reference
+  Surface Book 3 (Intel Iris Plus, Win11), release build, medians of 5, same
+  harness as the table below.
+
+  - **Adaptive output-paint budget under sustained flood.** Under a flood,
+    kettle's main thread was grabbing each pane's `Term` mutex ~60×/s to take an
+    O(cells) `PaneSnapshot` — the *same* mutex the PTY reader thread needs to run
+    `Processor::advance` — so the parser was starved on a CPU-contended machine.
+    The output-paint budget now grows (60 → 30 → 20 fps) the longer a flood is
+    sustained (`effective_output_budget`), handing the lock and the cores back to
+    the reader. On-screen flood content is unreadable scrolling anyway; a brief
+    burst (< ~4 coalesced frames) never throttles, keystroke echo still paints
+    immediately at 60 fps, and the counter resets the instant output drops below
+    the budget so the settled post-flood frame paints within one budget. Every
+    fast terminal coalesces paints under flood — kettle was simply
+    under-throttling.
+
+  | payload | v2.21.0 | **v2.21.1** | Windows Terminal | Alacritty 0.17 | WezTerm |
+  |---|---:|---:|---:|---:|---:|
+  | ascii | 1.90 | **4.57 MB/s** | 4.33 | 3.59 | 2.56 |
+  | sgr-heavy | 1.63 | **3.70 MB/s** | 4.12 | 3.06 | 2.67 |
+  | unicode/CJK | 3.48 | **7.00 MB/s** | 9.04 | 5.79 | 5.03 |
+
+  kettle is now **#1 on ascii** and **#2 on sgr/unicode** (behind only Windows
+  Terminal, which runs in a shared `windowingBehavior = useExisting` process).
+  Startup (~999 ms), idle CPU (~3.8%) and the rendered output are unchanged —
+  the throttle only affects how often a *flood* repaints. Post-flood working set
+  is a watch-item (faster consumption accumulates scrollback sooner).
+
 ## [2.21.0] — 2026-06-13
 
   **Startup 2.2× faster, damage-aware idle rendering, perf gate, dependency
