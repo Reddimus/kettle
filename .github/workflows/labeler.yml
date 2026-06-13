@@ -45,7 +45,7 @@ jobs:
       # no setup-node / etc. needed. Pinned to v5 (current latest as
       # of v1.3.6) so a future v6 breaking change doesn't silently
       # flip label assignment.
-      - uses: actions/labeler@v5
+      - uses: actions/labeler@v6
         with:
           configuration-path: .github/labeler.yml
           # Don't sync-labels — keep manually-applied labels (e.g.,
