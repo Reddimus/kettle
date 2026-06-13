@@ -441,6 +441,9 @@ impl TabBar {
 
 /// One tiled pane to draw this frame.
 pub struct PaneView<'a> {
+    /// Process-global pane id. Used to keep renderer caches attached to the
+    /// same terminal pane across split reorders and tab/window moves.
+    pub id: u64,
     /// Pixel rect `(x, y, w, h)` within the surface.
     pub rect: (f32, f32, f32, f32),
     /// v2.20.0 P2 (perf): RAW terminal state captured under the Term lock by
@@ -503,6 +506,12 @@ pub struct Renderer {
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
+    /// Bundled Regular is loaded eagerly; styled faces are loaded on first
+    /// bold/italic terminal content so first-window startup pays for one face,
+    /// not the full family.
+    bundled_style_faces_loaded: bool,
+    /// Pane id currently occupying each per-pane buffer/cache slot.
+    pane_buffer_ids: Vec<Option<u64>>,
     pane_buffers: Vec<TextBuffer>,
     /// Cycle 827 (audit): pooled scratch for `build_pane`'s per-cell style runs,
     /// reused across frames. Both the Vec backing store AND each run's `String`
@@ -819,9 +828,9 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let mut font_system = FontSystem::new();
-        for face in kettle_config::font::all() {
-            font_system.db_mut().load_font_data(face.to_vec());
-        }
+        font_system
+            .db_mut()
+            .load_font_data(kettle_config::font::REGULAR.to_vec());
 
         let swash = SwashCache::new();
         let cache = Cache::new(&device);
@@ -876,6 +885,8 @@ impl Renderer {
             atlas,
             viewport,
             text_renderer,
+            bundled_style_faces_loaded: false,
+            pane_buffer_ids: Vec::new(),
             pane_buffers: Vec::new(),
             span_scratch: Vec::new(),
             quad_scratch: Vec::new(),
@@ -1083,6 +1094,23 @@ impl Renderer {
         self.remeasure_cell();
     }
 
+    fn ensure_bundled_style_faces(&mut self) {
+        if self.bundled_style_faces_loaded {
+            return;
+        }
+        for face in [
+            kettle_config::font::BOLD,
+            kettle_config::font::ITALIC,
+            kettle_config::font::BOLD_ITALIC,
+        ] {
+            self.font_system.db_mut().load_font_data(face.to_vec());
+        }
+        self.bundled_style_faces_loaded = true;
+        self.pane_style_keys.fill(0);
+        self.pane_line_keys.iter_mut().for_each(Vec::clear);
+        self.chrome_style_key = 0;
+    }
+
     /// Render a full frame of tiled panes plus the tab bar and search overlay.
     pub fn render_frame(
         &mut self,
@@ -1179,6 +1207,30 @@ impl Renderer {
         while self.pane_titlebar_texts.len() < panes.len() {
             self.pane_titlebar_texts.push(String::new());
         }
+        while self.pane_buffer_ids.len() < panes.len() {
+            self.pane_buffer_ids.push(None);
+        }
+        for (i, pane) in panes.iter().enumerate() {
+            let pane_id = pane.id;
+            if self.pane_buffer_ids[i] == Some(pane_id) {
+                continue;
+            }
+            if let Some(j) = (i + 1..self.pane_buffer_ids.len())
+                .find(|&j| self.pane_buffer_ids[j] == Some(pane_id))
+            {
+                self.pane_buffer_ids.swap(i, j);
+                self.pane_buffers.swap(i, j);
+                self.pane_line_keys.swap(i, j);
+                self.pane_style_keys.swap(i, j);
+                self.pane_titlebar_buffers.swap(i, j);
+                self.pane_titlebar_texts.swap(i, j);
+            } else {
+                self.pane_buffer_ids[i] = Some(pane_id);
+                self.pane_line_keys[i].clear();
+                self.pane_style_keys[i] = 0;
+                self.pane_titlebar_texts[i].clear();
+            }
+        }
         // Cycle 749: release buffers for panes that have closed. The grow
         // loops above only ever extend, so without this the two vecs sat at
         // the session's high-water pane count — a 6-way split that you close
@@ -1186,6 +1238,7 @@ impl Renderer {
         // runs) allocated for the rest of the session. Truncation is safe:
         // every later loop indexes by enumerate position `< panes.len()`.
         self.pane_buffers.truncate(panes.len());
+        self.pane_buffer_ids.truncate(panes.len());
         self.pane_line_keys.truncate(panes.len());
         self.pane_style_keys.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
@@ -3238,6 +3291,7 @@ impl Renderer {
         span_line_breaks.clear();
         let mut n = 0usize;
         let mut cur_row = 0i32;
+        let mut saw_styled_text = false;
         // The style of the run currently being appended to (`spans[n - 1]`), or
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
@@ -3325,6 +3379,7 @@ impl Renderer {
             // Useful on fonts without a bold companion.
             let bold = cfg.allow_bold && flags.contains(Flags::BOLD);
             let italic = flags.contains(Flags::ITALIC);
+            saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
             // Cycle 355 (Terminator parity, terminatorlib/config.py:130
             // `bold_is_bright`): when true + bold + fg comes from
@@ -3427,6 +3482,9 @@ impl Renderer {
                     cur = Some((fg, bold, italic));
                 }
             }
+        }
+        if saw_styled_text {
+            self.ensure_bundled_style_faces();
         }
 
         // Selection.
@@ -5705,8 +5763,65 @@ mod pane_buffer_lifecycle_tests {
              don't leak their text buffers"
         );
         assert!(
+            src.contains("self.pane_buffer_ids.truncate(panes.len())"),
+            "pane_buffer_ids must be truncated with pane_buffers so slot ids \
+             cannot outlive their buffers"
+        );
+        assert!(
             src.contains("self.pane_titlebar_buffers.truncate(panes.len())"),
             "pane_titlebar_buffers must be truncated to panes.len() too"
+        );
+    }
+
+    /// Per-pane renderer caches must stay attached to stable pane ids rather
+    /// than transient visible-pane indices. Otherwise a split reorder or tab
+    /// move cold-starts line shaping and title caches for panes that did not
+    /// change. Source-level guard: the behavioral path needs a live `Renderer`.
+    #[test]
+    fn pane_buffers_are_keyed_by_stable_pane_id() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("pub id: u64,"),
+            "PaneView must carry the process-global pane id into the renderer"
+        );
+        assert!(
+            src.contains("pane_buffer_ids: Vec<Option<u64>>"),
+            "Renderer must track which pane id occupies each buffer slot"
+        );
+        assert!(
+            src.contains("self.pane_buffer_ids.swap(i, j)")
+                && src.contains("self.pane_buffers.swap(i, j)")
+                && src.contains("self.pane_line_keys.swap(i, j)"),
+            "render_frame must swap all per-pane caches when a pane reappears \
+             at a different visible index"
+        );
+    }
+
+    /// Startup should parse only the regular bundled face. The bold/italic
+    /// faces load once styled terminal text appears, then invalidate text caches
+    /// that may have shaped before the complete family was available.
+    #[test]
+    fn bundled_style_faces_load_lazily_and_invalidate_text_caches() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("bundled_style_faces_loaded: bool"),
+            "Renderer must track whether optional bundled style faces loaded"
+        );
+        assert!(
+            src.contains("load_font_data(kettle_config::font::REGULAR.to_vec())"),
+            "Renderer::new should eagerly load only the regular bundled face"
+        );
+        assert!(
+            src.contains("kettle_config::font::BOLD")
+                && src.contains("kettle_config::font::ITALIC")
+                && src.contains("kettle_config::font::BOLD_ITALIC"),
+            "ensure_bundled_style_faces must load every bundled styled face"
+        );
+        assert!(
+            src.contains("self.pane_style_keys.fill(0)")
+                && src.contains("self.pane_line_keys.iter_mut().for_each(Vec::clear)")
+                && src.contains("self.chrome_style_key = 0"),
+            "loading styled faces must invalidate text caches shaped without them"
         );
     }
 

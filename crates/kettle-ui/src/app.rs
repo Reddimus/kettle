@@ -4902,6 +4902,7 @@ impl App {
                     snaps[si].capture(&g);
                     drop(g); // lock released — the render below is lock-free
                     metas.push((
+                        *id,
                         *r,
                         Some(*id) == focus,
                         imgs,
@@ -4929,7 +4930,8 @@ impl App {
             .iter()
             .zip(snaps.iter())
             .map(
-                |((r, f, imgs, title, cols, rows, bell, group_name), snap)| PaneView {
+                |((id, r, f, imgs, title, cols, rows, bell, group_name), snap)| PaneView {
+                    id: *id,
                     rect: *r,
                     snap,
                     focused: *f,
@@ -4952,12 +4954,11 @@ impl App {
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
         ws.pane_snapshots = snaps;
-        // Cycle 785: now that the first frame is on the surface, reveal the
-        // window (created hidden to avoid the unpainted-window flash during GPU
-        // init). Runs after the render attempt — even on a render *error* we
-        // reveal, so the window can never get stuck invisible. No-op on every
-        // subsequent frame (and for a `window_state = hidden` window, which
-        // `resumed` already marked shown).
+        // Fallback reveal: normal startup reveals as soon as renderer init
+        // succeeds, then paints immediately. Keep this guard so any future path
+        // that reaches a rendered frame while still hidden cannot leave a
+        // visible-state window invisible forever. No-op after the first reveal
+        // and for `window_state = hidden`.
         if !ws.window_shown {
             if let Some(w) = &ws.window {
                 w.set_visible(true);
@@ -10232,11 +10233,10 @@ fn to_mods(m: ModifiersState) -> Mods {
     out
 }
 
-/// Cycle 785: whether to reveal the window after its first frame composites
-/// (the cycle-785 hide-until-painted startup), or keep it hidden. Only a
-/// configured `window_state = hidden` stays hidden; every visible state
-/// (Normal / Maximise / Fullscreen) is revealed once it has content.
-fn should_reveal_after_first_frame(state: kettle_config::WindowState) -> bool {
+/// Startup visibility policy. Windows are created hidden while renderer init
+/// runs, then visible states are revealed once the wgpu surface is configured.
+/// Only `window_state = hidden` remains hidden.
+fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool {
     !matches!(state, kettle_config::WindowState::Hidden)
 }
 
@@ -10634,9 +10634,8 @@ impl App {
     /// C4: window attributes shared by window 1 (`resumed_inner`) and
     /// windows 2..N (`open_window`), so a second window honors borderless /
     /// always-on-top / hide-from-taskbar / geometry-hinting / WM_CLASS
-    /// exactly like the first. Always returns `visible(false)` — the
-    /// cycle-785 hidden-until-first-paint reveal (callers seed `window_shown`
-    /// from `should_reveal_after_first_frame`).
+    /// exactly like the first. Always returns `visible(false)` while renderer
+    /// init runs; callers reveal visible states once the surface is configured.
     fn window_attributes(
         &self,
         state: kettle_config::WindowState,
@@ -10859,9 +10858,15 @@ impl App {
             mux.record_lossless = self.recorder.is_some();
         }
         let mut ws = WindowState::new(seq, false, mux);
-        ws.window_shown = !should_reveal_after_first_frame(state);
+        ws.window_shown = !should_reveal_after_renderer_init(state);
         ws.renderer = Some(renderer);
         ws.window = Some(window);
+        if should_reveal_after_renderer_init(state)
+            && let Some(w) = &ws.window
+        {
+            w.set_visible(true);
+            ws.window_shown = true;
+        }
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
         let (cw, ch) = self.cell_px(&ws);
@@ -11633,14 +11638,10 @@ impl App {
         if ws.window.is_some() {
             return;
         }
-        // Cycle 785: create the window hidden, then reveal it in `redraw` once
-        // the first frame is composited — so the user never sees an unpainted
-        // / "(Not Responding)" rectangle during the ~1.5s GPU adapter+device
-        // init that the `Renderer::new` `block_on` below stalls the event loop
-        // on. A configured `window_state = hidden` already stays hidden via the
-        // attrs, so `window_shown` starts `true` there (no reveal) and `false`
-        // for every visible state.
-        ws.window_shown = !should_reveal_after_first_frame(self.cfg.window_state);
+        // Create the window hidden while renderer init runs on the event-loop
+        // thread. Reveal once the wgpu surface is configured, then paint
+        // immediately below; `window_state = hidden` remains hidden.
+        ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
         let attrs = self.window_attributes(self.cfg.window_state);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -11710,6 +11711,12 @@ impl App {
         self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
         ws.window = Some(window);
+        if should_reveal_after_renderer_init(self.cfg.window_state)
+            && let Some(w) = &ws.window
+        {
+            w.set_visible(true);
+            ws.window_shown = true;
+        }
 
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
@@ -11988,17 +11995,10 @@ impl App {
             self.drain_lua_hook_commands("startup hook");
             self.lua_startup_fired = true;
         }
-        // Cycle 785: paint the first frame *directly* here — not only via
-        // `request_redraw` — so the window (created `with_visible(false)` to
-        // avoid the unpainted-window flash during GPU init) is actually
-        // revealed. On Windows, `RedrawRequested` is NOT delivered to a window
-        // that has never been shown, so a purely redraw-driven reveal leaves
-        // the window stuck invisible (verified live). `redraw` renders the
-        // first frame and, via its reveal block, calls `set_visible(true)` and
-        // flips `window_shown`. The renderer is always `Some` by this point
-        // (init failure above `exit()`s and returns), so this never early-
-        // returns before revealing. The follow-up `request_redraw` schedules
-        // the next frame — now delivered normally, the window being visible.
+        // Paint the first frame *directly* here — not only via
+        // `request_redraw` — so visible startup windows receive terminal
+        // content immediately after renderer + pane setup. The follow-up
+        // `request_redraw` schedules the next normal frame.
         // Cycle 875: start the developer session recorder now that the grid
         // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`;
         // opts captured above before `startup` was consumed).
@@ -13665,6 +13665,7 @@ impl App {
             self.pending_window_close = true;
             return None;
         }
+        let now = std::time::Instant::now();
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
         let bell_active = ws
@@ -13684,6 +13685,9 @@ impl App {
             }
         }
         let blink_active = self.cfg.cursor_blink && ws.window_focused;
+        let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
+        let blink_elapsed = now.saturating_duration_since(ws.last_blink);
+        let blink_due = blink_active && blink_elapsed >= blink_interval;
         let anim_active = ws
             .mux
             .panes
@@ -13702,14 +13706,13 @@ impl App {
         // Cycle 910 (R2): a deferred (coalesced) output paint becomes due
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
-        let now = std::time::Instant::now();
         let coalesce_due = ws.coalescing_paint
             && ws
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= OUTPUT_FRAME_BUDGET)
                 .unwrap_or(true);
         if bell_active
-            || blink_active
+            || blink_due
             || anim_active
             || autoscroll_active
             || coalesce_due
@@ -13723,13 +13726,14 @@ impl App {
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
-        // autoscroll / the resize chip, 120 ms for cursor-blink alone, or the
-        // pending coalesced output paint's deadline.
+        // autoscroll / the resize chip, the cursor-blink half-period deadline,
+        // or the pending coalesced output paint's deadline.
         let mut wait_ms: Option<u64> =
             if bell_active || anim_active || autoscroll_active || resize_chip_active {
                 Some(33)
             } else if blink_active {
-                Some(120)
+                let remaining = blink_interval.saturating_sub(blink_elapsed);
+                Some((remaining.as_millis() as u64).max(1))
             } else {
                 None
             };
@@ -13830,22 +13834,21 @@ mod tests {
     use super::{
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
         find_menu_row_y, modal_swallows_pointer, rank_layouts, selection_kind,
-        should_restore_session, should_reveal_after_first_frame, typeahead_match,
+        should_restore_session, should_reveal_after_renderer_init, typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
 
-    /// Cycle 785 drift guard: the hide-until-painted window (created with
-    /// `with_visible(false)`) is revealed after its first frame for every
-    /// visible startup state, and stays hidden only for `window_state =
-    /// hidden` — so the `set_visible(true)` in `redraw` matches user intent.
+    /// Startup drift guard: the window is hidden only while renderer init runs,
+    /// then revealed for every visible startup state. `window_state = hidden`
+    /// still stays hidden.
     #[test]
-    fn window_revealed_for_visible_states_only() {
+    fn window_revealed_after_renderer_init_for_visible_states_only() {
         use kettle_config::WindowState;
-        assert!(should_reveal_after_first_frame(WindowState::Normal));
-        assert!(should_reveal_after_first_frame(WindowState::Maximise));
-        assert!(should_reveal_after_first_frame(WindowState::Fullscreen));
-        assert!(!should_reveal_after_first_frame(WindowState::Hidden));
+        assert!(should_reveal_after_renderer_init(WindowState::Normal));
+        assert!(should_reveal_after_renderer_init(WindowState::Maximise));
+        assert!(should_reveal_after_renderer_init(WindowState::Fullscreen));
+        assert!(!should_reveal_after_renderer_init(WindowState::Hidden));
     }
 
     /// Cycle 919 (audit M1/M2): the default-session restore is opt-in. The same
@@ -15232,6 +15235,29 @@ mod tests {
         assert!(
             flush < clamp,
             "coalescing_paint flush must precede the .max(1) wait clamp (anti-busy-spin)"
+        );
+    }
+
+    /// Idle blink must wake at the configured half-period deadline, not at a
+    /// fixed sub-interval. The old 120 ms poll requested four mostly-no-op
+    /// redraws before each default 530 ms blink toggle.
+    #[test]
+    fn cursor_blink_waits_until_the_actual_deadline() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner present");
+        let rest = &src[start..];
+        let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("let blink_due = blink_active && blink_elapsed >= blink_interval"),
+            "about_to_wait must request a blink redraw only when the half-period elapsed"
+        );
+        assert!(
+            body.contains("blink_interval.saturating_sub(blink_elapsed)")
+                && !body.contains("Some(120)"),
+            "blink wait time must be the remaining configured interval, not a fixed poll"
         );
     }
 

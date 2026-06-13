@@ -1,4 +1,6 @@
 /target
+/kettle-target
+/*/kettle-target
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store

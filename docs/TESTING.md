@@ -12,6 +12,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Performance changes that claim cross-terminal movement should also run the
+Windows harness and score gate:
+
+```pwsh
+cargo build --release -p kettle
+pwsh -File scripts/perf/perf-all.ps1 -Label after
+pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after
+```
+
+For before/after work on the same machine, pass
+`-BaselineResultsDir target/perf-results/before` so regressions beyond the
+allowed threshold fail the gate.
+
 ## What's covered (automated)
 
 **500+ tests across the workspace** — see

@@ -154,6 +154,21 @@ graph LR
 
 ## Render pass order
 
+The renderer's per-pane text buffers, per-row shaping keys, style keys, and
+titlebar caches are indexed by the process-global pane id carried in
+`PaneView`. Visible pane order can change when a split is rotated, a tab moves
+between windows, or a pane is re-tiled; the renderer swaps cache slots to keep
+already-shaped rows attached to the same terminal pane instead of the same
+screen index.
+
+Font loading is also staged on the live renderer path. The bundled Regular face
+is loaded during `Renderer::new` so the first visible frame can measure and draw
+normal terminal text. Bundled Bold, Italic, and Bold Italic are loaded once the
+snapshot contains styled text, then text cache keys are invalidated so future
+shaping sees the complete family. Headless screenshot paths still load the full
+family because they render a single static image and do not benefit from a later
+warm-up frame.
+
 Each frame the renderer issues six passes against the same wgpu
 render-pass encoder, in this order. The order matters: a quad pass
 paints over text drawn before it, and text drawn after a quad covers

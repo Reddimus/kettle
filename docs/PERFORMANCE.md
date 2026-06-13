@@ -102,6 +102,25 @@ existing WindowsTerminal process (the harness never kills pre-existing
 pids), thermals on a Surface-class device make medians-of-5 the floor for
 honest numbers.
 
+### Current performance gate
+
+New performance work should publish a same-machine `perf-all.ps1` result and
+run `scripts/perf/score.ps1` on it. The score gate normalizes throughput,
+startup, idle CPU, and memory against the best terminal in the run; it fails if
+kettle is outside the top half, beats fewer than two peer terminals, or regresses
+more than the configured threshold when a baseline directory is supplied.
+
+The current development branch reduces first-window startup work by loading only
+the bundled Regular face up front; Bold, Italic, and Bold Italic are loaded on
+the first frame that actually contains styled terminal text. Pane text/title
+caches are now keyed by process-global pane id instead of visible index, so tab
+moves and split reorders preserve already-shaped rows instead of cold-starting
+the moved pane's renderer buffers. Visible-state windows are also revealed once
+the renderer has configured the wgpu surface, then painted immediately, instead
+of delaying first OS-window visibility until after the full terminal frame. Idle
+cursor blinking now wakes at the configured half-period deadline instead of
+polling every 120 ms between visible cursor toggles.
+
 ### Known follow-ups (tracked)
 
 - Row-level damage tracking + persistent GPU cell buffers (the natural
@@ -189,8 +208,9 @@ for each invocation.
   faster than software-Vulkan on the Linux CI runner.
 - **Peak RSS / working set ~ 236 MB on Linux.** Looks high for a
   terminal but is dominated by:
-  - The bundled JetBrains Mono Nerd Font set (~50 MB of glyph data
-    via `kettle_config::font::all()`).
+  - The bundled JetBrains Mono Nerd Font set (~50 MB of glyph data).
+    Newer builds load Regular at renderer startup and defer Bold/Italic/Bold
+    Italic until styled terminal text needs them.
   - The 500+ bundled themes (Ghostty + iTerm2-Color-Schemes set).
   - The wgpu adapter (software-Vulkan in the headless path; the
     GPU driver on a real machine pages most of this out).

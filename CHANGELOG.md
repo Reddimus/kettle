@@ -4,6 +4,32 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## Unreleased
+
+  **Performance gate + renderer warm-path trims.**
+
+  - Added `scripts/perf/score.ps1`, a cross-terminal perf gate that scores
+    `perf-all.ps1` output across throughput, startup, idle CPU and memory, then
+    fails unless kettle ranks in the top half, beats at least two peer
+    terminals and stays within the configured regression threshold when a
+    baseline result directory is supplied.
+  - Live renderer startup now loads only the bundled Regular font face up front;
+    Bold / Italic / Bold Italic are loaded lazily on the first frame that
+    contains styled terminal text, with pane/chrome text caches invalidated so
+    shaping sees the complete family.
+  - Per-pane renderer caches are now keyed by process-global pane id, preserving
+    text/titlebar buffers across split reorders and tab/window moves instead of
+    cold-starting caches by visible index.
+  - Startup visibility now reveals visible-state OS windows as soon as renderer
+    init has configured the surface, then paints immediately, instead of
+    waiting for the first full terminal frame before the window appears.
+    `window_state = hidden` still remains hidden.
+  - Idle cursor blinking now schedules the next redraw at the configured
+    half-period deadline instead of polling every 120 ms and producing mostly
+    unchanged frames between visible cursor toggles.
+  - Removed accidentally tracked local `kettle-target` cargo artifacts and
+    ignored future `kettle-target` directories.
+
 ## [2.20.0] — 2026-06-12
 
   **Performance overhaul, measured.** A new committed cross-terminal

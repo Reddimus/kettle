@@ -14,12 +14,35 @@ repeated runs.
 | `latency.ps1` | input latency (comparative) | SendInput a key, poll PrintWindow(PW_RENDERFULLCONTENT) until pixels change beyond an auto-calibrated blink-noise floor; capture-poll resolution ~5-15 ms, so treat results as relative |
 | `vtebench-wsl.ps1` | PTY read speed (WSL) | alacritty/vtebench full suite inside each terminal's WSL session; gnuplot .dat + median summary |
 | `perf-all.ps1` | everything | One label = one results directory under `target/perf-results/<label>/` |
+| `score.ps1` | release gate | Scores `startup-idle.json` + `throughput-*.json`; fails unless kettle ranks in the top half, beats at least two peers, and stays within the allowed regression threshold vs an optional baseline |
 
 ## Prerequisites
 
 - Terminals: `wt` on PATH; Alacritty portable at `C:\Users\kevm9\Repos\research\bin\alacritty.exe`; WezTerm portable at `...\bin\wezterm\wezterm-gui.exe`; kettle from `target\release\kettle.exe` (build first). Paths are overridable parameters on every script.
 - vtebench built in WSL: `CARGO_TARGET_DIR=$HOME/vtebench-target cargo build --release` from a clone of `alacritty/vtebench`.
 - A quiet machine: close other GPU/CPU-heavy apps; plugged in, high-performance power profile; do not move the mouse during the latency probe.
+
+## Score gate
+
+Run the full harness, then score the result directory:
+
+```pwsh
+pwsh -File scripts/perf/perf-all.ps1 -Label after
+pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after
+```
+
+For same-machine before/after work, add a baseline directory:
+
+```pwsh
+pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after `
+  -BaselineResultsDir target/perf-results/before -MaxRegressionPct 7.5
+```
+
+The score normalizes each terminal against the best observed result per metric:
+higher is better for throughput; lower is better for startup, idle CPU, and
+memory. The gate is intentionally comparative so a faster workstation does not
+hide a regression that only appears relative to the peer terminals measured in
+the same session.
 
 ## Caveats (read before quoting numbers)
 

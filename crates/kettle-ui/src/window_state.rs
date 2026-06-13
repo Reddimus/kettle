@@ -170,9 +170,10 @@ pub(crate) struct WindowState {
     /// Cycle 412: pane ids whose shell exited + cfg.exit_action requested
     /// restart. Drained AFTER drain_events; dedup'd on push (cycle 452).
     pub(crate) pending_pane_restarts: Vec<u64>,
-    /// Cycle 785: the window is created hidden so the user never sees an
-    /// unpainted rectangle during GPU init; `redraw` reveals it on the first
-    /// composited frame and flips this to `true`.
+    /// Whether a visible-state window has already been shown. Startup creates
+    /// the OS window hidden during renderer init, then reveals visible states
+    /// once the surface is configured; `window_state = hidden` keeps this true
+    /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
     /// C4: per-pane `Terminal::output_generation` values as of this window's
     /// last paint (snapshotted at the top of `redraw`, before drain_events).
