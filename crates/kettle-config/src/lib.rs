@@ -240,6 +240,24 @@ pub enum BackgroundType {
     Transparent,
 }
 
+/// `background-animation`: how an ANIMATED `background-image` (animated GIF /
+/// APNG / animated WebP) plays. Unlike Ghostty's custom GLSL shaders — which
+/// pin the GPU to a high frame rate even when idle — kettle advances frames on
+/// the media's own timestamps, capped by the ~30 fps render tick, and (by
+/// default) pauses when the window loses focus so it costs nothing in the
+/// background. A still image ignores this entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundAnimation {
+    /// Animate only while the window is focused; freeze (zero idle cost) when
+    /// it isn't. The battery-friendly default.
+    #[default]
+    WhenFocused,
+    /// Always animate, even when the window is unfocused.
+    Always,
+    /// Never animate — freeze on the first frame (the pre-v2.21.x behavior).
+    Off,
+}
+
 /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12): Lua
 /// sandbox level. `Safe` is the default — Lua plugins can still
 /// access the kettle.* APIs but the dangerous parts of the Lua
@@ -1152,6 +1170,10 @@ pub struct Config {
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:122
     /// `background_blur`): blur the background image.
     pub background_blur: bool,
+    /// `background-animation`: how an animated `background-image` (animated GIF
+    /// / APNG / animated WebP) plays. Defaults to `WhenFocused`. See
+    /// [`BackgroundAnimation`].
+    pub background_animation: BackgroundAnimation,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:106
     /// `background_darkness`): background image opacity (0.0 fully
     /// dark .. 1.0 untinted).
@@ -1742,6 +1764,7 @@ impl Default for Config {
             use_theme_colors: false,
             http_proxy: String::new(),
             background_type: BackgroundType::Solid,
+            background_animation: BackgroundAnimation::default(),
             background_image: String::new(),
             background_image_mode: "stretch_and_fill".to_string(),
             background_image_align_horiz: "center".to_string(),
@@ -2509,6 +2532,21 @@ impl Config {
                 "background-type" | "background_type" => {
                     matches!(v.to_ascii_lowercase().as_str(), "solid" | "image" | "transparent")
                 }
+                "background-animation" | "background_animation" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "when-focused"
+                        | "when_focused"
+                        | "focused"
+                        | "always"
+                        | "true"
+                        | "on"
+                        | "yes"
+                        | "off"
+                        | "false"
+                        | "no"
+                        | "none"
+                        | "static"
+                ),
                 "lua-sandbox" | "lua_sandbox" => {
                     matches!(v.to_ascii_lowercase().as_str(), "safe" | "trusted" | "unsafe")
                 }
@@ -3490,6 +3528,13 @@ impl Config {
                         "image" => BackgroundType::Image,
                         "transparent" => BackgroundType::Transparent,
                         _ => BackgroundType::Solid,
+                    };
+                }
+                "background-animation" | "background_animation" => {
+                    cfg.background_animation = match e.value.to_ascii_lowercase().as_str() {
+                        "always" | "true" | "on" | "yes" => BackgroundAnimation::Always,
+                        "off" | "false" | "no" | "none" | "static" => BackgroundAnimation::Off,
+                        _ => BackgroundAnimation::WhenFocused,
                     };
                 }
                 "background-image" | "background_image" => {
@@ -5093,6 +5138,43 @@ tab-bar-width = 200\n";
         assert!(!Config::parse_text("borderless = false").borderless);
         assert!(Config::parse_text("always-on-top = true").always_on_top);
         assert!(Config::parse_text("always_on_top = true").always_on_top);
+    }
+
+    #[test]
+    fn background_animation_parse() {
+        // Default is battery-friendly when-focused.
+        assert_eq!(
+            Config::default().background_animation,
+            BackgroundAnimation::WhenFocused
+        );
+        assert_eq!(
+            Config::parse_text("background-animation = always").background_animation,
+            BackgroundAnimation::Always
+        );
+        assert_eq!(
+            Config::parse_text("background_animation = on").background_animation,
+            BackgroundAnimation::Always
+        );
+        assert_eq!(
+            Config::parse_text("background-animation = off").background_animation,
+            BackgroundAnimation::Off
+        );
+        assert_eq!(
+            Config::parse_text("background-animation = static").background_animation,
+            BackgroundAnimation::Off
+        );
+        assert_eq!(
+            Config::parse_text("background-animation = when-focused").background_animation,
+            BackgroundAnimation::WhenFocused
+        );
+        // Unknown value → safe default, not a parse error.
+        assert_eq!(
+            Config::parse_text("background-animation = bogus").background_animation,
+            BackgroundAnimation::WhenFocused
+        );
+        // --check-config accepts the documented spellings, rejects nonsense.
+        assert!(Config::detect_malformed_values("background-animation = always").is_empty());
+        assert!(!Config::detect_malformed_values("background-animation = nope").is_empty());
     }
 
     #[test]

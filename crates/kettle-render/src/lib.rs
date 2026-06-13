@@ -44,7 +44,10 @@ mod imgpipe;
 mod quad;
 mod snapshot;
 
-pub use bg_image::{BgImage, decode_bg_image, decode_bg_image_with_blur};
+pub use bg_image::{
+    BgFrame, BgImage, bg_current_frame, decode_bg_image, decode_bg_image_frames,
+    decode_bg_image_frames_with_blur, decode_bg_image_with_blur,
+};
 pub use snapshot::{PaneSnapshot, SnapCell};
 
 use std::sync::Arc;
@@ -515,6 +518,24 @@ struct PendingCursorGlyph {
     clip: (f32, f32, f32, f32),
 }
 
+/// v2.21.x: the decoded background-image, animated. A still image is one frame;
+/// an animated GIF / APNG / animated WebP is many. `frames.is_empty()` encodes a
+/// FAILED decode (drives the retry throttle, like the old inner `Option::None`).
+struct BgImageAnim {
+    /// The configured path this was decoded from (cache key part 1).
+    path: String,
+    /// The blur radius this was decoded with (cache key part 2).
+    blur: u32,
+    /// GPU-ready frames. Each frame's `rgba` is `Arc`-shared, so the imgpipe
+    /// texture cache (keyed by `Arc::as_ptr`) reuses one GPU texture per frame
+    /// and only re-uploads when the displayed frame index actually changes.
+    frames: Vec<kettle_core::ImageData>,
+    /// Per-frame dwell time (ms), parallel to `frames`.
+    gaps: Vec<u32>,
+    /// Wall-clock origin for the playback loop (`bg_current_frame`).
+    started: std::time::Instant,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     gpu: GpuContext,
@@ -674,11 +695,14 @@ pub struct Renderer {
     // `background-type = image` so a large wallpaper doesn't sit resident
     // for the rest of the session after the user turns it off.
     //
-    // Cycle 918: the inner `Option<ImageData>` is `None` when the current
-    // (path, blur) was tried and FAILED to decode. Caching the failed key
-    // (a) stops rendering the previous wallpaper after the path changes to a
-    // broken one, and (b) stops re-attempting the failing decode every frame.
-    bg_image_cache: Option<(String, u32, Option<kettle_core::ImageData>)>,
+    // Cycle 918: a FAILED decode is cached as `frames.is_empty()` (was the
+    // inner `Option::None`). Caching the failed key (a) stops rendering the
+    // previous wallpaper after the path changes to a broken one, and (b) stops
+    // re-attempting the failing decode every frame.
+    // v2.21.x: holds ALL frames of an animated background (GIF/APNG/WebP) — one
+    // for a still image — plus per-frame gaps + the playback clock origin, so
+    // the render loop swaps the already-decoded frame per `bg_current_frame`.
+    bg_image_cache: Option<BgImageAnim>,
     /// Cycle 919 (audit L2): when the current bg-image (path, blur) FAILED to
     /// decode, the earliest `Instant` to retry — throttling self-heal to ≥3s so
     /// a broken/corrupt path isn't re-decoded every frame. `None` once a decode
@@ -1169,6 +1193,31 @@ impl Renderer {
     }
 
     /// Render a full frame of tiled panes plus the tab bar and search overlay.
+    /// v2.21.x: whether the background-image is an animation the event loop
+    /// should PROACTIVELY keep redrawing (feeds the app's ~30 fps anim tick).
+    /// True only for a decoded MULTI-frame background with
+    /// `background-animation != off`, and — for the default `when-focused` —
+    /// only while the window is focused, so an unfocused window costs ZERO idle
+    /// (the battery behavior Ghostty's always-on custom shaders lack). The
+    /// frame shown is still time-correct on any other repaint (see the bg
+    /// frame-select in `render_frame_with_status`); this only governs proactive
+    /// waking.
+    pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
+        if !matches!(cfg.background_type, kettle_config::BackgroundType::Image) {
+            return false;
+        }
+        let enabled = match cfg.background_animation {
+            kettle_config::BackgroundAnimation::Off => false,
+            kettle_config::BackgroundAnimation::Always => true,
+            kettle_config::BackgroundAnimation::WhenFocused => window_focused,
+        };
+        enabled
+            && self
+                .bg_image_cache
+                .as_ref()
+                .is_some_and(|c| c.frames.len() > 1)
+    }
+
     pub fn render_frame(
         &mut self,
         panes: &[PaneView<'_>],
@@ -1409,44 +1458,82 @@ impl Renderer {
             let need_reload = match self.bg_image_cache.as_ref() {
                 None => true,
                 // Reload when the (path, blur) key changed, OR — cycle 919 (audit
-                // L2) — when the cached entry is a FAILED decode (inner `None`)
+                // L2) — when the cached entry is a FAILED decode (`frames` empty)
                 // and the throttle has elapsed: a transient read error / an
                 // in-place file fix self-heals, but THROTTLED (≥3s between
                 // attempts) so a broken or corrupt path is NOT re-decoded every
                 // frame (the per-frame thrash cycle 918 removed). A successful
                 // decode clears the throttle, so the happy path never re-decodes.
-                Some((p, b, img)) => {
-                    p != &want
-                        || *b != blur_radius
-                        || (img.is_none()
+                Some(c) => {
+                    c.path != want
+                        || c.blur != blur_radius
+                        || (c.frames.is_empty()
                             && self
                                 .bg_image_retry_at
                                 .is_none_or(|t| std::time::Instant::now() >= t))
                 }
             };
             if need_reload {
-                // Cycle 918: store the (path, blur) key even when decode fails
-                // (inner `None`). Without this the stale wallpaper kept rendering
-                // for a now-broken path AND `need_reload` stayed true, re-decoding
+                // v2.21.x: decode ALL frames (one for a still image; many for an
+                // animated GIF/APNG/WebP). Cycle 918: store the (path, blur) key
+                // even when decode fails (empty `frames`) so the stale wallpaper
+                // stops rendering for a now-broken path and we don't re-decode
                 // the failing file every frame.
-                let decoded = bg_image::decode_bg_image_with_blur(&want, blur_radius).map(|d| {
-                    use std::sync::Arc;
-                    kettle_core::ImageData {
-                        width: d.width,
-                        height: d.height,
-                        rgba: Arc::new(d.rgba),
-                    }
-                });
+                use std::sync::Arc;
+                let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) =
+                    match bg_image::decode_bg_image_frames_with_blur(&want, blur_radius) {
+                        Some(fs) => fs
+                            .into_iter()
+                            .map(|f| {
+                                (
+                                    kettle_core::ImageData {
+                                        width: f.image.width,
+                                        height: f.image.height,
+                                        rgba: Arc::new(f.image.rgba),
+                                    },
+                                    f.gap_ms,
+                                )
+                            })
+                            .unzip(),
+                        None => (Vec::new(), Vec::new()),
+                    };
                 // Cycle 919 (audit L2): on failure, throttle the next retry; on
                 // success, clear it so the loaded wallpaper never re-decodes.
-                self.bg_image_retry_at = if decoded.is_none() {
+                self.bg_image_retry_at = if frames.is_empty() {
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(3))
                 } else {
                     None
                 };
-                self.bg_image_cache = Some((want.clone(), blur_radius, decoded));
+                self.bg_image_cache = Some(BgImageAnim {
+                    path: want.clone(),
+                    blur: blur_radius,
+                    frames,
+                    gaps,
+                    started: std::time::Instant::now(),
+                });
             }
-            if let Some((_, _, Some(data))) = self.bg_image_cache.as_ref() {
+            // v2.21.x: select the frame to display now. A still image (1 frame)
+            // or `background-animation = off` shows frame 0; otherwise the
+            // playback clock loops through frames at their own gaps. Focus does
+            // NOT gate the index (so an output-driven repaint while unfocused
+            // still shows the time-correct frame, no jump) — focus only gates
+            // whether the render loop PROACTIVELY wakes to animate, via
+            // `background_is_animating` feeding the anim tick.
+            let bg_frame: Option<&kettle_core::ImageData> = self
+                .bg_image_cache
+                .as_ref()
+                .filter(|c| !c.frames.is_empty())
+                .map(|c| {
+                    let idx = if c.frames.len() > 1
+                        && cfg.background_animation != kettle_config::BackgroundAnimation::Off
+                    {
+                        bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())
+                    } else {
+                        0
+                    };
+                    &c.frames[idx.min(c.frames.len() - 1)]
+                });
+            if let Some(data) = bg_frame {
                 // Cycle 390 (Terminator parity, bg-image Bucket-D
                 // sub-cycle 5): UV-mode variants. background-image-mode
                 // controls how the decoded image fills the surface.
@@ -6154,12 +6241,12 @@ mod pane_buffer_lifecycle_tests {
     fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
         let src = include_str!("lib.rs");
         assert!(
-            src.contains("Option<(String, u32, Option<kettle_core::ImageData>)>"),
-            "bg_image_cache must key on (path, blur_radius) so a blur toggle \
-             reloads even when the path is unchanged"
+            src.contains("bg_image_cache: Option<BgImageAnim>")
+                && src.contains("struct BgImageAnim"),
+            "bg_image_cache holds a BgImageAnim (path, blur, frames, gaps, started)"
         );
         assert!(
-            src.contains("p != &want") && src.contains("*b != blur_radius"),
+            src.contains("c.path != want") && src.contains("c.blur != blur_radius"),
             "need_reload must compare blur radius, not just the path"
         );
         assert!(
@@ -6169,26 +6256,33 @@ mod pane_buffer_lifecycle_tests {
              image / the path is cleared"
         );
         // Cycle 919 (audit L2): a FAILED decode self-heals on a THROTTLE — the
-        // reload condition includes `img.is_none()` gated on `bg_image_retry_at`,
-        // so a transient error / in-place fix recovers without re-decoding a
-        // broken path every frame.
+        // reload condition includes `c.frames.is_empty()` gated on
+        // `bg_image_retry_at`, so a transient error / in-place fix recovers
+        // without re-decoding a broken path every frame.
         assert!(
-            src.contains("img.is_none()") && src.contains("self.bg_image_retry_at"),
-            "a failed bg-image decode must retry (img.is_none()) but throttled \
+            src.contains("c.frames.is_empty()") && src.contains("self.bg_image_retry_at"),
+            "a failed bg-image decode must retry (empty frames) but throttled \
              via bg_image_retry_at — self-heal without per-frame thrash"
         );
-        // Cycle 918: on a needed reload the key is stored UNCONDITIONALLY (inner
-        // None on decode failure), and only a successfully-decoded entry renders.
-        // Together these stop a stale wallpaper rendering for a broken new path
-        // and stop re-decoding the failing file every frame.
+        // Cycle 918: on a needed reload the key is stored UNCONDITIONALLY (empty
+        // frames on decode failure), and only a successfully-decoded entry
+        // renders. Together these stop a stale wallpaper rendering for a broken
+        // new path and stop re-decoding the failing file every frame.
         assert!(
-            src.contains("self.bg_image_cache = Some((want.clone(), blur_radius, decoded));"),
+            src.contains("self.bg_image_cache = Some(BgImageAnim {"),
             "a failed decode must still cache the (path, blur) key to avoid a \
              per-frame re-decode of the broken path"
         );
         assert!(
-            src.contains("if let Some((_, _, Some(data))) = self.bg_image_cache.as_ref()"),
+            src.contains("filter(|c| !c.frames.is_empty())"),
             "only a successfully-decoded cache entry may render (no stale image)"
+        );
+        // v2.21.x: animated backgrounds advance on the media clock, gated for
+        // proactive waking on focus (battery), and never index out of bounds.
+        assert!(
+            src.contains("bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())")
+                && src.contains("idx.min(c.frames.len() - 1)"),
+            "animated bg must pick the clock frame, bounded to the frame count"
         );
     }
 

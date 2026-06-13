@@ -13735,7 +13735,17 @@ impl App {
             .mux
             .panes
             .values()
-            .any(|p| p.term.has_running_animation());
+            .any(|p| p.term.has_running_animation())
+            // v2.21.x: an animated background-image (GIF/APNG/WebP) drives the
+            // same ~30 fps tick. `background_is_animating` is false unless it's a
+            // decoded multi-frame bg with `background-animation != off`, and —
+            // for the default `when-focused` — only while focused, so an
+            // unfocused/idle window still reaches `ControlFlow::Wait` (zero idle
+            // cost, unlike Ghostty's always-on custom shaders).
+            || ws
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.background_is_animating(&self.cfg, ws.window_focused));
         // Selection-autoscroll runs at the same ~30 fps as bell / image
         // animation — without an active wake-up the loop sits idle waiting
         // for a fresh CursorMoved, so the drag-past-edge case would freeze

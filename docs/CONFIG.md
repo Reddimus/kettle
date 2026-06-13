@@ -168,7 +168,8 @@ per-key audit against Terminator's source.
 | `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
 | `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |
 | `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` |
-| `background-image` | path | — | Wallpaper image. Supports PNG/JPEG/WebP/BMP/GIF. Tilde expansion supported |
+| `background-image` | path | — | Wallpaper image. Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported |
+| `background-animation` | enum | `when-focused` | How an animated `background-image` plays: `when-focused` (animate only while focused, freeze with zero idle cost otherwise — battery-friendly default) \| `always` (`on`/`true`) \| `off` (`static`/`false`, freeze on first frame). Frames advance on the media's own timestamps, capped by the ~30 fps render tick |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |

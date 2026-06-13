@@ -22,8 +22,6 @@
 //! Subsequent sub-cycles add the wgpu texture upload (3) + render
 //! pass (4) + UV-mode variants (5+6) + blur shader (9).
 
-use std::path::Path;
-
 /// Cycle 584 decompression-bomb defense for the user-configured
 /// `background-image` path. The bg-image source is a config-file
 /// path (not attacker-controlled at the PTY layer), so the threat
@@ -35,6 +33,19 @@ use std::path::Path;
 const MAX_BG_IMAGE_DIM: u32 = 8192;
 const MAX_BG_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Animated background bounds (v2.21.x). A multi-frame background (animated
+/// GIF / APNG / animated WebP) decodes EVERY frame's RGBA up front, so the
+/// envelope is the SUM across frames, not one frame: a 1080p × 200-frame GIF
+/// would be ~1.6 GB. Cap the total decoded bytes AND the frame count; on
+/// exceedance the decoder truncates to the frames that fit (≥ 1) with a
+/// `log::warn`, degrading gracefully to a shorter loop / first-frame-static
+/// rather than OOMing on launch. A 0 ms inter-frame gap (common in
+/// "play as fast as possible" GIFs) is clamped up so the loop has a real
+/// period and the render tick (capped at ~30 fps) governs the actual wake rate.
+const MAX_BG_ANIM_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BG_FRAMES: usize = 512;
+const MIN_BG_FRAME_GAP_MS: u32 = 20;
+
 /// Decoded RGBA image ready for texture upload. Width/height in
 /// pixels; data is tightly-packed RGBA8 (4 bytes per pixel).
 #[derive(Debug, Clone)]
@@ -42,6 +53,39 @@ pub struct BgImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+/// One frame of an animated background: the decoded image plus its dwell time
+/// (ms) before the next frame. A still image decodes to a single `BgFrame`
+/// with `gap_ms = 0`, so callers handle still + animated uniformly.
+#[derive(Debug, Clone)]
+pub struct BgFrame {
+    pub image: BgImage,
+    pub gap_ms: u32,
+}
+
+/// The frame index to display right now for an animated background, given each
+/// frame's dwell `gaps` (ms) and the wall-clock `elapsed_ms` since playback
+/// started. Pure + loops forever. Mirrors the kitty animation clock
+/// (`kettle_vt::kitty::current_frame`) but with the background's simpler
+/// always-looping semantics (no kitty run-state). Drift-tested below.
+pub fn bg_current_frame(gaps: &[u32], elapsed_ms: u128) -> usize {
+    if gaps.len() <= 1 {
+        return 0;
+    }
+    let total: u128 = gaps.iter().map(|&g| g as u128).sum();
+    if total == 0 {
+        return 0;
+    }
+    let mut t = elapsed_ms % total;
+    for (i, &g) in gaps.iter().enumerate() {
+        let g = g as u128;
+        if t < g {
+            return i;
+        }
+        t -= g;
+    }
+    gaps.len() - 1
 }
 
 /// Decode a background image from disk. Returns None on any I/O,
@@ -159,7 +203,12 @@ fn home_dir() -> Option<String> {
     None
 }
 
-pub fn decode_bg_image(path: &str) -> Option<BgImage> {
+/// Resolve a configured `background-image` path: trims, expands a leading `~/`
+/// via [`home_dir`], and confirms the file exists. Shared by the single-frame
+/// and animated decoders so `~/` handling + the not-found warning live in one
+/// place. Returns `None` (silently for an empty path; with a `log::warn`
+/// otherwise) on any failure.
+fn resolve_bg_path(path: &str) -> Option<std::path::PathBuf> {
     if path.trim().is_empty() {
         return None;
     }
@@ -175,11 +224,17 @@ pub fn decode_bg_image(path: &str) -> Option<BgImage> {
             return None;
         }
     };
-    let p = Path::new(&p);
-    if !p.exists() {
-        log::warn!("background-image: file not found: {}", p.display());
+    let pb = std::path::PathBuf::from(&p);
+    if !pb.exists() {
+        log::warn!("background-image: file not found: {}", pb.display());
         return None;
     }
+    Some(pb)
+}
+
+pub fn decode_bg_image(path: &str) -> Option<BgImage> {
+    let pb = resolve_bg_path(path)?;
+    let p = pb.as_path();
     // Cycle 584: bound the decoder against PNG/JPEG/GIF/WebP/BMP
     // decompression bombs. `image::open` is a convenience wrapper
     // that decodes the whole DynamicImage; an attacker-supplied
@@ -234,6 +289,138 @@ pub fn decode_bg_image_with_blur(path: &str, blur_radius: u32) -> Option<BgImage
         box_blur(&mut img, blur_radius);
     }
     Some(img)
+}
+
+/// One frame, wrapped so still + animated callers are uniform.
+fn single_frame(path: &str) -> Option<Vec<BgFrame>> {
+    decode_bg_image(path).map(|image| vec![BgFrame { image, gap_ms: 0 }])
+}
+
+/// Decode a background image into ONE-OR-MORE frames (v2.21.x animated
+/// background). Animated GIF / APNG / animated WebP yield every frame (bounded
+/// by `MAX_BG_ANIM_BYTES` + `MAX_BG_FRAMES`, truncating gracefully on
+/// exceedance); a still image, or a non-animated GIF/PNG/WebP, yields exactly
+/// one frame (`gap_ms = 0`). Returns `None` on any I/O/format/decode error
+/// (with a `log::warn`), matching [`decode_bg_image`]. Frames decode once here;
+/// the render loop only swaps the already-decoded RGBA per the playback clock.
+pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
+    use image::{AnimationDecoder, ImageFormat};
+    let pb = resolve_bg_path(path)?;
+    let reader = match image::ImageReader::open(&pb).and_then(|r| r.with_guessed_format()) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("background-image open {}: {e}", pb.display());
+            return None;
+        }
+    };
+    let format = reader.format();
+    // Only GIF / WebP / PNG (APNG) can be multi-frame; everything else is still.
+    if !matches!(
+        format,
+        Some(ImageFormat::Gif | ImageFormat::WebP | ImageFormat::Png)
+    ) {
+        return single_frame(path);
+    }
+    let inner = reader.into_inner();
+    // Build the format-specific animation frame iterator, or fall back to the
+    // single-frame path for a non-animated GIF/PNG/WebP (or any decoder error).
+    let frames = match format {
+        Some(ImageFormat::Gif) => match image::codecs::gif::GifDecoder::new(inner) {
+            Ok(d) => d.into_frames(),
+            Err(e) => {
+                log::warn!("background-image gif {}: {e}", pb.display());
+                return None;
+            }
+        },
+        Some(ImageFormat::WebP) => match image::codecs::webp::WebPDecoder::new(inner) {
+            Ok(d) if d.has_animation() => d.into_frames(),
+            Ok(_) => return single_frame(path),
+            Err(e) => {
+                log::warn!("background-image webp {}: {e}", pb.display());
+                return None;
+            }
+        },
+        Some(ImageFormat::Png) => match image::codecs::png::PngDecoder::new(inner) {
+            Ok(d) => match d.is_apng() {
+                Ok(true) => match d.apng() {
+                    Ok(a) => a.into_frames(),
+                    Err(e) => {
+                        log::warn!("background-image apng {}: {e}", pb.display());
+                        return None;
+                    }
+                },
+                // Plain (non-animated) PNG → still.
+                _ => return single_frame(path),
+            },
+            Err(_) => return single_frame(path),
+        },
+        _ => return single_frame(path),
+    };
+    // Collect bounded: total decoded RGBA ≤ MAX_BG_ANIM_BYTES, ≤ MAX_BG_FRAMES,
+    // each frame ≤ MAX_BG_IMAGE_DIM per axis. Truncate (≥ 1 frame) on exceedance.
+    let mut out: Vec<BgFrame> = Vec::new();
+    let mut total: u64 = 0;
+    for fr in frames {
+        if out.len() >= MAX_BG_FRAMES {
+            log::warn!("background-image: animation truncated at {MAX_BG_FRAMES} frames");
+            break;
+        }
+        let fr = match fr {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("background-image frame decode {}: {e}", pb.display());
+                break;
+            }
+        };
+        let (numer, denom) = fr.delay().numer_denom_ms();
+        let gap = numer
+            .checked_div(denom)
+            .unwrap_or(numer)
+            .max(MIN_BG_FRAME_GAP_MS);
+        let buf = fr.into_buffer();
+        let (w, h) = buf.dimensions();
+        if w > MAX_BG_IMAGE_DIM || h > MAX_BG_IMAGE_DIM {
+            log::warn!("background-image: frame {w}x{h} exceeds {MAX_BG_IMAGE_DIM}px cap");
+            break;
+        }
+        let bytes = (w as u64) * (h as u64) * 4;
+        if total + bytes > MAX_BG_ANIM_BYTES {
+            log::warn!(
+                "background-image: animation exceeds {} MB budget, truncating at {} frames",
+                MAX_BG_ANIM_BYTES / (1024 * 1024),
+                out.len()
+            );
+            break;
+        }
+        total += bytes;
+        out.push(BgFrame {
+            image: BgImage {
+                width: w,
+                height: h,
+                rgba: buf.into_raw(),
+            },
+            gap_ms: gap,
+        });
+    }
+    if out.is_empty() {
+        // Animated path yielded nothing usable — last-ditch single decode.
+        return single_frame(path);
+    }
+    Some(out)
+}
+
+/// [`decode_bg_image_frames`] + the configured `background-blur` applied to
+/// every frame at load time (so renders just upload the blurred frame; no
+/// per-frame shader). Blur is bounded work per frame; the frame-count cap above
+/// keeps the total bounded.
+pub fn decode_bg_image_frames_with_blur(path: &str, blur_radius: u32) -> Option<Vec<BgFrame>> {
+    let mut frames = decode_bg_image_frames(path)?;
+    if blur_radius > 0 {
+        for f in &mut frames {
+            box_blur(&mut f.image, blur_radius);
+        }
+    }
+    Some(frames)
 }
 
 #[cfg(test)]
@@ -309,6 +496,90 @@ mod tests {
                 assert_eq!(a.rgba, b.rgba, "blur mismatch at {w}x{h} r={r}");
             }
         }
+    }
+
+    /// v2.21.x: the animated-background clock loops through frames per their
+    /// dwell gaps and never indexes out of bounds, including the degenerate
+    /// single-frame / zero-gap cases.
+    #[test]
+    fn bg_current_frame_loops_by_gap() {
+        // Single frame (or none) → always frame 0.
+        assert_eq!(bg_current_frame(&[], 0), 0);
+        assert_eq!(bg_current_frame(&[100], 999_999), 0);
+        // Three frames, 100ms each → total 300ms period.
+        let gaps = [100u32, 100, 100];
+        assert_eq!(bg_current_frame(&gaps, 0), 0);
+        assert_eq!(bg_current_frame(&gaps, 50), 0);
+        assert_eq!(bg_current_frame(&gaps, 100), 1);
+        assert_eq!(bg_current_frame(&gaps, 250), 2);
+        assert_eq!(bg_current_frame(&gaps, 300), 0); // wrapped
+        assert_eq!(bg_current_frame(&gaps, 1_000_000), 1); // still in range, looped
+        // Uneven gaps.
+        let uneven = [40u32, 200, 60];
+        assert_eq!(bg_current_frame(&uneven, 0), 0);
+        assert_eq!(bg_current_frame(&uneven, 40), 1);
+        assert_eq!(bg_current_frame(&uneven, 239), 1);
+        assert_eq!(bg_current_frame(&uneven, 240), 2);
+        // All-zero gaps must not divide-by-zero / panic.
+        assert_eq!(bg_current_frame(&[0, 0, 0], 12345), 0);
+    }
+
+    /// v2.21.x: a still PNG decodes to exactly one frame via the animated entry
+    /// point, so still + animated callers are uniform.
+    #[test]
+    fn still_png_decodes_to_one_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "kettle-bg-frames-still-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let img = image::RgbaImage::from_raw(4, 2, vec![200u8; 4 * 2 * 4]).expect("rgba");
+        img.save(&path).expect("write png");
+        let frames = decode_bg_image_frames(path.to_str().unwrap()).expect("decode frames");
+        assert_eq!(frames.len(), 1, "a still PNG must yield exactly one frame");
+        assert_eq!(frames[0].image.width, 4);
+        assert_eq!(frames[0].gap_ms, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// v2.21.x: an animated GIF decodes to multiple frames with per-frame gaps,
+    /// proving the animated-background path (and that the clock would cycle it).
+    #[test]
+    fn animated_gif_decodes_to_multiple_frames() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        use image::{Delay, Frame, RgbaImage};
+        let path = std::env::temp_dir().join(format!(
+            "kettle-bg-frames-anim-{}-{}.gif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        {
+            let file = std::fs::File::create(&path).expect("create gif");
+            let mut enc = GifEncoder::new(file);
+            enc.set_repeat(Repeat::Infinite).ok();
+            for c in [40u8, 120, 200] {
+                let buf = RgbaImage::from_raw(4, 4, vec![c; 4 * 4 * 4]).expect("rgba");
+                let frame = Frame::from_parts(buf, 0, 0, Delay::from_numer_denom_ms(80, 1));
+                enc.encode_frame(frame).expect("encode frame");
+            }
+        }
+        let frames = decode_bg_image_frames(path.to_str().unwrap()).expect("decode anim");
+        assert!(
+            frames.len() >= 2,
+            "an animated GIF must yield >1 frame; got {}",
+            frames.len()
+        );
+        assert!(
+            frames.iter().all(|f| f.gap_ms >= MIN_BG_FRAME_GAP_MS),
+            "every frame gap must be clamped to the floor"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

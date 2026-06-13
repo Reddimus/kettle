@@ -4,6 +4,35 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.22.0] — 2026-06-13
+
+  **Animated (GIF / APNG / animated WebP) backgrounds — a "video"/space-loop
+  background, done natively and performantly.**
+
+  - `background-image` now plays **animated** GIF / APNG / animated WebP as a
+    moving background (it was first-frame-only before). Point it at a slow
+    space/nebula loop for the "video background" look people set up on Ghostty —
+    except kettle does it **natively** (no transparency + external wallpaper
+    player, no GLSL shader). No mainstream terminal decodes a video *file* as its
+    background; an animated GIF/WebP is the lean, cross-platform equivalent, and
+    kettle already had the multi-format decoder + a per-frame animation clock to
+    reuse.
+  - New `background-animation` config: `when-focused` (default — animate only
+    while focused, freeze at **zero idle cost** otherwise), `always`, or `off`
+    (freeze on the first frame). Frames advance on the media's own timestamps,
+    capped by the existing ~30 fps render tick — deliberately *unlike* Ghostty's
+    custom shaders, which pin the GPU to a high frame rate even when idle.
+  - Performance + safety: frames decode once (not per render); the imgpipe
+    texture cache (keyed by `Arc::as_ptr`) re-uploads only when the displayed
+    frame index changes; total decoded RGBA is bounded (`MAX_BG_ANIM_BYTES` +
+    `MAX_BG_FRAMES`), degrading gracefully to first-frame-static on an oversized
+    animation rather than OOMing; an unfocused window drops to `ControlFlow::Wait`
+    (no busy-loop). Respects `background-opacity` / `background-blur` /
+    `background-image-mode` per frame.
+  - Reminder (unchanged): the *other* way to get a real video background — a
+    transparent window over an external desktop video wallpaper — already works
+    via `background-opacity < 1.0`.
+
 ## [2.21.1] — 2026-06-13
 
   **Flood throughput 2.0–2.4× — kettle now beats Alacritty and WezTerm on all
