@@ -281,6 +281,25 @@ pub enum WindowState {
     Hidden,
 }
 
+/// `gpu-power-preference`: which GPU wgpu should request the adapter from.
+/// A terminal is a light GPU workload, so the default is `Low` (the
+/// integrated adapter): on a laptop with both an integrated and a discrete
+/// GPU, `HighPerformance` wakes the discrete GPU from its low-power state,
+/// which on the reference Surface Book 3 cost ~1.5 s of cold startup for no
+/// rendering benefit. `High` forces the discrete adapter (useful on a
+/// desktop where the discrete card is always resident); `Auto` lets wgpu
+/// choose with no preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GpuPowerPreference {
+    /// Prefer the low-power (typically integrated) adapter — kettle default.
+    #[default]
+    Low,
+    /// Prefer the high-performance (typically discrete) adapter.
+    High,
+    /// No preference; let wgpu pick.
+    Auto,
+}
+
 /// Cycle 338 (Terminator parity, terminatorlib/config.py:107
 /// `backspace_binding`): how Backspace key is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1009,6 +1028,9 @@ pub struct Config {
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
     /// `window_state`): initial window state at launch.
     pub window_state: WindowState,
+    /// `gpu-power-preference`: which adapter wgpu requests at startup.
+    /// Defaults to `Low` (integrated) — see [`GpuPowerPreference`].
+    pub gpu_power_preference: GpuPowerPreference,
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
     /// `geometry_hinting`): resize in font-step increments.
     pub geometry_hinting: bool,
@@ -1692,6 +1714,7 @@ impl Default for Config {
             focus: FocusMode::Click,
             handle_size: -1,
             window_state: WindowState::Normal,
+            gpu_power_preference: GpuPowerPreference::default(),
             geometry_hinting: false,
             extra_styling: true,
             force_no_bell: false,
@@ -2552,6 +2575,10 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "maximise" | "maximize" | "fullscreen" | "hidden" | "normal"
                 ),
+                "gpu-power-preference" | "gpu_power_preference" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "low" | "high" | "high-performance" | "discrete" | "auto" | "none"
+                ),
                 "search-case-sensitive"
                 | "search_case_sensitive"
                 | "case-sensitive"
@@ -3258,6 +3285,13 @@ impl Config {
                         "fullscreen" => WindowState::Fullscreen,
                         "hidden" => WindowState::Hidden,
                         _ => WindowState::Normal,
+                    };
+                }
+                "gpu-power-preference" | "gpu_power_preference" => {
+                    cfg.gpu_power_preference = match e.value.to_ascii_lowercase().as_str() {
+                        "high" | "high-performance" | "discrete" => GpuPowerPreference::High,
+                        "auto" | "none" => GpuPowerPreference::Auto,
+                        _ => GpuPowerPreference::Low,
                     };
                 }
                 "full-screen" | "full_screen" => {
@@ -5218,6 +5252,46 @@ tab-bar-width = 200\n";
         assert!(!Config::parse_text("autoclean_groups = false").autoclean_groups);
         assert!(Config::parse_text("always-split-with-profile = true").always_split_with_profile);
         assert!(Config::parse_text("always_split_with_profile = true").always_split_with_profile);
+    }
+
+    #[test]
+    fn gpu_power_preference_parse() {
+        // Default is Low (integrated): the discrete-GPU wake on a dual-GPU
+        // laptop is the dominant startup cost and buys nothing for text.
+        assert_eq!(
+            Config::default().gpu_power_preference,
+            GpuPowerPreference::Low
+        );
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = high").gpu_power_preference,
+            GpuPowerPreference::High
+        );
+        assert_eq!(
+            Config::parse_text("gpu_power_preference = discrete").gpu_power_preference,
+            GpuPowerPreference::High
+        );
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = auto").gpu_power_preference,
+            GpuPowerPreference::Auto
+        );
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = low").gpu_power_preference,
+            GpuPowerPreference::Low
+        );
+        // Unknown value falls back to the safe default, not a parse error.
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = bogus").gpu_power_preference,
+            GpuPowerPreference::Low
+        );
+        // `--check-config` accepts every documented spelling.
+        assert!(
+            Config::detect_malformed_values("gpu-power-preference = high").is_empty(),
+            "high must validate"
+        );
+        assert!(
+            !Config::detect_malformed_values("gpu-power-preference = nonsense").is_empty(),
+            "an invalid value must be flagged by --check-config"
+        );
     }
 
     #[test]

@@ -4,10 +4,36 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## Unreleased
+## [2.21.0] — 2026-06-13
 
-  **Performance gate + renderer warm-path trims.**
+  **Startup 2.2× faster, damage-aware idle rendering, perf gate, dependency
+  hygiene.** Measured on the reference Surface Book 3 (Intel Iris Plus, Win11),
+  release build, medians of 5.
 
+  - **Integrated-GPU adapter by default (the big startup win).** The live-window
+    renderer requested its wgpu adapter with `PowerPreference::HighPerformance`,
+    which on a dual-GPU laptop wakes the **discrete** GPU from its low-power
+    state — ~1.5 s of pure cold-start cost for zero rendering benefit on a text
+    workload. It now defaults to the low-power (integrated) adapter, cutting
+    spawn → first-visible-window from **2202 ms to ~1000 ms (2.2×)**. New
+    `gpu-power-preference` config key (`low` (default) | `high` | `auto`) lets a
+    desktop user with an always-resident discrete card opt back in. (Trade-off:
+    the integrated adapter keeps its buffers in system RAM, so the measured
+    working set now *includes* GPU memory that the discrete path hid in VRAM.)
+  - **Damage-aware idle rendering.** An idle repaint (cursor blink, bell-flash
+    decay, focus dim) no longer re-runs the whole-viewport glyphon `prepare`,
+    which re-encodes every visible glyph's vertices. `build_pane` now reports
+    whether it actually reshaped a row; `render_frame` skips `prepare` (and the
+    paired `atlas.trim`) when no pane row reshaped, no chrome label changed and
+    no text overlay is open, re-rendering the cached vertex buffers instead.
+  - **Block cursor decoupled from the pane buffer.** The inverted glyph under a
+    focused solid block cursor is now drawn in a dedicated 1-glyph renderer ON
+    TOP of the block, instead of being recolored INTO the pane text buffer
+    (which dirtied the cursor row's shaping cache every blink). The pane buffer
+    now stays byte-identical across a blink, so the prepare-skip above applies
+    to a blinking block too. (Idle CPU on this hardware is now `present()`-bound
+    at ~3.8 % with a blinking cursor — down from 28 % — the 2 vsync presents/sec
+    a blink requires; the deadline-scheduled blink below is the dominant lever.)
   - Added `scripts/perf/score.ps1`, a cross-terminal perf gate that scores
     `perf-all.ps1` output across throughput, startup, idle CPU and memory, then
     fails unless kettle ranks in the top half, beats at least two peer
@@ -27,6 +53,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - Idle cursor blinking now schedules the next redraw at the configured
     half-period deadline instead of polling every 120 ms and producing mostly
     unchanged frames between visible cursor toggles.
+  - **Dependency / CI hygiene.** Bumped `actions/labeler` v5→v6 and
+    `actions/stale` v9→v10; bumped the `cargo-machete` action to v0.9.2. Added a
+    dependabot `ignore` for `dtolnay/rust-toolchain` (its `@1.89` ref is the
+    MSRV pin, not an action release — dependabot mis-bumped it to a non-existent
+    `@1.100`) and for `sysinfo` (0.39.x requires rustc 1.95, six releases past
+    the declared MSRV 1.89, for a freshness-only bump with no advisory;
+    `cargo audit` remains the security backstop).
   - Removed accidentally tracked local `kettle-target` cargo artifacts and
     ignored future `kettle-target` directories.
 

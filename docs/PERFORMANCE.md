@@ -110,26 +110,57 @@ startup, idle CPU, and memory against the best terminal in the run; it fails if
 kettle is outside the top half, beats fewer than two peer terminals, or regresses
 more than the configured threshold when a baseline directory is supplied.
 
-The current development branch reduces first-window startup work by loading only
-the bundled Regular face up front; Bold, Italic, and Bold Italic are loaded on
-the first frame that actually contains styled terminal text. Pane text/title
-caches are now keyed by process-global pane id instead of visible index, so tab
-moves and split reorders preserve already-shaped rows instead of cold-starting
-the moved pane's renderer buffers. Visible-state windows are also revealed once
-the renderer has configured the wgpu surface, then painted immediately, instead
-of delaying first OS-window visibility until after the full terminal frame. Idle
-cursor blinking now wakes at the configured half-period deadline instead of
-polling every 120 ms between visible cursor toggles.
+### v2.21.0 — startup 2.2× faster, damage-aware idle, corrected root causes
+
+v2.21.0 corrected two root-cause attributions this doc previously got wrong, by
+*measuring* instead of guessing:
+
+- **Startup was discrete-GPU wake, not "500 themes."** The 500 bundled themes
+  cost zero startup time (they are parsed lazily — only the active theme parses
+  at boot). The real ~1.5 s cost was `Renderer::new` requesting the wgpu adapter
+  with `PowerPreference::HighPerformance`, which on this dual-GPU laptop wakes
+  the **discrete NVIDIA** from its low-power state. Defaulting to the low-power
+  (integrated) adapter cut **spawn → first-visible-window from 2202 ms to
+  ~999 ms (median of 5)**. The new `gpu-power-preference` key (`low` default |
+  `high` | `auto`) lets a discrete-only/desktop user opt back in. Trade-off: the
+  integrated adapter's buffers live in **system RAM**, so the measured fresh
+  working set rose from 306.8 MB (discrete, GPU memory hidden in VRAM) to
+  ~471 MB (integrated, GPU memory now counted) — an honest number, comparable to
+  how Alacritty/WezTerm are measured.
+
+- **Idle CPU is `present()`-bound, not `prepare`-bound.** With a blinking cursor
+  idle CPU is ~3.8 % (down from 28 % via the deadline-scheduled blink). The
+  residual is the **two vsync `present()`s per second a blinking cursor
+  requires** on the integrated GPU — *not* glyphon `prepare`. v2.21.0 still adds
+  damage-aware rendering (an idle frame skips the whole-viewport `prepare`
+  + `atlas.trim` when no row reshaped, no chrome label changed, and no overlay
+  is open; the block cursor's inverted glyph is drawn in a dedicated 1-glyph
+  pass so a blink leaves the pane buffer byte-identical) — this is the right
+  damage architecture and pays off on larger grids / faster GPUs / battery, but
+  on this small-window, present-bound benchmark it does not move the number.
+  Sub-1 % idle would require not presenting per blink (e.g. a cursor-only
+  partial update), which a full-surface wgpu swapchain cannot express.
+
+Other v2.21.0 renderer trims: only the Regular font face loads at boot (Bold /
+Italic / Bold Italic defer to first styled text); pane text/title caches are
+keyed by process-global pane id (preserved across tab moves / split reorders);
+visible windows reveal as soon as the surface is configured; cursor blink wakes
+at the configured half-period deadline.
 
 ### Known follow-ups (tracked)
 
-- Row-level damage tracking + persistent GPU cell buffers (the natural
-  successor to the per-line shaping cache — Ghostty's architecture; see
-  docs/UX-COMPARISON.md).
+- Throughput row-level damage + persistent GPU cell buffers (capture/upload only
+  changed rows, shrinking the per-frame snapshot lock-hold that contends with
+  the PTY parser under flood — the Ghostty architecture; see
+  docs/UX-COMPARISON.md). v2.21.0 landed the *idle*-side damage gate (skip
+  `prepare` when nothing changed); the *flood*-side capture/upload damage is the
+  remaining piece and the lever most likely to close the throughput gap.
 - Glyph-atlas growth under sustained unicode flood (the post-flood WS
-  delta above).
-- Byte-budget scrollback (`scrollback-limit` in bytes, Ghostty model) to
-  bound worst-case memory deterministically.
+  delta above) — bound with an LRU / size cap.
+- Byte-budget scrollback (`scrollback-bytes`, Ghostty model) to bound
+  worst-case memory deterministically (current cap is line-count only).
+- Font faces are `include_bytes!`-embedded then `.to_vec()`-copied into the font
+  system (resident twice); borrow the `&'static` bytes to reclaim ~10–15 MB.
 
 ---
 

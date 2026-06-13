@@ -496,6 +496,25 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
 }
 
+/// v2.21.0 (idle perf): the foreground glyph drawn on top of a focused solid
+/// block cursor this frame. The glyph is rendered in its OWN tiny renderer +
+/// 1-line buffer rather than recolored INTO the pane text buffer, so a cursor
+/// blink no longer mutates the pane buffer (which would force the expensive
+/// whole-viewport `prepare`). The glyph bitmap is already in the atlas (it is
+/// part of the visible pane text), so the 1-glyph prepare never grows it.
+struct PendingCursorGlyph {
+    /// Surface-pixel top-left of the cursor cell.
+    x: f32,
+    y: f32,
+    /// The character under the cursor (drawn in `color`).
+    ch: char,
+    /// Cursor foreground (theme `cursor_text`, or the cell bg under an OSC 12
+    /// runtime cursor color so the inverted glyph follows reverse-video).
+    color: Rgb,
+    /// Pane rect `(x, y, w, h)` used to clip the glyph to its pane.
+    clip: (f32, f32, f32, f32),
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     gpu: GpuContext,
@@ -544,6 +563,29 @@ pub struct Renderer {
     /// unconditionally) on text equality. Text-only keys are sound while the
     /// font family is stable; this key invalidates them all when it changes.
     chrome_style_key: u64,
+    /// v2.21.0 (idle perf): hash of the chrome label text shaped last frame
+    /// (titlebars, tab labels, status, resize chip). When it is unchanged AND
+    /// no pane row reshaped AND no overlay is open, the whole-viewport glyphon
+    /// `prepare` (which re-encodes EVERY visible glyph's vertices) is skipped
+    /// and the cached vertex buffers are re-rendered as-is.
+    last_chrome_hash: u64,
+    /// v2.21.0 (idle perf): dedicated renderer + 1-line buffer for the focused
+    /// solid-block cursor's foreground glyph, drawn in its own pass on top of
+    /// the cursor block quad. Decoupling it from the pane text buffer is what
+    /// lets a blinking BLOCK cursor (the default) skip the whole-viewport
+    /// `prepare` between content changes — the block toggles a quad + a single
+    /// glyph, not a buffer reshape. Shares `atlas`/`viewport` like
+    /// `menu_text_renderer`.
+    cursor_glyph_renderer: TextRenderer,
+    cursor_glyph_buffer: TextBuffer,
+    /// Set during the focused pane's `build_pane` when a solid block cursor is
+    /// visible; consumed (and reset) each frame in `render_frame_with_status`.
+    pending_cursor_glyph: Option<PendingCursorGlyph>,
+    /// The cursor-cell glyph shaped last frame. A change forces a `prepare` so
+    /// the new glyph is guaranteed resident in the atlas before the cursor pass
+    /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
+    /// the atlas and invalidate the cached pane vertices).
+    last_cursor_char: Option<char>,
     /// v2.20.0 P1b: last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// v2.20.0 P1b: last text shaped into each `tab_buffers` slot.
@@ -709,10 +751,17 @@ impl Renderer {
     {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
+        // A terminal is a light GPU workload. Default to the low-power
+        // (integrated) adapter: on a dual-GPU laptop `HighPerformance` wakes
+        // the discrete GPU from its low-power state, which on the reference
+        // Surface Book 3 cost ~1.5 s of cold startup for zero rendering
+        // benefit. `gpu-power-preference` lets a discrete-only/desktop user
+        // opt back into the high-performance adapter.
+        let power_preference = power_preference_of(cfg.gpu_power_preference);
         let adapter = request_adapter_or_fallback(
             &instance,
             &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             },
@@ -874,6 +923,9 @@ impl Renderer {
         let menu_quads = QuadPipeline::new(&device, format);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let cursor_glyph_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
         let imgs = imgpipe::ImagePipeline::new(&device, format);
 
         Ok(Renderer {
@@ -895,6 +947,11 @@ impl Renderer {
             pane_style_keys: Vec::new(),
             line_text_scratch: String::new(),
             chrome_style_key: 0,
+            last_chrome_hash: 0,
+            cursor_glyph_renderer,
+            cursor_glyph_buffer,
+            pending_cursor_glyph: None,
+            last_cursor_char: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
             tab_close_text: String::new(),
@@ -1713,6 +1770,11 @@ impl Renderer {
         }
 
         // Per-pane grid + dividers/border.
+        // v2.21.0 (idle perf): true if ANY pane reshaped a row this frame.
+        let mut any_pane_text_changed = false;
+        // Reset the focused-cursor glyph; the focused pane's `build_pane` re-sets
+        // it this frame if a solid block cursor is visible.
+        self.pending_cursor_glyph = None;
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -1800,7 +1862,7 @@ impl Renderer {
                 ));
             }
 
-            self.build_pane(
+            any_pane_text_changed |= self.build_pane(
                 i,
                 pv,
                 cfg,
@@ -2924,27 +2986,124 @@ impl Renderer {
             }
         }
 
-        self.text_renderer.prepare(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            areas,
-            &mut self.swash,
-        )?;
-        // Second TextRenderer prepare — context-menu rows. Empty
-        // `menu_areas` is fine; glyphon's prepare handles a zero-area
-        // batch as a no-op.
-        self.menu_text_renderer.prepare(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            menu_areas,
-            &mut self.swash,
-        )?;
+        // v2.21.0 (idle perf): skip the whole-viewport glyphon `prepare` when
+        // nothing that feeds the text renderers changed this frame. `prepare`
+        // re-encodes EVERY visible glyph's vertices + does atlas housekeeping;
+        // on an idle repaint (a cursor blink, a bell-flash decay, a focus-dim
+        // toggle) the text is byte-identical, so we re-render the cached vertex
+        // buffers as-is and only rebuild/upload the cheap quad list. Skipping
+        // is conservative — ANY pane row reshape, ANY chrome label change, or
+        // ANY open text overlay forces the prepare, so a stale frame is
+        // impossible. `atlas.trim()` (below) is likewise gated: trimming
+        // without a following prepare would clear the in-use set and let a
+        // later prepare evict still-displayed glyphs out from under the cached
+        // vertices.
+        let overlay_open = overlay.search_query.is_some()
+            || !overlay.hint_labels.is_empty()
+            || overlay.ssh_query.is_some()
+            || overlay.palette_query.is_some()
+            || overlay.layout_picker_query.is_some()
+            || overlay.edit_title.is_some()
+            || overlay.context_menu.is_some()
+            || overlay.confirm_dialog.is_some()
+            || overlay.settings.is_some()
+            || overlay.resize_overlay.is_some()
+            || overlay.update_available.is_some();
+        let chrome_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            self.pane_titlebar_texts.hash(&mut h);
+            self.tab_texts.hash(&mut h);
+            self.tabbar_text.hash(&mut h);
+            self.status_bar_text.hash(&mut h);
+            self.tab_close_text.hash(&mut h);
+            self.new_tab_arrow_text.hash(&mut h);
+            self.resize_overlay_text.hash(&mut h);
+            h.finish()
+        };
+        let chrome_changed = chrome_hash != self.last_chrome_hash;
+        self.last_chrome_hash = chrome_hash;
+        // When the cursor moves to a DIFFERENT glyph, force the main prepare so
+        // that glyph is freshly resident in the atlas before the cursor pass
+        // reuses its bitmap (otherwise the 1-glyph cursor prepare could be the
+        // one that grows/repacks the atlas, invalidating the cached pane
+        // vertices we're about to re-render). A char change almost always
+        // coincides with a content change (so the prepare runs anyway); this
+        // only adds a prepare for the rare move-without-output case.
+        let cursor_char = self.pending_cursor_glyph.as_ref().map(|c| c.ch);
+        let cursor_char_changed = cursor_char != self.last_cursor_char;
+        self.last_cursor_char = cursor_char;
+        let need_prepare =
+            any_pane_text_changed || chrome_changed || overlay_open || cursor_char_changed;
+        if need_prepare {
+            self.text_renderer.prepare(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash,
+            )?;
+            // Second TextRenderer prepare — context-menu rows. Empty
+            // `menu_areas` is fine; glyphon's prepare handles a zero-area
+            // batch as a no-op.
+            self.menu_text_renderer.prepare(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                menu_areas,
+                &mut self.swash,
+            )?;
+        }
+        // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
+        // glyph in its own renderer. Runs EVERY frame a block cursor is visible
+        // (cheap: 1 glyph, bitmap already in the atlas), so a blink toggles this
+        // 1-glyph prepare + the block quad while the pane buffers — and their
+        // whole-viewport prepare — stay untouched.
+        if let Some((gx, gy, gch, gcolor, gclip)) = self
+            .pending_cursor_glyph
+            .as_ref()
+            .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
+        {
+            let mut enc = [0u8; 4];
+            self.cursor_glyph_buffer
+                .set_metrics(&mut self.font_system, metrics);
+            self.cursor_glyph_buffer.set_text(
+                &mut self.font_system,
+                gch.encode_utf8(&mut enc),
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.cursor_glyph_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            let area = TextArea {
+                buffer: &self.cursor_glyph_buffer,
+                left: gx,
+                top: gy,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: gclip.0 as i32,
+                    top: gclip.1 as i32,
+                    right: (gclip.0 + gclip.2) as i32,
+                    bottom: (gclip.1 + gclip.3) as i32,
+                },
+                default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
+                custom_glyphs: &[],
+            };
+            self.cursor_glyph_renderer.prepare(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [area],
+                &mut self.swash,
+            )?;
+        }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
         // Cycle 853: return the scratch to the pool (keeps its capacity for next
@@ -3035,6 +3194,13 @@ impl Renderer {
             self.menu_quads.draw(&mut pass);
             self.menu_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+            // v2.21.0 (idle perf): the focused solid-block cursor's inverted
+            // glyph, drawn last so it sits on top of the block quad (in
+            // `quads`) and the same glyph's normal-fg copy (in `text_renderer`).
+            if self.pending_cursor_glyph.is_some() {
+                self.cursor_glyph_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)?;
+            }
         }
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
@@ -3050,7 +3216,13 @@ impl Renderer {
             log::warn!("take_screenshot capture failed: {e}");
         }
         frame.present();
-        self.atlas.trim();
+        // Only trim when we prepared this frame (see the `need_prepare` gate):
+        // trimming clears the glyph in-use set, so a trim with no following
+        // prepare would let the next prepare evict glyphs the cached vertices
+        // still point at.
+        if need_prepare {
+            self.atlas.trim();
+        }
         Ok(())
     }
 
@@ -3213,7 +3385,15 @@ impl Renderer {
         // assumption the clear already painted them, which is false for
         // an unfocused pane carrying its own OSC 11 background.
         surface_bg: Rgb,
-    ) {
+    ) -> bool {
+        // v2.21.0 (idle perf): becomes true iff this pane mutated its text
+        // buffer this frame (a row reshaped, or the line count changed). When
+        // NO pane changed — and chrome text is identical, no overlay is open —
+        // `render_frame_with_status` skips the whole-viewport glyphon
+        // `prepare`, re-rendering the cached glyph vertices instead. A cursor
+        // blink that doesn't touch text (bar/underline/hollow, or any steady
+        // cursor) therefore costs no reshape AND no glyph re-encode.
+        let mut text_changed = false;
         let theme = &cfg.theme;
         let (rx, ry, rw, rh) = pv.rect;
         let ox = rx + cfg.padding_x;
@@ -3332,6 +3512,13 @@ impl Renderer {
         // cell walk (the display iterator is single-pass); `None` = narrow
         // cell, draw as before.
         let mut cursor_wide_quad: Option<(usize, f32)> = None;
+        // v2.21.0 (idle perf): instead of recoloring the glyph UNDER a focused
+        // solid block cursor INTO the pane text buffer (which dirtied the
+        // cursor row's shaping cache every blink and forced a whole-viewport
+        // re-prepare), capture (glyph, color) here and draw it in the dedicated
+        // cursor-glyph pass on top of the block. The pane buffer then stays
+        // byte-identical across a blink, so the prepare is skipped.
+        let mut cursor_glyph_capture: Option<(char, Rgb)> = None;
 
         for sc in &snap.cells {
             let row = sc.line;
@@ -3400,11 +3587,16 @@ impl Renderer {
                 if flags.contains(Flags::WIDE_CHAR) {
                     cursor_wide_quad = Some((col, 2.0));
                 }
-                fg = if cursor_rt_override.is_some() {
+                // The inverted glyph color: the cell bg under an OSC 12 runtime
+                // cursor color (reverse-video), else theme `cursor_text`. The
+                // glyph keeps its NORMAL `fg` in the pane buffer; the cursor
+                // pass draws this recolored copy on top of the block.
+                let cursor_fg = if cursor_rt_override.is_some() {
                     bg
                 } else {
                     theme.cursor_text
                 };
+                cursor_glyph_capture = Some((sc.c, cursor_fg));
             }
 
             if bg != default_bg {
@@ -3582,16 +3774,31 @@ impl Renderer {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
                     EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
                     // Cycle 939: a focused block cursor is SOLID (was a 0.55
-                    // translucent tint) — the glyph under it is recolored to
-                    // `theme.cursor_text` in the span builder, the standard
-                    // inverted-cursor model + Terminator cursor_fg/bg parity.
-                    // Cycle 942: `bcells` widens it over a wide (CJK/emoji)
-                    // glyph so the recolored right half isn't left uncovered.
+                    // translucent tint). v2.21.0: the inverted glyph under it is
+                    // drawn in the dedicated cursor-glyph pass (see below), not
+                    // recolored into the pane buffer, so a blink no longer
+                    // reshapes the row. Cycle 942: `bcells` widens it over a
+                    // wide (CJK/emoji) glyph so the right half isn't uncovered.
                     EShape::Block | EShape::HollowBlock | EShape::Hidden => {
                         (cw * bcells, 1.0, ch, 0.0)
                     }
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
+                // v2.21.0 (idle perf): queue the inverted foreground glyph to be
+                // drawn ON TOP of the solid block in its own pass. Only the
+                // full Block shape covers the glyph; beam/underline leave it
+                // visible in its normal color, so they need no overdraw.
+                if matches!(shape, EShape::Block)
+                    && let Some((gch, gcolor)) = cursor_glyph_capture
+                {
+                    self.pending_cursor_glyph = Some(PendingCursorGlyph {
+                        x: bx,
+                        y: by,
+                        ch: gch,
+                        color: gcolor,
+                        clip: pv.rect,
+                    });
+                }
             }
         }
 
@@ -3726,6 +3933,7 @@ impl Renderer {
             self.pane_line_keys[idx].clear();
         }
         let rows = screen_rows.max(0) as usize;
+        let old_lines = buf.lines.len();
         while buf.lines.len() < rows {
             buf.lines.push(BufferLine::new(
                 String::new(),
@@ -3735,6 +3943,9 @@ impl Renderer {
             ));
         }
         buf.lines.truncate(rows);
+        // A grow/shrink changes the prepared area set, so the cached glyph
+        // vertices can no longer be reused.
+        text_changed |= buf.lines.len() != old_lines;
         let keys = &mut self.pane_line_keys[idx];
         keys.truncate(rows);
         let mut row_text = std::mem::take(&mut self.line_text_scratch);
@@ -3760,6 +3971,8 @@ impl Renderer {
             if prev == Some(key) {
                 continue;
             }
+            // This row reshapes — the buffer's glyph vertices will differ.
+            text_changed = true;
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
             for (text, fg, bold, italic) in runs {
@@ -3794,6 +4007,7 @@ impl Renderer {
         // next frame/pane.
         self.span_scratch = spans;
         self.span_breaks_scratch = span_line_breaks;
+        text_changed
     }
 }
 
@@ -3985,6 +4199,18 @@ pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
 /// a full row off near the bottom of a tall window whenever `cell_height != 1`.
 pub fn pane_metrics(font_size: f32, cell_h: f32) -> Metrics {
     Metrics::new(font_size, cell_h)
+}
+
+/// Map the user-facing `gpu-power-preference` onto wgpu's adapter selector.
+/// The live window adapter (`Renderer::new`) is the only site that honors this;
+/// the headless `--screenshot` adapters deliberately stay `None` (they want
+/// whatever opens fastest in a one-shot process).
+fn power_preference_of(pref: kettle_config::GpuPowerPreference) -> wgpu::PowerPreference {
+    match pref {
+        kettle_config::GpuPowerPreference::Low => wgpu::PowerPreference::LowPower,
+        kettle_config::GpuPowerPreference::High => wgpu::PowerPreference::HighPerformance,
+        kettle_config::GpuPowerPreference::Auto => wgpu::PowerPreference::None,
+    }
 }
 
 /// Cycle 753: request a GPU adapter, preferring real hardware but transparently
@@ -5822,6 +6048,67 @@ mod pane_buffer_lifecycle_tests {
                 && src.contains("self.pane_line_keys.iter_mut().for_each(Vec::clear)")
                 && src.contains("self.chrome_style_key = 0"),
             "loading styled faces must invalidate text caches shaped without them"
+        );
+    }
+
+    /// v2.21.0 (idle perf): an idle repaint (cursor blink, bell decay, focus
+    /// dim) must NOT re-run the whole-viewport glyphon `prepare`, which
+    /// re-encodes every visible glyph's vertices. `build_pane` reports whether
+    /// it reshaped a row; `render_frame_with_status` gates `prepare` (and the
+    /// paired `atlas.trim`) on that + a chrome-text hash + any open overlay.
+    #[test]
+    fn idle_repaint_skips_glyphon_prepare_when_nothing_changed() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("let need_prepare = any_pane_text_changed")
+                && src.contains("if need_prepare {"),
+            "render_frame must gate the text prepare on a need_prepare flag"
+        );
+        assert!(
+            src.contains("any_pane_text_changed |= self.build_pane("),
+            "render_frame must accumulate whether any pane reshaped a row"
+        );
+        // atlas.trim must be gated with the prepare: trimming without a
+        // following prepare clears the in-use set and lets a later prepare
+        // evict glyphs the cached vertices still reference. The trim now sits
+        // inside its own `if need_prepare` after `frame.present()`.
+        let trim_idx = src.find("self.atlas.trim();").expect("atlas.trim present");
+        let before_trim = &src[trim_idx.saturating_sub(120)..trim_idx];
+        assert!(
+            before_trim.contains("if need_prepare {"),
+            "atlas.trim must be guarded by `if need_prepare`"
+        );
+    }
+
+    /// v2.21.0 (idle perf): the inverted glyph under a focused SOLID block
+    /// cursor is drawn in a dedicated 1-glyph renderer ON TOP of the block,
+    /// NOT recolored into the pane text buffer. Recoloring it in-buffer dirtied
+    /// the cursor row every blink and forced the whole-viewport prepare; the
+    /// dedicated pass keeps the pane buffer byte-identical across a blink.
+    #[test]
+    fn block_cursor_glyph_is_decoupled_from_the_pane_buffer() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("cursor_glyph_renderer: TextRenderer")
+                && src.contains("pending_cursor_glyph: Option<PendingCursorGlyph>"),
+            "Renderer must own a dedicated cursor-glyph renderer + pending slot"
+        );
+        assert!(
+            src.contains("self.cursor_glyph_renderer.prepare(")
+                && src.contains("self.cursor_glyph_renderer")
+                && src
+                    .matches(".render(&self.atlas, &self.viewport, &mut pass)")
+                    .count()
+                    >= 3,
+            "the cursor glyph must be prepared + rendered in its own pass \
+             (after the pane + menu text renders)"
+        );
+        // The old in-buffer recolor (`fg = if cursor_rt_override...`) is gone:
+        // the glyph keeps its normal fg in the buffer and is overdrawn instead.
+        assert!(
+            src.contains("cursor_glyph_capture = Some((sc.c, cursor_fg))"),
+            "the cursor cell must be captured for the overdraw pass, not \
+             recolored into the pane span runs"
         );
     }
 

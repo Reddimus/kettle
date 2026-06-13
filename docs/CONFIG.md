@@ -156,6 +156,7 @@ per-key audit against Terminator's source.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
+| `gpu-power-preference` | enum | `low` | Which GPU wgpu requests at startup: `low` (integrated — default; a terminal is a light GPU workload) \| `high` (`discrete`) \| `auto`. On a dual-GPU laptop `high` wakes the discrete GPU from its low-power state, adding ~1.5 s of cold startup for no rendering benefit — set `high` only on a desktop where the discrete card is always resident |
 | `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
 | `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
 | `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |

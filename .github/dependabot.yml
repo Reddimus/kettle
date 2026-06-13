@@ -26,6 +26,17 @@ updates:
         update-types:
           - patch
           - minor
+    ignore:
+      # `sysinfo` (kettle-remote process-tree walk) is pinned at 0.32.x: its
+      # 0.33+ line progressively raised its own MSRV — 0.39.3 requires rustc
+      # 1.95, six releases past kettle's declared MSRV 1.89 (Cargo.toml
+      # `rust-version`). The bump (PR #9) is freshness only — 0.32.1 carries no
+      # RustSec advisory (the `cargo audit` workflow is the security backstop
+      # and would force a deliberate bump + MSRV review if that changed). Lift
+      # this ignore when kettle's MSRV next moves to >= the then-current
+      # sysinfo floor, and apply the one-line `ProcessRefreshKind::new()` ->
+      # `nothing()` migration at the same time.
+      - dependency-name: "sysinfo"
 
   # GitHub Actions used by ci.yml / release.yml. Same weekly cadence so
   # the review surface lands together.
@@ -48,3 +59,11 @@ updates:
         update-types:
           - patch
           - minor
+    ignore:
+      # `dtolnay/rust-toolchain@1.89` (ci.yml's `msrv` job) pins the toolchain
+      # to the declared MSRV — the `@1.89` ref is a Rust *version*, not an
+      # action release. Dependabot read it as a version tag and proposed
+      # `@1.100` (a Rust release that does not exist), which broke the `msrv`
+      # job (PR #5). The MSRV is bumped deliberately alongside `rust-version`
+      # in Cargo.toml, never by automation; ignore this action entirely.
+      - dependency-name: "dtolnay/rust-toolchain"
