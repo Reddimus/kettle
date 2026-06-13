@@ -35,7 +35,7 @@ gethostname = "1"
 # v2.20.0 P3: first criterion benches in the repo (`benches/extract.rs` —
 # plain-text flood, SGR-heavy, OSC-spam). Slim feature set: no rayon, no
 # plotters/HTML reports — CI and the gauntlet only need `cargo bench` to run.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "extract"
