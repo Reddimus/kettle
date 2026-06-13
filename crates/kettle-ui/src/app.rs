@@ -872,7 +872,7 @@ fn effective_output_budget(flood_paints: u32) -> std::time::Duration {
     match flood_paints {
         0..=3 => OUTPUT_FRAME_BUDGET, // 16 ms / 60 fps — responsive default
         4..=15 => std::time::Duration::from_millis(33), // ~30 fps
-        _ => std::time::Duration::from_millis(50),      // ~20 fps — sustained flood
+        _ => std::time::Duration::from_millis(50), // ~20 fps — sustained flood
     }
 }
 
