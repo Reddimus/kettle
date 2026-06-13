@@ -116,7 +116,7 @@ windows = { version = "0.62", features = [
 # no extra major version enters the lockfile. macOS-only — other platforms
 # never see these.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5"
+objc2 = "0.6"
 # Class features must be opted into (objc2-app-kit ships none by default).
 # NSView + NSWindow + their shared NSResponder superclass — the same trio winit
 # 0.30 enables — give us `NSView::window()` and `NSWindow::setCollectionBehavior`.
