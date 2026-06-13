@@ -33,7 +33,7 @@ jobs:
     # a one-time large backlog scan without giving a runaway 6 hours.
     timeout-minutes: 10
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@v10
         with:
           # Conservative thresholds — see the header comment.
           days-before-issue-stale: 90
