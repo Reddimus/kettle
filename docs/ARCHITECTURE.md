@@ -169,19 +169,20 @@ shaping sees the complete family. Headless screenshot paths still load the full
 family because they render a single static image and do not benefit from a later
 warm-up frame.
 
-Each frame the renderer issues six passes against the same wgpu
+Each frame the renderer issues seven passes against the same wgpu
 render-pass encoder, in this order. The order matters: a quad pass
 paints over text drawn before it, and text drawn after a quad covers
 that quad's pixels.
 
 ```mermaid
 flowchart LR
-    clear["Clear color<br/>(theme bg + opacity)"] --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads"]
+    clear["Clear color<br/>(theme bg + opacity)"] --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
     quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>image overlays"]
     imgs --> text["3. text_renderer.render<br/>pane text + tab text<br/>(NOT menu rows)"]
     text --> overlay["4. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
     overlay --> menuq["5. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
     menuq --> menut["6. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
+    menut --> curg["7. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
 
 Steps 5–6 own the right-click context menu so its labels land **on
@@ -190,10 +191,20 @@ v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
 step 4 (`overlay_quads`), painting over the menu text that had
 already been rendered in step 3.
 
-The 5–6 passes are cheap no-ops while the menu is closed (empty
-buffer uploads). The two `TextRenderer` instances share the same
-`TextAtlas` and `Viewport` — glyphon batches glyphs by atlas, not by
-renderer, so the menu pass reuses already-cached glyphs.
+Step 7 (v2.21.0) draws the inverted glyph **under a focused solid
+block cursor** in its own 1-glyph renderer, on top of the block quad
+(step 1). Decoupling it from the pane text buffer — rather than
+recoloring the glyph in-place — means a cursor blink leaves the pane
+buffer byte-identical, so the **damage gate** can skip the expensive
+whole-viewport `text_renderer.prepare` (which re-encodes every visible
+glyph's vertices) and its paired `atlas.trim`: `build_pane` reports
+whether any row reshaped, and `prepare` runs only when a pane row
+changed, a chrome label changed, or a text overlay is open. The 5–7
+passes are cheap no-ops while idle (empty/unchanged buffers). The
+`TextRenderer` instances share one `TextAtlas` and `Viewport` —
+glyphon batches glyphs by atlas, not by renderer, so each pass reuses
+already-cached glyphs (the cursor glyph is part of the visible pane
+text, so its bitmap is already resident).
 
 ## Threading model
 
