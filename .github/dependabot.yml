@@ -37,6 +37,16 @@ updates:
       # sysinfo floor, and apply the one-line `ProcessRefreshKind::new()` ->
       # `nothing()` migration at the same time.
       - dependency-name: "sysinfo"
+      # `objc2` + `objc2-app-kit` (kettle-ui macOS `sticky = true` window) are
+      # pinned at 0.5 / 0.2 together — `crates/kettle-ui/Cargo.toml` requires
+      # matched versions so the ObjC class types are compatible. objc2-app-kit
+      # 0.3 needs objc2 0.6 AND changes the AppKit API the sticky-window code
+      # uses, so the split bumps (PRs #14/#16) break the macOS build. Bump both
+      # together with the kettle-ui macOS migration in one change verified on
+      # macOS CI (`build (macos-latest)`); ignore the recurring split proposals
+      # until then. `cargo audit` remains the security backstop.
+      - dependency-name: "objc2"
+      - dependency-name: "objc2-app-kit"
 
   # GitHub Actions used by ci.yml / release.yml. Same weekly cadence so
   # the review surface lands together.
