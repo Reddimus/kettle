@@ -505,7 +505,7 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// v2.23.0: the live adapter's identity, in kettle's vocabulary — feeds the
-    /// settings "Active now: <gpu> (<kind>, <backend>)" line so the user sees
+    /// settings `Active now: <gpu> (<kind>, <backend>)` line so the user sees
     /// which GPU is actually in use (vs. the pinned/preferred one, which only
     /// takes effect on restart).
     pub fn adapter_info(&self) -> GpuAdapterInfo {
