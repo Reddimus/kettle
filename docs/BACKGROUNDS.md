@@ -12,36 +12,38 @@ minimized or fully covered** (it can't be seen), so a hidden window costs nothin
 > embeds nothing. A background only appears once *you* choose one — keeping the
 > binary lean and startup fast for everyone who doesn't want one.
 
-## The included starfield — zero config (recommended)
+## The included starfield — a fixed built-in example (recommended)
 
 kettle has a built-in **procedural starfield**: a slow **forward-flight** field
-where stars emerge near the center, **fade in as they get closer**, and drift
-outward as if you're moving through space (the "warp at low speed" look). It's
-rendered live by a tiny GPU shader, so unlike a GIF it's **true-color** (soft
+where stars emerge from the dark near the center, **fade in dramatically as they
+get closer**, and bloom as they drift outward (the "warp at low speed" look).
+It's rendered live by a tiny GPU shader, so unlike a GIF it's **true-color** (soft
 star glows don't band), loops perfectly, stays crisp at **every resolution and
 aspect ratio** (4:3 → 21:9 → square), and uses **~zero memory** (no decoded
 frames). It's the recommended background because it does what a terminal
 background *should*: recede behind your text instead of fighting it.
 
-Turn it on with one setting — no file needed:
+It's a **fixed example** — its look (speed, star count, glow, fade-in) is baked
+into the shader and isn't config-tunable, so there's just one setting to turn it
+on (no file needed):
 
 ```ini
 background-type = starfield
 ```
 
-…or pick **starfield** in **Settings → Background** (`Ctrl+,`). Tune it:
+…or pick **starfield** in **Settings → Background** (`Ctrl+,`). The general
+background controls still apply to it:
 
 ```ini
-starfield-speed   = 0.06   # forward-flight rate (0.005–1.0; lower = slower drift)
-starfield-density = 55     # number of stars (1–128)
-starfield-glow    = 1.0    # soft-halo intensity (0.0–4.0)
 background-animation = always   # always (default) | when-focused | off (frozen)
 chrome-background = theme        # tab/status bar color over the field
 ```
 
 > A pure-black starfield pairs well with `chrome-background = theme` (a distinct
 > bar) or `auto` (a seamless black bar). It animates at a low ~10 fps cap, so
-> idle CPU stays near a static background's.
+> idle CPU stays near a static background's. Want a *different* animated look?
+> Use a file-based background (below) — the starfield itself is intentionally
+> one curated example, not a tweakable engine.
 
 ## Using your own image (file-based)
 
@@ -118,7 +120,6 @@ chrome-background = auto
 | `background-blur` | CPU 3-pass box blur at load (a soft, subtle backdrop) |
 | `background-darkness` | `0.0` fully dark … `1.0` no tint (default `0.5`) |
 | `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
-| `starfield-speed` / `-density` / `-glow` | procedural-starfield knobs (see [the starfield section](#the-included-starfield--zero-config-recommended)) |
 
 **Performance.** Frames decode once at load (bounded to 256 MB / 512 frames; a
 larger file degrades gracefully to a shorter loop, never an OOM). Playback just

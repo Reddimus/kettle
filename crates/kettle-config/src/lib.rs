@@ -246,12 +246,6 @@ pub enum StatusBarMode {
     Bottom,
 }
 
-/// Upper bound on `starfield-density` and the WGSL shader's per-pixel star
-/// loop (v2.24.0). The fragment shader loops a compile-time-fixed `MAX_STARS`
-/// for portability across naga backends and `break`s at the live density, so
-/// this must match the shader constant in `kettle-render/src/starfield.rs`.
-pub const STARFIELD_MAX_STARS: u32 = 128;
-
 /// Cycle 341 (Terminator parity, terminatorlib/config.py:118
 /// `background_type`): background style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1274,17 +1268,6 @@ pub struct Config {
     /// `background-image` or `Starfield` is set. Defaults to `Theme`. See
     /// [`ChromeBackground`].
     pub chrome_background: ChromeBackground,
-    /// `starfield-speed` (v2.24.0): forward-flight rate of the procedural
-    /// `Starfield` background, in radial-progress cycles per second. Default
-    /// `0.06` (a star crosses center→edge in ~17 s — slow drift). Clamped
-    /// `0.005..=1.0`.
-    pub starfield_speed: f32,
-    /// `starfield-density` (v2.24.0): number of stars in the procedural
-    /// `Starfield`. Default `55`. Clamped `1..=`[`STARFIELD_MAX_STARS`].
-    pub starfield_density: u32,
-    /// `starfield-glow` (v2.24.0): soft-halo intensity multiplier for the
-    /// procedural `Starfield` stars. Default `1.0`. Clamped `0.0..=4.0`.
-    pub starfield_glow: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:106
     /// `background_darkness`): background image opacity (0.0 fully
     /// dark .. 1.0 untinted).
@@ -1888,9 +1871,6 @@ impl Default for Config {
             background_image_align_vert: "middle".to_string(),
             background_blur: false,
             background_darkness: 0.5,
-            starfield_speed: 0.06,
-            starfield_density: 55,
-            starfield_glow: 1.0,
             cell_height: 1.0,
             cell_width: 1.0,
             detachable_tabs: true,
@@ -2493,15 +2473,6 @@ impl Config {
                 }
                 "background-darkness" | "background_darkness" => {
                     v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
-                }
-                "starfield-speed" | "starfield_speed" => {
-                    v.parse::<f32>().is_ok_and(|n| (0.005..=1.0).contains(&n))
-                }
-                "starfield-density" | "starfield_density" => {
-                    v.parse::<u32>().is_ok_and(|n| (1..=STARFIELD_MAX_STARS).contains(&n))
-                }
-                "starfield-glow" | "starfield_glow" => {
-                    v.parse::<f32>().is_ok_and(|n| (0.0..=4.0).contains(&n))
                 }
                 "cell-height" | "cell_height" | "cell-width" | "cell_width" => {
                     v.parse::<f32>().is_ok_and(|n| (0.5..=3.0).contains(&n))
@@ -3753,25 +3724,6 @@ impl Config {
                         && v.is_finite()
                     {
                         cfg.background_darkness = v.clamp(0.0, 1.0);
-                    }
-                }
-                "starfield-speed" | "starfield_speed" => {
-                    if let Ok(v) = e.value.parse::<f32>()
-                        && v.is_finite()
-                    {
-                        cfg.starfield_speed = v.clamp(0.005, 1.0);
-                    }
-                }
-                "starfield-density" | "starfield_density" => {
-                    if let Ok(v) = e.value.parse::<u32>() {
-                        cfg.starfield_density = v.clamp(1, STARFIELD_MAX_STARS);
-                    }
-                }
-                "starfield-glow" | "starfield_glow" => {
-                    if let Ok(v) = e.value.parse::<f32>()
-                        && v.is_finite()
-                    {
-                        cfg.starfield_glow = v.clamp(0.0, 4.0);
                     }
                 }
                 "cell-height" | "cell_height" => {
@@ -5385,13 +5337,11 @@ tab-bar-width = 200\n";
 
     #[test]
     fn starfield_parse_and_defaults() {
-        // v2.24.0 procedural starfield background-type + tunable knobs.
+        // v2.24.1: the starfield is a FIXED built-in example — its look is baked
+        // into the shader, NOT config-driven. Only the background-TYPE toggle is
+        // config (the speed/density/glow knobs were removed).
         let d = Config::default();
         assert_eq!(d.background_type, BackgroundType::Solid); // still off by default
-        assert!((d.starfield_speed - 0.06).abs() < 1e-6);
-        assert_eq!(d.starfield_density, 55);
-        assert!((d.starfield_glow - 1.0).abs() < 1e-6);
-        // Type parse (both spellings).
         assert_eq!(
             Config::parse_text("background-type = starfield").background_type,
             BackgroundType::Starfield
@@ -5400,30 +5350,7 @@ tab-bar-width = 200\n";
             Config::parse_text("background_type = starfield").background_type,
             BackgroundType::Starfield
         );
-        // Knobs parse + clamp to their documented ranges.
-        assert!((Config::parse_text("starfield-speed = 0.2").starfield_speed - 0.2).abs() < 1e-6);
-        assert!((Config::parse_text("starfield-speed = 99").starfield_speed - 1.0).abs() < 1e-6);
-        assert!((Config::parse_text("starfield-speed = 0").starfield_speed - 0.005).abs() < 1e-6);
-        assert_eq!(
-            Config::parse_text("starfield-density = 80").starfield_density,
-            80
-        );
-        assert_eq!(
-            Config::parse_text("starfield-density = 9999").starfield_density,
-            STARFIELD_MAX_STARS
-        );
-        assert_eq!(
-            Config::parse_text("starfield_density = 0").starfield_density,
-            1
-        );
-        assert!((Config::parse_text("starfield-glow = 2.5").starfield_glow - 2.5).abs() < 1e-6);
-        assert!((Config::parse_text("starfield-glow = 99").starfield_glow - 4.0).abs() < 1e-6);
-        // --check-config validation.
         assert!(Config::detect_malformed_values("background-type = starfield").is_empty());
-        assert!(Config::detect_malformed_values("starfield-density = 40").is_empty());
-        assert!(!Config::detect_malformed_values("starfield-density = 0").is_empty());
-        assert!(!Config::detect_malformed_values("starfield-speed = 5").is_empty());
-        assert!(!Config::detect_malformed_values("starfield-glow = 10").is_empty());
     }
 
     #[test]

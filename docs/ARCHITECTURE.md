@@ -208,9 +208,11 @@ bar / status bar. The chrome strips now resolve an opaque fill via
 **v2.24.0 — procedural starfield.** When `background-type = starfield`, pass 0
 instead draws `starfield` (`crates/kettle-render/src/starfield.rs`): a fullscreen
 triangle whose WGSL fragment shader *generates* a slow forward-flight star field
-per-pixel from a small uniform `{resolution, time, speed, density, glow}`. No
-decoded frames → ~zero memory, true-color (no GIF banding), a perfect loop, and
-crisp at any resolution. It is mutually exclusive with `bg_imgs` and composites
+per-pixel from a tiny uniform `{resolution, time}`. It's a **fixed built-in
+example** (v2.24.1) — the look (speed `0.009`, `NSTARS = 55`, glow, and the
+fade-in: center stars fully invisible, cubic `prog³` proximity ramp) is baked
+into the shader as WGSL constants, not config-driven. No decoded frames → ~zero memory, true-color (no GIF banding), a
+perfect loop, and crisp at any resolution. It is mutually exclusive with `bg_imgs` and composites
 identically (chrome opaque on top). The animation tick reuses the GIF machinery
 via a **synthetic fps clock**: `bg_current_frame_index` / `bg_anim_interval_ms`
 quantize the continuous drift to a ~10 fps cap (`STARFIELD_FPS`) so the existing

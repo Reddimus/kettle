@@ -4,6 +4,20 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.24.1] — 2026-06-14
+
+  ### Changed
+  - **The starfield is now a fixed built-in example, not config-driven.** The
+    `starfield-speed` / `starfield-density` / `starfield-glow` knobs introduced in
+    2.24.0 are removed; the look is baked into the shader. Baked changes: a
+    **much slower drift** (speed `0.06 → 0.009`) and a **much more dramatic "fade in as
+    we get closer"** — stars now emerge at the center **completely invisible** (no
+    brightness floor) and brighten sharply (cubic) as they approach, so the middle
+    stays dark and stars bloom into view as they near. Turning it on
+    (`background-type = starfield`) and the general
+    `background-animation` / `chrome-background` controls are unchanged. (A stale
+    `starfield-speed` line in an old config is now just an ignored unknown key.)
+
 ## [2.24.0] — 2026-06-14
 
   **A procedural starfield background, always-on by default, plus title-overflow

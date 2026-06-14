@@ -3374,17 +3374,14 @@ impl Renderer {
         // present in `live` but absent from a given cache is a harmless no-op).
         self.bg_imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
-        // v2.24.0: refresh the procedural starfield uniforms (cheap 32-byte
-        // write) when it's the active wallpaper. `time` is continuous so the
-        // low-fps repaint cadence still shows the exact drift position.
+        // v2.24.0: refresh the procedural starfield's per-frame uniform (just
+        // resolution + the continuous `time` clock; the look is baked into the
+        // shader as of v2.24.1) when it's the active wallpaper.
         if matches!(cfg.background_type, BackgroundType::Starfield) {
             self.starfield.upload(
                 &self.gpu.queue,
                 [sw, sh],
                 self.starfield_started.elapsed().as_secs_f32(),
-                cfg.starfield_speed,
-                cfg.starfield_density,
-                cfg.starfield_glow,
             );
         }
         self.bg_imgs.gc(&live);

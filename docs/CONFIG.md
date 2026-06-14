@@ -171,13 +171,10 @@ per-key audit against Terminator's source.
 | `title-transmit-bg-color` / `-fg-color` | color | `#c80003` / `#ffffff` | Focused-pane (broadcast-source) titlebar colors |
 | `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
 | `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |
-| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (v2.24.0 — a zero-config procedural GPU starfield; needs no `background-image`). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
+| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (v2.24.0 — a zero-config procedural GPU starfield; needs no `background-image`. A FIXED built-in example: its look is baked in, not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. No effect without a wallpaper |
 | `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the v2.24.0 default — animate even when unfocused; still freezes when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). Surfaced in Settings → Background |
-| `starfield-speed` | float 0.005..1.0 | `0.06` | v2.24.0 — forward-flight rate of the procedural starfield in radial-progress cycles/sec (lower = slower drift) |
-| `starfield-density` | int 1..128 | `55` | v2.24.0 — number of stars in the procedural starfield |
-| `starfield-glow` | float 0..4 | `1.0` | v2.24.0 — soft-halo intensity of the procedural starfield's stars |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |

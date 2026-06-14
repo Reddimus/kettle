@@ -19,10 +19,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Per-pixel star-loop bound in the shader; must equal
-/// [`kettle_config::STARFIELD_MAX_STARS`] (the density clamp). The loop is
-/// fixed-length for naga-backend portability and `break`s at the live density.
-const MAX_STARS: u32 = kettle_config::STARFIELD_MAX_STARS;
+/// Star count — baked into the shader's loop bound. The starfield is a FIXED
+/// built-in example (not config-driven, v2.24.1), so this lives here, not in
+/// `Config`. The shader loops a fixed `0..NSTARS` for naga-backend portability.
+const NSTARS: u32 = 55;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -31,32 +31,22 @@ struct Uniforms {
     resolution: [f32; 2],
     /// Continuous seconds since playback started (drives the drift).
     time: f32,
-    /// Radial-progress cycles per second (`starfield-speed`).
-    speed: f32,
-    /// Star count as a float (cast to a loop bound in the shader).
-    density: f32,
-    /// Soft-halo intensity multiplier (`starfield-glow`).
-    glow: f32,
-    _pad: [f32; 2],
+    _pad: f32,
 }
 
 const SHADER: &str = r#"
 struct U {
   resolution: vec2<f32>,
   time: f32,
-  speed: f32,
-  density: f32,
-  glow: f32,
-  pad0: f32,
-  pad1: f32,
+  pad: f32,
 };
 @group(0) @binding(0) var<uniform> u: U;
 
 const TAU: f32 = 6.2831853;
 const EASE: f32 = 1.7;          // >1: slow near center, faster near the edge
+const SPEED: f32 = 0.009;       // baked: slow forward-flight (cycles/sec)
 const FADE_IN_END: f32 = 0.30;
 const FADE_OUT_START: f32 = 0.92;
-const DIM_FLOOR: f32 = 0.15;
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -94,21 +84,21 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let center = res * 0.5;
   let p = frag.xy - center;            // pixels from screen center
   let rmax = length(center) * 1.04;    // reach into the corners
-  let n = i32(u.density);
   var col = vec3<f32>(0.0);            // pure black sky
 
-  for (var i: i32 = 0; i < %MAX_STARS%; i = i + 1) {
-    if (i >= n) { break; }
+  for (var i: i32 = 0; i < %NSTARS%; i = i + 1) {
     let fi = f32(i);
     let th = rnd(fi + 1.0) * TAU;
     let p0 = rnd(fi * 2.0 + 0.5);
-    let prog = fract(p0 + u.time * u.speed);
+    let prog = fract(p0 + u.time * SPEED);
 
-    // Brightness: fade in over the first stretch, keep brightening toward us,
-    // brief exit fade so the loop wrap is invisible.
+    // Brightness: stars emerge at the center COMPLETELY invisible (no floor —
+    // proximity ramps from 0) and brighten SHARPLY as they near (prog³), so the
+    // middle stays dark and stars bloom into view as they approach. A brief exit
+    // fade keeps the loop wrap invisible.
     let fadein = smoothstep(0.0, FADE_IN_END, prog);
     let fadeout = 1.0 - smoothstep(FADE_OUT_START, 1.0, prog);
-    let prox = mix(DIM_FLOOR, 1.0, prog);
+    let prox = prog * prog * prog;
     let b = fadein * fadeout * prox;
     if (b <= 0.002) { continue; }
 
@@ -117,13 +107,13 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let d = distance(p, sp);
 
     // Real-star look: a CRISP bright core (sharp inverse-square, squared for a
-    // tight point) plus a SUBTLE bloom — not a big soft orb.
+    // tight point) plus a SUBTLE bloom — not a big soft orb (glow baked at 1.0).
     let core_r = mix(0.7, 1.3, prog);
-    let halo_r = mix(3.0, 9.0, prog) * max(u.glow, 0.0001);
+    let halo_r = mix(3.0, 9.0, prog);
     let cc = (core_r * core_r) / (d * d + core_r * core_r);
     let core = cc * cc;
     let halo = exp(-(d * d) / (halo_r * halo_r));
-    let intensity = b * (core * 1.15 + halo * 0.22 * u.glow);
+    let intensity = b * (core * 1.15 + halo * 0.22);
 
     col = col + srgb_to_linear(star_color(fi)) * intensity;
   }
@@ -140,9 +130,9 @@ pub struct StarfieldPipeline {
 
 impl StarfieldPipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        // `%MAX_STARS%` is substituted so the WGSL loop bound matches the shared
-        // config cap without a WGSL override-constant (broadest backend support).
-        let src = SHADER.replace("%MAX_STARS%", &MAX_STARS.to_string());
+        // `%NSTARS%` is substituted into the loop bound (a compile-time literal,
+        // for the broadest naga-backend support — no WGSL override-constant).
+        let src = SHADER.replace("%NSTARS%", &NSTARS.to_string());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-starfield"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
@@ -215,24 +205,13 @@ impl StarfieldPipeline {
         }
     }
 
-    /// Refresh the per-frame uniforms. `time_secs` is continuous (the drift
-    /// clock); `speed`/`density`/`glow` come from config.
-    pub fn upload(
-        &self,
-        queue: &wgpu::Queue,
-        resolution: [f32; 2],
-        time_secs: f32,
-        speed: f32,
-        density: u32,
-        glow: f32,
-    ) {
+    /// Refresh the per-frame uniforms. `time_secs` is the continuous drift clock;
+    /// the look (speed / star count / glow) is baked into the shader (v2.24.1).
+    pub fn upload(&self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
         let u = Uniforms {
             resolution,
             time: time_secs,
-            speed,
-            density: density.min(MAX_STARS) as f32,
-            glow,
-            _pad: [0.0; 2],
+            _pad: 0.0,
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -253,7 +232,6 @@ mod tests {
     // reproduce (a real WGSL run needs a GPU).
     const FADE_IN_END: f32 = 0.30;
     const FADE_OUT_START: f32 = 0.92;
-    const DIM_FLOOR: f32 = 0.15;
 
     fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
         if edge0 == edge1 {
@@ -270,7 +248,9 @@ mod tests {
     fn star_brightness(prog: f32) -> f32 {
         let fadein = smoothstep(0.0, FADE_IN_END, prog);
         let fadeout = 1.0 - smoothstep(FADE_OUT_START, 1.0, prog);
-        let prox = DIM_FLOOR + (1.0 - DIM_FLOOR) * prog;
+        // v2.24.1: no floor (center stars fully invisible) + cubic proximity ramp
+        // (matches the WGSL) — the middle stays dark, stars bloom as they near.
+        let prox = prog * prog * prog;
         fadein * fadeout * prox
     }
 
@@ -318,7 +298,25 @@ mod tests {
     }
 
     #[test]
-    fn max_stars_matches_config_cap() {
-        assert_eq!(MAX_STARS, kettle_config::STARFIELD_MAX_STARS);
+    fn center_stars_are_invisible_and_bloom_with_proximity() {
+        // v2.24.1: a freshly-emerged star at the center is COMPLETELY invisible
+        // (no floor), the inner-middle stays near-dark, and brightness blooms
+        // sharply (cubic) as the star nears — a strong "warp toward you" feel.
+        assert_eq!(star_brightness(0.0), 0.0, "center star must be invisible");
+        assert!(
+            star_brightness(0.15) < 0.01,
+            "inner-middle stars stay near-invisible"
+        );
+        let mid = star_brightness(0.5);
+        let near = star_brightness(0.9);
+        assert!(near > mid * 4.0, "near ({near}) should dwarf mid ({mid})");
+    }
+
+    #[test]
+    fn nstars_is_sane() {
+        assert!(
+            (1..=4096).contains(&NSTARS),
+            "loop bound must be a sane count"
+        );
     }
 }
