@@ -54,6 +54,12 @@ pub enum FieldKind {
     /// don't persist via the key=value path; the editor appends a `keybind`
     /// line), so it carries the action name too.
     Keybind { action: &'static str },
+    /// v2.24.0: a free-text string value (e.g. the `background-image` path).
+    /// ←/→ don't cycle it; activating (Enter / Space / click) opens an inline
+    /// text prompt pre-filled with the current value, and the typed string is
+    /// persisted on submit. The displayed value is the current string (or a
+    /// placeholder when empty).
+    Text { placeholder: &'static str },
 }
 
 /// One editable setting: a human label, the config key it persists to, and how
@@ -83,6 +89,16 @@ pub struct SettingsNav {
     /// user to press a chord to bind. The next non-modifier key press is
     /// captured as the new binding; Esc cancels.
     pub capturing: bool,
+}
+
+/// v2.24.0: state for the inline text prompt opened by a [`FieldKind::Text`]
+/// row (the in-settings image-path entry). `key` is the config key to persist
+/// on submit; `buf` is the editable string (append / backspace only — cursor is
+/// always at the end, plenty for a path). Enter persists + reloads, Esc cancels.
+#[derive(Debug, Clone)]
+pub struct SettingsTextEdit {
+    pub key: &'static str,
+    pub buf: String,
 }
 
 fn toggle(label: &'static str, key: &'static str) -> Field {
@@ -150,6 +166,15 @@ fn keybind(label: &'static str, action: &'static str) -> Field {
     }
 }
 
+/// v2.24.0: a free-text field (the in-settings image-path entry).
+fn text(label: &'static str, key: &'static str, placeholder: &'static str) -> Field {
+    Field {
+        label,
+        key,
+        kind: FieldKind::Text { placeholder },
+    }
+}
+
 /// The curated catalogue. Covers the settings a typical user actually reaches
 /// for; the overlay also offers an "open config file" row for the long tail.
 ///
@@ -197,20 +222,43 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
                 toggle("Cursor blink", "cursor-blink"),
                 toggle("Show pane titlebars", "show-titlebar"),
-                // v2.23.0: background style + (for an animated image) how it
-                // plays. The image *path* stays a config-file key (it needs a
-                // file, not a cycle); these two cover the discoverable choices.
+            ],
+        },
+        // v2.24.0: a dedicated Background page. `starfield` is a zero-config
+        // animated background; `image` takes a file path (edited inline here).
+        // Sub-options below the type are gated (dimmed + skipped) when they
+        // don't apply to the selected type — see `field_disabled`.
+        Category {
+            name: "Background",
+            fields: vec![
                 choice(
                     "Background",
                     "background-type",
-                    &["solid", "image", "transparent"],
-                    &["solid color", "image", "transparent"],
+                    &["solid", "image", "starfield", "transparent"],
+                    &[
+                        "solid color",
+                        "image",
+                        "starfield (animated)",
+                        "transparent",
+                    ],
+                ),
+                text(
+                    "Image file",
+                    "background-image",
+                    "(set a path — e.g. ~/wall.png)",
                 ),
                 choice(
-                    "Background animation",
+                    // Always-first to match the v2.24.0 default.
+                    "Animation",
                     "background-animation",
-                    &["when-focused", "always", "off"],
-                    &["when focused", "always", "off"],
+                    &["always", "when-focused", "off"],
+                    &["always", "when focused", "off"],
+                ),
+                choice(
+                    "Chrome bar color",
+                    "chrome-background",
+                    &["theme", "auto", "black", "white"],
+                    &["theme", "auto (from wallpaper)", "black", "white"],
                 ),
             ],
         },
@@ -349,6 +397,14 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                 None => "—".to_string(),
             }
         }
+        FieldKind::Text { placeholder } => {
+            let v = read_string(cfg, field.key);
+            if v.trim().is_empty() {
+                placeholder.to_string()
+            } else {
+                v
+            }
+        }
     }
 }
 
@@ -399,6 +455,9 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
         // Keybinds don't change via ←/→: activating one enters capture mode in
         // the overlay handler, which binds the next chord directly. No-op here.
         FieldKind::Keybind { .. } => String::new(),
+        // Text fields don't cycle: activating opens an inline prompt in the
+        // overlay handler. No-op here.
+        FieldKind::Text { .. } => String::new(),
     }
 }
 
@@ -415,6 +474,44 @@ pub fn keybind_action(field: &Field) -> Option<&'static str> {
         FieldKind::Keybind { action } => Some(action),
         _ => None,
     }
+}
+
+/// v2.24.0: is this a free-text field (the inline-prompt path entry)? The
+/// overlay handler routes Enter / Space / click into a text prompt for these.
+pub fn is_text(field: &Field) -> bool {
+    matches!(field.kind, FieldKind::Text { .. })
+}
+
+/// v2.24.0: is `key`'s row inapplicable to the current `background-type`, so the
+/// overlay should DIM it and skip it during nav/click? Keeps the Background page
+/// honest — e.g. the image path only matters for `image`, and animation / chrome
+/// color only matter when there's a wallpaper (image or starfield).
+pub fn field_disabled(cfg: &Config, key: &str) -> bool {
+    use kettle_config::BackgroundType as BT;
+    let t = cfg.background_type;
+    match key {
+        "background-image" => !matches!(t, BT::Image),
+        "background-animation" | "chrome-background" => !matches!(t, BT::Image | BT::Starfield),
+        _ => false,
+    }
+}
+
+/// v2.24.0: the next field index from `start` stepping by `step` (`+1`/`-1`) that
+/// is NOT [`field_disabled`], wrapping around. Lets keyboard nav skip dimmed
+/// (inapplicable) rows. Returns `start` if every field is disabled (degenerate).
+pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i32) -> usize {
+    let n = fields.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut idx = start as i32;
+    for _ in 0..n {
+        idx = (idx + step).rem_euclid(n as i32);
+        if !field_disabled(cfg, fields[idx as usize].key) {
+            return idx as usize;
+        }
+    }
+    start.min(n - 1)
 }
 
 // ---- Config readers (string-keyed; the one place catalogue keys meet Config).
@@ -465,6 +562,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         "background-type" => match cfg.background_type {
             kettle_config::BackgroundType::Solid => "solid",
             kettle_config::BackgroundType::Image => "image",
+            kettle_config::BackgroundType::Starfield => "starfield",
             kettle_config::BackgroundType::Transparent => "transparent",
         }
         .to_string(),
@@ -472,6 +570,13 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             kettle_config::BackgroundAnimation::WhenFocused => "when-focused",
             kettle_config::BackgroundAnimation::Always => "always",
             kettle_config::BackgroundAnimation::Off => "off",
+        }
+        .to_string(),
+        "chrome-background" => match cfg.chrome_background {
+            kettle_config::ChromeBackground::Theme => "theme",
+            kettle_config::ChromeBackground::Auto => "auto",
+            kettle_config::ChromeBackground::Black => "black",
+            kettle_config::ChromeBackground::White => "white",
         }
         .to_string(),
         // Cycle 872: the live theme name (canonical bundled casing). When the
@@ -506,6 +611,13 @@ fn read_choice(cfg: &Config, key: &str) -> String {
                 "auto".to_string()
             }
         }
+        _ => String::new(),
+    }
+}
+
+fn read_string(cfg: &Config, key: &str) -> String {
+    match key {
+        "background-image" => cfg.background_image.clone(),
         _ => String::new(),
     }
 }
@@ -616,6 +728,89 @@ mod tests {
         cfg.gpu_vendor_id = 0xdead;
         cfg.gpu_device_id = 0xbeef;
         assert_eq!(read(&cfg, gpu_field), "Phantom GPU 9000 (not detected)");
+    }
+
+    #[test]
+    fn background_category_has_starfield_path_and_gating() {
+        use kettle_config::BackgroundType as BT;
+        let cats = categories(&[]);
+        let bg = cats
+            .iter()
+            .find(|c| c.name == "Background")
+            .expect("Background category exists");
+        // The type choice offers the new zero-config starfield.
+        let typef = bg
+            .fields
+            .iter()
+            .find(|f| f.key == "background-type")
+            .unwrap();
+        match &typef.kind {
+            FieldKind::Choice { values, .. } => {
+                assert!(values.contains(&"starfield"), "type must offer starfield")
+            }
+            _ => panic!("background-type must be a Choice"),
+        }
+        // The image path is an inline-editable Text field.
+        let img = bg
+            .fields
+            .iter()
+            .find(|f| f.key == "background-image")
+            .unwrap();
+        assert!(is_text(img), "image path must be a Text field");
+
+        // Gating by background-type.
+        let mut cfg = Config::default();
+        cfg.background_type = BT::Solid;
+        assert!(field_disabled(&cfg, "background-image"));
+        assert!(field_disabled(&cfg, "background-animation"));
+        assert!(field_disabled(&cfg, "chrome-background"));
+        assert!(!field_disabled(&cfg, "background-type")); // the type row is never gated
+        cfg.background_type = BT::Image;
+        assert!(!field_disabled(&cfg, "background-image"));
+        assert!(!field_disabled(&cfg, "background-animation"));
+        assert!(!field_disabled(&cfg, "chrome-background"));
+        cfg.background_type = BT::Starfield;
+        assert!(field_disabled(&cfg, "background-image")); // no file for a procedural bg
+        assert!(!field_disabled(&cfg, "background-animation"));
+        assert!(!field_disabled(&cfg, "chrome-background"));
+    }
+
+    #[test]
+    fn next_enabled_field_skips_gated_rows() {
+        use kettle_config::BackgroundType as BT;
+        let cats = categories(&[]);
+        let bg = cats.iter().find(|c| c.name == "Background").unwrap();
+        let n = bg.fields.len();
+        let mut cfg = Config::default();
+        // Starfield: fields = [type(0), image(1 DISABLED), animation(2), chrome(3)].
+        cfg.background_type = BT::Starfield;
+        assert_eq!(
+            next_enabled_field(&cfg, &bg.fields, 0, 1),
+            2,
+            "forward from type skips the disabled image path → animation"
+        );
+        assert_eq!(
+            next_enabled_field(&cfg, &bg.fields, 0, -1),
+            n - 1,
+            "backward from type wraps to chrome"
+        );
+        // Solid: only the type row is enabled → nav stays put.
+        cfg.background_type = BT::Solid;
+        assert_eq!(next_enabled_field(&cfg, &bg.fields, 0, 1), 0);
+    }
+
+    #[test]
+    fn chrome_background_round_trips_through_read_choice() {
+        let mut cfg = Config::default();
+        cfg.background_type = kettle_config::BackgroundType::Image;
+        cfg.chrome_background = kettle_config::ChromeBackground::Auto;
+        let f = choice(
+            "Chrome bar color",
+            "chrome-background",
+            &["theme", "auto", "black", "white"],
+            &["theme", "auto", "black", "white"],
+        );
+        assert_eq!(read(&cfg, &f), "auto");
     }
 
     /// Cycle 789 drift guard (audit D3). `keybind_action` extracts the

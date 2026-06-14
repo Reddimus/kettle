@@ -43,6 +43,7 @@ mod color;
 mod imgpipe;
 mod quad;
 mod snapshot;
+mod starfield;
 
 pub use bg_image::{
     BgFrame, BgImage, bg_current_frame, decode_bg_image, decode_bg_image_frames,
@@ -317,6 +318,10 @@ pub struct SettingsOverlay {
 pub struct SettingsRow {
     pub label: String,
     pub value: String,
+    /// v2.24.0: `true` when this row doesn't apply to the current state (e.g. the
+    /// image path while `background-type != image`) — drawn dimmed and skipped by
+    /// keyboard/mouse nav.
+    pub disabled: bool,
 }
 
 /// Pixel rectangle `(x, y, w, h)`.
@@ -724,6 +729,14 @@ pub struct Renderer {
     /// wallpaper hid all cell backgrounds AND let the animation bleed through
     /// the tab bar.
     bg_imgs: imgpipe::ImagePipeline,
+    /// v2.24.0 procedural starfield wallpaper (`background-type = starfield`),
+    /// drawn in the same back-most slot as `bg_imgs`. Stateless on the GPU side
+    /// (just a per-frame uniform); the only state is `starfield_started`.
+    starfield: starfield::StarfieldPipeline,
+    /// Playback clock for the starfield drift — `elapsed()` feeds the shader's
+    /// continuous `time` so motion is smooth-valued even though we repaint at a
+    /// low fps cap.
+    starfield_started: std::time::Instant,
     /// Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
     /// 3+4): decoded background-image cache. Tuple of
     /// (cfg.background_image path, decoded ImageData). Invalidated
@@ -987,6 +1000,8 @@ impl Renderer {
         // v2.23.0: separate pipeline so the wallpaper draws behind cell/chrome
         // quads (see the `bg_imgs` field docs).
         let bg_imgs = imgpipe::ImagePipeline::new(&device, format);
+        // v2.24.0: procedural starfield wallpaper, same back-most slot.
+        let starfield = starfield::StarfieldPipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -1038,6 +1053,8 @@ impl Renderer {
             menu_text_renderer,
             imgs,
             bg_imgs,
+            starfield,
+            starfield_started: std::time::Instant::now(),
             bg_image_cache: None,
             bg_image_retry_at: None,
             font_family: cfg.font_family.as_str().into(),
@@ -1240,20 +1257,39 @@ impl Renderer {
     /// frame shown is still time-correct on any other repaint (see the bg
     /// frame-select in `render_frame_with_status`); this only governs proactive
     /// waking.
+    /// Repaint cap for the procedural starfield (`background-type = starfield`).
+    /// The drift is slow, so a low rate keeps idle CPU near today's level while
+    /// the steps stay imperceptible; the shader's `time` is continuous either
+    /// way. A synthetic frame index (`elapsed / 100 ms`) lets the starfield
+    /// reuse the GIF's edge-trigger + wake machinery unchanged.
+    const STARFIELD_FPS: u64 = 10;
+
     pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
-        if !matches!(cfg.background_type, kettle_config::BackgroundType::Image) {
-            return false;
-        }
+        use kettle_config::BackgroundType;
+        // Shared focus/Off gate.
         let enabled = match cfg.background_animation {
             kettle_config::BackgroundAnimation::Off => false,
             kettle_config::BackgroundAnimation::Always => true,
             kettle_config::BackgroundAnimation::WhenFocused => window_focused,
         };
-        enabled
-            && self
+        if !enabled {
+            return false;
+        }
+        match cfg.background_type {
+            // Procedural — always advancing while enabled (no frame cache).
+            BackgroundType::Starfield => true,
+            // Decoded — only a genuinely multi-frame image animates.
+            BackgroundType::Image => self
                 .bg_image_cache
                 .as_ref()
-                .is_some_and(|c| c.frames.len() > 1)
+                .is_some_and(|c| c.frames.len() > 1),
+            BackgroundType::Solid | BackgroundType::Transparent => false,
+        }
+    }
+
+    /// Synthetic frame period (ms) for the starfield's fps cap.
+    fn starfield_frame_ms() -> u128 {
+        (1000 / Self::STARFIELD_FPS) as u128
     }
 
     /// v2.23.1: milliseconds until the animated background's displayed frame
@@ -1267,6 +1303,15 @@ impl Renderer {
     pub fn bg_anim_interval_ms(&self, cfg: &Config, window_focused: bool) -> Option<u64> {
         if !self.background_is_animating(cfg, window_focused) {
             return None;
+        }
+        if matches!(
+            cfg.background_type,
+            kettle_config::BackgroundType::Starfield
+        ) {
+            // Wake at the next fps-cap boundary.
+            let frame = Self::starfield_frame_ms();
+            let into = self.starfield_started.elapsed().as_millis() % frame;
+            return Some(((frame - into) as u64).max(16));
         }
         let c = self.bg_image_cache.as_ref()?;
         bg_image::bg_next_frame_ms(&c.gaps, c.started.elapsed().as_millis())
@@ -1282,6 +1327,15 @@ impl Renderer {
     pub fn bg_current_frame_index(&self, cfg: &Config, window_focused: bool) -> Option<usize> {
         if !self.background_is_animating(cfg, window_focused) {
             return None;
+        }
+        if matches!(
+            cfg.background_type,
+            kettle_config::BackgroundType::Starfield
+        ) {
+            // Quantize continuous time to the fps cap so the edge-trigger fires
+            // once per displayed step.
+            let frame = Self::starfield_frame_ms();
+            return Some((self.starfield_started.elapsed().as_millis() / frame) as usize);
         }
         let c = self.bg_image_cache.as_ref()?;
         if c.frames.len() <= 1 {
@@ -1447,19 +1501,16 @@ impl Renderer {
                 //   weight without needing a separate quad
                 //   shape (sub-cycle 7 can promote to a real
                 //   colored chip).
-                let mut label = String::new();
-                if let Some(g) = pv.group_name
-                    && !g.is_empty()
-                {
-                    label.push_str(&format!("  [{g}]"));
-                }
-                label.push_str(&format!("  {title}"));
-                if !cfg.title_hide_sizetext {
-                    label.push_str(&format!("  {}x{}", pv.size_cols, pv.size_rows));
-                }
-                if cfg.icon_bell && pv.bell {
-                    label.push_str("  \u{1F514}");
-                }
+                // v2.24.0: fit the label to the pane width, shedding the size
+                // text then the group tag then middle-ellipsizing the title
+                // (keeping the program/leaf name) — was a hard glyphon clip with
+                // no ellipsis, so a narrow split cut "C:\Program…" to "C:\Program".
+                let group = pv.group_name.filter(|g| !g.is_empty());
+                let size_text = (!cfg.title_hide_sizetext)
+                    .then(|| format!("{}x{}", pv.size_cols, pv.size_rows));
+                let bell = (cfg.icon_bell && pv.bell).then_some("\u{1F514}");
+                let budget = (rw / cw.max(1.0)).floor().max(1.0) as usize;
+                let label = fit_pane_title(group, title, size_text.as_deref(), bell, budget);
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
@@ -2457,7 +2508,9 @@ impl Renderer {
                         .chars()
                         .count();
                 let maxc = avail.saturating_sub(fixed_w).max(3);
-                let title = truncate(&s.title, maxc);
+                // v2.24.0: middle-ellipsis keeps the program/leaf name visible
+                // (head-priority truncation hid it behind the drive path).
+                let title = middle_ellipsis(&s.title, maxc);
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
                 // Title only — the ✕ is rendered separately below so we
@@ -3129,7 +3182,16 @@ impl Renderer {
             // active tab rather than always-blue.
             let acc = self.ui_accent(cfg, theme);
             // Dim backdrop over the whole window so the panel reads as modal.
-            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, 0.55));
+            // v2.24.0: on the Background page, dim LESS so the live wallpaper
+            // (the real animated starfield / image) shows around the panel as a
+            // genuine preview while you change `background-type`.
+            let on_bg_page = set
+                .categories
+                .get(set.active_category)
+                .map(|c| c == "Background")
+                .unwrap_or(false);
+            let backdrop_a = if on_bg_page { 0.30 } else { 0.55 };
+            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
             // Panel background (near-opaque) + accent border.
             menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
             menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
@@ -3141,10 +3203,23 @@ impl Renderer {
             let hi_y = py + 12.0 + hi_line as f32 * row_h;
             menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
             let sfg = theme.foreground;
+            // v2.24.0: a disabled field row (inapplicable to the current state)
+            // renders dimmed — blended halfway toward the panel background.
+            let dim = color::dim(sfg, theme.background);
             for (i, _line) in lines.iter().enumerate() {
                 if i >= self.settings_buffers.len() {
                     break;
                 }
+                let row_color = if i >= SETTINGS_FIELD_START
+                    && set
+                        .rows
+                        .get(i - SETTINGS_FIELD_START)
+                        .is_some_and(|r| r.disabled)
+                {
+                    dim
+                } else {
+                    sfg
+                };
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
                     left: px + 16.0,
@@ -3156,7 +3231,7 @@ impl Renderer {
                         right: (px + panel_w) as i32,
                         bottom: (py + panel_h) as i32,
                     },
-                    default_color: GColor::rgb(sfg.r, sfg.g, sfg.b),
+                    default_color: GColor::rgb(row_color.r, row_color.g, row_color.b),
                     custom_glyphs: &[],
                 });
             }
@@ -3299,6 +3374,19 @@ impl Renderer {
         // present in `live` but absent from a given cache is a harmless no-op).
         self.bg_imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
+        // v2.24.0: refresh the procedural starfield uniforms (cheap 32-byte
+        // write) when it's the active wallpaper. `time` is continuous so the
+        // low-fps repaint cadence still shows the exact drift position.
+        if matches!(cfg.background_type, BackgroundType::Starfield) {
+            self.starfield.upload(
+                &self.gpu.queue,
+                [sw, sh],
+                self.starfield_started.elapsed().as_secs_f32(),
+                cfg.starfield_speed,
+                cfg.starfield_density,
+                cfg.starfield_glow,
+            );
+        }
         self.bg_imgs.gc(&live);
         self.imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
@@ -3375,7 +3463,13 @@ impl Renderer {
             // cell backgrounds → text. Pre-2.23.0 the wallpaper drew *after*
             // `quads`, hiding all cell backgrounds and bleeding the animation
             // through the chrome.
-            self.bg_imgs.draw(&mut pass);
+            if matches!(cfg.background_type, BackgroundType::Starfield) {
+                // The procedural starfield is the opaque back-most wallpaper
+                // (mutually exclusive with an image background).
+                self.starfield.draw(&mut pass);
+            } else {
+                self.bg_imgs.draw(&mut pass);
+            }
             self.quads.draw(&mut pass);
             self.imgs.draw(&mut pass);
             self.text_renderer
@@ -4356,18 +4450,32 @@ pub(crate) fn resolve_chrome_bg(
     bg_avg: Option<Rgb>,
 ) -> Rgb {
     use kettle_config::{BackgroundType, ChromeBackground};
-    // Only a wallpaper changes the chrome color; otherwise theme as before.
-    if !matches!(cfg.background_type, BackgroundType::Image) {
+    // Only a wallpaper (image or starfield) changes the chrome color; otherwise
+    // theme as before. (Over a pure-black starfield, `auto` keeps the chrome
+    // black — black already clears the 3:1 contrast bar against a light fg.)
+    if !matches!(
+        cfg.background_type,
+        BackgroundType::Image | BackgroundType::Starfield
+    ) {
         return theme.palette[8];
     }
     match cfg.chrome_background {
         ChromeBackground::Theme => theme.palette[8],
         ChromeBackground::Black => Rgb::new(0, 0, 0),
         ChromeBackground::White => Rgb::new(255, 255, 255),
-        ChromeBackground::Auto => match bg_avg {
-            Some(avg) => color::with_min_contrast(avg, theme.foreground, 3.0),
-            None => theme.palette[8],
-        },
+        ChromeBackground::Auto => {
+            // The starfield has no decoded frame to sample; it's a black sky, so
+            // treat its average as black (→ a seamless dark bar after the
+            // contrast nudge) rather than falling back to the theme color.
+            let avg = bg_avg.or_else(|| {
+                matches!(cfg.background_type, BackgroundType::Starfield)
+                    .then_some(Rgb::new(0, 0, 0))
+            });
+            match avg {
+                Some(avg) => color::with_min_contrast(avg, theme.foreground, 3.0),
+                None => theme.palette[8],
+            }
+        }
     }
 }
 
@@ -4752,27 +4860,204 @@ fn settings_panel_cols(lines: &[String]) -> f32 {
     lines.iter().map(|l| l.width()).max().unwrap_or(44).max(44) as f32
 }
 
+/// What a click on the settings overlay landed on (v2.24.0 mouse control). The
+/// geometry is recomputed here from the SAME inputs the draw uses
+/// (`settings_display_lines` + the panel math in `render_frame_with_status`),
+/// so the hit-test can't drift from what's painted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHit {
+    /// Outside the panel entirely — dismiss the overlay.
+    Outside,
+    /// Inside the panel but not on an actionable row (title / blank / footer).
+    Inert,
+    /// The category-tab strip — switch to this category index.
+    Category(usize),
+    /// A field row — index into the active category's fields.
+    Field(usize),
+}
+
+/// Map a cursor position to a [`SettingsHit`]. Pure (no GPU) so the row/tab
+/// mapping is unit-tested. `cell_w`/`cell_h` are the renderer's cell metrics and
+/// `surface_w`/`surface_h` the surface size — exactly the values the draw uses.
+pub fn settings_hit_test(
+    set: &SettingsOverlay,
+    cell_w: f32,
+    cell_h: f32,
+    surface_w: f32,
+    surface_h: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+) -> SettingsHit {
+    let (cw, ch, sw, sh) = (cell_w, cell_h, surface_w, surface_h);
+    let lines = settings_display_lines(set);
+    let row_h = ch + 6.0;
+    let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+    let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
+    let px = ((sw - panel_w) * 0.5).max(0.0);
+    let py = ((sh - panel_h) * 0.5).max(0.0);
+    if cursor_x < px || cursor_x >= px + panel_w || cursor_y < py || cursor_y >= py + panel_h {
+        return SettingsHit::Outside;
+    }
+    // Rows are laid out from `py + 12.0`, each `row_h` tall (mirrors the draw).
+    let rel = cursor_y - (py + 12.0);
+    if rel < 0.0 {
+        return SettingsHit::Inert;
+    }
+    let line = (rel / row_h) as usize;
+    if line >= lines.len() {
+        return SettingsHit::Inert;
+    }
+    // Line 1 is the category-tab strip.
+    if line == 1 {
+        let text_left = px + 16.0;
+        let mut col = 0usize;
+        for (i, c) in set.categories.iter().enumerate() {
+            let seg = if i == set.active_category {
+                format!("[ {c} ]")
+            } else {
+                format!("  {c}  ")
+            };
+            let w = display_width(&seg);
+            let start = text_left + col as f32 * cw;
+            let end = text_left + (col + w) as f32 * cw;
+            if cursor_x >= start && cursor_x < end {
+                return SettingsHit::Category(i);
+            }
+            col += w + 1; // + the joining space
+        }
+        return SettingsHit::Inert;
+    }
+    // Field rows: SETTINGS_FIELD_START .. SETTINGS_FIELD_START + rows.len().
+    if line >= SETTINGS_FIELD_START && line < SETTINGS_FIELD_START + set.rows.len() {
+        return SettingsHit::Field(line - SETTINGS_FIELD_START);
+    }
+    SettingsHit::Inert
+}
+
 /// actually paints into. The ellipsis itself is 1 cell so we reserve a
 /// column for it.
-fn truncate(s: &str, n: usize) -> String {
+/// Display width (terminal columns) of a string, via `unicode-width`.
+fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
-    let total: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
-    if total <= n {
-        return s.to_string();
-    }
-    let limit = n.saturating_sub(1); // reserve 1 col for the `…`
+    s.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// Take whole chars from the FRONT of `s` up to `cols` display columns.
+fn take_cols_front(s: &str, cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
     let mut acc = 0usize;
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::new();
     for c in s.chars() {
         let w = c.width().unwrap_or(0);
-        if acc + w > limit {
+        if acc + w > cols {
             break;
         }
         out.push(c);
         acc += w;
     }
-    out.push('…');
     out
+}
+
+/// Take whole chars from the BACK of `s` up to `cols` display columns.
+fn take_cols_back(s: &str, cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut acc = 0usize;
+    let mut rev: Vec<char> = Vec::new();
+    for c in s.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if acc + w > cols {
+            break;
+        }
+        rev.push(c);
+        acc += w;
+    }
+    rev.iter().rev().collect()
+}
+
+/// Shorten `s` to at most `n` display columns with a MIDDLE ellipsis, preserving
+/// both ends — the right choice for paths and `user@host:dir` titles where the
+/// tail (program / leaf dir) is the most identifying part. When `s` looks like a
+/// path, the trailing segment after the last `/` or `\` is kept whole if it fits
+/// (`C:\…\pwsh.exe`); otherwise it falls back to a symmetric split. Measured in
+/// columns, not chars, so CJK/wide glyphs don't overflow.
+fn middle_ellipsis(s: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    if display_width(s) <= n {
+        return s.to_string();
+    }
+    if n == 1 {
+        return "…".to_string();
+    }
+    let budget = n - 1; // reserve 1 col for the `…`
+    // Prefer keeping the trailing path segment (program / leaf) intact.
+    let leaf_start = s.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
+    if leaf_start > 0 {
+        let leaf = &s[leaf_start..];
+        let leaf_w = display_width(leaf);
+        if leaf_w <= budget && leaf_w > 0 {
+            let head = take_cols_front(&s[..leaf_start], budget - leaf_w);
+            return format!("{head}…{leaf}");
+        }
+    }
+    // Fallback: symmetric middle split.
+    let front_cols = budget.div_ceil(2);
+    let back_cols = budget - front_cols;
+    let head = take_cols_front(s, front_cols);
+    let tail = take_cols_back(s, back_cols);
+    format!("{head}…{tail}")
+}
+
+/// Build a per-pane titlebar label that fits `budget` display columns, shedding
+/// the least-useful parts first (the v2.24.0 progressive-shed UX): full →
+/// drop the `WxH` size text → drop the `[group]` tag → middle-ellipsize the
+/// title (keeping the program/leaf name) → at the floor, the leaf alone. The
+/// bell indicator (if any) is kept throughout — it's small and important.
+/// Mirrors the label format built inline pre-2.24.0 (`"  [g]  title  WxH  🔔"`).
+fn fit_pane_title(
+    group: Option<&str>,
+    title: &str,
+    size_text: Option<&str>,
+    bell: Option<&str>,
+    budget: usize,
+) -> String {
+    let bell_part = bell.map(|b| format!("  {b}")).unwrap_or_default();
+    let assemble = |g: Option<&str>, t: &str, sz: Option<&str>| -> String {
+        let mut s = String::new();
+        if let Some(g) = g {
+            s.push_str("  [");
+            s.push_str(g);
+            s.push(']');
+        }
+        s.push_str("  ");
+        s.push_str(t);
+        if let Some(sz) = sz {
+            s.push_str("  ");
+            s.push_str(sz);
+        }
+        s.push_str(&bell_part);
+        s
+    };
+    // 1. Everything.
+    let full = assemble(group, title, size_text);
+    if display_width(&full) <= budget {
+        return full;
+    }
+    // 2. Drop the size text.
+    let no_size = assemble(group, title, None);
+    if display_width(&no_size) <= budget {
+        return no_size;
+    }
+    // 3. Drop the group tag.
+    let no_group = assemble(None, title, None);
+    if display_width(&no_group) <= budget {
+        return no_group;
+    }
+    // 4. Middle-ellipsize the title; "  " lead + the bell are fixed overhead.
+    let fixed = 2 + display_width(&bell_part);
+    let title_budget = budget.saturating_sub(fixed).max(1);
+    format!("  {}{}", middle_ellipsis(title, title_budget), bell_part)
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
@@ -4980,7 +5265,10 @@ fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     use kettle_config::BackgroundType;
     match cfg.background_type {
         BackgroundType::Solid => cfg.background_opacity as f64,
-        BackgroundType::Transparent | BackgroundType::Image => {
+        // Starfield is an opaque kettle-drawn wallpaper, so the cell backgrounds
+        // dim the same way as an image (darkness lets the field show through the
+        // terminal area, not just behind the chrome).
+        BackgroundType::Transparent | BackgroundType::Image | BackgroundType::Starfield => {
             (cfg.background_opacity as f64) * (cfg.background_darkness as f64)
         }
     }
@@ -6742,6 +7030,21 @@ mod pane_buffer_lifecycle_tests {
         );
         // Auto with no frame sampled yet → falls back to the theme chrome color.
         assert_eq!(resolve_chrome_bg(&cfg, &theme, None), theme.palette[8]);
+
+        // v2.24.0: the starfield is a wallpaper too, so chrome modes apply.
+        cfg.background_type = BackgroundType::Starfield;
+        cfg.chrome_background = ChromeBackground::Black;
+        assert_eq!(resolve_chrome_bg(&cfg, &theme, None), Rgb::new(0, 0, 0));
+        // Auto over the black starfield (no sampled frame) → a black/near-black
+        // bar that still clears the contrast bar, NOT the theme fallback.
+        cfg.chrome_background = ChromeBackground::Auto;
+        let out = resolve_chrome_bg(&cfg, &theme, None);
+        assert!(
+            color::contrast_ratio(out, theme.foreground) + 1e-6 >= 3.0,
+            "auto chrome over the starfield must stay readable"
+        );
+        // With a light (default Mocha) foreground, black already passes → black.
+        assert_eq!(out, Rgb::new(0, 0, 0));
     }
 
     /// v2.23.0: the pinned-GPU fallback chain. A dual-GPU Windows machine shows
@@ -6938,55 +7241,162 @@ mod pane_buffer_lifecycle_tests {
 }
 
 #[cfg(test)]
-mod truncate_tests {
-    use super::truncate;
+mod title_fit_tests {
+    use super::{display_width, fit_pane_title, middle_ellipsis};
 
     #[test]
-    fn truncate_respects_display_columns_not_chars() {
-        // ASCII: 1 col per char. Trivially fits.
-        assert_eq!(truncate("hello", 10), "hello");
-        // ASCII overflow: keep n-1 chars, append `…` (1 col).
-        assert_eq!(truncate("abcdefghij", 5), "abcd…");
-        // CJK: each char is 2 cells. "中文中文" = 8 cells. Limit 8 = fits.
-        assert_eq!(truncate("中文中文", 8), "中文中文");
-        // CJK overflow: 8 cells doesn't fit in 6, reserve 1 col for `…`
-        // → can fit at most 2 chars (4 cells) + `…` (1 col) = 5 cols ≤ 6.
-        // Greedy: 2 chars + ellipsis.
-        assert_eq!(truncate("中文中文", 6), "中文…");
-        // Mixed ASCII + CJK: "abc中文" = 3+4 = 7 cells. Limit 5 →
-        // overflow; reserve 1 col, take 4 cols worth = "abc" + ellipsis.
-        // (next char is `中` (2 cols), 3+2=5 > 4-limit-after-ellipsis-reserve,
-        // so stops at 3 ASCII chars.)
-        assert_eq!(truncate("abc中文", 5), "abc…");
-        // Limit 0 / 1: edge cases. limit=0 always returns just `…` if
-        // anything was cut, but a truly-empty string fits in 0.
-        assert_eq!(truncate("", 0), "");
-        assert_eq!(truncate("a", 0), "…");
-        // Total-equals-limit: no ellipsis (everything fits exactly).
-        assert_eq!(truncate("中", 2), "中");
+    fn middle_ellipsis_fits_and_keeps_both_ends() {
+        // Fits unchanged.
+        assert_eq!(middle_ellipsis("hello", 10), "hello");
+        assert_eq!(middle_ellipsis("hello", 5), "hello");
+        // A path keeps the LEAF (program name) whole + the drive root.
+        let p = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
+        let cut = middle_ellipsis(p, 16);
+        assert!(cut.contains('…'), "must ellipsize: {cut}");
+        assert!(cut.ends_with("pwsh.exe"), "leaf must survive: {cut}");
+        assert!(cut.starts_with("C:\\"), "drive root must survive: {cut}");
+        assert!(display_width(&cut) <= 16, "must fit the budget: {cut}");
     }
 
     #[test]
-    fn truncate_honors_budgets_beyond_24_columns() {
-        // Cycle 804: the tab-title budget used to be hard-capped at 24 chars
-        // regardless of how wide the tab was. `truncate` itself never had that
-        // cap, so these guard that a wide budget shows the full title and only
-        // ellipsizes on genuine overflow — i.e. that a future re-clamp to 24
-        // would be caught.
+    fn middle_ellipsis_falls_back_to_symmetric_for_non_paths() {
+        let s = "abcdefghijklmnopqrstuvwxyz"; // 26 cols, no separators
+        let cut = middle_ellipsis(s, 11);
+        assert!(cut.contains('…'));
+        assert!(cut.starts_with('a'), "front kept: {cut}");
+        assert!(cut.ends_with('z'), "back kept: {cut}");
+        assert!(display_width(&cut) <= 11);
+    }
+
+    #[test]
+    fn middle_ellipsis_respects_display_columns_not_chars() {
+        // CJK: each char is 2 cells. "中文中文" = 8 cells; budget 8 fits.
+        assert_eq!(middle_ellipsis("中文中文", 8), "中文中文");
+        // Overflow never exceeds the column budget.
+        for n in 0..=8 {
+            assert!(display_width(&middle_ellipsis("中文中文路径", n)) <= n);
+        }
+        assert_eq!(middle_ellipsis("a", 0), "");
+        assert_eq!(middle_ellipsis("abc", 1), "…");
+    }
+
+    #[test]
+    fn pane_title_sheds_size_then_group_then_ellipsizes() {
         let long = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
-        let long_len = long.chars().count(); // all ASCII → 1 col each
-        // A budget wider than the title returns it verbatim (no 24 cap).
-        assert_eq!(truncate(long, 200), long);
-        assert_eq!(truncate(long, long_len), long);
-        // A 30-col title at budget 30 is unchanged (would fail under a 24 cap).
-        let t30 = "abcdefghijklmnopqrstuvwxyz0123"; // 30 ASCII cols
-        assert_eq!(t30.chars().count(), 30);
-        assert_eq!(truncate(t30, 30), t30);
-        // Still ellipsizes when the title actually exceeds the (large) budget.
-        let t40 = "0123456789012345678901234567890123456789"; // 40 cols
-        let cut = truncate(t40, 30);
-        assert!(cut.ends_with('…'));
-        assert_eq!(cut.chars().count(), 30);
+        // Wide budget: everything shows, including size + group.
+        let wide = fit_pane_title(Some("fleet"), long, Some("120x60"), None, 120);
+        assert!(wide.contains("[fleet]") && wide.contains("120x60") && wide.contains(long));
+        // Medium: size text is dropped first, group + full title still fit.
+        let med_budget = display_width("  [fleet]  ") + long.chars().count() + 1;
+        let med = fit_pane_title(Some("fleet"), long, Some("120x60"), None, med_budget);
+        assert!(med.contains(long), "title intact: {med}");
+        assert!(!med.contains("120x60"), "size shed first: {med}");
+        // Narrow: group dropped too, and the title middle-ellipsized to the leaf.
+        let narrow = fit_pane_title(Some("fleet"), long, Some("120x60"), None, 18);
+        assert!(!narrow.contains("[fleet]"), "group shed: {narrow}");
+        assert!(narrow.ends_with("pwsh.exe"), "leaf survives: {narrow}");
+        assert!(display_width(&narrow) <= 18, "fits budget: {narrow}");
+    }
+
+    #[test]
+    fn pane_title_keeps_the_bell_through_shedding() {
+        let long = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
+        let narrow = fit_pane_title(Some("fleet"), long, Some("120x60"), Some("\u{1F514}"), 20);
+        assert!(narrow.contains('\u{1F514}'), "bell must survive: {narrow}");
+    }
+}
+
+#[cfg(test)]
+mod settings_hit_test_tests {
+    use super::{
+        SETTINGS_FIELD_START, SettingsHit, SettingsOverlay, SettingsRow, settings_display_lines,
+        settings_hit_test, settings_panel_cols,
+    };
+
+    fn overlay() -> SettingsOverlay {
+        SettingsOverlay {
+            categories: vec!["Appearance".into(), "Graphics".into(), "Behavior".into()],
+            active_category: 0,
+            rows: vec![
+                SettingsRow {
+                    label: "Theme".into(),
+                    value: "Mocha".into(),
+                    disabled: false,
+                },
+                SettingsRow {
+                    label: "Font size".into(),
+                    value: "14".into(),
+                    disabled: false,
+                },
+            ],
+            focused_row: 0,
+            vim_nav: false,
+            footer_note: None,
+        }
+    }
+
+    // Recompute the panel geometry the same way the draw + hit-test do, so the
+    // probes target real on-screen positions.
+    fn geom(set: &SettingsOverlay, cw: f32, ch: f32, sw: f32, sh: f32) -> (f32, f32, f32) {
+        let lines = settings_display_lines(set);
+        let row_h = ch + 6.0;
+        let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+        let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
+        let px = ((sw - panel_w) * 0.5).max(0.0);
+        let py = ((sh - panel_h) * 0.5).max(0.0);
+        (px, py, row_h)
+    }
+
+    #[test]
+    fn outside_the_panel_dismisses() {
+        let set = overlay();
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, 2.0, 2.0),
+            SettingsHit::Outside
+        );
+    }
+
+    #[test]
+    fn field_rows_map_by_index() {
+        let set = overlay();
+        let (px, py, row_h) = geom(&set, 8.0, 16.0, 800.0, 600.0);
+        for f in 0..set.rows.len() {
+            let line = SETTINGS_FIELD_START + f;
+            let y = py + 12.0 + line as f32 * row_h + row_h * 0.5;
+            assert_eq!(
+                settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, px + 40.0, y),
+                SettingsHit::Field(f),
+                "field {f} at y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_and_blank_rows_are_inert() {
+        let set = overlay();
+        let (px, py, row_h) = geom(&set, 8.0, 16.0, 800.0, 600.0);
+        // Line 0 = title.
+        let y0 = py + 12.0 + row_h * 0.5;
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, px + 40.0, y0),
+            SettingsHit::Inert
+        );
+    }
+
+    #[test]
+    fn category_tabs_map_by_x() {
+        let set = overlay();
+        let (px, py, row_h) = geom(&set, 8.0, 16.0, 800.0, 600.0);
+        let y = py + 12.0 + row_h * 1.5; // line 1 = tab strip
+        // Tab 0 "[ Appearance ]" starts at text_left = px + 16.
+        let hit0 = settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, px + 16.0 + 4.0, y);
+        assert_eq!(hit0, SettingsHit::Category(0));
+        // Tab 1 "  Graphics  " begins after tab0 (14 cols) + 1 separator = col 15.
+        let x1 = px + 16.0 + (15.0 + 3.0) * 8.0;
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, x1, y),
+            SettingsHit::Category(1)
+        );
     }
 }
 

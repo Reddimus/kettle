@@ -4,6 +4,47 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.24.0] — 2026-06-14
+
+  **A procedural starfield background, always-on by default, plus title-overflow
+  and mouse-driven settings polish.**
+
+  ### Added
+  - **Procedural GPU starfield background** (`background-type = starfield`). A
+    slow forward-flight field of soft-glowing, subtly-colored stars rendered
+    entirely in a WGSL fragment shader — true-color (no GIF banding), a perfect
+    loop, crisp at any resolution/aspect, and **~zero memory** (no decoded
+    frames, vs the ~253 MB a 1080p animated GIF decoded to). Stars **fade in as
+    they get closer** over a pure-black sky. Zero-config: pick it and it plays.
+    Tunable via `starfield-speed`, `starfield-density`, `starfield-glow`.
+  - **Live theme preview on hover.** Right-click → Theme → hovering (or arrowing
+    over) a theme applies it instantly as a preview; moving off, Esc, or clicking
+    away reverts to your current theme, and clicking commits it. No config write
+    happens until you commit.
+  - **Mouse control for the Settings overlay.** Left-click a row to cycle its
+    value forward, right-click to cycle back, scroll-wheel to adjust; click a
+    category tab to switch pages; click outside to close. Keybind rows start
+    capture on click; the image-path row opens an inline text prompt.
+  - **In-settings background setup.** A dedicated **Background** page: choose the
+    type (solid / image / starfield / transparent), set the image **path inline**
+    (no more hand-editing the config), pick the animation mode + chrome bar color.
+    Options that don't apply to the current type are dimmed and skipped; the page
+    dims its backdrop so the **live** wallpaper previews around the panel.
+
+  ### Changed
+  - **Animated backgrounds now play by default even when the window is
+    unfocused** (`background-animation` default `when-focused → always`). A
+    wallpaper that only moved while focused felt broken. It still **freezes when
+    the window is minimized or fully occluded** (it can't be seen), so a hidden
+    window costs zero idle — the safety refinement that keeps always-on cheap.
+    Set `background-animation = when-focused` for the old battery-friendly mode.
+  - **Long pane/tab titles now shorten gracefully.** A narrow split used to hard-
+    cut a long title (e.g. PowerShell's full exe path) to `C:\Program` with no
+    ellipsis. Titles now shed the size text, then the group tag, then
+    middle-ellipsize keeping the program/leaf name (`C:\Pr…\pwsh.exe`); tab
+    labels switched from head-priority to the same middle-ellipsis so the program
+    name stays visible.
+
 ## [2.23.2] — 2026-06-14
 
   ### Fixed

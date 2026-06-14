@@ -98,6 +98,10 @@ pub(crate) struct WindowState {
     /// Cycle 756: `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
+    /// v2.24.0: when `Some`, an inline text prompt (the image-path entry) is open
+    /// over the settings panel; keystrokes route to it until Enter (persist) or
+    /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
+    pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
     /// v2.23.0: set when a Settings change (a GPU pin / power-preference /
     /// backend / force-software) was persisted but can only take effect on the
     /// next launch. The settings overlay shows a "⚠ restart to apply" footer
@@ -117,6 +121,13 @@ pub(crate) struct WindowState {
     /// to the other modal overlays — same close-all-modals discipline,
     /// same Esc-to-dismiss key route.
     pub(crate) context_menu: Option<ContextMenuState>,
+    /// v2.24.0 live theme preview: while the cursor (or keyboard) is on a
+    /// `ThemeChoice` row in the right-click → Theme submenu, the theme is applied
+    /// ephemerally to `cfg`; this holds the `(theme_name, theme)` to restore on
+    /// dismiss-without-select. Cleared (kept) on commit (`SetTheme`). Reverted by
+    /// the single post-event chokepoint in `window_event` when the highlight
+    /// leaves a theme row or the menu closes.
+    pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
     /// Cycle 369: when `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -124,6 +135,11 @@ pub(crate) struct WindowState {
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
     pub(crate) window_focused: bool,
+    /// v2.24.0: `true` while the window is fully hidden behind other windows
+    /// (winit `WindowEvent::Occluded(true)`). Gates the animated-background
+    /// wake so a covered window costs zero idle (alongside an `is_minimized`
+    /// probe). Set back to `false` on un-occlude, which also forces a repaint.
+    pub(crate) window_occluded: bool,
     /// True while the OS mouse cursor is hidden because the user is typing
     /// (`mouse-hide-while-typing`). Re-shown on the next mouse movement.
     pub(crate) mouse_hidden: bool,
@@ -261,14 +277,17 @@ impl WindowState {
             ssh_input: None,
             palette_input: None,
             settings_nav: None,
+            settings_text_edit: None,
             settings_restart_pending: false,
             last_bg_frame: None,
             layout_picker_input: None,
             hint_state: None,
             context_menu: None,
+            theme_preview: None,
             editing_title: None,
             confirm_dialog: None,
             window_focused: true,
+            window_occluded: false,
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,

@@ -4589,53 +4589,7 @@ impl App {
         // Cycle 756: project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
-        let settings_overlay = ws.settings_nav.as_ref().map(|nav| {
-            let cats = crate::settings::categories(&self.gpu_choices);
-            let cat = nav.category.min(cats.len().saturating_sub(1));
-            let active = &cats[cat];
-            let fld = nav.field.min(active.fields.len().saturating_sub(1));
-            kettle_render::SettingsOverlay {
-                categories: cats.iter().map(|c| c.name.to_string()).collect(),
-                active_category: cat,
-                rows: active
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| kettle_render::SettingsRow {
-                        label: f.label.to_string(),
-                        // Cycle 766: show a capture prompt on the focused keybind
-                        // row while waiting for the user's chord.
-                        value: if i == fld && nav.capturing {
-                            "‹press a chord — Esc to cancel›".to_string()
-                        } else {
-                            crate::settings::read(&self.cfg, f)
-                        },
-                    })
-                    .collect(),
-                focused_row: fld,
-                vim_nav: self.cfg.vim_menu_nav,
-                // v2.23.0: on the Graphics tab, show which GPU is LIVE right now
-                // (from the shared adapter) plus a restart hint when a GPU
-                // setting was changed this session (it applies on next launch).
-                footer_note: if active.name == "Graphics" {
-                    let active_line = self
-                        .gpu
-                        .as_ref()
-                        .map(|g| {
-                            let i = g.adapter_info();
-                            format!("Active GPU: {} ({}, {})", i.name, i.kind, i.backend)
-                        })
-                        .unwrap_or_else(|| "Active GPU: (initializing)".to_string());
-                    if ws.settings_restart_pending {
-                        Some(format!("{active_line}    •    ⚠ restart kettle to apply"))
-                    } else {
-                        Some(active_line)
-                    }
-                } else {
-                    None
-                },
-            }
-        });
+        let settings_overlay = self.settings_overlay_projection(ws);
         let s = &ws.mux.search;
         if !s.open {
             return Overlay {
@@ -5124,6 +5078,9 @@ impl App {
         ws.mux.search.open = false;
         ws.palette_input = None;
         ws.settings_nav = None;
+        // v2.24.0: also drop any open inline settings text prompt (the image-path
+        // editor) so it can't linger after the panel closes / reopens.
+        ws.settings_text_edit = None;
         ws.layout_picker_input = None;
         ws.hint_state = None;
         ws.ssh_input = None;
@@ -5739,6 +5696,203 @@ impl App {
             .unwrap_or((8.0, 16.0))
     }
 
+    /// v2.24.0: reconcile the live theme preview with the current context-menu
+    /// highlight. Applying snapshots the pre-preview `(theme_name, theme)` once
+    /// into `ws.theme_preview`; reverting restores + clears it. A committed pick
+    /// (`SetTheme`) clears the baseline first, so this becomes a no-op for it.
+    fn sync_theme_preview(&mut self, ws: &mut WindowState) {
+        let target = ws
+            .context_menu
+            .as_ref()
+            .and_then(|m| match m.items.get(m.highlight) {
+                Some(ContextMenuItem::ThemeChoice { theme, .. }) => Some(theme.clone()),
+                _ => None,
+            });
+        match target {
+            Some(name) => {
+                if ws.theme_preview.is_none() {
+                    ws.theme_preview = Some((self.cfg.theme_name.clone(), self.cfg.theme.clone()));
+                }
+                if self.cfg.theme_name != name {
+                    self.cfg.theme_name = name.clone();
+                    self.cfg.theme = kettle_config::Theme::by_name(&name);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            None => self.revert_theme_preview(ws),
+        }
+    }
+
+    /// Restore the theme captured before a preview began (if any) and clear the
+    /// snapshot. No-op when no preview is active (the common case).
+    fn revert_theme_preview(&mut self, ws: &mut WindowState) {
+        if let Some((name, theme)) = ws.theme_preview.take() {
+            self.cfg.theme_name = name;
+            self.cfg.theme = theme;
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Build the renderer-side settings projection from the live `settings_nav`
+    /// and config. Used by the draw path AND the v2.24.0 mouse hit-test, so the
+    /// painted panel and the clickable regions are computed from one source.
+    fn settings_overlay_projection(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::SettingsOverlay> {
+        let nav = ws.settings_nav.as_ref()?;
+        let cats = crate::settings::categories(&self.gpu_choices);
+        let cat = nav.category.min(cats.len().saturating_sub(1));
+        let active = &cats[cat];
+        let fld = nav.field.min(active.fields.len().saturating_sub(1));
+        Some(kettle_render::SettingsOverlay {
+            categories: cats.iter().map(|c| c.name.to_string()).collect(),
+            active_category: cat,
+            rows: active
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    // v2.24.0: an open inline text edit for this field shows its
+                    // editable buffer + a caret instead of the stored value.
+                    let editing = ws.settings_text_edit.as_ref().filter(|e| e.key == f.key);
+                    let value = if let Some(e) = editing {
+                        format!("{}\u{258f}", settings_edit_display(&e.buf))
+                    } else if i == fld && nav.capturing {
+                        // Cycle 766: capture prompt on the focused keybind row.
+                        "‹press a chord — Esc to cancel›".to_string()
+                    } else {
+                        crate::settings::read(&self.cfg, f)
+                    };
+                    kettle_render::SettingsRow {
+                        label: f.label.to_string(),
+                        value,
+                        disabled: crate::settings::field_disabled(&self.cfg, f.key),
+                    }
+                })
+                .collect(),
+            focused_row: fld,
+            vim_nav: self.cfg.vim_menu_nav,
+            // v2.23.0: on the Graphics tab, show which GPU is LIVE right now
+            // (from the shared adapter) plus a restart hint when a GPU setting
+            // was changed this session (it applies on next launch).
+            footer_note: if active.name == "Graphics" {
+                let active_line = self
+                    .gpu
+                    .as_ref()
+                    .map(|g| {
+                        let i = g.adapter_info();
+                        format!("Active GPU: {} ({}, {})", i.name, i.kind, i.backend)
+                    })
+                    .unwrap_or_else(|| "Active GPU: (initializing)".to_string());
+                if ws.settings_restart_pending {
+                    Some(format!("{active_line}    •    ⚠ restart kettle to apply"))
+                } else {
+                    Some(active_line)
+                }
+            } else {
+                None
+            },
+        })
+    }
+
+    /// v2.24.0: handle a mouse interaction with the settings overlay. `dir` is
+    /// the adjust direction for a field (left-click `+1`, right-click `-1`,
+    /// wheel `±1`); a category-tab hit switches category. `is_click` (vs a wheel)
+    /// makes a hit OUTSIDE the panel close settings and makes inert hits consume
+    /// the event; a wheel outside/inert is left for the modal swallow so a stray
+    /// scroll can't dismiss the panel. Returns `true` if the event was consumed.
+    fn settings_mouse(&mut self, ws: &mut WindowState, dir: i32, is_click: bool) -> bool {
+        if ws.settings_nav.is_none() {
+            return false;
+        }
+        // A mouse interaction while the inline path prompt is open cancels it
+        // (the typed value is discarded; re-open to edit again).
+        if ws.settings_text_edit.is_some() {
+            ws.settings_text_edit = None;
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+        let Some(set) = self.settings_overlay_projection(ws) else {
+            return false;
+        };
+        let (cw, ch) = self.menu_cell(ws);
+        let (sw, sh) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let (mx, my) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let hit = kettle_render::settings_hit_test(&set, cw, ch, sw, sh, mx, my);
+        match hit {
+            kettle_render::SettingsHit::Outside => {
+                if !is_click {
+                    return false; // let a stray wheel fall through to the swallow
+                }
+                ws.settings_nav = None;
+            }
+            kettle_render::SettingsHit::Inert => {
+                if !is_click {
+                    return false;
+                }
+            }
+            kettle_render::SettingsHit::Category(i) => {
+                if let Some(nav) = ws.settings_nav.as_mut() {
+                    let cats = crate::settings::categories(&self.gpu_choices);
+                    nav.category = i.min(cats.len().saturating_sub(1));
+                    // Clamp the focused field into the new category + cancel any
+                    // in-progress keybind capture.
+                    let fcount = cats[nav.category].fields.len().max(1);
+                    nav.field = nav.field.min(fcount - 1);
+                    nav.capturing = false;
+                }
+            }
+            kettle_render::SettingsHit::Field(f) => {
+                let cats = crate::settings::categories(&self.gpu_choices);
+                let cat = ws
+                    .settings_nav
+                    .as_ref()
+                    .map(|n| n.category.min(cats.len().saturating_sub(1)))
+                    .unwrap_or(0);
+                let fcount = cats[cat].fields.len();
+                if f < fcount {
+                    let key = cats[cat].fields[f].key;
+                    // A dimmed/inapplicable row is a no-op (but consumes the click).
+                    if !crate::settings::field_disabled(&self.cfg, key) {
+                        if let Some(nav) = ws.settings_nav.as_mut() {
+                            nav.field = f;
+                            nav.capturing = false;
+                        }
+                        // Keybind + text rows ACTIVATE on click (dir 0 — capture /
+                        // open prompt); a wheel just focuses them. Value rows cycle.
+                        let activate = crate::settings::is_keybind(&cats[cat].fields[f])
+                            || crate::settings::is_text(&cats[cat].fields[f]);
+                        if activate {
+                            if is_click {
+                                self.settings_adjust(ws, &cats, cat, f, 0);
+                            }
+                        } else {
+                            self.settings_adjust(ws, &cats, cat, f, dir);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Dropdown-parity cycle: per-row shortcut hints for a menu, from the
     /// LIVE keybind map (a user rebind shows their actual chord). `Item` /
     /// `DynamicItem` rows look up their own Action; the Nth `NewTabShell`
@@ -6108,6 +6262,10 @@ impl App {
             }
             ContextMenuClick::SetTheme(name) => {
                 ws.context_menu = None;
+                // v2.24.0: commit the preview — drop the revert baseline so the
+                // post-event `sync_theme_preview` keeps this pick instead of
+                // restoring the pre-hover theme.
+                ws.theme_preview = None;
                 self.cfg.theme_name = name.clone();
                 self.cfg.theme = kettle_config::Theme::by_name(&name);
                 // Cycle 918: theme is config-governed — persist to the config
@@ -9599,8 +9757,12 @@ impl App {
                 self.reset_blink_phase(ws);
                 return;
             }
-            Key::Named(NamedKey::ArrowDown) => fld = (fld + 1) % field_count,
-            Key::Named(NamedKey::ArrowUp) => fld = (fld + field_count - 1) % field_count,
+            Key::Named(NamedKey::ArrowDown) => {
+                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, 1)
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, -1)
+            }
             Key::Named(NamedKey::Tab) => {
                 let n = cats.len();
                 cat = if ws.mods.shift_key() {
@@ -9634,8 +9796,22 @@ impl App {
                 // nav layer; g-vs-G derives from the physical Shift state.
                 let folded = s.to_ascii_lowercase();
                 match (folded.as_str(), ws.mods.control_key()) {
-                    ("j", false) => fld = (fld + 1) % field_count,
-                    ("k", false) => fld = (fld + field_count - 1) % field_count,
+                    ("j", false) => {
+                        fld = crate::settings::next_enabled_field(
+                            &self.cfg,
+                            &cats[cat].fields,
+                            fld,
+                            1,
+                        )
+                    }
+                    ("k", false) => {
+                        fld = crate::settings::next_enabled_field(
+                            &self.cfg,
+                            &cats[cat].fields,
+                            fld,
+                            -1,
+                        )
+                    }
                     ("g", false) => {
                         fld = if ws.mods.shift_key() {
                             field_count - 1
@@ -9672,6 +9848,10 @@ impl App {
         dir: i32,
     ) {
         let field = &cats[cat].fields[fld];
+        // v2.24.0: a gated/inapplicable row never changes (it's drawn dimmed).
+        if crate::settings::field_disabled(&self.cfg, field.key) {
+            return;
+        }
         if crate::settings::is_keybind(field) {
             // Activate on a keybind row → enter chord-capture; ←/→ no-op.
             if dir == 0
@@ -9680,6 +9860,18 @@ impl App {
                 n.category = cat;
                 n.field = fld;
                 n.capturing = true;
+            }
+            return;
+        }
+        // v2.24.0: a Text row (the image path) opens an inline prompt on activate
+        // (dir 0); ←/→ no-op. A gated/disabled Text row can't be edited.
+        if crate::settings::is_text(field) {
+            if dir == 0 && !crate::settings::field_disabled(&self.cfg, field.key) {
+                if let Some(n) = ws.settings_nav.as_mut() {
+                    n.category = cat;
+                    n.field = fld;
+                }
+                self.open_settings_text_edit(ws, field.key);
             }
             return;
         }
@@ -9741,6 +9933,64 @@ impl App {
         // pick after an unclean exit. The pick is durably written to
         // the config `theme =` line by `persist_pref` above, which is
         // the single source of truth on restart.
+    }
+
+    /// v2.24.0: open the inline text prompt for a [`crate::settings::FieldKind::Text`]
+    /// row, pre-filled with the current config value.
+    fn open_settings_text_edit(&mut self, ws: &mut WindowState, key: &'static str) {
+        let cur = match key {
+            "background-image" => self.cfg.background_image.clone(),
+            _ => String::new(),
+        };
+        ws.settings_text_edit = Some(crate::settings::SettingsTextEdit { key, buf: cur });
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+    }
+
+    /// v2.24.0: keyboard routing while the settings inline text prompt is open.
+    /// Esc cancels, Enter persists + live-reloads, Backspace deletes, printable
+    /// text appends (control chars filtered, like the ssh/palette inputs).
+    fn settings_text_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                ws.settings_text_edit = None;
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(e) = ws.settings_text_edit.as_mut() {
+                    e.buf.pop();
+                }
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(e) = ws.settings_text_edit.take() {
+                    let val = e.buf.trim().to_string();
+                    if !self.persist_pref(e.key, &val) {
+                        fire_notify(
+                            "kettle: setting not saved",
+                            "Applied for this session — couldn't write it to your config file.",
+                        );
+                    }
+                    self.reload_config(ws);
+                }
+            }
+            _ => {
+                if let Some(t) = text
+                    && !t.chars().any(|c| c.is_control())
+                    && let Some(e) = ws.settings_text_edit.as_mut()
+                {
+                    e.buf.push_str(t);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+        }
     }
 
     /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
@@ -10343,6 +10593,19 @@ fn to_mods(m: ModifiersState) -> Mods {
     out
 }
 
+/// v2.24.0: how the in-settings text-edit buffer is shown in the value column —
+/// the whole string when short, else an ellipsized tail so a long path stays
+/// readable (the caret/end is what matters while typing) without ballooning the
+/// panel width.
+fn settings_edit_display(buf: &str) -> String {
+    let count = buf.chars().count();
+    if count <= 40 {
+        return buf.to_string();
+    }
+    let tail: String = buf.chars().skip(count - 39).collect();
+    format!("…{tail}")
+}
+
 /// Startup visibility policy. Windows are created hidden while renderer init
 /// runs, then visible states are revealed once the wgpu surface is configured.
 /// Only `window_state = hidden` remains hidden.
@@ -10475,6 +10738,11 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
         self.window_event_inner(&mut ws, event_loop, event);
+        // v2.24.0: single chokepoint for the live theme preview. After every
+        // event, make `cfg.theme` reflect the context-menu highlight — apply the
+        // hovered `ThemeChoice` ephemerally, or revert to the baseline once the
+        // highlight leaves a theme row OR the menu closes without committing.
+        self.sync_theme_preview(&mut ws);
         self.finish_window_dispatch(event_loop, seq, ws);
     }
 
@@ -12729,6 +12997,17 @@ impl App {
                     }
                     return;
                 }
+                // v2.24.0: the settings overlay is mouse-driven (click-to-cycle).
+                // Left-click a field cycles its value forward, right-click
+                // backward; clicking a category tab switches category; a click
+                // outside the panel closes settings. Handled before the generic
+                // modal swallow below so the click actually does something.
+                if ws.settings_nav.is_some()
+                    && (bcode == 0 || bcode == 2)
+                    && self.settings_mouse(ws, if bcode == 2 { -1 } else { 1 }, true)
+                {
+                    return;
+                }
                 // Cycle 786 (audit A1, critical): with any *other* modal open
                 // (search / palette / ssh / settings / layout-picker / hint /
                 // confirm dialog / inline title-edit / vi copy-mode) the click
@@ -13219,6 +13498,14 @@ impl App {
                     self.scroll_context_menu(ws, -(lines as isize));
                     return;
                 }
+                // v2.24.0: wheel over a settings field adjusts it (up = forward,
+                // down = backward). A wheel outside the panel is NOT a dismiss —
+                // it just falls through to the modal swallow below.
+                if ws.settings_nav.is_some()
+                    && self.settings_mouse(ws, if lines > 0 { 1 } else { -1 }, false)
+                {
+                    return;
+                }
                 // Cycle 786 (audit A2): a non-context-menu modal swallows the
                 // wheel too — without this, Ctrl+wheel still zoomed the font
                 // and Shift/plain wheel still scrolled the pane / cycled tabs
@@ -13434,6 +13721,18 @@ impl App {
                     w.request_redraw();
                 }
             }
+            WindowEvent::Occluded(occluded) => {
+                // v2.24.0: freeze the animated background (and any proactive
+                // animation wake) while the window is fully hidden behind other
+                // windows — an invisible window must cost zero idle, the
+                // safety refinement that makes `background-animation = always`
+                // (the new default) safe. On un-occlude, repaint at once so the
+                // wallpaper catches up to its true time.
+                ws.window_occluded = occluded;
+                if !occluded && let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
@@ -13531,6 +13830,15 @@ impl App {
                     return;
                 }
 
+                // v2.24.0: while the inline path prompt is open it owns the
+                // keyboard (typed text → the buffer; Enter/Esc finish it).
+                if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
+                    self.settings_text_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Cycle 756: settings overlay key handling (exclusive modal).
                 if ws.settings_nav.is_some() {
                     self.settings_key(ws, &event.logical_key, event_loop);
@@ -13807,26 +14115,45 @@ impl App {
             .panes
             .values()
             .any(|p| p.term.has_running_animation());
-        // v2.23.1: an animated background-image (GIF/APNG/WebP) wakes at the
-        // GIF's OWN frame rate, not a fixed 30 fps — at 30 fps an 8 fps GIF
-        // repaints the same frame ~22×/s (wasted present()s, the ~55% animated
-        // idle). `bg_anim_interval_ms` is the ms to the next frame boundary;
-        // `None` unless a decoded multi-frame bg is animating (and — for the
-        // default `when-focused` — only while focused, so an unfocused window
-        // still reaches `ControlFlow::Wait` at zero idle cost, unlike Ghostty's
-        // always-on shaders).
-        let bg_anim_interval = ws
+        // v2.23.1: an animated background (a starfield, or a GIF/APNG/WebP
+        // image) wakes at its OWN frame rate, not a fixed 30 fps — at 30 fps an
+        // 8 fps GIF repaints the same frame ~22×/s (wasted present()s, the ~55%
+        // animated idle). `bg_anim_interval_ms` is the ms to the next frame
+        // boundary; `None` unless a bg is animating (and — for `when-focused` —
+        // only while focused, so an unfocused window still reaches
+        // `ControlFlow::Wait` at zero idle cost, unlike Ghostty's always-on
+        // shaders).
+        let bg_anim_interval_raw = ws
             .renderer
             .as_ref()
             .and_then(|r| r.bg_anim_interval_ms(&self.cfg, ws.window_focused));
+        // v2.24.0 freeze-when-hidden: an occluded or minimized window can't show
+        // the animation, so it must cost zero idle — this is what makes the new
+        // always-on default safe. Only probe `is_minimized()` (an OS call) when
+        // a bg is actually animating, so the common no-wallpaper case pays
+        // nothing here.
+        let bg_hidden = bg_anim_interval_raw.is_some()
+            && (ws.window_occluded
+                || ws
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| w.is_minimized().unwrap_or(false)));
+        let bg_anim_interval = if bg_hidden {
+            None
+        } else {
+            bg_anim_interval_raw
+        };
         // Edge-trigger the bg redraw: request it ONLY when the displayed frame
         // index actually changes, not every loop iteration. (Requesting it every
         // `about_to_wait` made winit redraw continuously — the high animated
         // idle. Mirrors how `blink_due` gates the cursor-blink redraw.)
-        let bg_frame = ws
-            .renderer
-            .as_ref()
-            .and_then(|r| r.bg_current_frame_index(&self.cfg, ws.window_focused));
+        let bg_frame = if bg_hidden {
+            None
+        } else {
+            ws.renderer
+                .as_ref()
+                .and_then(|r| r.bg_current_frame_index(&self.cfg, ws.window_focused))
+        };
         let bg_frame_due = bg_frame.is_some() && bg_frame != ws.last_bg_frame;
         if bg_frame_due {
             ws.last_bg_frame = bg_frame;

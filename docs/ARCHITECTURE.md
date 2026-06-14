@@ -195,15 +195,39 @@ flowchart LR
     menut --> curg["7. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
 
-Pass 0 (v2.23.0) is the **background image (wallpaper)** in its own pipeline,
-drawn at the very back so the cell/chrome quads (pass 1) composite *opaquely on
-top* of it — the standard kitty / WezTerm / Alacritty layering. The wallpaper
-lives in `bg_imgs`, separate from the **inline** sixel/kitty/iTerm2 images in
-`imgs` (pass 2, which sit over cell backgrounds). Before v2.23.0 the wallpaper
-shared `imgs` and drew *after* the quads, which (a) hid every cell background
-under an opaque wallpaper and (b) bled the animation through the tab bar /
-status bar. The chrome strips now resolve an opaque fill via `chrome-background`
-(theme / auto-from-wallpaper / black / white).
+Pass 0 (v2.23.0) is the **background (wallpaper)** in its own pipeline, drawn at
+the very back so the cell/chrome quads (pass 1) composite *opaquely on top* of it
+— the standard kitty / WezTerm / Alacritty layering. The wallpaper lives in
+`bg_imgs` (a decoded image texture), separate from the **inline** sixel/kitty/
+iTerm2 images in `imgs` (pass 2, which sit over cell backgrounds). Before v2.23.0
+the wallpaper shared `imgs` and drew *after* the quads, which (a) hid every cell
+background under an opaque wallpaper and (b) bled the animation through the tab
+bar / status bar. The chrome strips now resolve an opaque fill via
+`chrome-background` (theme / auto-from-wallpaper / black / white).
+
+**v2.24.0 — procedural starfield.** When `background-type = starfield`, pass 0
+instead draws `starfield` (`crates/kettle-render/src/starfield.rs`): a fullscreen
+triangle whose WGSL fragment shader *generates* a slow forward-flight star field
+per-pixel from a small uniform `{resolution, time, speed, density, glow}`. No
+decoded frames → ~zero memory, true-color (no GIF banding), a perfect loop, and
+crisp at any resolution. It is mutually exclusive with `bg_imgs` and composites
+identically (chrome opaque on top). The animation tick reuses the GIF machinery
+via a **synthetic fps clock**: `bg_current_frame_index` / `bg_anim_interval_ms`
+quantize the continuous drift to a ~10 fps cap (`STARFIELD_FPS`) so the existing
+edge-trigger + wake-scheduling in `App::about_to_wait_inner` advance it at low
+idle cost, while the shader's `time` uniform stays continuous so each repaint
+shows the exact position. The animated background (starfield or image) now plays
+by default even when unfocused, but the event loop **freezes the wake when the
+window is minimized or occluded** (`window_occluded` + `is_minimized`), so a
+hidden window costs zero idle.
+
+The **settings overlay is mouse-driven** (v2.24.0): `kettle_render::settings_hit_test`
+recomputes the panel geometry from the SAME `settings_display_lines` + panel math
+the draw uses (single source of truth) and maps a cursor position to a category
+tab / field row / outside; `App::settings_mouse` dispatches that into the existing
+`settings_adjust` (left-click = cycle forward, right-click = back, wheel =
+adjust). The Background settings page edits the image path through an inline text
+prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
 Steps 5–6 own the right-click context menu so its labels land **on
 top of** the panel background. Splitting them out fixed the v1.3.0 /

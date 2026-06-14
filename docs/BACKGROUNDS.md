@@ -1,46 +1,70 @@
 # Background images & animated wallpapers
 
-kettle can paint a still image **or an animated loop** behind your terminal —
-the native, GPU-friendly equivalent of the "video background" people set up in
-other terminals. No terminal decodes actual video files; kettle plays an
-**animated GIF / APNG / animated WebP** instead, advancing frames on the media's
-own timestamps (capped by the ~30 fps render tick) and — by default — freezing
-when the window loses focus, so it costs nothing in the background.
+kettle can paint a **procedural starfield**, a still image, **or an animated
+loop** behind your terminal — the native, GPU-friendly equivalent of the "video
+background" people set up in other terminals. For a file you supply, no terminal
+decodes actual video; kettle plays an **animated GIF / APNG / animated WebP**,
+advancing frames on the media's own timestamps. By default an animated
+background **plays even when unfocused**, but it **freezes when the window is
+minimized or fully covered** (it can't be seen), so a hidden window costs nothing.
 
 > **Off by default.** `background-type` is `solid` out of the box and the binary
-> embeds nothing. A wallpaper only appears once *you* point kettle at a file —
-> keeping the binary lean and startup fast for everyone who doesn't want one.
+> embeds nothing. A background only appears once *you* choose one — keeping the
+> binary lean and startup fast for everyone who doesn't want one.
 
-## The included sample — a subtle starfield
+## The included starfield — zero config (recommended)
 
-kettle ships one ready-to-use sample: **[`docs/examples/space-starfield.gif`](examples/space-starfield.gif)**
-— a slow **forward-flight** starfield: stars emerge near the center and drift
-gently outward as if you're moving through space, then fade as they pass (the
-"warp at low speed" look). It's the recommended starting point because it does
-what a terminal background *should*: it recedes behind your text instead of
-fighting it (see [What makes a good one](#what-makes-a-good-terminal-background)),
-and because it's a uniform radial field of tiny dots it looks right at **every
-aspect ratio and resolution** — 4:3, 16:9, 16:10, 21:9, even square — with
-nothing to distort when stretched.
+kettle has a built-in **procedural starfield**: a slow **forward-flight** field
+where stars emerge near the center, **fade in as they get closer**, and drift
+outward as if you're moving through space (the "warp at low speed" look). It's
+rendered live by a tiny GPU shader, so unlike a GIF it's **true-color** (soft
+star glows don't band), loops perfectly, stays crisp at **every resolution and
+aspect ratio** (4:3 → 21:9 → square), and uses **~zero memory** (no decoded
+frames). It's the recommended background because it does what a terminal
+background *should*: recede behind your text instead of fighting it.
 
-Point your config at it (or copy it somewhere first):
+Turn it on with one setting — no file needed:
+
+```ini
+background-type = starfield
+```
+
+…or pick **starfield** in **Settings → Background** (`Ctrl+,`). Tune it:
+
+```ini
+starfield-speed   = 0.06   # forward-flight rate (0.005–1.0; lower = slower drift)
+starfield-density = 55     # number of stars (1–128)
+starfield-glow    = 1.0    # soft-halo intensity (0.0–4.0)
+background-animation = always   # always (default) | when-focused | off (frozen)
+chrome-background = theme        # tab/status bar color over the field
+```
+
+> A pure-black starfield pairs well with `chrome-background = theme` (a distinct
+> bar) or `auto` (a seamless black bar). It animates at a low ~10 fps cap, so
+> idle CPU stays near a static background's.
+
+## Using your own image (file-based)
+
+Point kettle at any PNG / JPEG / WebP / BMP, or an animated GIF / APNG / WebP:
 
 ```ini
 background-type  = image
-background-image = ~/path/to/space-starfield.gif
-background-animation = when-focused        # when-focused (default) | always | off
-background-image-mode = stretch_and_fill   # safe for the starfield at any aspect
-chrome-background = auto                    # tab/status bar tint from the wallpaper
+background-image = ~/path/to/wallpaper.png   # editable in Settings → Background
+background-animation = always                # always | when-focused | off
+background-image-mode = stretch_and_fill
+chrome-background = auto                      # tab/status bar tint from the image
 ```
 
-Regenerate or customize it with the bundled generator (needs `pip install pillow`):
+The image path is editable **inline in Settings → Background** (no config edit
+needed). Prefer a dark, slow, abstract loop — see
+[What makes a good one](#what-makes-a-good-terminal-background).
+
+Want a *file* starfield instead of the procedural one? The bundled generator
+still ships (needs `pip install pillow`):
 
 ```sh
 python scripts/gen-starfield.py ~/kettle-backgrounds/space-starfield.gif
 ```
-
-`background-type` and `background-animation` are also in **Settings → Appearance**
-(`Ctrl+,`). The image *path* stays a config line — it needs a file, not a cycle.
 
 ## What makes a good terminal background
 
@@ -93,7 +117,8 @@ chrome-background = auto
 | `background-image-align-horiz` / `-vert` | position for `center` / `scale` |
 | `background-blur` | CPU 3-pass box blur at load (a soft, subtle backdrop) |
 | `background-darkness` | `0.0` fully dark … `1.0` no tint (default `0.5`) |
-| `background-animation` | `when-focused` (battery-friendly default), `always`, `off` (freeze on frame 1) |
+| `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
+| `starfield-speed` / `-density` / `-glow` | procedural-starfield knobs (see [the starfield section](#the-included-starfield--zero-config-recommended)) |
 
 **Performance.** Frames decode once at load (bounded to 256 MB / 512 frames; a
 larger file degrades gracefully to a shorter loop, never an OOM). Playback just
@@ -148,10 +173,14 @@ with `background-blur = true` + a low `background-darkness`, and `chrome-backgro
 
 ## Troubleshooting
 
-- **Nothing shows?** `background-type` must be `image` *and* `background-image`
-  must point at a file that exists. Run with `RUST_LOG=warn kettle` to see decode
-  warnings (not found / unsupported / too large).
-- **Animation won't move while unfocused?** That's `background-animation =
-  when-focused` (the default). Set `always` to keep it moving in the background.
+- **Nothing shows?** For an image, `background-type` must be `image` *and*
+  `background-image` must point at a file that exists (run `RUST_LOG=warn kettle`
+  to see decode warnings — not found / unsupported / too large). For the
+  starfield, just `background-type = starfield` (no file). And `background-type`
+  defaults to `solid`, so a background only appears once you pick one.
+- **Animation freezes when I switch windows?** Only if it's *hidden* (minimized
+  or fully covered) — that's intentional (zero idle for an invisible window). An
+  unfocused-but-visible window keeps animating under the `always` default; set
+  `background-animation = when-focused` if you'd rather it pause on blur.
 - **Tabs still look busy?** Try `chrome-background = auto` (or `black`/`white`)
   and a calmer loop.

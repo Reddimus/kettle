@@ -8,11 +8,17 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 
 | Key | Action |
 |---|---|
-| ↑ / ↓ | Move between options |
+| ↑ / ↓ | Move between options (skips options that don't apply) |
 | ← / → | Change the highlighted option |
 | Space / Enter | Toggle / cycle the highlighted option |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Close |
+
+The panel is also fully **mouse-driven** (v2.24.0): **left-click** a row to cycle
+its value forward, **right-click** to cycle back, **scroll-wheel** over a row to
+adjust it, **click a category tab** to switch pages, and **click outside** the
+panel to close. (A keybind row starts capture on click; the image-path row opens
+an inline text prompt.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
@@ -32,15 +38,24 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu, `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
+| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which now **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window padding | `window-padding-x` | 0–40 px |
 | Cursor shape | `cursor-style` | block · beam · underline |
 | Cursor blink | `cursor-blink` | on / off |
 | Show pane titlebars | `show-titlebar` | on / off |
-| Background | `background-type` | solid color · image · transparent. The wallpaper *path* stays a config line (`background-image`) — see [BACKGROUNDS.md](BACKGROUNDS.md) |
-| Background animation | `background-animation` | when focused · always · off — how an animated wallpaper plays |
+
+**Background** (v2.24.0) — options that don't apply to the chosen type are dimmed
+and skipped; the page dims its backdrop so the **live** wallpaper previews around
+the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
+
+| Option | Config key | Notes |
+|---|---|---|
+| Background | `background-type` | solid color · image · **starfield** (zero-config animated) · transparent |
+| Image file | `background-image` | the wallpaper path — **editable inline** here (Enter to open the prompt, type a path, Enter to save). Only for `image` |
+| Animation | `background-animation` | always (default) · when focused · off — how a starfield / animated image plays |
+| Chrome bar color | `chrome-background` | theme · auto (from wallpaper) · black · white |
 
 **Behavior**
 
@@ -83,6 +98,11 @@ The panel covers the most-used options; kettle has many more config keys
 For those, edit the config file directly — the full reference is in
 [CONFIG.md](CONFIG.md). You can jump straight to it from kettle with
 **right-click → Preferences ▸ Advanced… (open config in $EDITOR)**.
+
+**Live theme preview (v2.24.0):** in **right-click → Theme**, hovering (or
+arrowing over) a theme applies it instantly so you can browse all 500+ themes
+live; moving off, pressing Esc, or clicking away reverts to your current theme,
+and clicking a theme commits it.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,
