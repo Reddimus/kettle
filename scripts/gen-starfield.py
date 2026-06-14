@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Generate kettle's sample animated background: a dark, subtle, slowly-twinkling
-starfield with one slow shooting star. Seamless loop, MIT (part of kettle).
+"""Generate kettle's sample animated background: a slow forward-flight starfield.
 
-Why a starfield? The community consensus for a *good* terminal animated
-background is **slow, dark, subtle** — it must recede behind your text, not
-fight it (WezTerm users routinely drop GIF playback to 0.2x speed). A uniform
-field of tiny stars is also the only kind of image that looks right at *every*
-aspect ratio and resolution: stretched from 4:3 to 32:9 there is no geometry to
-distort, and soft upscaling on a 4K display just reads as a calmer sky. Bright,
-busy scientific-viz loops (nebulae, accretion disks) do the opposite.
+Stars emerge near the center and drift outward to the edges as the camera moves
+forward — the classic "warp at low speed" look — kept slow, sparse, and dark so
+terminal text stays readable. Modeled in SCREEN SPACE (each star has an angle +
+a radial progress p that cycles 0->1 over the loop), so on-screen density and
+brightness are directly controlled and the field looks right at any aspect ratio.
 
-Output is bounded to stay under kettle's 256 MB decoded-animation cap
-(W*H*4*frames). Re-run to regenerate; tweak the constants to taste.
+Seamless loop: a star's brightness fades to 0 at both ends of p (center and
+edge), so the wrap is invisible. Output is bounded under kettle's 256 MB
+decoded-animation cap (W*H*4*frames). MIT — part of kettle. Requires Pillow.
+
+Why this look? The community keeps terminal backgrounds that *recede*: slow,
+dark, subtle (WezTerm users drop GIFs to 0.2x). A drifting starfield reads as
+alive without the busyness of a bright scene/scientific-viz loop, and a uniform
+radial field survives any aspect-ratio stretch.
 
 Usage:
     python scripts/gen-starfield.py [OUTPUT.gif]      # default: ./space-starfield.gif
-
-Requires Pillow (`pip install pillow`).
 """
 import math
 import os
@@ -25,83 +26,62 @@ import sys
 
 from PIL import Image, ImageDraw
 
-# 16:9 is the central common aspect, so stretch toward 4:3 (~0.75x) and 21:9
-# (~1.3x) is minimal — and imperceptible for tiny round dots.
-# 1600*900*4*40 = 230 MB decoded, under kettle's 256 MB cap.
-W, H = 1600, 900
-NFRAMES = 40          # 4.0 s loop at 10 fps
-FPS = 10
-NSTARS = 120
-random.seed(20260614)  # deterministic output
+# 1920x1080 * 4 * 32 = 253 MB decoded, under kettle's 256 MB cap. 16:9 source.
+W, H = 1920, 1080
+NFRAMES = 32
+FPS = 8                  # 4.0 s loop — slow, gentle drift
+NSTARS = 90
+SMIN, SMAX = 1.4, 3.6    # star radius grows from far (center) to near (edge)
+RADIAL_EASE = 1.7        # >1: slow near center, faster near the edge (perspective)
+random.seed(20260614)    # deterministic output
 
-BG = (10, 10, 18)      # near-black with a faint blue — sits under any dark theme
+BG = (10, 10, 18)        # near-black, faint blue — sits under any dark theme
 
 
 def star_color():
     r = random.random()
-    if r < 0.7:
-        return (200, 214, 240)   # cool white-blue
+    if r < 0.72:
+        return (216, 226, 246)   # cool white-blue
     if r < 0.9:
-        return (220, 224, 235)   # near white
-    return (240, 226, 200)       # faint warm
+        return (234, 234, 242)   # near white
+    return (246, 230, 206)       # faint warm
 
 
-class Star:
-    __slots__ = ("x", "y", "size", "peak", "glow", "amp", "phase", "steady", "base")
-
-    def __init__(self):
-        self.x = random.uniform(0, W)
-        self.y = random.uniform(0, H)
-        self.size = random.choices([1, 1, 1, 2, 2, 3], [5, 5, 5, 3, 2, 1])[0]
-        rr = random.random()
-        if rr < 0.6:
-            self.peak = random.uniform(0.18, 0.38)   # faint (most stars)
-        elif rr < 0.9:
-            self.peak = random.uniform(0.40, 0.65)   # medium
-        else:
-            self.peak = random.uniform(0.70, 1.0)    # few bright
-        self.glow = self.size >= 3 and self.peak > 0.7
-        self.steady = random.random() < 0.55         # ~half never twinkle
-        self.amp = 0.0 if self.steady else random.uniform(0.25, 0.6)
-        self.phase = random.uniform(0, 2 * math.pi)
-        self.base = star_color()
-
-
-stars = [Star() for _ in range(NSTARS)]
-
-# One subtle shooting star, fully faded in and out inside the loop window so the
-# loop stays seamless (nothing visible at frame 0 / NFRAMES).
-SS_START, SS_LEN = 14, 12
-sx0, sy0 = random.uniform(W * 0.1, W * 0.5), random.uniform(H * 0.05, H * 0.35)
-sdx, sdy = random.uniform(150, 210), random.uniform(70, 105)
+cx, cy = W / 2.0, H / 2.0
+RMAX = math.hypot(cx, cy) * 1.04  # reach the corners
+stars = [dict(
+    th=random.uniform(0, 2 * math.pi),
+    p0=random.uniform(0, 1),
+    peak=random.choices(
+        [random.uniform(0.60, 0.74), random.uniform(0.80, 0.92), random.uniform(0.96, 1.0)],
+        [4, 3, 3])[0],
+    base=star_color(),
+) for _ in range(NSTARS)]
 
 
 def render(fi):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    t = fi / NFRAMES
     for s in stars:
-        if s.steady:
-            k = s.peak
-        else:
-            k = s.peak * (1 - s.amp + s.amp * 0.5 * (1 + math.sin(2 * math.pi * t + s.phase)))
-        col = tuple(int(BG[i] + (s.base[i] - BG[i]) * k) for i in range(3))
-        if s.glow:
-            g = tuple(int(BG[i] + (s.base[i] - BG[i]) * k * 0.25) for i in range(3))
-            d.ellipse([s.x - 3, s.y - 3, s.x + 3, s.y + 3], fill=g)
-        r = s.size / 2.0
-        d.ellipse([s.x - r, s.y - r, s.x + r, s.y + r], fill=col)
-    if SS_START <= fi < SS_START + SS_LEN:
-        p = (fi - SS_START) / SS_LEN
-        fade = math.sin(math.pi * p)
-        hx, hy = sx0 + sdx * p, sy0 + sdy * p
-        tail = 36
-        for j in range(tail):
-            tp = j / tail
-            px, py = hx - sdx * 0.06 * tp, hy - sdy * 0.06 * tp
-            a = fade * (1 - tp) * 0.85
-            col = tuple(int(BG[i] + (235 - BG[i]) * a) for i in range(3))
-            d.ellipse([px - 0.8, py - 0.8, px + 0.8, py + 0.8], fill=col)
+        p = (s["p0"] + fi / NFRAMES) % 1.0
+        r = RMAX * (p ** RADIAL_EASE)
+        # Flat-top fade: full brightness across the mid-travel, easing to 0 only
+        # at the center (emerging) and the edge (passing) so the loop is seamless.
+        fade = min(1.0, math.sin(math.pi * p) * 1.7)
+        k = s["peak"] * fade
+        if k <= 0.02:
+            continue
+        x = cx + r * math.cos(s["th"])
+        y = cy + r * math.sin(s["th"])
+        if x < -4 or x > W + 4 or y < -4 or y > H + 4:
+            continue
+        size = SMIN + (SMAX - SMIN) * p
+        c = tuple(int(BG[i] + (s["base"][i] - BG[i]) * k) for i in range(3))
+        if size >= 2.6:                  # faint glow on the closest stars
+            g = tuple(int(BG[i] + (s["base"][i] - BG[i]) * k * 0.22) for i in range(3))
+            d.ellipse([x - size, y - size, x + size, y + size], fill=g)
+        rr = max(0.6, size / 2.0)
+        d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=c)
     return img
 
 
@@ -111,11 +91,10 @@ def main():
     if os.path.dirname(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
     frames = [render(i) for i in range(NFRAMES)]
-    frames[0].save(
-        out, save_all=True, append_images=frames[1:],
-        duration=int(1000 / FPS), loop=0, optimize=True, disposal=2,
-    )
-    print(f"wrote {out} ({os.path.getsize(out) // 1024} KB, {W}x{H}, {NFRAMES} frames)")
+    frames[0].save(out, save_all=True, append_images=frames[1:],
+                   duration=int(1000 / FPS), loop=0, optimize=True, disposal=2)
+    print(f"wrote {out} ({os.path.getsize(out) // 1024} KB, {W}x{H}, {NFRAMES} frames, "
+          f"{W*H*4*NFRAMES/1024/1024:.0f} MB decoded)")
 
 
 if __name__ == "__main__":

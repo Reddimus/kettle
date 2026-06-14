@@ -611,6 +611,14 @@ pub struct Renderer {
     /// `prepare` (which re-encodes EVERY visible glyph's vertices) is skipped
     /// and the cached vertex buffers are re-rendered as-is.
     last_chrome_hash: u64,
+    /// v2.23.0 fix: whether ANY text overlay (settings, palette, search, menu,
+    /// …) was open the previous frame. The `need_prepare` damage gate forces a
+    /// glyphon prepare while an overlay is open, but the frame an overlay
+    /// *closes* would otherwise see "no overlay + nothing changed" and SKIP the
+    /// prepare — re-rendering the just-closed overlay's cached text vertices, so
+    /// the panel lingered on screen until the next keystroke. Tracking the
+    /// previous open-state lets the close transition force one clearing prepare.
+    last_overlay_open: bool,
     /// v2.21.0 (idle perf): dedicated renderer + 1-line buffer for the focused
     /// solid-block cursor's foreground glyph, drawn in its own pass on top of
     /// the cursor block quad. Decoupling it from the pane text buffer is what
@@ -1000,6 +1008,7 @@ impl Renderer {
             line_text_scratch: String::new(),
             chrome_style_key: 0,
             last_chrome_hash: 0,
+            last_overlay_open: false,
             cursor_glyph_renderer,
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
@@ -3163,8 +3172,17 @@ impl Renderer {
         let cursor_char = self.pending_cursor_glyph.as_ref().map(|c| c.ch);
         let cursor_char_changed = cursor_char != self.last_cursor_char;
         self.last_cursor_char = cursor_char;
-        let need_prepare =
-            any_pane_text_changed || chrome_changed || overlay_open || cursor_char_changed;
+        // v2.23.0 fix: the frame an overlay CLOSES (`overlay_open` flips
+        // true→false) must still prepare once, or the closed panel's cached text
+        // vertices keep rendering until the next keystroke. `overlay_open` alone
+        // covers the open state; this covers the close edge.
+        let overlay_changed = overlay_open != self.last_overlay_open;
+        self.last_overlay_open = overlay_open;
+        let need_prepare = any_pane_text_changed
+            || chrome_changed
+            || overlay_open
+            || cursor_char_changed
+            || overlay_changed;
         if need_prepare {
             self.text_renderer.prepare(
                 &self.gpu.device,
@@ -6469,6 +6487,24 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             before_trim.contains("if need_prepare {"),
             "atlas.trim must be guarded by `if need_prepare`"
+        );
+    }
+
+    /// v2.23.0 fix: closing an overlay (settings/palette/search/menu) must force
+    /// ONE clearing prepare, or the closed panel's cached text vertices linger
+    /// until the next keystroke. The gate tracks the previous overlay-open state
+    /// and ORs the open↔closed transition into `need_prepare`.
+    #[test]
+    fn overlay_close_forces_a_clearing_prepare() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("let overlay_changed = overlay_open != self.last_overlay_open;")
+                && src.contains("self.last_overlay_open = overlay_open;"),
+            "the gate must compare overlay_open against the previous frame"
+        );
+        assert!(
+            src.contains("|| overlay_changed;"),
+            "overlay_changed must feed need_prepare so a close repaints once"
         );
     }
 

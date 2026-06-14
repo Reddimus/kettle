@@ -4,6 +4,25 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.23.1] — 2026-06-14
+
+  ### Fixed
+  - **Overlay lingered after closing.** Closing the settings panel (or any text
+    overlay — command palette, search, context menu) left it drawn on screen
+    until the next keystroke. The v2.21.0 damage gate skipped the glyphon
+    `prepare` on the close frame (overlay already gone + nothing else changed),
+    so the just-closed overlay's cached text vertices kept rendering. The gate
+    now tracks the previous overlay-open state and forces one clearing prepare on
+    the open→closed transition.
+
+  ### Changed
+  - **The sample background is now a slow forward-flight starfield.** Replaces
+    the previous look with stars that emerge near the center and drift gently
+    outward as you move forward ("warp at low speed"), then fade as they pass —
+    slow, sparse, and dark so text stays readable, and a uniform radial field so
+    it looks right at any aspect ratio. `scripts/gen-starfield.py` +
+    `docs/examples/space-starfield.gif` updated; off by default as always.
+
 ## [2.23.0] — 2026-06-14
 
   **Animated-background polish + a cross-platform GPU picker.**

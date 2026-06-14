@@ -14,13 +14,14 @@ when the window loses focus, so it costs nothing in the background.
 ## The included sample — a subtle starfield
 
 kettle ships one ready-to-use sample: **[`docs/examples/space-starfield.gif`](examples/space-starfield.gif)**
-— a dark, slowly-twinkling starfield with one slow shooting star. It's the
-recommended starting point because it does what a terminal background *should*:
-it recedes behind your text instead of fighting it (see
-[What makes a good one](#what-makes-a-good-terminal-background)), and because
-it's a uniform field of tiny dots it looks right at **every aspect ratio and
-resolution** — 4:3, 16:9, 16:10, 21:9, even square — with nothing to distort
-when stretched.
+— a slow **forward-flight** starfield: stars emerge near the center and drift
+gently outward as if you're moving through space, then fade as they pass (the
+"warp at low speed" look). It's the recommended starting point because it does
+what a terminal background *should*: it recedes behind your text instead of
+fighting it (see [What makes a good one](#what-makes-a-good-terminal-background)),
+and because it's a uniform radial field of tiny dots it looks right at **every
+aspect ratio and resolution** — 4:3, 16:9, 16:10, 21:9, even square — with
+nothing to distort when stretched.
 
 Point your config at it (or copy it somewhere first):
 
