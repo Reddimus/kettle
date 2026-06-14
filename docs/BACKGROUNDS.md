@@ -7,26 +7,53 @@ other terminals. No terminal decodes actual video files; kettle plays an
 own timestamps (capped by the ~30 fps render tick) and — by default — freezing
 when the window loses focus, so it costs nothing in the background.
 
-> **Off by default.** Nothing is bundled in kettle and `background-type` is
-> `solid` out of the box. A wallpaper only appears once *you* point kettle at a
-> file. This keeps the binary lean and startup fast for everyone who doesn't
-> want one.
+> **Off by default.** `background-type` is `solid` out of the box and the binary
+> embeds nothing. A wallpaper only appears once *you* point kettle at a file —
+> keeping the binary lean and startup fast for everyone who doesn't want one.
 
-## Quick start
+## The included sample — a subtle starfield
 
-Add to your config (`~/.config/kettle/config`, or `%APPDATA%\kettle\config` on
-Windows — find yours with `kettle --config-path`):
+kettle ships one ready-to-use sample: **[`docs/examples/space-starfield.gif`](examples/space-starfield.gif)**
+— a dark, slowly-twinkling starfield with one slow shooting star. It's the
+recommended starting point because it does what a terminal background *should*:
+it recedes behind your text instead of fighting it (see
+[What makes a good one](#what-makes-a-good-terminal-background)), and because
+it's a uniform field of tiny dots it looks right at **every aspect ratio and
+resolution** — 4:3, 16:9, 16:10, 21:9, even square — with nothing to distort
+when stretched.
+
+Point your config at it (or copy it somewhere first):
 
 ```ini
 background-type  = image
-background-image = ~/kettle-backgrounds/space.gif
+background-image = ~/path/to/space-starfield.gif
 background-animation = when-focused        # when-focused (default) | always | off
-background-image-mode = stretch_and_fill   # stretch_and_fill | tile | center | scale
+background-image-mode = stretch_and_fill   # safe for the starfield at any aspect
+chrome-background = auto                    # tab/status bar tint from the wallpaper
+```
+
+Regenerate or customize it with the bundled generator (needs `pip install pillow`):
+
+```sh
+python scripts/gen-starfield.py ~/kettle-backgrounds/space-starfield.gif
 ```
 
 `background-type` and `background-animation` are also in **Settings → Appearance**
-(open with `Ctrl+,`). The image *path* stays a config line — it needs a file, not
-a cycle-through.
+(`Ctrl+,`). The image *path* stays a config line — it needs a file, not a cycle.
+
+## What makes a good terminal background
+
+A terminal already has text in every corner, so the background must stay out of
+the way. The look people actually keep (and the reason the starfield was chosen):
+
+- **Dark + low-contrast.** A near-black image keeps light text readable on any
+  theme. Bright, high-detail loops (nebulae, photos, accretion disks) wash out
+  text — avoid them, or pair them with `background-blur = true` and a low
+  `background-darkness`.
+- **Slow + subtle.** Gentle motion reads as "alive," not distracting (WezTerm
+  users routinely slow GIFs to 0.2×). A calm twinkle beats a fast clip.
+- **Aspect-agnostic.** A uniform/abstract field (stars, particles, soft
+  gradients) survives stretching to any screen; a recognizable scene distorts.
 
 ## How it composites (v2.23.0)
 
@@ -77,47 +104,46 @@ distraction and the lowest wake rate.
 
 ## Where to get good, clearly-licensed wallpapers
 
-Use sources whose license actually allows redistribution/use. Two reliable,
-popular ones:
+Start with the [included starfield](#the-included-sample--a-subtle-starfield).
+If you want something else, keep the [principles](#what-makes-a-good-terminal-background)
+in mind (dark, slow, abstract) and use sources whose license allows use:
 
-### NASA — Scientific Visualization Studio (public domain)
+### Pixel-art space / particle loops (the popular choice)
 
-NASA's imagery is generally **not copyrighted** and free to use (see NASA's
-media-usage guidelines). The SVS publishes ready-to-use animated GIFs and loops —
-nebulae, the Sun, Earth from orbit, galaxies — that make excellent slow,
-ambient backgrounds.
+The dark, subtle, pixel-art "space" look is what most people run, and it's
+aspect-agnostic. These let you make your own and are free / CC0:
 
-- **NASA SVS:** <https://svs.gsfc.nasa.gov/> (filter for GIF/loop products)
-- **NASA Image and Video Library:** <https://images.nasa.gov/>
-- **Hubble / ESA-Hubble:** <https://esahubble.org/images/> (check each image's
-  license; most Hubble imagery is public domain or CC BY)
-
-> Always confirm the specific item's usage terms — a few NASA assets include
-> third-party or partner content with separate restrictions.
+- **Deep-Fold — Pixel Space Background Generator:** <https://deep-fold.itch.io/space-background-generator>
+  — generate a seamless, looping pixel starfield/nebula; tile-able, export to GIF.
+- **ansimuz — space backgrounds (CC0):** seamless looped space art, highly rated.
+- **itch.io CC0 packs:** <https://itch.io/game-assets/free/tag-cc0/tag-pixel-art>
+  → search "space", "starfield", "rain", "night". Confirm each pack is **CC0**.
 
 ### OpenGameArt — CC0 (public-domain-equivalent)
 
-Filter OpenGameArt by the **CC0** license for seamless space / starfield /
-parallax sets you can use with no attribution required:
-
 - <https://opengameart.org/> → Art search → License: **CC0** → e.g. "space",
-  "starfield", "nebula", "parallax"
+  "starfield", "particles", "parallax". No attribution required.
 
-Other good CC0 pools: **Wikimedia Commons** (filter for public domain / CC0) and
-**Pexels/Pixabay** (their own license; check before redistributing).
+### NASA / Hubble (public domain — dramatic, but dim it)
 
-### Make your own loop from a clip
+NASA imagery is public domain (see NASA's media-usage guidelines) — nebulae, the
+Sun, galaxies. It's **bright and busy**, so it fights text by default: pair it
+with `background-blur = true` + a low `background-darkness`, and `chrome-background
+= auto`, or it'll wash out your terminal.
 
-If you have a clearly-licensed short video, convert a few seconds to a looping
-GIF with `ffmpeg`:
+- **NASA SVS:** <https://svs.gsfc.nasa.gov/> · **Library:** <https://images.nasa.gov/>
+  · **Hubble:** <https://esahubble.org/images/> (confirm each item's terms).
 
-```sh
-ffmpeg -t 8 -i clip.mp4 \
-  -vf "fps=12,scale=1920:-1:flags=lanczos" \
-  -loop 0 ~/kettle-backgrounds/space.gif
-```
+### Make your own loop
 
-Keep it short and low-fps — a terminal backdrop wants calm, not bandwidth.
+- **Bundled generator** (recommended): `python scripts/gen-starfield.py out.gif`
+  — tweak the constants for density, speed, color.
+- **From a clearly-licensed clip** with `ffmpeg` — keep it short, low-fps, dark:
+
+  ```sh
+  ffmpeg -t 8 -i clip.mp4 -vf "fps=12,scale=1600:-1:flags=lanczos" \
+    -loop 0 ~/kettle-backgrounds/my-bg.gif
+  ```
 
 ## Troubleshooting
 
