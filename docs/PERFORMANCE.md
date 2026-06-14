@@ -1,5 +1,43 @@
 # Performance
 
+## v2.23.x — re-verification + the animated-background idle fix
+
+Re-ran `scripts/perf/perf-all.ps1` against **Alacritty** and **WezTerm**
+(`scripts/perf/score.ps1` is the committed "kettle in the top half" gate).
+
+**Throughput is unchanged and still leads the dedicated competitors.** The
+v2.23.x changes (the wallpaper render pass, the GPU-default flip) don't touch the
+PTY parse path, and a re-run confirmed it — kettle **beats Alacritty and WezTerm
+on all three payloads** (ascii / sgr / unicode), behind only Windows Terminal's
+shared-process class. See the v2.21.1 table below for the calm-machine numbers
+(the re-run was on a dev box loaded with this very session + a dozen MCP
+processes, which depresses every terminal's absolute numbers but preserves the
+ranking: kettle 4.32 / 3.67 / 6.99 vs Alacritty 2.48 / 2.57 / 5.24 and WezTerm
+2.83 / 2.51 / 4.75 MB/s).
+
+**Animated-background idle fixed (the real find).** An animated `background-image`
+was repainting at a fixed 30 fps regardless of the GIF's own frame rate — and,
+worse, `request_redraw` was called *level-triggered* every event-loop iteration,
+so winit redrew continuously (vsync-bound). Measured **~55–60 % of a core** idle
+while a focused animated wallpaper was visible. The fix makes the bg redraw
+**edge-triggered** (request a redraw only when the displayed frame index changes)
+and wakes the loop at the GIF's own frame boundary (`bg_next_frame_ms`) — so it
+repaints at the GIF's fps, not 30 fps. Measured **20.9 %** for the same 8 fps
+loop (~2.7× less), and a non-animated background or solid theme stays at the
+~3.8 % present-bound idle from v2.21.0. Animating a full-surface wallpaper still
+costs one `present()` per frame (inherent to a wgpu flip-model swapchain); the
+fix removes the *wasted* repaints, not the necessary ones.
+
+**Honest weak axis: cold start.** kettle's wgpu device + pipeline + font init
+makes startup ~1 s on the integrated GPU and ~1.9–2.2 s on the discrete one —
+slower than Alacritty/WezTerm/WT (~0.26–0.48 s). The v2.23.0 **default flip to
+the discrete GPU** (more render headroom for wallpapers/large windows) widens
+that gap by ~1 s; `gpu-power-preference = low` restores the faster integrated
+cold start. So on the equal-weighted `score.ps1` composite (throughput +
+startup + idle + memory), kettle leads on throughput and on memory-vs-WT but
+trails on startup; it is a **throughput-and-footprint leader, not a cold-start
+leader**.
+
 ## v2.20.0 — the cross-terminal benchmark harness + the perf overhaul
 
 v2.20.0 added the committed harness this doc previously listed as an open

@@ -88,6 +88,32 @@ pub fn bg_current_frame(gaps: &[u32], elapsed_ms: u128) -> usize {
     gaps.len() - 1
 }
 
+/// Milliseconds until the displayed frame index next changes, given each
+/// frame's dwell `gaps` (ms) and the wall-clock `elapsed_ms` since playback
+/// started. The companion to [`bg_current_frame`]: the render loop sleeps this
+/// long, then wakes to show the next frame, so an N-fps animated background
+/// repaints N×/s instead of at a fixed 30 fps (the v2.23.1 animated-idle fix).
+/// `None` for a still image (≤ 1 frame) or all-zero gaps. Floored at 16 ms so a
+/// degenerate fast GIF can't drive the loop past ~60 fps. Pure; unit-tested.
+pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
+    if gaps.len() <= 1 {
+        return None;
+    }
+    let total: u128 = gaps.iter().map(|&g| g as u128).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut t = elapsed_ms % total;
+    for &g in gaps {
+        let g = g as u128;
+        if t < g {
+            return Some(((g - t) as u64).max(16));
+        }
+        t -= g;
+    }
+    Some(16)
+}
+
 /// Decode a background image from disk. Returns None on any I/O,
 /// format, or decode error (with a `log::warn` so users discover
 /// the misconfiguration in their kettle logs).
@@ -522,6 +548,29 @@ mod tests {
         assert_eq!(bg_current_frame(&uneven, 240), 2);
         // All-zero gaps must not divide-by-zero / panic.
         assert_eq!(bg_current_frame(&[0, 0, 0], 12345), 0);
+    }
+
+    /// v2.23.1 animated-idle fix: the wake interval is the time to the NEXT frame
+    /// boundary, so the loop ticks at the GIF's fps, not a fixed 30 fps.
+    #[test]
+    fn bg_next_frame_ms_wakes_at_frame_boundaries() {
+        // Still image / single frame / empty → no animation tick.
+        assert_eq!(bg_next_frame_ms(&[], 0), None);
+        assert_eq!(bg_next_frame_ms(&[125], 999), None);
+        assert_eq!(bg_next_frame_ms(&[0, 0, 0], 5), None);
+        // Uniform 125 ms (8 fps): at t=0 the current frame has 125 ms left.
+        let g = [125u32, 125, 125];
+        assert_eq!(bg_next_frame_ms(&g, 0), Some(125));
+        assert_eq!(bg_next_frame_ms(&g, 100), Some(25)); // 25 ms left in frame 0
+        assert_eq!(bg_next_frame_ms(&g, 125), Some(125)); // just entered frame 1
+        assert_eq!(bg_next_frame_ms(&g, 375), Some(125)); // wrapped to frame 0
+        // Uneven gaps resolve per-frame.
+        let u = [40u32, 200, 60];
+        assert_eq!(bg_next_frame_ms(&u, 0), Some(40));
+        assert_eq!(bg_next_frame_ms(&u, 40), Some(200));
+        assert_eq!(bg_next_frame_ms(&u, 239), Some(16)); // 1 ms left in frame 1 → floored to 16
+        // Floor: never below 16 ms (a 5 ms gap would otherwise drive >60 fps).
+        assert_eq!(bg_next_frame_ms(&[5, 5], 0), Some(16));
     }
 
     /// v2.21.x: a still PNG decodes to exactly one frame via the animated entry

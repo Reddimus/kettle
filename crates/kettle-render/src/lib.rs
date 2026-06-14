@@ -1256,6 +1256,43 @@ impl Renderer {
                 .is_some_and(|c| c.frames.len() > 1)
     }
 
+    /// v2.23.1: milliseconds until the animated background's displayed frame
+    /// next changes — the wake interval the event loop should use for the
+    /// bg-animation tick. Animating at a fixed 30 fps repaints the SAME frame
+    /// ~22×/s for a typical 8 fps GIF (wasted full-surface `present()`s — the
+    /// cause of the ~55% animated-idle CPU); waking at the actual frame boundary
+    /// caps the repaint rate at the GIF's own fps. `None` when the background
+    /// isn't animating. Floored at 16 ms so a degenerate fast GIF can't drive
+    /// the loop past ~60 fps.
+    pub fn bg_anim_interval_ms(&self, cfg: &Config, window_focused: bool) -> Option<u64> {
+        if !self.background_is_animating(cfg, window_focused) {
+            return None;
+        }
+        let c = self.bg_image_cache.as_ref()?;
+        bg_image::bg_next_frame_ms(&c.gaps, c.started.elapsed().as_millis())
+    }
+
+    /// v2.23.1: the animated background's currently-displayed frame index, or
+    /// `None` when it isn't animating. The event loop compares this against the
+    /// last-painted index and requests a redraw ONLY when it changes (an
+    /// edge-trigger, like the cursor blink) — without that, `request_redraw` is
+    /// called every `about_to_wait` while the bg animates, so winit redraws
+    /// continuously (vsync-bound) instead of at the GIF's fps. That continuous
+    /// repaint was the real cause of the high animated-idle CPU.
+    pub fn bg_current_frame_index(&self, cfg: &Config, window_focused: bool) -> Option<usize> {
+        if !self.background_is_animating(cfg, window_focused) {
+            return None;
+        }
+        let c = self.bg_image_cache.as_ref()?;
+        if c.frames.len() <= 1 {
+            return None;
+        }
+        Some(bg_image::bg_current_frame(
+            &c.gaps,
+            c.started.elapsed().as_millis(),
+        ))
+    }
+
     pub fn render_frame(
         &mut self,
         panes: &[PaneView<'_>],

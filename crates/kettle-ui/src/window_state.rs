@@ -103,6 +103,11 @@ pub(crate) struct WindowState {
     /// next launch. The settings overlay shows a "⚠ restart to apply" footer
     /// while this is true; cleared when the overlay closes.
     pub(crate) settings_restart_pending: bool,
+    /// v2.23.1: the animated-background frame index last requested for paint.
+    /// The event loop requests a bg redraw only when the live frame index
+    /// differs from this (an edge-trigger), so an animated wallpaper repaints at
+    /// the GIF's fps instead of continuously (the animated-idle-CPU fix).
+    pub(crate) last_bg_frame: Option<usize>,
     /// Cycle 708 (Terminator parity): `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
     pub(crate) layout_picker_input: Option<(String, usize)>,
@@ -257,6 +262,7 @@ impl WindowState {
             palette_input: None,
             settings_nav: None,
             settings_restart_pending: false,
+            last_bg_frame: None,
             layout_picker_input: None,
             hint_state: None,
             context_menu: None,

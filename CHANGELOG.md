@@ -4,6 +4,22 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.23.2] — 2026-06-14
+
+  ### Fixed
+  - **Animated background burned CPU at idle.** A focused animated
+    `background-image` repainted at a fixed 30 fps regardless of the GIF's own
+    frame rate, and `request_redraw` was issued every event-loop iteration
+    (level-triggered), so winit redrew continuously — **~55–60 % of a core**
+    while an animated wallpaper was visible. The bg redraw is now
+    **edge-triggered** (requested only when the displayed frame index changes,
+    like the cursor blink) and the loop wakes at the GIF's own frame boundary
+    (`bg_next_frame_ms`). Measured **20.9 %** for the same 8 fps loop (~2.7×
+    less); a still/solid background stays at the ~3.8 % present-bound idle.
+    Re-ran the cross-terminal suite: throughput is unchanged and still beats
+    Alacritty and WezTerm on all payloads (the wallpaper pass + GPU default
+    don't touch the parse path). See [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## [2.23.1] — 2026-06-14
 
   ### Fixed

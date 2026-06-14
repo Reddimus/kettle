@@ -13802,21 +13802,38 @@ impl App {
         let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
         let blink_elapsed = now.saturating_duration_since(ws.last_blink);
         let blink_due = blink_active && blink_elapsed >= blink_interval;
-        let anim_active = ws
+        let term_anim = ws
             .mux
             .panes
             .values()
-            .any(|p| p.term.has_running_animation())
-            // v2.21.x: an animated background-image (GIF/APNG/WebP) drives the
-            // same ~30 fps tick. `background_is_animating` is false unless it's a
-            // decoded multi-frame bg with `background-animation != off`, and —
-            // for the default `when-focused` — only while focused, so an
-            // unfocused/idle window still reaches `ControlFlow::Wait` (zero idle
-            // cost, unlike Ghostty's always-on custom shaders).
-            || ws
-                .renderer
-                .as_ref()
-                .is_some_and(|r| r.background_is_animating(&self.cfg, ws.window_focused));
+            .any(|p| p.term.has_running_animation());
+        // v2.23.1: an animated background-image (GIF/APNG/WebP) wakes at the
+        // GIF's OWN frame rate, not a fixed 30 fps — at 30 fps an 8 fps GIF
+        // repaints the same frame ~22×/s (wasted present()s, the ~55% animated
+        // idle). `bg_anim_interval_ms` is the ms to the next frame boundary;
+        // `None` unless a decoded multi-frame bg is animating (and — for the
+        // default `when-focused` — only while focused, so an unfocused window
+        // still reaches `ControlFlow::Wait` at zero idle cost, unlike Ghostty's
+        // always-on shaders).
+        let bg_anim_interval = ws
+            .renderer
+            .as_ref()
+            .and_then(|r| r.bg_anim_interval_ms(&self.cfg, ws.window_focused));
+        // Edge-trigger the bg redraw: request it ONLY when the displayed frame
+        // index actually changes, not every loop iteration. (Requesting it every
+        // `about_to_wait` made winit redraw continuously — the high animated
+        // idle. Mirrors how `blink_due` gates the cursor-blink redraw.)
+        let bg_frame = ws
+            .renderer
+            .as_ref()
+            .and_then(|r| r.bg_current_frame_index(&self.cfg, ws.window_focused));
+        let bg_frame_due = bg_frame.is_some() && bg_frame != ws.last_bg_frame;
+        if bg_frame_due {
+            ws.last_bg_frame = bg_frame;
+        }
+        if bg_frame.is_none() {
+            ws.last_bg_frame = None;
+        }
         // Selection-autoscroll runs at the same ~30 fps as bell / image
         // animation — without an active wake-up the loop sits idle waiting
         // for a fresh CursorMoved, so the drag-past-edge case would freeze
@@ -13838,7 +13855,8 @@ impl App {
                 .unwrap_or(true);
         if bell_active
             || blink_due
-            || anim_active
+            || term_anim
+            || bg_frame_due
             || autoscroll_active
             || coalesce_due
             || resize_chip_active
@@ -13854,8 +13872,12 @@ impl App {
         // autoscroll / the resize chip, the cursor-blink half-period deadline,
         // or the pending coalesced output paint's deadline.
         let mut wait_ms: Option<u64> =
-            if bell_active || anim_active || autoscroll_active || resize_chip_active {
+            if bell_active || term_anim || autoscroll_active || resize_chip_active {
                 Some(33)
+            } else if let Some(bg_ms) = bg_anim_interval {
+                // Animated bg: wake exactly at its next frame boundary (its own
+                // fps), not 30 fps — this is the fix for the ~55% animated idle.
+                Some(bg_ms.clamp(16, 1000))
             } else if blink_active {
                 let remaining = blink_interval.saturating_sub(blink_elapsed);
                 Some((remaining.as_millis() as u64).max(1))
@@ -14088,6 +14110,30 @@ mod tests {
         assert!(
             src.contains(".or_else(|| self.split_seam_hover_icon())"),
             "hovering a divider must show the resize cursor"
+        );
+    }
+
+    /// v2.23.1: the animated background must be EDGE-triggered — a redraw is
+    /// requested only when the displayed frame index changes (`bg_frame_due`),
+    /// and the loop wakes at the GIF's frame boundary (`bg_anim_interval`), not a
+    /// fixed 30 fps. Requesting it every `about_to_wait` (level-triggered) made
+    /// winit redraw continuously — the ~55% animated-idle CPU regression.
+    #[test]
+    fn animated_bg_redraw_is_edge_triggered() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        assert!(
+            src.contains("let bg_frame_due = bg_frame.is_some() && bg_frame != ws.last_bg_frame;"),
+            "the bg redraw must edge-trigger on a frame-index change"
+        );
+        // The redraw block must use the edge (bg_frame_due), not a level anim flag.
+        assert!(
+            src.contains("|| bg_frame_due\n"),
+            "the redraw block must trigger on bg_frame_due, not level anim_active"
+        );
+        // The wake interval is the GIF's frame boundary, not a fixed 30 fps.
+        assert!(
+            src.contains("} else if let Some(bg_ms) = bg_anim_interval {"),
+            "the wait must use the bg frame interval, not the fixed 33ms tick"
         );
     }
 
