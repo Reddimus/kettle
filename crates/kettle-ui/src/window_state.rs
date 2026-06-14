@@ -98,6 +98,11 @@ pub(crate) struct WindowState {
     /// Cycle 756: `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
+    /// v2.23.0: set when a Settings change (a GPU pin / power-preference /
+    /// backend / force-software) was persisted but can only take effect on the
+    /// next launch. The settings overlay shows a "⚠ restart to apply" footer
+    /// while this is true; cleared when the overlay closes.
+    pub(crate) settings_restart_pending: bool,
     /// Cycle 708 (Terminator parity): `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
     pub(crate) layout_picker_input: Option<(String, usize)>,
@@ -251,6 +256,7 @@ impl WindowState {
             ssh_input: None,
             palette_input: None,
             settings_nav: None,
+            settings_restart_pending: false,
             layout_picker_input: None,
             hint_state: None,
             context_menu: None,

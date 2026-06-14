@@ -252,9 +252,70 @@ pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     blend(fg, target, hi)
 }
 
+/// Average (mean) RGB color of a tightly-packed RGBA8 buffer, used by
+/// `chrome-background = auto` to tint the chrome strips "inspired by" the
+/// wallpaper. Fully-transparent pixels (alpha 0) are skipped so a sprite-style
+/// background with large transparent regions doesn't bias the mean toward
+/// black. Samples at a stride so a 4K frame costs microseconds, not
+/// milliseconds — the result is a broad-strokes tint, not a precise palette, so
+/// sampling every Nth pixel is visually indistinguishable from a full average.
+/// Returns mid-gray for an empty / all-transparent buffer (a safe neutral).
+pub fn average_color(rgba: &[u8]) -> Rgb {
+    let px = rgba.len() / 4;
+    if px == 0 {
+        return Rgb::new(128, 128, 128);
+    }
+    // Aim for ~4096 samples regardless of image size; never stride past the end.
+    let stride = (px / 4096).max(1);
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    let mut i = 0;
+    while i < px {
+        let o = i * 4;
+        let a = rgba[o + 3];
+        if a != 0 {
+            r += rgba[o] as u64;
+            g += rgba[o + 1] as u64;
+            b += rgba[o + 2] as u64;
+            n += 1;
+        }
+        i += stride;
+    }
+    if n == 0 {
+        return Rgb::new(128, 128, 128);
+    }
+    Rgb::new((r / n) as u8, (g / n) as u8, (b / n) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn average_color_means_and_skips_transparent() {
+        // Solid red (opaque) → red.
+        let red = [255u8, 0, 0, 255].repeat(100);
+        assert_eq!(average_color(&red), Rgb::new(255, 0, 0));
+        // Half black, half white (all opaque) → mid-gray.
+        let mut bw = Vec::new();
+        bw.extend(std::iter::repeat_n([0u8, 0, 0, 255], 2048).flatten());
+        bw.extend(std::iter::repeat_n([255u8, 255, 255, 255], 2048).flatten());
+        let avg = average_color(&bw);
+        assert!(
+            (120..=135).contains(&avg.r) && avg.r == avg.g && avg.g == avg.b,
+            "got {avg:?}"
+        );
+        // Fully-transparent pixels are skipped — a green opaque pixel among
+        // transparent ones yields green, not a darkened/black-biased mean.
+        let mut mixed = [0u8, 0, 0, 0].repeat(50); // transparent black
+        mixed.extend([0u8, 200, 0, 255]); // one opaque green
+        assert_eq!(average_color(&mixed), Rgb::new(0, 200, 0));
+        // Empty / all-transparent → neutral mid-gray, never a panic.
+        assert_eq!(average_color(&[]), Rgb::new(128, 128, 128));
+        assert_eq!(
+            average_color(&[0, 0, 0, 0, 0, 0, 0, 0]),
+            Rgb::new(128, 128, 128)
+        );
+    }
 
     #[test]
     fn contrast_ratio_extremes_and_symmetry() {

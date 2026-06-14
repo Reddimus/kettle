@@ -306,6 +306,10 @@ pub struct SettingsOverlay {
     /// v2.20.0: `cfg.vim_menu_nav` — the footer hint advertises the vim keys
     /// when the setting is on.
     pub vim_nav: bool,
+    /// v2.23.0: an optional contextual note shown below the keybind footer —
+    /// e.g. the Graphics category's "Active GPU: … • ⚠ restart to apply". `None`
+    /// on categories that don't need it.
+    pub footer_note: Option<String>,
 }
 
 /// Cycle 756: one settings row — a human label and its current value string.
@@ -499,6 +503,23 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
 }
 
+impl GpuContext {
+    /// v2.23.0: the live adapter's identity, in kettle's vocabulary — feeds the
+    /// settings "Active now: <gpu> (<kind>, <backend>)" line so the user sees
+    /// which GPU is actually in use (vs. the pinned/preferred one, which only
+    /// takes effect on restart).
+    pub fn adapter_info(&self) -> GpuAdapterInfo {
+        let i = self.adapter.get_info();
+        GpuAdapterInfo {
+            name: i.name,
+            vendor: i.vendor,
+            device: i.device,
+            kind: device_kind_str(i.device_type),
+            backend: backend_str(i.backend),
+        }
+    }
+}
+
 /// v2.21.0 (idle perf): the foreground glyph drawn on top of a focused solid
 /// block cursor this frame. The glyph is rendered in its OWN tiny renderer +
 /// 1-line buffer rather than recolored INTO the pane text buffer, so a cursor
@@ -684,6 +705,17 @@ pub struct Renderer {
     /// pass so menu labels sit above the panel bg.
     menu_text_renderer: TextRenderer,
     imgs: imgpipe::ImagePipeline,
+    /// v2.23.0: dedicated pipeline for the **background image (wallpaper)**,
+    /// drawn at the very back — between the surface clear and the cell/chrome
+    /// `quads` pass — so cell backgrounds (selection, syntax, TUI panels),
+    /// chrome (tab bar / status bar / per-pane titlebars), and pane borders all
+    /// composite OPAQUELY on top of the wallpaper (the standard kitty / wezterm
+    /// / alacritty layering). Inline kitty / sixel images stay in `imgs`, drawn
+    /// *after* the quads so they sit over cell backgrounds. Pre-2.23.0 the
+    /// wallpaper shared `imgs` and drew *after* every quad, so an opaque
+    /// wallpaper hid all cell backgrounds AND let the animation bleed through
+    /// the tab bar.
+    bg_imgs: imgpipe::ImagePipeline,
     /// Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
     /// 3+4): decoded background-image cache. Tuple of
     /// (cfg.background_image path, decoded ImageData). Invalidated
@@ -775,23 +807,16 @@ impl Renderer {
     {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
-        // A terminal is a light GPU workload. Default to the low-power
-        // (integrated) adapter: on a dual-GPU laptop `HighPerformance` wakes
-        // the discrete GPU from its low-power state, which on the reference
-        // Surface Book 3 cost ~1.5 s of cold startup for zero rendering
-        // benefit. `gpu-power-preference` lets a discrete-only/desktop user
-        // opt back into the high-performance adapter.
-        let power_preference = power_preference_of(cfg.gpu_power_preference);
-        let adapter = request_adapter_or_fallback(
-            &instance,
-            &wgpu::RequestAdapterOptions {
-                power_preference,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            },
-            "Renderer::new",
-        )
-        .await?;
+        // v2.23.0: resolve the adapter per config — an explicitly pinned GPU
+        // (settings picker / `gpu-device-id`) wins, else the
+        // `gpu-power-preference` policy, which now defaults to `High` (the
+        // discrete/dedicated adapter) so kettle renders on the dedicated GPU out
+        // of the box. On a dual-GPU laptop that wakes the discrete GPU from its
+        // low-power state (~1.5 s of extra cold startup on the reference Surface
+        // Book 3); `gpu-power-preference = low` restores the integrated adapter
+        // for the fastest cold start. `resolve_adapter` falls through to the
+        // policy (and finally a software adapter) whenever no pin matches.
+        let adapter = resolve_adapter(&instance, &surface, cfg, "Renderer::new").await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
@@ -951,6 +976,9 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
         let imgs = imgpipe::ImagePipeline::new(&device, format);
+        // v2.23.0: separate pipeline so the wallpaper draws behind cell/chrome
+        // quads (see the `bg_imgs` field docs).
+        let bg_imgs = imgpipe::ImagePipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -1000,6 +1028,7 @@ impl Renderer {
             menu_quads,
             menu_text_renderer,
             imgs,
+            bg_imgs,
             bg_image_cache: None,
             bg_image_retry_at: None,
             font_family: cfg.font_family.as_str().into(),
@@ -1433,6 +1462,15 @@ impl Renderer {
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> =
             Vec::with_capacity(16);
+        // v2.23.0: the wallpaper item(s) draw in their own pass (`bg_imgs`)
+        // BEFORE the cell/chrome quads, so the wallpaper sits at the very back
+        // and everything else composites opaquely on top. `tile` mode can push
+        // many; the rest push one.
+        let mut bg_img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
+        // v2.23.0: when `chrome-background = auto`, the average color of the
+        // currently-displayed wallpaper frame, used to tint the chrome strips.
+        // Computed once from the displayed frame below (only when auto is set).
+        let mut bg_frame_avg: Option<Rgb> = None;
         let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
         // Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
@@ -1534,6 +1572,12 @@ impl Renderer {
                     &c.frames[idx.min(c.frames.len() - 1)]
                 });
             if let Some(data) = bg_frame {
+                // v2.23.0: sample the displayed frame's average color for
+                // `chrome-background = auto`. Sampled + alpha-aware, so it's a
+                // few microseconds even on a 4K frame; only when auto is set.
+                if cfg.chrome_background == kettle_config::ChromeBackground::Auto {
+                    bg_frame_avg = Some(color::average_color(data.rgba.as_slice()));
+                }
                 // Cycle 390 (Terminator parity, bg-image Bucket-D
                 // sub-cycle 5): UV-mode variants. background-image-mode
                 // controls how the decoded image fills the surface.
@@ -1562,7 +1606,7 @@ impl Renderer {
                             while x < sw {
                                 let tw = img_w.min(sw - x);
                                 let th = img_h.min(sh - y);
-                                img_items.push((x, y, tw, th, data.clone()));
+                                bg_img_items.push((x, y, tw, th, data.clone()));
                                 x += img_w;
                             }
                             y += img_h;
@@ -1574,7 +1618,7 @@ impl Renderer {
                         // clones EVERY frame — ~8.3M on a 4K surface — hanging
                         // the render thread. Past `MAX_BG_TILES`, fall back to a
                         // single stretched quad instead of melting the renderer.
-                        img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                        bg_img_items.push((0.0, 0.0, sw, sh, data.clone()));
                     }
                     "center" => {
                         // Cycle 391: align_horiz/vert nudge the
@@ -1593,7 +1637,7 @@ impl Renderer {
                             "bottom" => (sh - h).max(0.0),
                             _ => ((sh - h) * 0.5).max(0.0),
                         };
-                        img_items.push((x, y, w, h, data.clone()));
+                        bg_img_items.push((x, y, w, h, data.clone()));
                     }
                     "scale" => {
                         // Cycle 391: aspect-preserving fit within
@@ -1612,12 +1656,12 @@ impl Renderer {
                             "bottom" => (sh - h).max(0.0),
                             _ => ((sh - h) * 0.5).max(0.0),
                         };
-                        img_items.push((x, y, w, h, data.clone()));
+                        bg_img_items.push((x, y, w, h, data.clone()));
                     }
                     _ => {
                         // "stretch_and_fill" + any unknown value:
                         // single quad covering the whole surface.
-                        img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                        bg_img_items.push((0.0, 0.0, sw, sh, data.clone()));
                     }
                 }
             }
@@ -1630,19 +1674,18 @@ impl Renderer {
             self.bg_image_retry_at = None; // cycle 919 (L2): reset the self-heal throttle
         }
 
+        // v2.23.0: the opaque fill color for the window chrome strips (tab bar,
+        // status bar, new-tab button). Only differs from the theme when a
+        // wallpaper is in use AND `chrome-background` asks for it; otherwise
+        // it's `palette[8]` exactly as before. See `resolve_chrome_bg`.
+        let chrome_strip_bg = resolve_chrome_bg(cfg, theme, bg_frame_avg);
+
         // Cycle 296: status-bar background. The text is uploaded
         // alongside `tabbar_buffer.set_text` further down so the same
         // text-renderer pass handles both. Just a chrome-dim panel
         // here (1 quad).
         if status.height > 0.0 {
-            quads.push(rect(
-                0.0,
-                status.y,
-                sw,
-                status.height,
-                theme.palette[8],
-                1.0,
-            ));
+            quads.push(rect(0.0, status.y, sw, status.height, chrome_strip_bg, 1.0));
             // One-px line on the side facing the pane grid so the
             // strip reads as distinct chrome, not as terminal output.
             // The line goes on the BOTTOM of a top-positioned status
@@ -1671,9 +1714,9 @@ impl Renderer {
                     .first()
                     .map(|s| s.rect)
                     .unwrap_or(tabbar.new_tab);
-                quads.push(rect(sx, 0.0, swid, sh, theme.palette[8], 1.0));
+                quads.push(rect(sx, 0.0, swid, sh, chrome_strip_bg, 1.0));
             } else {
-                quads.push(rect(0.0, by, sw, tabbar.height, theme.palette[8], 1.0));
+                quads.push(rect(0.0, by, sw, tabbar.height, chrome_strip_bg, 1.0));
             }
             for s in &tabbar.segments {
                 // Cycle 672 (vertical-tabs sub-cycle 5): use the
@@ -1797,7 +1840,7 @@ impl Renderer {
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
             let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
-            quads.push(rect(bx, ny, bw, nh, theme.palette[8], 1.0));
+            quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
             // Cycle 255: drag-in-progress ghost. While the user holds a
             // left button down on the tab bar (cycle 249), paint a
             // translucent overlay copy of the active segment centered
@@ -3196,6 +3239,12 @@ impl Renderer {
         // Cycle 853: return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
+        // v2.23.0: wallpaper into its own back pipeline; inline images into
+        // `imgs`. One shared `live` set keys both texture caches' gc (a key
+        // present in `live` but absent from a given cache is a harmless no-op).
+        self.bg_imgs
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
+        self.bg_imgs.gc(&live);
         self.imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
         self.imgs.gc(&live);
@@ -3266,6 +3315,12 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // v2.23.0 layering: wallpaper at the very back → cell + chrome +
+            // border quads opaquely on top → inline kitty/sixel images over the
+            // cell backgrounds → text. Pre-2.23.0 the wallpaper drew *after*
+            // `quads`, hiding all cell backgrounds and bleeding the animation
+            // through the chrome.
+            self.bg_imgs.draw(&mut pass);
             self.quads.draw(&mut pass);
             self.imgs.draw(&mut pass);
             self.text_renderer
@@ -4227,6 +4282,40 @@ pub(crate) fn pick_titlebar_bg(
     }
 }
 
+/// v2.23.0: resolve the opaque fill color for the window chrome strips (tab
+/// bar, status bar, new-tab button). Without a wallpaper, or with
+/// `chrome-background = theme`, this is the theme's chrome color (`palette[8]`)
+/// — identical to the pre-2.23.0 look. With a wallpaper, the other modes let
+/// the chrome read deliberately against the moving background:
+///   - `black` / `white`: a fixed neutral panel.
+///   - `auto`: the wallpaper's average color, nudged toward black/white only as
+///     far as needed to keep the (theme-colored) tab text readable on it
+///     (`with_min_contrast` against `theme.foreground`, 3:1). Falls back to the
+///     theme color if no frame has been sampled yet.
+///
+/// `bg_avg` is `Some` only when a wallpaper frame was sampled this frame for
+/// `auto`. Pure so the mapping is unit-tested without a GPU.
+pub(crate) fn resolve_chrome_bg(
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    bg_avg: Option<Rgb>,
+) -> Rgb {
+    use kettle_config::{BackgroundType, ChromeBackground};
+    // Only a wallpaper changes the chrome color; otherwise theme as before.
+    if !matches!(cfg.background_type, BackgroundType::Image) {
+        return theme.palette[8];
+    }
+    match cfg.chrome_background {
+        ChromeBackground::Theme => theme.palette[8],
+        ChromeBackground::Black => Rgb::new(0, 0, 0),
+        ChromeBackground::White => Rgb::new(255, 255, 255),
+        ChromeBackground::Auto => match bg_avg {
+            Some(avg) => color::with_min_contrast(avg, theme.foreground, 3.0),
+            None => theme.palette[8],
+        },
+    }
+}
+
 /// Cap a cell count so `requested * cell_px + chrome_px <= 8192` —
 /// the wgpu per-side texture limit. Returns at least 1 so a degenerate
 /// clamp (huge font + huge padding) doesn't produce a zero-cell PNG.
@@ -4333,6 +4422,217 @@ async fn request_adapter_or_fallback(
         .map_err(|e| anyhow!("{context}: no GPU adapter, even software fallback: {e:?}"))
 }
 
+/// v2.23.0: a detected GPU adapter, described in kettle's own vocabulary so
+/// kettle-ui (the settings GPU picker) never has to name a `wgpu` type. Carries
+/// the PCI `(vendor, device)` pair the config pins on, the human display name,
+/// and string-ized `kind` / `backend` for the settings list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuAdapterInfo {
+    pub name: String,
+    pub vendor: u32,
+    pub device: u32,
+    /// "Discrete" | "Integrated" | "Virtual" | "Software" | "Other".
+    pub kind: &'static str,
+    /// "DX12" | "Vulkan" | "Metal" | "GL" | "Other".
+    pub backend: &'static str,
+}
+
+fn device_kind_str(t: wgpu::DeviceType) -> &'static str {
+    match t {
+        wgpu::DeviceType::DiscreteGpu => "Discrete",
+        wgpu::DeviceType::IntegratedGpu => "Integrated",
+        wgpu::DeviceType::VirtualGpu => "Virtual",
+        wgpu::DeviceType::Cpu => "Software",
+        _ => "Other",
+    }
+}
+
+fn backend_str(b: wgpu::Backend) -> &'static str {
+    match b {
+        wgpu::Backend::Vulkan => "Vulkan",
+        wgpu::Backend::Metal => "Metal",
+        wgpu::Backend::Dx12 => "DX12",
+        wgpu::Backend::Gl => "GL",
+        wgpu::Backend::BrowserWebGpu => "WebGPU",
+        _ => "Other",
+    }
+}
+
+/// The display-string form of a config [`kettle_config::GpuBackend`], matching
+/// [`backend_str`]'s output so the picker's saved backend compares directly to a
+/// detected adapter's backend. `""` means "Auto / any backend".
+fn config_backend_str(b: kettle_config::GpuBackend) -> &'static str {
+    use kettle_config::GpuBackend;
+    match b {
+        GpuBackend::Auto => "",
+        GpuBackend::Dx12 => "DX12",
+        GpuBackend::Vulkan => "Vulkan",
+        GpuBackend::Metal => "Metal",
+        GpuBackend::Gl => "GL",
+    }
+}
+
+/// Enumerate the machine's GPU adapters across every backend, de-duplicated by
+/// `(vendor, device, name)` so the same physical GPU exposed under multiple
+/// backends (e.g. DX12 *and* Vulkan on Windows) shows once in the picker.
+pub async fn enumerate_adapter_infos(instance: &wgpu::Instance) -> Vec<GpuAdapterInfo> {
+    let mut seen: std::collections::HashSet<(u32, u32, String)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for a in instance.enumerate_adapters(wgpu::Backends::all()).await {
+        let info = a.get_info();
+        if !seen.insert((info.vendor, info.device, info.name.clone())) {
+            continue;
+        }
+        out.push(GpuAdapterInfo {
+            name: info.name,
+            vendor: info.vendor,
+            device: info.device,
+            kind: device_kind_str(info.device_type),
+            backend: backend_str(info.backend),
+        });
+    }
+    out
+}
+
+/// Convenience wrapper for kettle-ui: spin up a throwaway `wgpu::Instance` and
+/// return the detected GPUs. Keeps `wgpu` out of the UI crate's vocabulary and
+/// stays synchronous for the settings code (blocks on the async enumeration —
+/// a one-shot, off the render hot path).
+pub fn detect_gpus() -> Vec<GpuAdapterInfo> {
+    pollster::block_on(enumerate_adapter_infos(&wgpu::Instance::default()))
+}
+
+/// Pure core of the pinned-GPU fallback chain (testable without a GPU). Given
+/// the surface-capable adapters' `(vendor, device, backend_str, name)` and the
+/// config pin, return the index of the chosen adapter, or `None` to fall
+/// through to the `gpu-power-preference` policy. Order:
+///   1. `(vendor, device, backend)` — only when a backend is pinned,
+///   2. `(vendor, device)` — any backend,
+///   3. exact name, then name-substring.
+///
+/// Never errors: an absent pin simply yields `None`.
+fn pick_pinned_adapter(
+    infos: &[(u32, u32, &str, &str)],
+    vendor: u32,
+    device: u32,
+    backend: &str,
+    name: &str,
+) -> Option<usize> {
+    let pinned_ids = vendor != 0 && device != 0;
+    let pinned_name = !name.is_empty();
+    if !pinned_ids && !pinned_name {
+        return None;
+    }
+    if pinned_ids
+        && !backend.is_empty()
+        && let Some(i) = infos
+            .iter()
+            .position(|&(v, d, b, _)| v == vendor && d == device && b.eq_ignore_ascii_case(backend))
+    {
+        return Some(i);
+    }
+    if pinned_ids
+        && let Some(i) = infos
+            .iter()
+            .position(|&(v, d, _, _)| v == vendor && d == device)
+    {
+        return Some(i);
+    }
+    if pinned_name {
+        let want = name.to_ascii_lowercase();
+        if let Some(i) = infos
+            .iter()
+            .position(|&(_, _, _, n)| n.to_ascii_lowercase() == want)
+        {
+            return Some(i);
+        }
+        if let Some(i) = infos
+            .iter()
+            .position(|&(_, _, _, n)| n.to_ascii_lowercase().contains(&want))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// v2.23.0: pick the GPU adapter per the config, then fall back gracefully.
+/// `gpu-force-software` wins outright; otherwise a pinned GPU
+/// (`gpu-vendor-id`/`gpu-device-id`/`gpu-name`) is matched among the
+/// surface-capable adapters via [`pick_pinned_adapter`]; anything unmatched (no
+/// pin, or the pinned GPU is gone — eGPU unplugged, driver swap) falls through
+/// to the `gpu-power-preference` policy and finally a software adapter, exactly
+/// as pre-2.23.0. Never errors unless even the software fallback is unavailable.
+async fn resolve_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+    cfg: &Config,
+    context: &str,
+) -> Result<wgpu::Adapter> {
+    if cfg.gpu_force_software {
+        log::info!("{context}: gpu-force-software set — requesting the software adapter");
+        let opts = wgpu::RequestAdapterOptions {
+            power_preference: power_preference_of(cfg.gpu_power_preference),
+            compatible_surface: Some(surface),
+            force_fallback_adapter: true,
+        };
+        return instance
+            .request_adapter(&opts)
+            .await
+            .map_err(|e| anyhow!("{context}: software adapter unavailable: {e:?}"));
+    }
+    let pinned =
+        (cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0) || !cfg.gpu_name.trim().is_empty();
+    if pinned {
+        // Only consider adapters that can actually present to this surface — a
+        // GL adapter when the surface is DX12 would fail `surface.configure`.
+        let cands: Vec<wgpu::Adapter> = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .filter(|a| a.is_surface_supported(surface))
+            .collect();
+        let infos: Vec<wgpu::AdapterInfo> = cands.iter().map(|a| a.get_info()).collect();
+        let infos_t: Vec<(u32, u32, &str, &str)> = infos
+            .iter()
+            .map(|i| (i.vendor, i.device, backend_str(i.backend), i.name.as_str()))
+            .collect();
+        let chosen = pick_pinned_adapter(
+            &infos_t,
+            cfg.gpu_vendor_id,
+            cfg.gpu_device_id,
+            config_backend_str(cfg.gpu_backend),
+            cfg.gpu_name.trim(),
+        );
+        if let Some(idx) = chosen {
+            let i = &infos[idx];
+            log::info!(
+                "{context}: using pinned GPU {} ({}, {})",
+                i.name,
+                device_kind_str(i.device_type),
+                backend_str(i.backend)
+            );
+            let mut cands = cands;
+            return Ok(cands.swap_remove(idx));
+        }
+        log::warn!(
+            "{context}: pinned GPU (vendor={:#06x} device={:#06x} name={:?}) not found among \
+             {} surface-capable adapter(s); falling back to gpu-power-preference",
+            cfg.gpu_vendor_id,
+            cfg.gpu_device_id,
+            cfg.gpu_name,
+            cands.len()
+        );
+    }
+    // No pin (or the pin vanished): the historic power-preference → software path.
+    let opts = wgpu::RequestAdapterOptions {
+        power_preference: power_preference_of(cfg.gpu_power_preference),
+        compatible_surface: Some(surface),
+        force_fallback_adapter: false,
+    };
+    request_adapter_or_fallback(instance, &opts, context).await
+}
+
 /// Cycle 756: number of header display-lines before the field rows in the
 /// settings panel (title, category tabs, blank). The focused-row highlight
 /// quad and the per-line text areas both index off this.
@@ -4376,6 +4676,11 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
     } else {
         "↑↓ field    ←→ change    Tab category    Esc close".to_string()
     });
+    // v2.23.0: contextual note (e.g. the Graphics "Active GPU … • restart to
+    // apply" line). Appended last so it never shifts the focused-row highlight.
+    if let Some(note) = &set.footer_note {
+        lines.push(note.clone());
+    }
     lines
 }
 
@@ -6284,6 +6589,128 @@ mod pane_buffer_lifecycle_tests {
                 && src.contains("idx.min(c.frames.len() - 1)"),
             "animated bg must pick the clock frame, bounded to the frame count"
         );
+    }
+
+    /// v2.23.0: the wallpaper draws in its OWN pipeline (`bg_imgs`) BEFORE the
+    /// cell/chrome `quads` pass, so chrome (tab bar/status/titlebar), cell
+    /// backgrounds (selection/syntax/TUI), and borders composite opaquely on
+    /// top of it instead of being hidden under an opaque wallpaper (and the
+    /// animation no longer bleeds through the tab bar). Pinned at the source
+    /// level since exercising the pass needs a full GPU `Renderer`.
+    #[test]
+    fn wallpaper_draws_behind_quads_in_its_own_pass() {
+        let src = include_str!("lib.rs");
+        // A dedicated pipeline exists and is constructed.
+        assert!(
+            src.contains("bg_imgs: imgpipe::ImagePipeline,")
+                && src.contains("let bg_imgs = imgpipe::ImagePipeline::new(&device, format);"),
+            "the wallpaper must have its own ImagePipeline field + construction"
+        );
+        // The wallpaper items go to bg_img_items, inline images stay in img_items.
+        assert!(
+            src.contains("bg_img_items.push(") && src.contains("img_items.push(("),
+            "wallpaper pushes to bg_img_items; inline images to img_items"
+        );
+        // Draw order: bg_imgs (back) → quads → imgs (inline) → text.
+        let bg = src
+            .find("self.bg_imgs.draw(&mut pass);")
+            .expect("bg_imgs draw");
+        let quads = src.find("self.quads.draw(&mut pass);").expect("quads draw");
+        let inline = src.find("self.imgs.draw(&mut pass);").expect("imgs draw");
+        assert!(
+            bg < quads && quads < inline,
+            "draw order must be wallpaper → quads → inline images"
+        );
+    }
+
+    /// v2.23.0: `chrome-background` only recolors the chrome with a wallpaper;
+    /// theme mode + the no-wallpaper case keep `palette[8]`; auto keeps the tab
+    /// text readable; black/white are fixed.
+    #[test]
+    #[allow(
+        clippy::field_reassign_with_default,
+        reason = "stepwise cfg tweaks read clearer than a full struct literal here"
+    )]
+    fn resolve_chrome_bg_modes() {
+        use super::{color, resolve_chrome_bg};
+        use kettle_config::{BackgroundType, ChromeBackground, Rgb};
+        let theme = kettle_config::Theme::default();
+        let avg = Rgb::new(90, 60, 120); // a nebula-ish purple
+        let mut cfg = kettle_config::Config::default();
+
+        // No wallpaper → always the theme chrome color, whatever the mode.
+        cfg.background_type = BackgroundType::Solid;
+        cfg.chrome_background = ChromeBackground::Black;
+        assert_eq!(resolve_chrome_bg(&cfg, &theme, Some(avg)), theme.palette[8]);
+
+        // Wallpaper + theme (default) → theme chrome color.
+        cfg.background_type = BackgroundType::Image;
+        cfg.chrome_background = ChromeBackground::Theme;
+        assert_eq!(resolve_chrome_bg(&cfg, &theme, Some(avg)), theme.palette[8]);
+
+        // Black / white are fixed.
+        cfg.chrome_background = ChromeBackground::Black;
+        assert_eq!(
+            resolve_chrome_bg(&cfg, &theme, Some(avg)),
+            Rgb::new(0, 0, 0)
+        );
+        cfg.chrome_background = ChromeBackground::White;
+        assert_eq!(
+            resolve_chrome_bg(&cfg, &theme, Some(avg)),
+            Rgb::new(255, 255, 255)
+        );
+
+        // Auto with a sampled frame → contrasts with the (theme) tab text ≥3:1.
+        cfg.chrome_background = ChromeBackground::Auto;
+        let out = resolve_chrome_bg(&cfg, &theme, Some(avg));
+        assert!(
+            color::contrast_ratio(out, theme.foreground) + 1e-6 >= 3.0,
+            "auto chrome must stay readable under the tab text"
+        );
+        // Auto with no frame sampled yet → falls back to the theme chrome color.
+        assert_eq!(resolve_chrome_bg(&cfg, &theme, None), theme.palette[8]);
+    }
+
+    /// v2.23.0: the pinned-GPU fallback chain. A dual-GPU Windows machine shows
+    /// each GPU once per backend; the resolver walks vendor+device+backend →
+    /// vendor+device → name, and returns None (→ power-preference policy) when
+    /// the pinned GPU is absent, so a saved pin NEVER errors the renderer.
+    #[test]
+    fn pick_pinned_adapter_fallback_chain() {
+        use super::pick_pinned_adapter;
+        // (vendor, device, backend, name) — Intel iGPU + NVIDIA dGPU, the dGPU
+        // under both DX12 and Vulkan (as Windows enumerates it).
+        let intel = (
+            0x8086u32,
+            0x9a49u32,
+            "DX12",
+            "Intel(R) Iris(R) Plus Graphics",
+        );
+        let nv_dx12 = (0x10deu32, 0x2191u32, "DX12", "NVIDIA GeForce GTX 1660 Ti");
+        let nv_vk = (0x10deu32, 0x2191u32, "Vulkan", "NVIDIA GeForce GTX 1660 Ti");
+        let infos = [intel, nv_dx12, nv_vk];
+
+        // 1) vendor+device+backend exact → the Vulkan NVIDIA entry (index 2).
+        assert_eq!(
+            pick_pinned_adapter(&infos, 0x10de, 0x2191, "Vulkan", ""),
+            Some(2)
+        );
+        // 2) vendor+device, backend Auto → first matching (the DX12 NVIDIA, idx 1).
+        assert_eq!(pick_pinned_adapter(&infos, 0x10de, 0x2191, "", ""), Some(1));
+        // 2) a backend that isn't present falls back to vendor+device (idx 1).
+        assert_eq!(
+            pick_pinned_adapter(&infos, 0x10de, 0x2191, "Metal", ""),
+            Some(1)
+        );
+        // 3) name-only pin (no ids) → substring match on the Intel entry.
+        assert_eq!(pick_pinned_adapter(&infos, 0, 0, "", "iris"), Some(0));
+        // Pinned GPU absent → None (resolver then uses gpu-power-preference).
+        assert_eq!(
+            pick_pinned_adapter(&infos, 0x1002, 0x1234, "", "Radeon"),
+            None
+        );
+        // No pin at all → None.
+        assert_eq!(pick_pinned_adapter(&infos, 0, 0, "", ""), None);
     }
 
     /// Cycle 891 (audit): the unfocused-pane backdrop is gated on the pane's

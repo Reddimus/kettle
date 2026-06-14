@@ -4,6 +4,53 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.23.0] — 2026-06-14
+
+  **Animated-background polish + a cross-platform GPU picker.**
+
+  ### Background images
+  - **Opaque chrome over the wallpaper (bleed-through fix).** The background
+    image now draws in its own pipeline at the very back, so cell backgrounds,
+    the tab bar / status bar / per-pane titlebars, and pane borders composite
+    *opaquely on top* of it — the standard kitty/WezTerm/Alacritty layering. The
+    animation no longer shows through the tab bar, and colored cell backgrounds
+    (selections, syntax panels, TUI apps) are no longer hidden under an opaque
+    wallpaper. (Pre-2.23.0 the wallpaper shared the inline-image pass and drew
+    *after* the quads.)
+  - New **`chrome-background`** config: the opaque chrome color over a wallpaper
+    — `theme` (default) · `auto` (the wallpaper's average color, auto-adjusted to
+    keep the tab text readable) · `black` · `white`.
+  - **Settings → Appearance** now surfaces **Background** (`background-type`) and
+    **Background animation** (`background-animation`) so the focus behavior is
+    discoverable (the image *path* stays a config line).
+  - New **[docs/BACKGROUNDS.md](docs/BACKGROUNDS.md)** — a walkthrough plus
+    curated, clearly-licensed wallpaper sources (NASA SVS public-domain loops,
+    OpenGameArt CC0). Nothing is bundled; backgrounds stay **off by default**.
+
+  ### GPU selection (Settings → Graphics)
+  - **Default GPU is now the discrete / dedicated adapter** (`gpu-power-preference
+    = high`). kettle renders on the dedicated GPU out of the box for more headroom
+    (animated backgrounds, large/high-DPI windows, many panes). On a dual-GPU
+    laptop this wakes the discrete GPU (~1.5 s of extra cold start on the
+    reference Surface Book 3); set `gpu-power-preference = low` for the fastest
+    cold start. Single-GPU machines are unaffected.
+  - **Pin a specific GPU** — new `gpu-vendor-id` / `gpu-device-id` / `gpu-name`
+    keys and a **Settings → Graphics** picker that lists the GPUs detected on this
+    machine. The resolver matches `(vendor,device,backend) → (vendor,device) →
+    name` among surface-capable adapters and falls back to the power-preference
+    policy if the pinned GPU is gone — a stale pin never fails startup. kettle's
+    cross-platform answer to the OS GPU picker, and it persists per-app.
+  - New `gpu-backend` (`auto`/`dx12`/`vulkan`/`metal`/`gl`) and
+    `gpu-force-software` (debugging) keys.
+  - GPU changes apply on the **next launch** (the device/surface graph can't
+    hot-swap, and every window shares one adapter); the panel shows the **active**
+    GPU and a "⚠ restart to apply" hint after a change.
+
+  Render/config only — Claude Code CLI / AstroNvim / Tmux behavior, MSRV (1.89),
+  and the cross-platform builds (Windows / Ubuntu / macOS / aarch64) are
+  unchanged. Throughput, idle CPU, and the damage gate are untouched (the new
+  wallpaper pass is one quad; the GPU picker is startup-only).
+
 ## [2.22.0] — 2026-06-13
 
   **Animated (GIF / APNG / animated WebP) backgrounds — a "video"/space-loop

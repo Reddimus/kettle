@@ -26,6 +26,16 @@ pub enum FieldKind {
         values: &'static [&'static str],
         labels: &'static [&'static str],
     },
+    /// v2.23.0: like [`FieldKind::Choice`] but the options are computed at
+    /// runtime (owned `Vec<String>`) rather than `&'static`. Used by the GPU
+    /// picker, whose options are the GPUs actually detected on this machine.
+    /// `values[i]` is the token persisted (and round-tripped through `read`);
+    /// `labels[i]` is shown. A scoped relaxation — the rest of the catalogue
+    /// stays `&'static` — so the dynamic-list need doesn't refactor everything.
+    ChoiceOwned {
+        values: Vec<String>,
+        labels: Vec<String>,
+    },
     /// An integer in `[min, max]` stepped by `step`. Optional `suffix` for
     /// display (e.g. "%", "px"). Some keys store a different on-disk form than
     /// the displayed integer (e.g. opacity is a 0.0–1.0 float shown as a
@@ -96,6 +106,20 @@ fn choice(
     }
 }
 
+/// v2.23.0: a runtime-options Choice (see [`FieldKind::ChoiceOwned`]).
+fn choice_owned(
+    label: &'static str,
+    key: &'static str,
+    values: Vec<String>,
+    labels: Vec<String>,
+) -> Field {
+    Field {
+        label,
+        key,
+        kind: FieldKind::ChoiceOwned { values, labels },
+    }
+}
+
 fn number(
     label: &'static str,
     key: &'static str,
@@ -128,7 +152,19 @@ fn keybind(label: &'static str, action: &'static str) -> Field {
 
 /// The curated catalogue. Covers the settings a typical user actually reaches
 /// for; the overlay also offers an "open config file" row for the long tail.
-pub fn categories() -> Vec<Category> {
+///
+/// `gpus` are the GPUs detected on this machine as `(token, label)` pairs (the
+/// token is what [`read_choice`] round-trips for the `gpu` key — `"auto"` or
+/// `"<vendor-hex>:<device-hex>:<name>"`). They populate the Graphics category's
+/// device picker; pass `&[]` (e.g. in tests) for just the "Automatic" option.
+pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
+    // GPU device options: Automatic first, then each detected GPU.
+    let mut gpu_values = vec!["auto".to_string()];
+    let mut gpu_labels = vec!["Automatic".to_string()];
+    for (val, label) in gpus {
+        gpu_values.push(val.clone());
+        gpu_labels.push(label.clone());
+    }
     vec![
         Category {
             name: "Appearance",
@@ -161,6 +197,21 @@ pub fn categories() -> Vec<Category> {
                 ),
                 toggle("Cursor blink", "cursor-blink"),
                 toggle("Show pane titlebars", "show-titlebar"),
+                // v2.23.0: background style + (for an animated image) how it
+                // plays. The image *path* stays a config-file key (it needs a
+                // file, not a cycle); these two cover the discoverable choices.
+                choice(
+                    "Background",
+                    "background-type",
+                    &["solid", "image", "transparent"],
+                    &["solid color", "image", "transparent"],
+                ),
+                choice(
+                    "Background animation",
+                    "background-animation",
+                    &["when-focused", "always", "off"],
+                    &["when focused", "always", "off"],
+                ),
             ],
         },
         Category {
@@ -191,6 +242,33 @@ pub fn categories() -> Vec<Category> {
                     &["click", "sloppy", "system"],
                     &["click to focus", "follows mouse", "system default"],
                 ),
+            ],
+        },
+        Category {
+            name: "Graphics",
+            fields: vec![
+                // Tier A: the power-preference policy (integrated vs discrete).
+                // Applies on restart — the renderer/device graph can't hot-swap.
+                choice(
+                    "GPU preference",
+                    "gpu-power-preference",
+                    &["low", "high", "auto"],
+                    &[
+                        "integrated (power-saving)",
+                        "discrete (performance)",
+                        "automatic",
+                    ],
+                ),
+                // Tier B: pin a specific detected GPU (or Automatic).
+                choice_owned("GPU device", "gpu", gpu_values, gpu_labels),
+                // Advanced: backend + software fallback.
+                choice(
+                    "GPU backend",
+                    "gpu-backend",
+                    &["auto", "dx12", "vulkan", "metal", "gl"],
+                    &["automatic", "DirectX 12", "Vulkan", "Metal", "OpenGL"],
+                ),
+                toggle("Force software rendering", "gpu-force-software"),
             ],
         },
         Category {
@@ -237,6 +315,23 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                 .map(|label| label.to_string())
                 .unwrap_or_else(|| cur.clone())
         }
+        FieldKind::ChoiceOwned { values, labels } => {
+            let cur = read_choice(cfg, field.key);
+            values
+                .iter()
+                .position(|v| *v == cur)
+                .and_then(|i| labels.get(i))
+                .map(|label| label.to_string())
+                // No match (e.g. a pinned GPU that no longer enumerates) →
+                // show the saved name if any, else "Automatic".
+                .unwrap_or_else(|| {
+                    if cfg.gpu_name.trim().is_empty() {
+                        "Automatic".to_string()
+                    } else {
+                        format!("{} (not detected)", cfg.gpu_name)
+                    }
+                })
+        }
         FieldKind::Number { suffix, .. } => {
             format!("{}{}", read_number(cfg, field.key), suffix)
         }
@@ -274,6 +369,17 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             let step = if dir == 0 { 1 } else { dir };
             let next = (idx + step).rem_euclid(n) as usize;
             values[next].to_string()
+        }
+        FieldKind::ChoiceOwned { values, .. } => {
+            if values.is_empty() {
+                return String::new();
+            }
+            let cur = read_choice(cfg, field.key);
+            let idx = values.iter().position(|v| *v == cur).unwrap_or(0) as i32;
+            let n = values.len() as i32;
+            let step = if dir == 0 { 1 } else { dir };
+            let next = (idx + step).rem_euclid(n) as usize;
+            values[next].clone()
         }
         FieldKind::Number {
             min,
@@ -321,6 +427,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "update-check" => cfg.update_check,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
+        "gpu-force-software" => cfg.gpu_force_software,
         _ => false,
     }
 }
@@ -354,10 +461,51 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             FocusMode::System => "system",
         }
         .to_string(),
+        // v2.23.0 background controls.
+        "background-type" => match cfg.background_type {
+            kettle_config::BackgroundType::Solid => "solid",
+            kettle_config::BackgroundType::Image => "image",
+            kettle_config::BackgroundType::Transparent => "transparent",
+        }
+        .to_string(),
+        "background-animation" => match cfg.background_animation {
+            kettle_config::BackgroundAnimation::WhenFocused => "when-focused",
+            kettle_config::BackgroundAnimation::Always => "always",
+            kettle_config::BackgroundAnimation::Off => "off",
+        }
+        .to_string(),
         // Cycle 872: the live theme name (canonical bundled casing). When the
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
+        // v2.23.0 Graphics.
+        "gpu-power-preference" => match cfg.gpu_power_preference {
+            kettle_config::GpuPowerPreference::Low => "low",
+            kettle_config::GpuPowerPreference::High => "high",
+            kettle_config::GpuPowerPreference::Auto => "auto",
+        }
+        .to_string(),
+        "gpu-backend" => match cfg.gpu_backend {
+            kettle_config::GpuBackend::Auto => "auto",
+            kettle_config::GpuBackend::Dx12 => "dx12",
+            kettle_config::GpuBackend::Vulkan => "vulkan",
+            kettle_config::GpuBackend::Metal => "metal",
+            kettle_config::GpuBackend::Gl => "gl",
+        }
+        .to_string(),
+        // The pinned-GPU token, round-tripped against the picker's option
+        // values: "<vendor-hex>:<device-hex>:<name>" when pinned, else "auto".
+        // Must match the token app.rs builds from a detected GpuAdapterInfo.
+        "gpu" => {
+            if cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0 {
+                format!(
+                    "{:x}:{:x}:{}",
+                    cfg.gpu_vendor_id, cfg.gpu_device_id, cfg.gpu_name
+                )
+            } else {
+                "auto".to_string()
+            }
+        }
         _ => String::new(),
     }
 }
@@ -398,7 +546,13 @@ mod tests {
         // a Config field without updating the catalogue fails the build's
         // tests rather than silently showing a blank value.
         let cfg = Config::default();
-        for cat in categories() {
+        // Pass a representative detected-GPU list so the dynamic GPU field is
+        // exercised too (not just the empty "Automatic"-only fallback).
+        let gpus = [(
+            "10de:2191:NVIDIA GeForce GTX 1660 Ti".to_string(),
+            "NVIDIA GeForce GTX 1660 Ti (Discrete)".to_string(),
+        )];
+        for cat in categories(&gpus) {
             for field in &cat.fields {
                 let shown = read(&cfg, field);
                 assert!(
@@ -409,6 +563,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gpu_device_choice_round_trips_and_cycles() {
+        // v2.23.0. The GPU picker's token round-trips through read_choice and
+        // the ChoiceOwned cycle, and a pinned GPU shows its label.
+        let gpus = [
+            (
+                "10de:2191:NVIDIA GeForce GTX 1660 Ti".to_string(),
+                "NVIDIA GeForce GTX 1660 Ti (Discrete)".to_string(),
+            ),
+            (
+                "8086:9a49:Intel(R) Iris(R) Plus Graphics".to_string(),
+                "Intel(R) Iris(R) Plus Graphics (Integrated)".to_string(),
+            ),
+        ];
+        let cats = categories(&gpus);
+        let graphics = cats
+            .iter()
+            .find(|c| c.name == "Graphics")
+            .expect("Graphics");
+        let gpu_field = graphics
+            .fields
+            .iter()
+            .find(|f| f.key == "gpu")
+            .expect("gpu field");
+
+        // Default cfg → "auto" token → shows "Automatic".
+        let mut cfg = Config::default();
+        assert_eq!(read(&cfg, gpu_field), "Automatic");
+        // Cycling forward from auto lands on the first detected GPU's token.
+        let next = next_value(&cfg, gpu_field, 1);
+        assert_eq!(next, "10de:2191:NVIDIA GeForce GTX 1660 Ti");
+
+        // A pinned NVIDIA cfg reads back the matching label.
+        cfg.gpu_vendor_id = 0x10de;
+        cfg.gpu_device_id = 0x2191;
+        cfg.gpu_name = "NVIDIA GeForce GTX 1660 Ti".to_string();
+        assert_eq!(
+            read(&cfg, gpu_field),
+            "NVIDIA GeForce GTX 1660 Ti (Discrete)"
+        );
+        // Cycling forward from NVIDIA → Intel's token.
+        assert_eq!(
+            next_value(&cfg, gpu_field, 1),
+            "8086:9a49:Intel(R) Iris(R) Plus Graphics"
+        );
+
+        // A pinned GPU that's no longer detected degrades gracefully.
+        cfg.gpu_name = "Phantom GPU 9000".to_string();
+        cfg.gpu_vendor_id = 0xdead;
+        cfg.gpu_device_id = 0xbeef;
+        assert_eq!(read(&cfg, gpu_field), "Phantom GPU 9000 (not detected)");
     }
 
     /// Cycle 789 drift guard (audit D3). `keybind_action` extracts the

@@ -2049,6 +2049,12 @@ pub struct App {
     /// in `resumed`; `open_window` reuses it for the synchronous (no
     /// adapter/device request) renderer init of windows 2..N.
     gpu: Option<kettle_render::GpuContext>,
+    /// v2.23.0: detected GPUs as `(token, label)` pairs for the Settings →
+    /// Graphics device picker. Enumerated ONCE when the settings overlay first
+    /// opens (a wgpu instance + adapter walk is ~tens of ms — too heavy per
+    /// frame) and cached for the session; `categories()` reads it. Empty until
+    /// the overlay is first opened (the picker then shows just "Automatic").
+    gpu_choices: Vec<(String, String)>,
     /// C4: set by any "this window is done" path (last tab closed, X button,
     /// reap drained the panes) while its WindowState is checked out of the
     /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
@@ -2511,6 +2517,7 @@ impl App {
             focused_seq: 1,
             next_window_seq: 2,
             gpu: None,
+            gpu_choices: Vec::new(),
             pending_window_close: false,
             quit_requested: false,
             #[cfg(feature = "dev-record")]
@@ -4583,7 +4590,7 @@ impl App {
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = ws.settings_nav.as_ref().map(|nav| {
-            let cats = crate::settings::categories();
+            let cats = crate::settings::categories(&self.gpu_choices);
             let cat = nav.category.min(cats.len().saturating_sub(1));
             let active = &cats[cat];
             let fld = nav.field.min(active.fields.len().saturating_sub(1));
@@ -4607,6 +4614,26 @@ impl App {
                     .collect(),
                 focused_row: fld,
                 vim_nav: self.cfg.vim_menu_nav,
+                // v2.23.0: on the Graphics tab, show which GPU is LIVE right now
+                // (from the shared adapter) plus a restart hint when a GPU
+                // setting was changed this session (it applies on next launch).
+                footer_note: if active.name == "Graphics" {
+                    let active_line = self
+                        .gpu
+                        .as_ref()
+                        .map(|g| {
+                            let i = g.adapter_info();
+                            format!("Active GPU: {} ({}, {})", i.name, i.kind, i.backend)
+                        })
+                        .unwrap_or_else(|| "Active GPU: (initializing)".to_string());
+                    if ws.settings_restart_pending {
+                        Some(format!("{active_line}    •    ⚠ restart kettle to apply"))
+                    } else {
+                        Some(active_line)
+                    }
+                } else {
+                    None
+                },
             }
         });
         let s = &ws.mux.search;
@@ -7150,6 +7177,21 @@ impl App {
             // → Settings / palette "Open settings").
             Action::OpenSettings => {
                 self.close_all_modals(ws);
+                // v2.23.0: enumerate GPUs once for the Graphics device picker
+                // (cached for the session; a wgpu adapter walk is too heavy to
+                // repeat per frame). Re-enumerate only if we never have.
+                if self.gpu_choices.is_empty() {
+                    self.gpu_choices = kettle_render::detect_gpus()
+                        .into_iter()
+                        .map(|g| {
+                            (
+                                format!("{:x}:{:x}:{}", g.vendor, g.device, g.name),
+                                format!("{} ({})", g.name, g.kind),
+                            )
+                        })
+                        .collect();
+                }
+                ws.settings_restart_pending = false;
                 ws.settings_nav = Some(crate::settings::SettingsNav::default());
             }
             // Cycle 708 (Terminator parity, layoutlauncher.py):
@@ -9485,7 +9527,7 @@ impl App {
     /// and reloads live, so the effect is immediate (matching the right-click
     /// Preferences toggles).
     fn settings_key(&mut self, ws: &mut WindowState, key: &Key, _event_loop: &ActiveEventLoop) {
-        let cats = crate::settings::categories();
+        let cats = crate::settings::categories(&self.gpu_choices);
         if cats.is_empty() {
             ws.settings_nav = None;
             return;
@@ -9648,6 +9690,27 @@ impl App {
                 crate::settings::next_value(&self.cfg, field, dir),
             )
         };
+        // v2.23.0: the GPU device picker is one row but persists THREE keys
+        // (vendor/device/name). "auto" clears the pin; "<vendor>:<device>:<name>"
+        // sets it. GPU changes apply on the NEXT launch (the wgpu device/surface
+        // graph can't hot-swap and every window shares one adapter), so we flag
+        // a restart affordance instead of rebuilding the renderer live.
+        if key_str == "gpu" {
+            if new_val == "auto" {
+                self.persist_pref("gpu-vendor-id", "0");
+                self.persist_pref("gpu-device-id", "0");
+                self.persist_pref("gpu-name", "");
+            } else if let Some((v, rest)) = new_val.split_once(':')
+                && let Some((d, name)) = rest.split_once(':')
+            {
+                self.persist_pref("gpu-vendor-id", &format!("0x{v}"));
+                self.persist_pref("gpu-device-id", &format!("0x{d}"));
+                self.persist_pref("gpu-name", name);
+            }
+            ws.settings_restart_pending = true;
+            self.reload_config(ws);
+            return;
+        }
         // Cycle 919 (audit L4): notify if the Settings change can't
         // be written — it's live this session but lost on restart.
         if !self.persist_pref(key_str, &new_val) {
@@ -9662,6 +9725,14 @@ impl App {
         // visibly lopsided padding. Mirror the value to the Y axis.
         if key_str == "window-padding-x" {
             self.persist_pref("window-padding-y", &new_val);
+        }
+        // v2.23.0: the remaining GPU policy keys (power preference / backend /
+        // force-software) also only take effect on restart.
+        if matches!(
+            key_str,
+            "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
+        ) {
+            ws.settings_restart_pending = true;
         }
         self.reload_config(ws);
         // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid

@@ -39,6 +39,8 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Cursor shape | `cursor-style` | block · beam · underline |
 | Cursor blink | `cursor-blink` | on / off |
 | Show pane titlebars | `show-titlebar` | on / off |
+| Background | `background-type` | solid color · image · transparent. The wallpaper *path* stays a config line (`background-image`) — see [BACKGROUNDS.md](BACKGROUNDS.md) |
+| Background animation | `background-animation` | when focused · always · off — how an animated wallpaper plays |
 
 **Behavior**
 
@@ -52,6 +54,20 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Focus mode | `focus` | click · follows-mouse · system |
 | Check for updates | `update-check` | on / off |
 | Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+
+**Graphics**
+
+| Option | Config key | Notes |
+|---|---|---|
+| GPU preference | `gpu-power-preference` | integrated (power-saving) · discrete (performance) · automatic. **Default: discrete** (renders on the dedicated GPU). `low` gives the fastest cold start on a dual-GPU laptop |
+| GPU device | `gpu-device-id` + `gpu-vendor-id` + `gpu-name` | Pin a *specific* detected GPU, or **Automatic**. The list is the GPUs found on this machine |
+| GPU backend | `gpu-backend` | automatic · DirectX 12 · Vulkan · Metal · OpenGL |
+| Force software rendering | `gpu-force-software` | on / off — debugging fallback (slow) |
+
+A footer line shows the **Active GPU** in use right now. GPU changes take effect
+on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
+a *"⚠ restart kettle to apply"* hint after you change one. This is kettle's
+cross-platform answer to the OS GPU picker, and unlike it, it persists per-app.
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new

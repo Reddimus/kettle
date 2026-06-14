@@ -68,6 +68,25 @@ pub(crate) fn parse_bool(s: &str) -> Option<bool> {
     }
 }
 
+/// Parse a `u32` written either as hex (`0x10de`, `10DE`) or decimal (`4318`).
+/// Used for the GPU `gpu-vendor-id` / `gpu-device-id` pins, which the in-app
+/// picker writes in hex (matching how PCI ids are conventionally displayed) but
+/// which a hand-edited config may give in either form. `None` on garbage.
+pub(crate) fn parse_hex_or_dec_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    if let Some(hex) = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .or_else(|| t.strip_prefix("#"))
+    {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    // Bare value: try decimal first, then hex (so `10de` still resolves).
+    t.parse::<u32>()
+        .ok()
+        .or_else(|| u32::from_str_radix(t, 16).ok())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -258,6 +277,27 @@ pub enum BackgroundAnimation {
     Off,
 }
 
+/// `chrome-background`: the fill color of the window chrome strips (tab bar,
+/// status bar, new-tab button) **when a `background-image` is in use**. Without
+/// an image, chrome always uses the theme as before — this only governs how the
+/// chrome reads against a wallpaper. v2.23.0 already draws the chrome opaquely
+/// over the wallpaper (so the animation no longer bleeds through); this picks
+/// what that opaque color is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromeBackground {
+    /// Use the theme's chrome color (`palette[8]`) — the default, matches the
+    /// no-wallpaper look.
+    #[default]
+    Theme,
+    /// Sample the wallpaper's average color, dimmed for text contrast, so the
+    /// chrome feels "inspired by" the background. Recomputed per frame change.
+    Auto,
+    /// Solid black.
+    Black,
+    /// Solid white.
+    White,
+}
+
 /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12): Lua
 /// sandbox level. `Safe` is the default — Lua plugins can still
 /// access the kettle.* APIs but the dangerous parts of the Lua
@@ -300,22 +340,46 @@ pub enum WindowState {
 }
 
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.
-/// A terminal is a light GPU workload, so the default is `Low` (the
-/// integrated adapter): on a laptop with both an integrated and a discrete
-/// GPU, `HighPerformance` wakes the discrete GPU from its low-power state,
-/// which on the reference Surface Book 3 cost ~1.5 s of cold startup for no
-/// rendering benefit. `High` forces the discrete adapter (useful on a
-/// desktop where the discrete card is always resident); `Auto` lets wgpu
-/// choose with no preference.
+/// v2.23.0 default is `High` — prefer the **discrete / high-performance**
+/// adapter, so kettle renders on the dedicated GPU out of the box (more
+/// headroom for animated backgrounds, large/high-DPI windows, many panes). The
+/// trade-off on a dual-GPU laptop: requesting the discrete adapter wakes it from
+/// its low-power state, which on the reference Surface Book 3 adds ~1.5 s to a
+/// *cold* start. Users who want the fastest cold start can set
+/// `gpu-power-preference = low` (the integrated adapter); `Auto` lets wgpu
+/// choose with no preference. On single-GPU machines all three behave the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GpuPowerPreference {
-    /// Prefer the low-power (typically integrated) adapter — kettle default.
-    #[default]
+    /// Prefer the low-power (typically integrated) adapter — fastest cold start
+    /// on a dual-GPU laptop.
     Low,
-    /// Prefer the high-performance (typically discrete) adapter.
+    /// Prefer the high-performance (typically discrete) adapter — kettle default
+    /// (v2.23.0): render on the dedicated GPU.
+    #[default]
     High,
     /// No preference; let wgpu pick.
     Auto,
+}
+
+/// `gpu-backend` (v2.23.0): which wgpu graphics backend to request. `Auto`
+/// lets wgpu choose per platform (DX12 on Windows, Metal on macOS, Vulkan on
+/// Linux). The explicit variants exist mainly so the in-app GPU picker can pin
+/// a specific adapter — on Windows the same physical GPU is enumerated once per
+/// backend (DX12 *and* Vulkan), so the backend disambiguates which entry the
+/// user chose. A backend the platform can't provide falls back to `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GpuBackend {
+    /// Let wgpu pick the platform-default backend — kettle default.
+    #[default]
+    Auto,
+    /// Direct3D 12 (Windows).
+    Dx12,
+    /// Vulkan (Windows / Linux).
+    Vulkan,
+    /// Metal (macOS).
+    Metal,
+    /// OpenGL / GLES (fallback).
+    Gl,
 }
 
 /// Cycle 338 (Terminator parity, terminatorlib/config.py:107
@@ -1047,8 +1111,27 @@ pub struct Config {
     /// `window_state`): initial window state at launch.
     pub window_state: WindowState,
     /// `gpu-power-preference`: which adapter wgpu requests at startup.
-    /// Defaults to `Low` (integrated) — see [`GpuPowerPreference`].
+    /// Defaults to `High` (discrete/dedicated, v2.23.0) — see
+    /// [`GpuPowerPreference`]. This is the POLICY/fallback used when no specific
+    /// GPU is pinned below.
     pub gpu_power_preference: GpuPowerPreference,
+    /// `gpu-backend` (v2.23.0): pin the wgpu backend (DX12/Vulkan/Metal/GL), or
+    /// `Auto` (default). See [`GpuBackend`].
+    pub gpu_backend: GpuBackend,
+    /// `gpu-vendor-id` (v2.23.0): PCI vendor id of the pinned GPU (0 = unset →
+    /// use `gpu-power-preference`). Set by the in-app GPU picker. Hex in the
+    /// config file (e.g. `0x8086` Intel, `0x10de` NVIDIA, `0x1002` AMD).
+    pub gpu_vendor_id: u32,
+    /// `gpu-device-id` (v2.23.0): PCI device id of the pinned GPU (0 = unset).
+    /// Paired with `gpu-vendor-id` for a robust, name-independent match.
+    pub gpu_device_id: u32,
+    /// `gpu-name` (v2.23.0): display name of the pinned GPU. Used for the
+    /// settings label and as a fallback match if the (vendor,device) pair no
+    /// longer enumerates (e.g. eGPU unplugged, driver swap). Empty = unset.
+    pub gpu_name: String,
+    /// `gpu-force-software` (v2.23.0): force wgpu's software/fallback adapter
+    /// (`force_fallback_adapter`). Slow; for debugging GPU-driver issues.
+    pub gpu_force_software: bool,
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
     /// `geometry_hinting`): resize in font-step increments.
     pub geometry_hinting: bool,
@@ -1174,6 +1257,9 @@ pub struct Config {
     /// / APNG / animated WebP) plays. Defaults to `WhenFocused`. See
     /// [`BackgroundAnimation`].
     pub background_animation: BackgroundAnimation,
+    /// `chrome-background` (v2.23.0): the opaque chrome strip color used when a
+    /// `background-image` is set. Defaults to `Theme`. See [`ChromeBackground`].
+    pub chrome_background: ChromeBackground,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:106
     /// `background_darkness`): background image opacity (0.0 fully
     /// dark .. 1.0 untinted).
@@ -1737,6 +1823,11 @@ impl Default for Config {
             handle_size: -1,
             window_state: WindowState::Normal,
             gpu_power_preference: GpuPowerPreference::default(),
+            gpu_backend: GpuBackend::default(),
+            gpu_vendor_id: 0,
+            gpu_device_id: 0,
+            gpu_name: String::new(),
+            gpu_force_software: false,
             geometry_hinting: false,
             extra_styling: true,
             force_no_bell: false,
@@ -1765,6 +1856,7 @@ impl Default for Config {
             http_proxy: String::new(),
             background_type: BackgroundType::Solid,
             background_animation: BackgroundAnimation::default(),
+            chrome_background: ChromeBackground::default(),
             background_image: String::new(),
             background_image_mode: "stretch_and_fill".to_string(),
             background_image_align_horiz: "center".to_string(),
@@ -2156,6 +2248,8 @@ impl Config {
         "audible_bell",
         "autoclean-groups",
         "autoclean_groups",
+        "gpu-force-software",
+        "gpu_force_software",
         "background-blur",
         "background_blur",
         "bold-is-bright",
@@ -2547,6 +2641,10 @@ impl Config {
                         | "none"
                         | "static"
                 ),
+                "chrome-background" | "chrome_background" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "theme" | "auto" | "black" | "white"
+                ),
                 "lua-sandbox" | "lua_sandbox" => {
                     matches!(v.to_ascii_lowercase().as_str(), "safe" | "trusted" | "unsafe")
                 }
@@ -2617,6 +2715,14 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "low" | "high" | "high-performance" | "discrete" | "auto" | "none"
                 ),
+                "gpu-backend" | "gpu_backend" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "auto" | "dx12" | "d3d12" | "directx12" | "vulkan" | "vk" | "metal" | "gl"
+                        | "opengl" | "gles"
+                ),
+                "gpu-vendor-id" | "gpu_vendor_id" | "gpu-device-id" | "gpu_device_id" => {
+                    parse_hex_or_dec_u32(v).is_some()
+                }
                 "search-case-sensitive"
                 | "search_case_sensitive"
                 | "case-sensitive"
@@ -3332,6 +3438,33 @@ impl Config {
                         _ => GpuPowerPreference::Low,
                     };
                 }
+                "gpu-backend" | "gpu_backend" => {
+                    cfg.gpu_backend = match e.value.to_ascii_lowercase().as_str() {
+                        "dx12" | "d3d12" | "directx12" => GpuBackend::Dx12,
+                        "vulkan" | "vk" => GpuBackend::Vulkan,
+                        "metal" => GpuBackend::Metal,
+                        "gl" | "opengl" | "gles" => GpuBackend::Gl,
+                        _ => GpuBackend::Auto,
+                    };
+                }
+                "gpu-vendor-id" | "gpu_vendor_id" => {
+                    if let Some(v) = parse_hex_or_dec_u32(&e.value) {
+                        cfg.gpu_vendor_id = v;
+                    }
+                }
+                "gpu-device-id" | "gpu_device_id" => {
+                    if let Some(v) = parse_hex_or_dec_u32(&e.value) {
+                        cfg.gpu_device_id = v;
+                    }
+                }
+                "gpu-name" | "gpu_name" => {
+                    cfg.gpu_name = e.value.trim().to_string();
+                }
+                "gpu-force-software" | "gpu_force_software" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.gpu_force_software = b;
+                    }
+                }
                 "full-screen" | "full_screen" => {
                     // Cycle 623 (Terminator parity, config.py:159
                     // `full_screen`): Terminator splits "should start
@@ -3535,6 +3668,14 @@ impl Config {
                         "always" | "true" | "on" | "yes" => BackgroundAnimation::Always,
                         "off" | "false" | "no" | "none" | "static" => BackgroundAnimation::Off,
                         _ => BackgroundAnimation::WhenFocused,
+                    };
+                }
+                "chrome-background" | "chrome_background" => {
+                    cfg.chrome_background = match e.value.to_ascii_lowercase().as_str() {
+                        "auto" => ChromeBackground::Auto,
+                        "black" => ChromeBackground::Black,
+                        "white" => ChromeBackground::White,
+                        _ => ChromeBackground::Theme,
                     };
                 }
                 "background-image" | "background_image" => {
@@ -5338,11 +5479,11 @@ tab-bar-width = 200\n";
 
     #[test]
     fn gpu_power_preference_parse() {
-        // Default is Low (integrated): the discrete-GPU wake on a dual-GPU
-        // laptop is the dominant startup cost and buys nothing for text.
+        // v2.23.0: default is High (discrete/dedicated) — render on the
+        // dedicated GPU out of the box. `low` restores the fastest cold start.
         assert_eq!(
             Config::default().gpu_power_preference,
-            GpuPowerPreference::Low
+            GpuPowerPreference::High
         );
         assert_eq!(
             Config::parse_text("gpu-power-preference = high").gpu_power_preference,
@@ -5374,6 +5515,90 @@ tab-bar-width = 200\n";
             !Config::detect_malformed_values("gpu-power-preference = nonsense").is_empty(),
             "an invalid value must be flagged by --check-config"
         );
+    }
+
+    #[test]
+    fn chrome_background_parse() {
+        // v2.23.0. Default is Theme (matches the no-wallpaper look).
+        assert_eq!(Config::default().chrome_background, ChromeBackground::Theme);
+        assert_eq!(
+            Config::parse_text("chrome-background = auto").chrome_background,
+            ChromeBackground::Auto
+        );
+        assert_eq!(
+            Config::parse_text("chrome_background = black").chrome_background,
+            ChromeBackground::Black
+        );
+        assert_eq!(
+            Config::parse_text("chrome-background = white").chrome_background,
+            ChromeBackground::White
+        );
+        // Unknown value falls back to the default, not a parse error.
+        assert_eq!(
+            Config::parse_text("chrome-background = bogus").chrome_background,
+            ChromeBackground::Theme
+        );
+        // `--check-config` accepts the documented spellings, flags garbage.
+        assert!(Config::detect_malformed_values("chrome-background = auto").is_empty());
+        assert!(!Config::detect_malformed_values("chrome-background = rainbow").is_empty());
+    }
+
+    #[test]
+    fn gpu_selection_parse_and_backward_compat() {
+        // v2.23.0. A config with NO gpu pin (the historic shape, only
+        // gpu-power-preference) leaves the pin fields at their unset defaults,
+        // so resolve_adapter falls through to the power-preference policy
+        // exactly as before — backward compatible.
+        let legacy = Config::parse_text("gpu-power-preference = high");
+        assert_eq!(legacy.gpu_vendor_id, 0);
+        assert_eq!(legacy.gpu_device_id, 0);
+        assert!(legacy.gpu_name.is_empty());
+        assert_eq!(legacy.gpu_backend, GpuBackend::Auto);
+        assert!(!legacy.gpu_force_software);
+
+        // A pinned GPU: hex ids (the form the picker writes) + backend + name.
+        let pinned = Config::parse_text(
+            "gpu-vendor-id = 0x10de\n\
+             gpu-device-id = 0x2191\n\
+             gpu-backend = dx12\n\
+             gpu-name = NVIDIA GeForce GTX 1660 Ti\n\
+             gpu-force-software = false\n",
+        );
+        assert_eq!(pinned.gpu_vendor_id, 0x10de);
+        assert_eq!(pinned.gpu_device_id, 0x2191);
+        assert_eq!(pinned.gpu_backend, GpuBackend::Dx12);
+        assert_eq!(pinned.gpu_name, "NVIDIA GeForce GTX 1660 Ti");
+        assert!(!pinned.gpu_force_software);
+
+        // Decimal ids parse too; force-software toggles.
+        let dec = Config::parse_text("gpu-vendor-id = 32902\ngpu-force-software = true");
+        assert_eq!(dec.gpu_vendor_id, 32902); // 0x8086 Intel
+        assert!(dec.gpu_force_software);
+
+        // Backend aliases + validation.
+        assert_eq!(
+            Config::parse_text("gpu-backend = vulkan").gpu_backend,
+            GpuBackend::Vulkan
+        );
+        assert_eq!(
+            Config::parse_text("gpu-backend = bogus").gpu_backend,
+            GpuBackend::Auto
+        );
+        assert!(Config::detect_malformed_values("gpu-backend = metal").is_empty());
+        assert!(!Config::detect_malformed_values("gpu-backend = quux").is_empty());
+        assert!(!Config::detect_malformed_values("gpu-vendor-id = zzz").is_empty());
+        assert!(Config::detect_malformed_values("gpu-vendor-id = 0x10de").is_empty());
+    }
+
+    #[test]
+    fn parse_hex_or_dec_u32_forms() {
+        assert_eq!(parse_hex_or_dec_u32("0x10de"), Some(0x10de));
+        assert_eq!(parse_hex_or_dec_u32("0X10DE"), Some(0x10de));
+        assert_eq!(parse_hex_or_dec_u32("#10de"), Some(0x10de));
+        assert_eq!(parse_hex_or_dec_u32("4318"), Some(4318));
+        assert_eq!(parse_hex_or_dec_u32("  0x8086 "), Some(0x8086));
+        assert_eq!(parse_hex_or_dec_u32("zzz"), None);
+        assert_eq!(parse_hex_or_dec_u32(""), None);
     }
 
     #[test]

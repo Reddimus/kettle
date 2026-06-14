@@ -156,7 +156,11 @@ per-key audit against Terminator's source.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
-| `gpu-power-preference` | enum | `low` | Which GPU wgpu requests at startup: `low` (integrated — default; a terminal is a light GPU workload) \| `high` (`discrete`) \| `auto`. On a dual-GPU laptop `high` wakes the discrete GPU from its low-power state, adding ~1.5 s of cold startup for no rendering benefit — set `high` only on a desktop where the discrete card is always resident |
+| `gpu-power-preference` | enum | `high` | Which GPU wgpu requests at startup: `high` (`discrete`/dedicated — **default**, renders on the dedicated GPU) \| `low` (integrated) \| `auto`. Used as the policy/fallback when no specific GPU is pinned (`gpu-device-id` below). On a dual-GPU laptop `high` wakes the discrete GPU from its low-power state, adding ~1.5 s of cold startup; set `low` for the fastest cold start. Single-GPU machines are unaffected. Also surfaced in Settings → Graphics |
+| `gpu-device-id` / `gpu-vendor-id` | hex u32 | `0` / `0` | Pin a *specific* GPU by its PCI device + vendor id (e.g. `0x2191` / `0x10de`). `0`/unset = use `gpu-power-preference`. Easiest set via Settings → Graphics → GPU device; the resolver falls back to the power-preference policy if the pinned GPU is absent (eGPU unplugged, driver swap) so a stale pin never fails startup. **Applies on next launch** |
+| `gpu-name` | string | — | Display name of the pinned GPU; also a fallback match if the `(vendor,device)` pair no longer enumerates. Written by the settings picker |
+| `gpu-backend` | enum | `auto` | Pin the graphics backend: `auto` \| `dx12` \| `vulkan` \| `metal` \| `gl`. Mainly disambiguates the same GPU exposed under multiple backends on Windows. **Applies on next launch** |
+| `gpu-force-software` | bool | `false` | Force wgpu's software/fallback adapter (slow; for debugging GPU-driver issues). **Applies on next launch** |
 | `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
 | `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
 | `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |
@@ -167,9 +171,10 @@ per-key audit against Terminator's source.
 | `title-transmit-bg-color` / `-fg-color` | color | `#c80003` / `#ffffff` | Focused-pane (broadcast-source) titlebar colors |
 | `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
 | `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |
-| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` |
-| `background-image` | path | — | Wallpaper image. Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported |
-| `background-animation` | enum | `when-focused` | How an animated `background-image` plays: `when-focused` (animate only while focused, freeze with zero idle cost otherwise — battery-friendly default) \| `always` (`on`/`true`) \| `off` (`static`/`false`, freeze on first frame). Frames advance on the media's own timestamps, capped by the ~30 fps render tick |
+| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image`. Also surfaced in Settings → Appearance. See **[BACKGROUNDS.md](BACKGROUNDS.md)** for a walkthrough + curated wallpaper sources |
+| `background-image` | path | — | Wallpaper image. Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Curated, clearly-licensed sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
+| `chrome-background` | enum | `theme` | When a `background-image` is set, the opaque fill of the window chrome strips (tab bar, status bar) so the wallpaper never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the wallpaper's average color, kept readable under the tab text) \| `black` \| `white`. No effect without a wallpaper |
+| `background-animation` | enum | `when-focused` | How an animated `background-image` plays: `when-focused` (animate only while focused, freeze with zero idle cost otherwise — battery-friendly default) \| `always` (`on`/`true`) \| `off` (`static`/`false`, freeze on first frame). Frames advance on the media's own timestamps, capped by the ~30 fps render tick. Also surfaced in Settings → Appearance |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |

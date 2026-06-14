@@ -89,7 +89,16 @@ state) lives in `WindowState`, while `App` keeps the process globals
 - **One GPU context** — the wgpu `GpuContext { instance, adapter,
   device, queue }` is created with window 1 and shared; each subsequent
   window gets its own surface via `Renderer::new_with_gpu` (synchronous —
-  no adapter request, no watchdog needed).
+  no adapter request, no watchdog needed). The adapter is chosen by
+  `resolve_adapter` (v2.23.0): a config-pinned GPU (`gpu-vendor-id` /
+  `-device-id` / `-name`, set via Settings → Graphics) wins, matched among the
+  *surface-capable* adapters by `(vendor,device,backend) → (vendor,device) →
+  name`; otherwise the `gpu-power-preference` policy applies — now defaulting to
+  `high` (the **discrete/dedicated** adapter), with a software fallback last.
+  An absent pin (eGPU unplugged, driver swap) silently falls through to the
+  policy, so a stale pin never fails startup. Because the device/surface graph
+  can't hot-swap and every window shares the one adapter, GPU changes apply on
+  the next launch (the settings panel shows a "restart to apply" hint).
 - **PTY wakeups fan out** to all windows, gated per window by a per-pane
   output-generation counter — plain output emits no `TermEvent`, so the
   counter is the only reliable "this pane has new bytes" signal.
@@ -169,21 +178,32 @@ shaping sees the complete family. Headless screenshot paths still load the full
 family because they render a single static image and do not benefit from a later
 warm-up frame.
 
-Each frame the renderer issues seven passes against the same wgpu
+Each frame the renderer issues eight passes against the same wgpu
 render-pass encoder, in this order. The order matters: a quad pass
 paints over text drawn before it, and text drawn after a quad covers
 that quad's pixels.
 
 ```mermaid
 flowchart LR
-    clear["Clear color<br/>(theme bg + opacity)"] --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
-    quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>image overlays"]
+    clear["Clear color<br/>(theme bg + opacity)"] --> bgimg["0. bg_imgs.draw<br/>background image<br/>(wallpaper, at the back)"]
+    bgimg --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
+    quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>inline image overlays"]
     imgs --> text["3. text_renderer.render<br/>pane text + tab text<br/>(NOT menu rows)"]
     text --> overlay["4. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
     overlay --> menuq["5. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
     menuq --> menut["6. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
     menut --> curg["7. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
+
+Pass 0 (v2.23.0) is the **background image (wallpaper)** in its own pipeline,
+drawn at the very back so the cell/chrome quads (pass 1) composite *opaquely on
+top* of it — the standard kitty / WezTerm / Alacritty layering. The wallpaper
+lives in `bg_imgs`, separate from the **inline** sixel/kitty/iTerm2 images in
+`imgs` (pass 2, which sit over cell backgrounds). Before v2.23.0 the wallpaper
+shared `imgs` and drew *after* the quads, which (a) hid every cell background
+under an opaque wallpaper and (b) bled the animation through the tab bar /
+status bar. The chrome strips now resolve an opaque fill via `chrome-background`
+(theme / auto-from-wallpaper / black / white).
 
 Steps 5–6 own the right-click context menu so its labels land **on
 top of** the panel background. Splitting them out fixed the v1.3.0 /

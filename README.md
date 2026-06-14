@@ -294,7 +294,9 @@ keybind = ctrl+shift+t=new_tab
 ```
 
 See [docs/CONFIG.md](docs/CONFIG.md) and the sample at
-[`docs/kettle.example.config`](docs/kettle.example.config).
+[`docs/kettle.example.config`](docs/kettle.example.config). For wallpapers and
+animated (GIF/APNG/WebP) backgrounds — including a GPU picker and curated,
+clearly-licensed sources — see [docs/BACKGROUNDS.md](docs/BACKGROUNDS.md).
 
 ## AI agents
 
