@@ -28,9 +28,9 @@
 #   downloads.
 # - All work happens in a temp directory that's removed on exit (via
 #   `trap`) regardless of success/failure.
-# - To uninstall later: re-run `~/.local/share/kettle/install.sh
-#   --uninstall` (the script copies a reference under share/ so the
-#   uninstall path doesn't depend on the original temp dir).
+# - To uninstall later: run `<prefix>/share/kettle/install.sh --uninstall`
+#   (the script writes a prefix-local helper so the uninstall path doesn't
+#   depend on the original temp dir).
 
 # NOTE: this script is `#!/usr/bin/env sh` and is run via `curl … | sh`,
 # so it must stay POSIX. `set -o pipefail` is a bashism — under dash

@@ -300,3 +300,8 @@ Separate workflows:
   versions against `Cargo.toml`, checks their Linux hashes agree, and, once the
   matching release tag exists, verifies the template hashes against the
   published `.sha256` sidecars. CI runs it on Linux.
+- `scripts/check-linux-installers.sh` — builds on the release binary produced by
+  CI, installs into throwaway custom prefixes, verifies desktop/man/icon/helper
+  paths, uninstalls through the saved helper, and, when the matching release tag
+  exists, runs `install-online.sh` against the published tarball to verify
+  SHA-256 checking plus prefix-local uninstall behavior.

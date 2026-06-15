@@ -159,6 +159,13 @@ jobs:
         # binary to run. Windows stays out (its smokes are bash-only).
         if: runner.os != 'Windows'
         run: cargo build --release -p kettle
+      - name: Linux installer smoke
+        # Exercise the no-sudo Linux install/uninstall paths in an isolated
+        # prefix. If the matching release tag already exists, also run the
+        # current install-online.sh against that published tarball so prefix
+        # helper handling and SHA-256 verification stay covered.
+        if: runner.os == 'Linux'
+        run: scripts/check-linux-installers.sh
       - name: Build release binary + CLI smoke (Windows)
         # Cycle 906 (audit): the Linux/macOS leg builds the release binary and
         # smokes it, but Windows was skipped — so a release-PROFILE Windows
