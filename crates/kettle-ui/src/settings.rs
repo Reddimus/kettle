@@ -300,12 +300,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 choice(
                     "GPU preference",
                     "gpu-power-preference",
-                    &["low", "high", "auto"],
-                    &[
-                        "integrated (power-saving)",
-                        "discrete (performance)",
-                        "automatic",
-                    ],
+                    &["auto", "low", "high"],
+                    &["automatic", "low power / integrated", "high performance"],
                 ),
                 // Tier B: pin a specific detected GPU (or Automatic).
                 choice_owned("GPU device", "gpu", gpu_values, gpu_labels),

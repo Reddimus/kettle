@@ -93,8 +93,8 @@ state) lives in `WindowState`, while `App` keeps the process globals
   `resolve_adapter` (v2.23.0): a config-pinned GPU (`gpu-vendor-id` /
   `-device-id` / `-name`, set via Settings → Graphics) wins, matched among the
   *surface-capable* adapters by `(vendor,device,backend) → (vendor,device) →
-  name`; otherwise the `gpu-power-preference` policy applies — now defaulting to
-  `high` (the **discrete/dedicated** adapter), with a software fallback last.
+  name`; otherwise the `gpu-power-preference` policy applies — defaulting to
+  `auto` so wgpu / the platform chooses, with a software fallback last.
   An absent pin (eGPU unplugged, driver swap) silently falls through to the
   policy, so a stale pin never fails startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on

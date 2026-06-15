@@ -18,6 +18,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     instances and glyphon text areas refresh when pane rects, surface size, cell
     metrics, renderer mode, padding or text shaping inputs change, even if row
     contents themselves did not reshape.
+  - **GPU preference default is now `auto`.** Kettle no longer labels the default
+    policy as discrete/high-performance on machines that only expose integrated
+    graphics. Explicit `high` and `low` remain available, and a pinned GPU still
+    wins over the policy.
 
   ### Documentation / packaging
   - Refreshed stale install and package-template version references so the

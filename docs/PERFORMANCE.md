@@ -9,6 +9,12 @@ damage still refreshes grid glyph instances. This preserves the v2.25.0 idle
 intent (no full pane glyph re-upload for a blink) and closes the prompt-glyph
 disappear/reappear regression covered by the new offscreen `➜  ~` pixel test.
 
+This release also makes `gpu-power-preference = auto` the default again. That is
+the least surprising cross-platform policy: single-GPU machines report their
+only adapter without pretending a discrete GPU was selected, while hybrid
+laptops can still opt into `high` for dedicated-GPU headroom or `low` for
+integrated/battery-friendly startup.
+
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
 The cell-locked glyph pipeline (`text-renderer = grid`, the new default) replaces

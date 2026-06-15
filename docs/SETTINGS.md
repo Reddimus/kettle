@@ -74,7 +74,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 
 | Option | Config key | Notes |
 |---|---|---|
-| GPU preference | `gpu-power-preference` | integrated (power-saving) · discrete (performance) · automatic. **Default: discrete** (renders on the dedicated GPU). `low` gives the fastest cold start on a dual-GPU laptop |
+| GPU preference | `gpu-power-preference` | automatic · low power / integrated · high performance. **Default: automatic** (platform/wgpu chooses). Pick `high` only when you want dedicated-GPU render headroom on hybrid hardware |
 | GPU device | `gpu-device-id` + `gpu-vendor-id` + `gpu-name` | Pin a *specific* detected GPU, or **Automatic**. The list is the GPUs found on this machine |
 | GPU backend | `gpu-backend` | automatic · DirectX 12 · Vulkan · Metal · OpenGL |
 | Force software rendering | `gpu-force-software` | on / off — debugging fallback (slow) |

@@ -858,13 +858,10 @@ impl Renderer {
         let surface = instance.create_surface(window)?;
         // v2.23.0: resolve the adapter per config — an explicitly pinned GPU
         // (settings picker / `gpu-device-id`) wins, else the
-        // `gpu-power-preference` policy, which now defaults to `High` (the
-        // discrete/dedicated adapter) so kettle renders on the dedicated GPU out
-        // of the box. On a dual-GPU laptop that wakes the discrete GPU from its
-        // low-power state (~1.5 s of extra cold startup on the reference Surface
-        // Book 3); `gpu-power-preference = low` restores the integrated adapter
-        // for the fastest cold start. `resolve_adapter` falls through to the
-        // policy (and finally a software adapter) whenever no pin matches.
+        // `gpu-power-preference` policy, which defaults to `Auto`: let wgpu /
+        // the platform choose unless the user explicitly asks for low-power or
+        // high-performance. `resolve_adapter` falls through to that policy (and
+        // finally a software adapter) whenever no pin matches.
         let adapter = resolve_adapter(&instance, &surface, cfg, "Renderer::new").await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
