@@ -1,5 +1,14 @@
 # Performance
 
+## v2.25.1 — grid cursor-blink regression fix
+
+The grid renderer fix keeps cell-locked pane glyph uploads on their own damage
+gate. Cursor blink no longer participates in that gate: a blink updates cursor
+quads and the separate cursor-glyph pass only, while pane text/style/geometry
+damage still refreshes grid glyph instances. This preserves the v2.25.0 idle
+intent (no full pane glyph re-upload for a blink) and closes the prompt-glyph
+disappear/reappear regression covered by the new offscreen `➜  ~` pixel test.
+
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
 The cell-locked glyph pipeline (`text-renderer = grid`, the new default) replaces

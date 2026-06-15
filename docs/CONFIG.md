@@ -32,7 +32,7 @@ keys). The file is **watched and reloaded live**.
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
-| `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` (default) is cell-locked rendering: every glyph is pinned to its terminal cell (`col × cell_w`), the way Alacritty/kitty/WezTerm/Ghostty render — so fallback-font glyphs (CJK, color emoji, some symbols) and ligatures can't drift off the grid that selection / cursor / mouse hit-testing use. `legacy` restores the pre-2.25.0 continuous layout; it's a rollback escape hatch kept for one release and slated for removal. Leave it on `grid` |
+| `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` (default) is cell-locked rendering: every glyph is pinned to its terminal cell (`col × cell_w`), the way Alacritty/kitty/WezTerm/Ghostty render — so fallback-font glyphs (CJK, color emoji, some symbols) and ligatures can't drift off the grid that selection / cursor / mouse hit-testing use. `legacy` restores the pre-2.25.0 continuous layout as a rollback escape hatch. Leave it on `grid` unless you are isolating a renderer regression |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The cursor BLOCK color. `cursor-bg-color` (Terminator `cursor_bg_color`) is an alias |
 | `cursor-fg-color` | color | from theme | The color of the glyph UNDER the cursor (Terminator `cursor_fg_color`). A focused block cursor renders solid in the block color with the glyph recolored to this — the standard inverted-cursor model |

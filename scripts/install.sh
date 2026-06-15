@@ -128,11 +128,11 @@ echo "Installing into ${PREFIX}…"
 # 1) Binary.
 install -Dm755 "${BIN_SRC}" "${BIN_DIR}/kettle"
 
-# 2) XDG desktop entry. The packaging file ships `Icon=kettle` (the
-# themed name distro packages rely on, since the package manager keeps
-# /usr/share/icons/hicolor's icon-theme.cache fresh). For this no-sudo
-# *user* install we rewrite Icon= to the absolute installed PNG path —
-# see the cycle-756 note below the icon copy for the full why.
+# 2) XDG desktop entry. The packaging file ships relative `Exec` /
+# `TryExec` plus themed `Icon=kettle` (the shape distro packages rely
+# on, since the package manager keeps PATH + icon-theme.cache fresh).
+# For this no-sudo *user* install we rewrite them to exact installed
+# paths — see the cycle-756 note below the icon copy for the full why.
 install -Dm644 "${REPO_ROOT}/packaging/linux/kettle.desktop" "${APP_DIR}/kettle.desktop"
 
 # 3) Icons.
@@ -144,7 +144,7 @@ for size in 16 24 32 48 64 128 256; do
   fi
 done
 
-# 3a) Cycle 756 — point Icon= at the absolute installed PNG.
+# 3a) Point the desktop entry at the exact user-installed paths.
 #
 # GNOME Shell's StIconTheme does NOT resolve a *themed* icon name
 # (`Icon=kettle`) from a user-local hicolor dir that has no
@@ -162,7 +162,15 @@ done
 # packages keep the themed `Icon=kettle` since their post-install hooks
 # maintain the system hicolor cache.
 ICON_ABS="${ICON_BASE}/256x256/apps/kettle.png"
-sed -i "s#^Icon=kettle\$#Icon=${ICON_ABS}#" "${APP_DIR}/kettle.desktop"
+BIN_ABS="${BIN_DIR}/kettle"
+sed_repl() {
+  printf '%s' "$1" | sed 's/[&#]/\\&/g'
+}
+BIN_REPL=$(sed_repl "${BIN_ABS}")
+ICON_REPL=$(sed_repl "${ICON_ABS}")
+sed -i "s#^Exec=kettle\$#Exec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
+sed -i "s#^TryExec=kettle\$#TryExec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
+sed -i "s#^Icon=kettle\$#Icon=${ICON_REPL}#" "${APP_DIR}/kettle.desktop"
 
 # 3b) Man page (cycle 279) — `man kettle` works after install if
 # /usr/share/man/<...>/man1 (or the user's $MANPATH) is searched. Many

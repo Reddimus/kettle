@@ -86,13 +86,17 @@ discipline here.
   wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
   zero-width.
 
-- **kettle-render** (30+ unit tests + 1 visual integration test):
+- **kettle-render** (30+ unit tests + visual integration tests):
   truncate respects display columns (not chars), the
   `clamp_font_size` floor/ceiling/NaN/∞ contract (cycle 118), the
   `cap_axis_cells` GPU-texture safety guard (cycle 119), color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12). The cycle-251 `tests/menu_visual.rs`
+  Vulkan/Metal/DX12). The v2.25.1 grid-regression guard renders a
+  prompt-like `➜  ~` line through the cell-locked glyph pipeline,
+  toggles only the block cursor between two offscreen frames, and
+  asserts every non-cursor prompt pixel remains unchanged. The
+  cycle-251 `tests/menu_visual.rs`
   integration test renders both `DebugScene::Default` and
   `DebugScene::ContextMenu` PNGs via `capture_png_with`, then
   asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
@@ -216,6 +220,12 @@ These need a real display and are run by hand (or on real hardware):
   [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md), then `Ctrl+Up`/`Ctrl+Down`
   to jump between prompt marks.
 - **Perf**: `cat` a ~100 MB file / fast `yes` stays responsive.
+- **Platform compatibility**: before a release, verify the shipped binary on
+  Ubuntu, native Windows 11, and Windows 11 WSL. Windows 11 is a known-good
+  baseline for v2.25.0 behavior, so renderer fixes must not regress ConPTY,
+  PowerShell/cmd startup, GUI-subsystem piped stdout, shell integration, or the
+  installer. WSL verification should cover Linux shells and the same CLI/agent
+  flows launched from inside a WSL pane.
 - **Agent gauntlet** (run on **Windows + WSL**; see [AGENT.md](AGENT.md)):
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
