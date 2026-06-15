@@ -296,3 +296,7 @@ Separate workflows:
   macos-universal, windows-x86_64, and the best-effort aarch64-linux tarball —
   each with a `.sha256` sidecar; the aarch64 leg is non-blocking, so an
   occasional release has six).
+- `scripts/check-package-templates.sh` — verifies Homebrew and AUR template
+  versions against `Cargo.toml`, checks their Linux hashes agree, and, once the
+  matching release tag exists, verifies the template hashes against the
+  published `.sha256` sidecars. CI runs it on Linux.

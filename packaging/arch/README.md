@@ -65,7 +65,10 @@ git push
 ```
 
 The cycle-254 `.sha256` sidecars on each GitHub release make step 1
-deterministic — no manual checksumming.
+deterministic — no manual checksumming. From the main kettle repo, run
+`scripts/check-package-templates.sh --require-release` after updating the
+template; it verifies `pkgver`, the PKGBUILD hash, the Homebrew Linux hash, and
+the published release sidecar all agree.
 
 ## Why `kettle-bin` and not `kettle`?
 

@@ -50,7 +50,15 @@ done
 ```
 
 Then drop the two hex strings into the matching `sha256` fields in
-`kettle.rb` and commit. `brew livecheck kettle` (run in the tap
+`kettle.rb`, then run:
+
+```sh
+scripts/check-package-templates.sh --require-release
+```
+
+That verifies the formula version matches `Cargo.toml`, the Linux hash matches
+the AUR template, and both hashes match the published release `.sha256`
+sidecars. Commit after it passes. `brew livecheck kettle` (run in the tap
 repo) flags this drift automatically — the `livecheck` block in
 the formula resolves against `/releases/latest` via the same
 GitHub redirect the cycle-253 `install-online.sh` uses.

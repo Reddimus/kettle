@@ -130,6 +130,13 @@ jobs:
           test "${count:-0}" -ge 4 \
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
           echo "kettle.ico OK (${count} resolutions)"
+      - name: Package template lockstep
+        # Homebrew and AUR templates pin release artifact hashes that are only
+        # known after release.yml uploads the archives. This guard catches stale
+        # version/hash template drift after a release, while still allowing an
+        # unreleased version bump to pass before its tag exists.
+        if: runner.os == 'Linux'
+        run: scripts/check-package-templates.sh
       - name: Rustdoc (Linux, warnings denied)
         # Cycle 219: rustdoc has its own warning class (broken
         # intra-doc-links, missing docs on public items, malformed
