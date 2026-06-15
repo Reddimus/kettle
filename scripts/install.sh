@@ -25,13 +25,15 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PREFIX="${HOME}/.local"
+PREFIX_ARG_SET=0
 SKIP_BUILD=0
 UNINSTALL=0
 
 for arg in "$@"; do
   case "$arg" in
-    --prefix=*) PREFIX="${arg#--prefix=}" ;;
+    --prefix=*) PREFIX="${arg#--prefix=}"; PREFIX_ARG_SET=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --uninstall) UNINSTALL=1 ;;
     -h|--help)
@@ -40,6 +42,16 @@ for arg in "$@"; do
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+# If this script is the installed helper at <prefix>/share/kettle/install.sh,
+# default to that prefix. This keeps `.../share/kettle/install.sh --uninstall`
+# symmetrical for custom-prefix installs produced by install-online.sh. Repo and
+# tarball layouts do not match the `/share/kettle` suffix, so they keep ~/.local.
+if [[ "${PREFIX_ARG_SET}" -eq 0 \
+    && "$(basename -- "${SCRIPT_DIR}")" == "kettle" \
+    && "$(basename -- "$(dirname -- "${SCRIPT_DIR}")")" == "share" ]]; then
+  PREFIX=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
+fi
 
 # The script runs in two layouts:
 #
@@ -51,7 +63,6 @@ done
 # We detect tarball mode by looking for a `kettle` binary next to the
 # script — that file only exists in the release tarball, never in the
 # repo (the in-tree binary lives under target/release/).
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -x "${SCRIPT_DIR}/kettle" && -d "${SCRIPT_DIR}/packaging/linux" ]]; then
   TARBALL_MODE=1
   REPO_ROOT="${SCRIPT_DIR}"
@@ -81,7 +92,8 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${ICON_BASE}/64x64/apps/kettle.png" \
     "${ICON_BASE}/128x128/apps/kettle.png" \
     "${ICON_BASE}/256x256/apps/kettle.png" \
-    "${PREFIX}/share/kettle/install.sh"
+    "${PREFIX}/share/kettle/install.sh" \
+    "${PREFIX}/share/kettle/install-real.sh"
   # Cycle 531: remove ${PREFIX}/share/kettle/ if it ends up empty
   # after the install.sh copy is gone. `rmdir` is non-recursive +
   # only succeeds on empty dirs — so a future addition (e.g.,
@@ -250,5 +262,5 @@ Three optional one-liners to finish setting things up:
     # Tab-complete every kettle CLI flag (kettle --li<TAB>):
     kettle --print-completions bash >> ~/.bashrc      # or zsh / fish
 
-To uninstall: ./scripts/install.sh --uninstall
+To uninstall: ${PREFIX}/share/kettle/install.sh --uninstall
 MSG

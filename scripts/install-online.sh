@@ -4,8 +4,8 @@
 # Downloads the latest GitHub release tarball, extracts the prebuilt
 # binary + XDG launcher + icons to a temp directory, and runs the
 # bundled `install.sh --skip-build` to drop everything into the
-# standard XDG user paths under `~/.local/`. No `sudo` required, no
-# Rust toolchain required.
+# standard XDG user paths under `~/.local/` by default. No `sudo`
+# required for the default path, no Rust toolchain required.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
 #
@@ -218,28 +218,72 @@ if [ ! -x "$TMP/kettle/install.sh" ]; then
   exit 1
 fi
 
-# `--skip-build` because the tarball already ships a release binary.
-# Invoke via the script's own shebang (`#!/usr/bin/env bash`) — the
-# bundled install.sh uses `set -euo pipefail`, a Bash-ism that fails
-# under dash (Debian/Ubuntu `sh` is dash). The release.yml ships
-# install.sh with mode 755 so the bare exec path works.
+# `--skip-build` because the tarball already ships a release binary. Invoke via
+# the script's own shebang (`#!/usr/bin/env bash`) — the bundled install.sh uses
+# `set -euo pipefail`, a Bash-ism that fails under dash (Debian/Ubuntu `sh` is
+# dash). The release.yml ships install.sh with mode 755 so the bare exec path
+# works.
 #
 # `KETTLE_PREFIX` env var (optional) plumbs through to install.sh's
 # `--prefix=<DIR>` so a power user can do, e.g.,
 #   KETTLE_PREFIX=/usr/local sh install-online.sh
-# for a system-wide install (with appropriate write perms). Default
-# is `~/.local/` — matches the standalone `install.sh` default.
+# for a system-wide install (with appropriate write perms). Default is
+# `~/.local/` — matches the standalone `install.sh` default.
+#
+# Capture stdout so we can suppress old tarball helpers' repo-oriented uninstall
+# hint (`./scripts/install.sh --uninstall`) and print the prefix-aware online
+# uninstall helper below instead. Keep stderr live so real failures are visible.
+INSTALL_LOG="${TMP}/install.log"
 if [ -n "${KETTLE_PREFIX:-}" ]; then
-  "$TMP/kettle/install.sh" --skip-build "--prefix=$KETTLE_PREFIX"
+  if ! "$TMP/kettle/install.sh" --skip-build "--prefix=$KETTLE_PREFIX" > "$INSTALL_LOG"; then
+    cat "$INSTALL_LOG"
+    exit 1
+  fi
 else
-  "$TMP/kettle/install.sh" --skip-build
+  if ! "$TMP/kettle/install.sh" --skip-build > "$INSTALL_LOG"; then
+    cat "$INSTALL_LOG"
+    exit 1
+  fi
 fi
+sed '/^To uninstall: \.\/scripts\/install\.sh --uninstall$/d' "$INSTALL_LOG"
 
-# Stash a copy of install.sh under share/ so the user can later run
-# `~/.local/share/kettle/install.sh --uninstall` without re-downloading.
-mkdir -p "${HOME}/.local/share/kettle"
-cp "$TMP/kettle/install.sh" "${HOME}/.local/share/kettle/install.sh"
-chmod +x "${HOME}/.local/share/kettle/install.sh"
+# Stash an uninstall helper under the same prefix so the user can later
+# uninstall without re-downloading. Keep this in lockstep with KETTLE_PREFIX:
+# pre-fix, a custom-prefix install still wrote ~/.local/share/kettle/install.sh,
+# leaving the uninstall helper in the wrong tree and mutating the user's default
+# install area during an isolated/prefix install.
+#
+# Use a wrapper instead of copying install.sh directly. The tarball might come
+# from an older release whose install.sh defaults to ~/.local even when it is
+# saved under <prefix>/share/kettle; the wrapper infers <prefix> from its own
+# location and passes it explicitly. Newer install.sh versions infer this too,
+# but the wrapper keeps old release tarballs uninstallable from custom prefixes.
+INSTALL_PREFIX="${KETTLE_PREFIX:-${HOME}/.local}"
+INSTALL_HELPER="${INSTALL_PREFIX}/share/kettle/install.sh"
+INSTALL_REAL="${INSTALL_PREFIX}/share/kettle/install-real.sh"
+mkdir -p "$(dirname "$INSTALL_HELPER")"
+cp "$TMP/kettle/install.sh" "$INSTALL_REAL"
+cat > "$INSTALL_HELPER" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PREFIX=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
+UNINSTALL=0
+for arg in "$@"; do
+  if [[ "${arg}" == "--uninstall" ]]; then
+    UNINSTALL=1
+  fi
+done
+if [[ "${UNINSTALL}" -eq 1 ]]; then
+  "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
+  rm -f "${SCRIPT_DIR}/install-real.sh" "${SCRIPT_DIR}/install.sh"
+  rmdir "${SCRIPT_DIR}" 2>/dev/null || true
+else
+  exec "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
+fi
+EOF
+chmod +x "$INSTALL_HELPER"
+chmod +x "$INSTALL_REAL"
 
 echo ""
 echo "kettle ${VERSION} installed."
@@ -247,4 +291,4 @@ echo "Search 'kettle' in your app launcher (GNOME Activities / KDE Krunner /"
 echo "Ubuntu Super-key), or run \`kettle\` from a shell on \$PATH."
 echo ""
 echo "Uninstall later via:"
-echo "  ~/.local/share/kettle/install.sh --uninstall"
+echo "  ${INSTALL_HELPER} --uninstall"

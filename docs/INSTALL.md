@@ -5,7 +5,7 @@
 | Platform | Arch | Support |
 |---|---|---|
 | Linux | x86_64 | **Tier 1** — prebuilt binary + one-line installer |
-| Linux | aarch64 | **Tier 1.5** — prebuilt binary + one-line installer, but the CI build is *best-effort* (`continue-on-error`); an occasional release may ship without the ARM tarball (the installer then falls back to a source build) |
+| Linux | aarch64 | **Tier 1.5** — prebuilt binary + one-line installer, but the CI build is *best-effort* (`continue-on-error`); an occasional release may ship without the ARM tarball, in which case use the source-build path |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
