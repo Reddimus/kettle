@@ -593,6 +593,11 @@ pub struct Renderer {
     /// grid column, since `build_pane` pushes exactly one char per cell). Reused
     /// across runs/frames to keep the glyph-emit walk allocation-free.
     glyph_char_starts: Vec<u32>,
+    /// Cell-locked glyph instance buffer needs a forced upload after the GPU
+    /// pipeline is cleared, even if pane text/layout hashes did not change.
+    /// Without this, a font/scale/cache invalidation can drop the live draw
+    /// count to zero and cursor-only frames keep presenting blank pane text.
+    grid_glyphs_dirty: bool,
     /// v2.25.1: text-area / grid-glyph layout damage key. Cursor blink must not
     /// be part of this key: a blink changes cursor quads / cursor glyph only,
     /// never pane text glyph instances. Geometry, cell metrics, renderer mode,
@@ -1044,6 +1049,7 @@ impl Renderer {
             glyph_instances: Vec::new(),
             glyph_clips: Vec::new(),
             glyph_char_starts: Vec::new(),
+            grid_glyphs_dirty: true,
             last_text_layout_key: None,
             bundled_style_faces_loaded: false,
             pane_buffer_ids: Vec::new(),
@@ -1231,6 +1237,7 @@ impl Renderer {
         // size / scale / family change makes every cached slot stale, so drop
         // them (the atlas textures keep their allocation; the packer resets).
         self.glyph_pipeline.clear();
+        self.grid_glyphs_dirty = true;
     }
 
     /// Cycle 654 (sub-cycle 3 of terminalshot design): queue a
@@ -3371,7 +3378,8 @@ impl Renderer {
         // instances. Only pane text changes and layout/style damage refresh the
         // grid pipeline. Legacy mode uploads an empty instance set on the same
         // gate so switching grid→legacy cannot leave stale grid glyphs behind.
-        let grid_upload_needed = any_pane_text_changed || text_layout_changed;
+        let grid_upload_needed =
+            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
         if grid_upload_needed {
             let mut gi = std::mem::take(&mut self.glyph_instances);
             let mut gc = std::mem::take(&mut self.glyph_clips);
@@ -3384,6 +3392,7 @@ impl Renderer {
                 .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
             self.glyph_instances = gi;
             self.glyph_clips = gc;
+            self.grid_glyphs_dirty = false;
         }
         // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
         // glyph in its own renderer. Runs EVERY frame a block cursor is visible
@@ -8242,11 +8251,23 @@ mod glyph_cell_lock_tests {
             "renderer must keep a layout damage key for cached text/grid vertices"
         );
         assert!(
-            src.contains("let grid_upload_needed = any_pane_text_changed || text_layout_changed;"),
-            "grid glyph upload must be gated only by pane text or layout damage"
+            src.contains("grid_glyphs_dirty: bool"),
+            "renderer must force a grid upload after clearing the glyph pipeline"
+        );
+        assert!(
+            src.contains("let grid_upload_needed =")
+                && src.contains(
+                    "self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed",
+                ),
+            "grid glyph upload must be gated by forced dirtiness, pane text, or layout damage"
+        );
+        assert!(
+            src.contains("self.glyph_pipeline.clear();")
+                && src.contains("self.grid_glyphs_dirty = true;"),
+            "clearing the grid glyph pipeline must dirty the next upload"
         );
         let gate = src
-            .split("let grid_upload_needed = any_pane_text_changed || text_layout_changed;")
+            .split("let grid_upload_needed =")
             .nth(1)
             .and_then(|s| s.split("if let Some((gx, gy, gch, gcolor, gclip))").next())
             .expect("grid upload block present before cursor-glyph prepare");

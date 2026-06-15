@@ -14,6 +14,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     pass. A new offscreen GPU regression renders a prompt-like `➜  ~` line
     across cursor blink phases and asserts every non-cursor prompt pixel remains
     unchanged.
+  - **Live grid text no longer blanks after glyph-cache clears.** Clearing the
+    cell-locked glyph pipeline now forces the next pane-glyph upload even when
+    terminal contents are unchanged, so font/scale/cache invalidation cannot
+    leave cursor-only frames presenting an empty text buffer.
   - **Renderer cache invalidation now includes pane layout damage.** Grid glyph
     instances and glyphon text areas refresh when pane rects, surface size, cell
     metrics, renderer mode, padding or text shaping inputs change, even if row
