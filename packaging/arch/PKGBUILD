@@ -23,7 +23,7 @@
 #     curl -fsSL https://github.com/Reddimus/kettle/releases/download/v${VER}/kettle-linux-x86_64.tar.gz.sha256
 
 pkgname=kettle-bin
-pkgver=2.25.0
+pkgver=2.25.1
 pkgrel=1
 pkgdesc="Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
 arch=('x86_64')
@@ -45,7 +45,7 @@ conflicts=('kettle')
 source=("kettle-linux-x86_64-${pkgver}.tar.gz::https://github.com/Reddimus/kettle/releases/download/v${pkgver}/kettle-linux-x86_64.tar.gz")
 # SHA-256 from the cycle-254 sidecar published alongside the artifact.
 # Bump in lockstep with `pkgver` on every release.
-sha256sums=('bf291ea4aaefc08acd852a17693b5001cbe57092c3bab25d526c2deab5a36203')
+sha256sums=('fdf22018fc2754c37ef5d4d0d37635ee6053373466e61436e23661abeb609813')
 options=('!strip')   # Already stripped by the release runner.
 
 package() {

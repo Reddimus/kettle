@@ -31,18 +31,18 @@ class Kettle < Formula
   desc "Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/Reddimus/kettle"
   license "MIT"
-  version "2.25.0"
+  version "2.25.1"
 
   on_macos do
     # macOS ships the universal2 .app bundle — same binary covers
     # arm64 and x86_64. No need to split by architecture.
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-macos-universal.zip"
-    sha256 "eae4feca9fdeafbf6eeb0ea9d092b0396fc2393098fec59fd2f95c75d40c8bc2"
+    sha256 "5f1de46d559c7b287316d1db809597599cf82b13416d823b18c4fc0f93e53001"
   end
 
   on_linux do
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-linux-x86_64.tar.gz"
-    sha256 "bf291ea4aaefc08acd852a17693b5001cbe57092c3bab25d526c2deab5a36203"
+    sha256 "fdf22018fc2754c37ef5d4d0d37635ee6053373466e61436e23661abeb609813"
   end
 
   livecheck do
