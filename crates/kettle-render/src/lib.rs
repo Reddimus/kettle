@@ -593,6 +593,18 @@ pub struct Renderer {
     /// grid column, since `build_pane` pushes exactly one char per cell). Reused
     /// across runs/frames to keep the glyph-emit walk allocation-free.
     glyph_char_starts: Vec<u32>,
+    /// Cell-locked glyph instance buffer needs a forced upload after the GPU
+    /// pipeline is cleared, even if pane text/layout hashes did not change.
+    /// Without this, a font/scale/cache invalidation can drop the live draw
+    /// count to zero and cursor-only frames keep presenting blank pane text.
+    grid_glyphs_dirty: bool,
+    /// v2.25.1: text-area / grid-glyph layout damage key. Cursor blink must not
+    /// be part of this key: a blink changes cursor quads / cursor glyph only,
+    /// never pane text glyph instances. Geometry, cell metrics, renderer mode,
+    /// font shaping inputs, and pane viewport dimensions do belong here because
+    /// cached glyph vertices/text areas become stale even when row contents did
+    /// not reshape.
+    last_text_layout_key: Option<u64>,
     /// Bundled Regular is loaded eagerly; styled faces are loaded on first
     /// bold/italic terminal content so first-window startup pays for one face,
     /// not the full family.
@@ -851,13 +863,10 @@ impl Renderer {
         let surface = instance.create_surface(window)?;
         // v2.23.0: resolve the adapter per config — an explicitly pinned GPU
         // (settings picker / `gpu-device-id`) wins, else the
-        // `gpu-power-preference` policy, which now defaults to `High` (the
-        // discrete/dedicated adapter) so kettle renders on the dedicated GPU out
-        // of the box. On a dual-GPU laptop that wakes the discrete GPU from its
-        // low-power state (~1.5 s of extra cold startup on the reference Surface
-        // Book 3); `gpu-power-preference = low` restores the integrated adapter
-        // for the fastest cold start. `resolve_adapter` falls through to the
-        // policy (and finally a software adapter) whenever no pin matches.
+        // `gpu-power-preference` policy, which defaults to `Auto`: let wgpu /
+        // the platform choose unless the user explicitly asks for low-power or
+        // high-performance. `resolve_adapter` falls through to that policy (and
+        // finally a software adapter) whenever no pin matches.
         let adapter = resolve_adapter(&instance, &surface, cfg, "Renderer::new").await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1040,6 +1049,8 @@ impl Renderer {
             glyph_instances: Vec::new(),
             glyph_clips: Vec::new(),
             glyph_char_starts: Vec::new(),
+            grid_glyphs_dirty: true,
+            last_text_layout_key: None,
             bundled_style_faces_loaded: false,
             pane_buffer_ids: Vec::new(),
             pane_buffers: Vec::new(),
@@ -1226,6 +1237,7 @@ impl Renderer {
         // size / scale / family change makes every cached slot stale, so drop
         // them (the atlas textures keep their allocation; the packer resets).
         self.glyph_pipeline.clear();
+        self.grid_glyphs_dirty = true;
     }
 
     /// Cycle 654 (sub-cycle 3 of terminalshot design): queue a
@@ -3311,6 +3323,10 @@ impl Renderer {
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
         self.last_chrome_hash = chrome_hash;
+        let text_layout_key =
+            text_layout_damage_key(panes, cfg, (sw, sh), (cw, ch), pane_titlebar_h);
+        let text_layout_changed = self.last_text_layout_key != Some(text_layout_key);
+        self.last_text_layout_key = Some(text_layout_key);
         // When the cursor moves to a DIFFERENT glyph, force the main prepare so
         // that glyph is freshly resident in the atlas before the cursor pass
         // reuses its bitmap (otherwise the 1-glyph cursor prepare could be the
@@ -3329,6 +3345,7 @@ impl Renderer {
         self.last_overlay_open = overlay_open;
         let need_prepare = any_pane_text_changed
             || chrome_changed
+            || text_layout_changed
             || overlay_open
             || cursor_char_changed
             || overlay_changed;
@@ -3354,11 +3371,16 @@ impl Renderer {
                 menu_areas,
                 &mut self.swash,
             )?;
-            // v2.25.0: cell-locked pane text. In the default grid mode, emit one
-            // pinned glyph instance per cell from the freshly-shaped pane buffers;
-            // legacy mode left the pane text in `areas` (glyphon) above, so emit
-            // nothing. Gated by need_prepare exactly like the glyphon prepares, so
-            // an idle frame keeps the last uploaded instance buffer + redraws it.
+        }
+        // v2.25.1: cell-locked pane text has its OWN damage gate. A cursor blink
+        // can force `need_prepare` via `cursor_char_changed` for the separate
+        // cursor glyph pass, but it must not clear/re-upload pane glyph
+        // instances. Only pane text changes and layout/style damage refresh the
+        // grid pipeline. Legacy mode uploads an empty instance set on the same
+        // gate so switching grid→legacy cannot leave stale grid glyphs behind.
+        let grid_upload_needed =
+            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
+        if grid_upload_needed {
             let mut gi = std::mem::take(&mut self.glyph_instances);
             let mut gc = std::mem::take(&mut self.glyph_clips);
             gi.clear();
@@ -3370,6 +3392,7 @@ impl Renderer {
                 .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
             self.glyph_instances = gi;
             self.glyph_clips = gc;
+            self.grid_glyphs_dirty = false;
         }
         // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
         // glyph in its own renderer. Runs EVERY frame a block cursor is visible
@@ -5504,6 +5527,62 @@ fn gc(c: Rgb) -> GColor {
     GColor::rgb(c.r, c.g, c.b)
 }
 
+fn text_layout_damage_key(
+    panes: &[PaneView<'_>],
+    cfg: &Config,
+    surface: (f32, f32),
+    cell: (f32, f32),
+    pane_titlebar_h: f32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    fn hf<H: Hasher>(h: &mut H, v: f32) {
+        // Normalize -0.0 so arithmetic-equivalent layout inputs hash together.
+        let v = if v == 0.0 { 0.0 } else { v };
+        v.to_bits().hash(h);
+    }
+
+    let mut h = std::hash::DefaultHasher::new();
+    match cfg.text_renderer {
+        TextRendererMode::Grid => 0u8.hash(&mut h),
+        TextRendererMode::Legacy => 1u8.hash(&mut h),
+    }
+    for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+        cfg.family_for(bold, italic).hash(&mut h);
+    }
+    cfg.font_ligatures.hash(&mut h);
+    for f in &cfg.font_features {
+        f.tag.hash(&mut h);
+        f.value.hash(&mut h);
+    }
+    for v in [
+        surface.0,
+        surface.1,
+        cell.0,
+        cell.1,
+        cfg.font_size,
+        cfg.cell_height,
+        cfg.cell_width,
+        cfg.padding_x,
+        cfg.padding_y,
+        pane_titlebar_h,
+    ] {
+        hf(&mut h, v);
+    }
+    cfg.show_titlebar.hash(&mut h);
+    cfg.title_at_bottom.hash(&mut h);
+    for pv in panes {
+        pv.id.hash(&mut h);
+        for v in [pv.rect.0, pv.rect.1, pv.rect.2, pv.rect.3] {
+            hf(&mut h, v);
+        }
+        pv.snap.columns.hash(&mut h);
+        pv.snap.screen_lines.hash(&mut h);
+        pv.snap.display_offset.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Render a representative kettle frame **offscreen** (no window/surface) and
 /// write it to a PNG. Used by `kettle --screenshot <out.png>` to produce the
 /// showcase images embedded in `docs/UX-COMPARISON.md`.
@@ -6444,6 +6523,327 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+
+    /// v2.25.1 regression guard for the grid renderer/cursor interaction. The
+    /// prompt glyphs are uploaded ONCE through the cell-locked glyph pipeline,
+    /// then two offscreen frames are rendered while only the cursor quad toggles.
+    /// Every non-cursor pixel must stay byte-identical; a blink may change the
+    /// cursor cell only.
+    #[test]
+    fn grid_prompt_pixels_survive_cursor_blink() {
+        let Some((off, on, cursor_rect, prompt_rect)) =
+            grid_prompt_blink_frames().expect("grid prompt blink frames render")
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        assert_eq!(
+            (off.width(), off.height()),
+            (on.width(), on.height()),
+            "both blink phases must render the same surface size"
+        );
+
+        let mut prompt_ink = 0u64;
+        let mut changed_outside_cursor = 0u64;
+        let bg = Config::default().theme.background;
+        for y in prompt_rect.1..prompt_rect.1 + prompt_rect.3 {
+            for x in prompt_rect.0..prompt_rect.0 + prompt_rect.2 {
+                let in_cursor = x >= cursor_rect.0
+                    && x < cursor_rect.0 + cursor_rect.2
+                    && y >= cursor_rect.1
+                    && y < cursor_rect.1 + cursor_rect.3;
+                let a = off.get_pixel(x, y);
+                let b = on.get_pixel(x, y);
+                if !in_cursor && a != b {
+                    changed_outside_cursor += 1;
+                }
+                if !in_cursor
+                    && ((a[0] as i16 - bg.r as i16).abs() > 6
+                        || (a[1] as i16 - bg.g as i16).abs() > 6
+                        || (a[2] as i16 - bg.b as i16).abs() > 6)
+                {
+                    prompt_ink += 1;
+                }
+            }
+        }
+        assert!(
+            prompt_ink > 120,
+            "expected visible prompt glyph ink outside cursor; got {prompt_ink} pixels"
+        );
+        assert_eq!(
+            changed_outside_cursor, 0,
+            "cursor blink changed {changed_outside_cursor} non-cursor prompt pixels"
+        );
+    }
+
+    type BlinkFrames = (
+        image::RgbaImage,
+        image::RgbaImage,
+        (u32, u32, u32, u32),
+        (u32, u32, u32, u32),
+    );
+
+    fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = match request_adapter_or_fallback(
+                &instance,
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::None,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                },
+                "grid_prompt_blink",
+            )
+            .await
+            {
+                Ok(a) => a,
+                Err(_) => return Ok(None),
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-grid-prompt-blink"),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!("device: {e:?}"))?;
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let cfg = Config::default();
+            let theme = cfg.theme;
+            let family = cfg.font_family.clone();
+            let mut font_system = FontSystem::new();
+            for face in kettle_config::font::all() {
+                font_system.db_mut().load_font_data(face.to_vec());
+            }
+            let mut swash = SwashCache::new();
+            let mut glyph_pipe = GlyphPipeline::new(&device, format);
+            let mut quads = QuadPipeline::new(&device, format);
+
+            let metrics = Metrics::new(24.0, 30.0);
+            let mut measure = TextBuffer::new(&mut font_system, metrics);
+            let (cw, ch) = measure_cell(&mut font_system, &mut measure, &family, metrics);
+            let w = (cw * 10.0 + 24.0).ceil() as u32;
+            let h = (ch + 24.0).ceil() as u32;
+            let origin = (12.0_f32, 12.0_f32);
+            let cursor_col = 4usize;
+            let cursor_rect = (
+                (origin.0 + cursor_col as f32 * cw).round() as u32,
+                origin.1.round() as u32,
+                cw.ceil() as u32,
+                ch.ceil() as u32,
+            );
+            let prompt_rect = (
+                origin.0.round() as u32,
+                origin.1.round() as u32,
+                (cw * 5.0).ceil() as u32,
+                ch.ceil() as u32,
+            );
+
+            let mut buf = TextBuffer::new(&mut font_system, metrics);
+            buf.set_metrics(&mut font_system, metrics);
+            buf.set_size(&mut font_system, Some(w as f32), Some(h as f32));
+            buf.set_wrap(&mut font_system, Wrap::None);
+            buf.set_text(
+                &mut font_system,
+                "➜  ~",
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut font_system, false);
+
+            let mut instances = Vec::new();
+            let mut starts = Vec::new();
+            let default_color =
+                GColor::rgb(theme.foreground.r, theme.foreground.g, theme.foreground.b);
+            for run in buf.layout_runs() {
+                starts.clear();
+                for (b, _) in run.text.char_indices() {
+                    starts.push(b as u32);
+                }
+                for glyph in run.glyphs {
+                    let col = glyph_grid_col(&starts, glyph.start);
+                    let fs = glyph.font_size;
+                    let cell_left = origin.0 + col as f32 * cw;
+                    let x_off_px = fs * glyph.x_offset;
+                    let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
+                    let phys = glyph.physical((off_x, origin.1), 1.0);
+                    let key = phys.cache_key;
+                    let Some(slot) = glyph_pipe.ensure_glyph(&device, &queue, key, || {
+                        RasterGlyph::from_swash(swash.get_image(&mut font_system, key).as_ref()?)
+                    }) else {
+                        continue;
+                    };
+                    let color = glyph.color_opt.unwrap_or(default_color);
+                    instances.push(GlyphInstance {
+                        pos: [
+                            (phys.x + slot.left) as f32,
+                            (run.line_y.round() as i32 + phys.y - slot.top) as f32,
+                        ],
+                        size: [slot.w, slot.h],
+                        uv: [slot.atlas_x, slot.atlas_y],
+                        color: [
+                            color.r() as f32 / 255.0,
+                            color.g() as f32 / 255.0,
+                            color.b() as f32 / 255.0,
+                            color.a() as f32 / 255.0,
+                        ],
+                        kind: slot.kind,
+                        _pad: [0; 3],
+                    });
+                }
+            }
+            glyph_pipe.upload(&device, &queue, [w as f32, h as f32], &instances);
+            let clips = [GlyphClip {
+                rect: [0.0, 0.0, w as f32, h as f32],
+                start: 0,
+                count: instances.len() as u32,
+            }];
+
+            let off = render_grid_prompt_frame(
+                &device,
+                &queue,
+                format,
+                &mut quads,
+                &glyph_pipe,
+                &clips,
+                (w, h),
+                theme.background,
+                None,
+            )?;
+            let on = render_grid_prompt_frame(
+                &device,
+                &queue,
+                format,
+                &mut quads,
+                &glyph_pipe,
+                &clips,
+                (w, h),
+                theme.background,
+                Some((
+                    cursor_rect.0 as f32,
+                    cursor_rect.1 as f32,
+                    cursor_rect.2 as f32,
+                    cursor_rect.3 as f32,
+                    theme.cursor,
+                )),
+            )?;
+            Ok(Some((off, on, cursor_rect, prompt_rect)))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_grid_prompt_frame(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        quads: &mut QuadPipeline,
+        glyph_pipe: &GlyphPipeline,
+        clips: &[GlyphClip],
+        size: (u32, u32),
+        bg: Rgb,
+        cursor: Option<(f32, f32, f32, f32, Rgb)>,
+    ) -> Result<image::RgbaImage> {
+        let (w, h) = size;
+        let mut q = Vec::new();
+        if let Some((x, y, cw, ch, color)) = cursor {
+            q.push(rect(x, y, cw, ch, color, 1.0));
+        }
+        quads.upload(device, queue, [w as f32, h as f32], &q);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-grid-prompt-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bpp = 4u32;
+        let unpadded = w * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-grid-prompt-readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-grid-prompt-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: srgb(bg.r),
+                            g: srgb(bg.g),
+                            b: srgb(bg.b),
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            quads.draw(&mut pass);
+            glyph_pipe.draw(&mut pass, clips);
+        }
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(enc.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv()
+            .map_err(|_| anyhow!("map channel closed"))?
+            .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
+        let data = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded * h) as usize);
+        for row in 0..h {
+            let start = (row * padded) as usize;
+            pixels.extend_from_slice(&data[start..start + unpadded as usize]);
+        }
+        drop(data);
+        readback.unmap();
+        image::RgbaImage::from_raw(w, h, pixels)
+            .ok_or_else(|| anyhow!("image buffer size mismatch"))
     }
 
     /// Render one solid quad of a known *dark* sRGB color (#1a1b23) covering
@@ -7836,6 +8236,44 @@ mod glyph_cell_lock_tests {
         assert!(
             src.contains("buf.set_wrap(&mut self.font_system, Wrap::None);"),
             "pane buffers must be Wrap::None so a row is one run + char==column holds"
+        );
+    }
+
+    /// Cursor blink may force the separate cursor-glyph prepare, but it must not
+    /// be part of the pane grid upload gate. Otherwise blink can clear/stale-draw
+    /// ordinary prompt glyphs. Pane grid uploads are allowed only for text
+    /// content damage or layout/style damage.
+    #[test]
+    fn grid_upload_damage_excludes_cursor_blink() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("last_text_layout_key: Option<u64>"),
+            "renderer must keep a layout damage key for cached text/grid vertices"
+        );
+        assert!(
+            src.contains("grid_glyphs_dirty: bool"),
+            "renderer must force a grid upload after clearing the glyph pipeline"
+        );
+        assert!(
+            src.contains("let grid_upload_needed =")
+                && src.contains(
+                    "self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed",
+                ),
+            "grid glyph upload must be gated by forced dirtiness, pane text, or layout damage"
+        );
+        assert!(
+            src.contains("self.glyph_pipeline.clear();")
+                && src.contains("self.grid_glyphs_dirty = true;"),
+            "clearing the grid glyph pipeline must dirty the next upload"
+        );
+        let gate = src
+            .split("let grid_upload_needed =")
+            .nth(1)
+            .and_then(|s| s.split("if let Some((gx, gy, gch, gcolor, gclip))").next())
+            .expect("grid upload block present before cursor-glyph prepare");
+        assert!(
+            !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),
+            "grid upload gate/block must not depend on cursor blink state"
         );
     }
 }

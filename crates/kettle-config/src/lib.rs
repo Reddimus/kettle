@@ -368,24 +368,22 @@ pub enum WindowState {
 }
 
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.
-/// v2.23.0 default is `High` — prefer the **discrete / high-performance**
-/// adapter, so kettle renders on the dedicated GPU out of the box (more
-/// headroom for animated backgrounds, large/high-DPI windows, many panes). The
-/// trade-off on a dual-GPU laptop: requesting the discrete adapter wakes it from
-/// its low-power state, which on the reference Surface Book 3 adds ~1.5 s to a
-/// *cold* start. Users who want the fastest cold start can set
-/// `gpu-power-preference = low` (the integrated adapter); `Auto` lets wgpu
-/// choose with no preference. On single-GPU machines all three behave the same.
+/// Default is `Auto`: let wgpu / the platform pick the adapter unless the user
+/// pins a specific GPU. This is the least surprising cross-platform policy:
+/// single-GPU machines show their only adapter, hybrid laptops avoid claiming a
+/// discrete GPU is required, and users can still opt into `High` for dedicated
+/// GPU headroom or `Low` for integrated/battery-friendly startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GpuPowerPreference {
     /// Prefer the low-power (typically integrated) adapter — fastest cold start
     /// on a dual-GPU laptop.
     Low,
-    /// Prefer the high-performance (typically discrete) adapter — kettle default
-    /// (v2.23.0): render on the dedicated GPU.
-    #[default]
+    /// Prefer the high-performance adapter. On hybrid laptops this usually
+    /// means the discrete/dedicated GPU; on single-GPU machines it may resolve
+    /// to the only integrated adapter.
     High,
     /// No preference; let wgpu pick.
+    #[default]
     Auto,
 }
 
@@ -3473,8 +3471,9 @@ impl Config {
                 "gpu-power-preference" | "gpu_power_preference" => {
                     cfg.gpu_power_preference = match e.value.to_ascii_lowercase().as_str() {
                         "high" | "high-performance" | "discrete" => GpuPowerPreference::High,
+                        "low" | "low-power" | "integrated" => GpuPowerPreference::Low,
                         "auto" | "none" => GpuPowerPreference::Auto,
-                        _ => GpuPowerPreference::Low,
+                        _ => GpuPowerPreference::Auto,
                     };
                 }
                 "gpu-backend" | "gpu_backend" => {
@@ -5565,11 +5564,11 @@ tab-bar-width = 200\n";
 
     #[test]
     fn gpu_power_preference_parse() {
-        // v2.23.0: default is High (discrete/dedicated) — render on the
-        // dedicated GPU out of the box. `low` restores the fastest cold start.
+        // Default is Auto: the platform/wgpu policy picks unless the user pins
+        // a GPU or explicitly asks for low/high power preference.
         assert_eq!(
             Config::default().gpu_power_preference,
-            GpuPowerPreference::High
+            GpuPowerPreference::Auto
         );
         assert_eq!(
             Config::parse_text("gpu-power-preference = high").gpu_power_preference,
@@ -5590,7 +5589,7 @@ tab-bar-width = 200\n";
         // Unknown value falls back to the safe default, not a parse error.
         assert_eq!(
             Config::parse_text("gpu-power-preference = bogus").gpu_power_preference,
-            GpuPowerPreference::Low
+            GpuPowerPreference::Auto
         );
         // `--check-config` accepts every documented spelling.
         assert!(

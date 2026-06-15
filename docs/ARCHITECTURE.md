@@ -93,8 +93,8 @@ state) lives in `WindowState`, while `App` keeps the process globals
   `resolve_adapter` (v2.23.0): a config-pinned GPU (`gpu-vendor-id` /
   `-device-id` / `-name`, set via Settings → Graphics) wins, matched among the
   *surface-capable* adapters by `(vendor,device,backend) → (vendor,device) →
-  name`; otherwise the `gpu-power-preference` policy applies — now defaulting to
-  `high` (the **discrete/dedicated** adapter), with a software fallback last.
+  name`; otherwise the `gpu-power-preference` policy applies — defaulting to
+  `auto` so wgpu / the platform chooses, with a software fallback last.
   An absent pin (eGPU unplugged, driver swap) silently falls through to the
   policy, so a stale pin never fails startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
@@ -217,7 +217,10 @@ frame that re-prepares for any reason (a pane row changed, a chrome label change
 or a cursor blink to a new glyph) re-emits the pane instances — the same cadence
 the old glyphon pane prepare ran at, so it is at parity, not a regression.
 `text-renderer = legacy` keeps the old continuous-glyphon pane path (pass 4) as a
-one-release rollback escape hatch; pass 3 is then an empty no-op.
+rollback escape hatch; pass 3 is then an empty no-op. Since v2.25.1 the grid pass
+has its own damage gate: pane text/style/geometry changes refresh glyph
+instances, while cursor blink updates only cursor quads and the cursor-glyph
+pass. A blink must never invalidate or stale-draw ordinary pane glyphs.
 
 Pass 0 (v2.23.0) is the **background (wallpaper)** in its own pipeline, drawn at
 the very back so the cell/chrome quads (pass 1) composite *opaquely on top* of it

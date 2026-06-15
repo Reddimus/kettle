@@ -4,6 +4,34 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.25.1] — 2026-06-15
+
+  ### Fixed
+  - **Grid renderer cursor-blink regression.** The v2.25.0 cell-locked
+    `text-renderer = grid` path now keeps pane glyph uploads on their own damage
+    gate: pane text, style, cell metrics and geometry refresh grid glyph
+    instances, while cursor blink updates only cursor quads / the cursor-glyph
+    pass. A new offscreen GPU regression renders a prompt-like `➜  ~` line
+    across cursor blink phases and asserts every non-cursor prompt pixel remains
+    unchanged.
+  - **Live grid text no longer blanks after glyph-cache clears.** Clearing the
+    cell-locked glyph pipeline now forces the next pane-glyph upload even when
+    terminal contents are unchanged, so font/scale/cache invalidation cannot
+    leave cursor-only frames presenting an empty text buffer.
+  - **Renderer cache invalidation now includes pane layout damage.** Grid glyph
+    instances and glyphon text areas refresh when pane rects, surface size, cell
+    metrics, renderer mode, padding or text shaping inputs change, even if row
+    contents themselves did not reshape.
+  - **GPU preference default is now `auto`.** Kettle no longer labels the default
+    policy as discrete/high-performance on machines that only expose integrated
+    graphics. Explicit `high` and `low` remain available, and a pinned GPU still
+    wins over the policy.
+
+  ### Documentation / packaging
+  - Refreshed stale install and package-template version references so the
+    v2.25.1 release bump can keep README / INSTALL / Homebrew / AUR / Nix
+    surfaces in lockstep.
+
 ## [2.25.0] — 2026-06-14
 
   **Cell-locked text rendering + sub-cell selection accuracy.** Fixes two
@@ -35,7 +63,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   ### Added
   - **`text-renderer` config key** (`grid` | `legacy`, default `grid`). `grid` is
     the new cell-locked path above; `legacy` restores the previous continuous
-    layout as a one-release rollback escape hatch (slated for removal). See
+    layout as a rollback escape hatch. See
     **[CONFIG.md](docs/CONFIG.md)**.
 
 ## [2.24.1] — 2026-06-14
