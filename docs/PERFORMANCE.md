@@ -15,6 +15,20 @@ only adapter without pretending a discrete GPU was selected, while hybrid
 laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
+**Ubuntu 24.04 integrated-GPU smoke, final v2.25.1 build** (Intel Iris Xe,
+Vulkan/Mesa, `text-renderer = grid`, `gpu-power-preference = auto`, Xvfb,
+hyperfine medians/means over 7-10 runs):
+
+| workload | kettle | Terminator | Ghostty | Alacritty |
+|---|---:|---:|---:|---:|
+| launch terminal, run `/bin/true`, close | 206 ms | 252 ms | 440 ms | 147 ms |
+| launch terminal, print ~4 MiB ASCII, close | 195 ms | 261 ms | 495 ms | 235 ms |
+
+These are smoke numbers rather than a full latency suite, but they exercise the
+final installed binary on the integrated adapter the default policy chooses on
+this machine. Kettle beats Terminator and Ghostty on both probes and remains in
+the same practical class as Alacritty for the flood path.
+
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
 The cell-locked glyph pipeline (`text-renderer = grid`, the new default) replaces
