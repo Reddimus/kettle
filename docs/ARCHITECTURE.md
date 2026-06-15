@@ -178,8 +178,8 @@ shaping sees the complete family. Headless screenshot paths still load the full
 family because they render a single static image and do not benefit from a later
 warm-up frame.
 
-Each frame the renderer issues eight passes against the same wgpu
-render-pass encoder, in this order. The order matters: a quad pass
+Each frame the renderer issues nine passes (grid mode; eight in legacy) against
+the same wgpu render-pass encoder, in this order. The order matters: a quad pass
 paints over text drawn before it, and text drawn after a quad covers
 that quad's pixels.
 
@@ -188,12 +188,36 @@ flowchart LR
     clear["Clear color<br/>(theme bg + opacity)"] --> bgimg["0. bg_imgs.draw<br/>background image<br/>(wallpaper, at the back)"]
     bgimg --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
     quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>inline image overlays"]
-    imgs --> text["3. text_renderer.render<br/>pane text + tab text<br/>(NOT menu rows)"]
-    text --> overlay["4. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
-    overlay --> menuq["5. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> menut["6. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
-    menut --> curg["7. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
+    imgs --> glyph["3. glyph_pipeline.draw<br/>pane text, CELL-LOCKED<br/>(grid mode; v2.25.0)"]
+    glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
+    text --> overlay["5. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
+    overlay --> menuq["6. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
+    menuq --> menut["7. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
+    menut --> curg["8. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
+
+**Pass 3 (v2.25.0) — cell-locked pane text.** In the default `text-renderer =
+grid` mode pane cell text is drawn by `glyph_pipeline`
+(`crates/kettle-render/src/glyphpipe.rs`), an instanced glyph renderer that pins
+every glyph to its grid cell (`pane_origin + col × cell_w`) — the
+Alacritty / kitty / WezTerm / Ghostty model. `build_pane` still shapes each row
+with cosmic-text (the per-line shaping cache is unchanged), but instead of handing
+the whole `Buffer` to glyphon, `emit_pane_glyphs` walks the laid-out glyphs and
+emits one pinned instance each, rasterized through cosmic-text's own `SwashCache`
+into a private mask+color atlas. The fragment shader replicates glyphon's exactly
+(mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas), so
+antialiasing, gamma and theme colors are identical — only the X position is
+substituted. This fixes glyph drift: previously a glyph whose advance differed from
+the cell width (fallback-font CJK / color emoji / some symbols, ligature clusters,
+a mismatched-width bold/italic face) shifted every following glyph off the
+`col × cell_w` grid that the selection highlight, cursor and mouse hit-testing all
+use. Emission runs on the same `need_prepare` damage gate as the glyphon prepares
+it replaces: a steady frame re-draws the retained instance buffer for free, and a
+frame that re-prepares for any reason (a pane row changed, a chrome label changed,
+or a cursor blink to a new glyph) re-emits the pane instances — the same cadence
+the old glyphon pane prepare ran at, so it is at parity, not a regression.
+`text-renderer = legacy` keeps the old continuous-glyphon pane path (pass 4) as a
+one-release rollback escape hatch; pass 3 is then an empty no-op.
 
 Pass 0 (v2.23.0) is the **background (wallpaper)** in its own pipeline, drawn at
 the very back so the cell/chrome quads (pass 1) composite *opaquely on top* of it
@@ -231,13 +255,13 @@ tab / field row / outside; `App::settings_mouse` dispatches that into the existi
 adjust). The Background settings page edits the image path through an inline text
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
-Steps 5–6 own the right-click context menu so its labels land **on
+Steps 6–7 own the right-click context menu so its labels land **on
 top of** the panel background. Splitting them out fixed the v1.3.0 /
 v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
-step 4 (`overlay_quads`), painting over the menu text that had
-already been rendered in step 3.
+step 5 (`overlay_quads`), painting over the menu text that had
+already been rendered.
 
-Step 7 (v2.21.0) draws the inverted glyph **under a focused solid
+Step 8 (v2.21.0) draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad
 (step 1). Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
@@ -245,7 +269,7 @@ buffer byte-identical, so the **damage gate** can skip the expensive
 whole-viewport `text_renderer.prepare` (which re-encodes every visible
 glyph's vertices) and its paired `atlas.trim`: `build_pane` reports
 whether any row reshaped, and `prepare` runs only when a pane row
-changed, a chrome label changed, or a text overlay is open. The 5–7
+changed, a chrome label changed, or a text overlay is open. The 6–8
 passes are cheap no-ops while idle (empty/unchanged buffers). The
 `TextRenderer` instances share one `TextAtlas` and `Viewport` —
 glyphon batches glyphs by atlas, not by renderer, so each pass reuses
@@ -335,7 +359,7 @@ adding modern features it lacks.
 |---|---|---|
 | VT engine | `alacritty_terminal` + `vte` | Battle-tested vs vttest/vim/tmux; avoids re-deriving the xterm long tail. |
 | Images/OSC | in-house `Extractor` ahead of the engine | Adds Sixel/kitty/iTerm2 + OSC 7/133 without forking the engine. |
-| Text | `glyphon` (cosmic-text) | Pure-Rust shaping + fallback + GPU atlas; ligatures + Nerd glyphs. |
+| Text | `glyphon` (cosmic-text) + a cell-locked instanced glyph pass | Pure-Rust shaping + fallback + GPU atlas; ligatures + Nerd glyphs. Pane text (v2.25.0) is pinned to the cell grid via `glyphpipe.rs` using cosmic-text's `SwashCache`; glyphon still draws chrome / menus / the cursor glyph. |
 | Window/GPU | `winit` + `wgpu` | One codebase for X11/Wayland/Win32/Cocoa; offscreen self-test in CI. |
 | PTY | `portable-pty` | Uniform Unix + Windows ConPTY. |
 | Config | Ghostty `key = value` | Ships the Ghostty theme set verbatim; familiar to users. |

@@ -789,6 +789,19 @@ fn dev_record_key(
     }
 }
 
+/// Pure pointer → `(col, line, side)` math for a pane, shared by `px_to_point`.
+///
+/// `side` is which half of the hit cell the pointer sits in, derived from the
+/// sub-cell x offset: the left half is `Side::Left`, the right half (and the
+/// exact midpoint) is `Side::Right`. This matches xterm / Alacritty / iTerm2 and
+/// is exactly what alacritty's `Selection::to_range` (`range_simple`/`range_block`)
+/// needs to decide whether each boundary cell is included — without it a drag is
+/// biased one cell wide (the historical "selection off by one letter"). The side
+/// is computed from the SAME clamped non-negative offset as `col`, so a pointer
+/// left of the content origin maps to `(col 0, Side::Left)` — the first cell is
+/// included, never trimmed. NOTE: only Simple/Block *drag* selections consume this
+/// side; word / line / smart-select snap to token boundaries and ignore it (see
+/// `begin_selection` / `apply_smart_selection`).
 fn px_to_cell(
     px: f32,
     py: f32,
@@ -796,13 +809,24 @@ fn px_to_cell(
     cell: (f32, f32),
     pad: (f32, f32),
     titlebar_h: f32,
-) -> (usize, i32) {
+) -> (usize, i32, kettle_core::Side) {
     let (rx, ry, _, _) = rect;
     let (cw, ch) = cell;
     let (pad_x, pad_y) = pad;
-    let col = ((px - rx - pad_x) / cw).floor().max(0.0) as usize;
+    // Derive BOTH col and side from the same non-negative offset so they agree at
+    // the left clamp: a pointer in the left padding (offset < 0) maps to
+    // (col 0, Side::Left) — the first cell is included, not trimmed. Computing the
+    // side from the raw (negative) offset via `rem_euclid` would wrap it into the
+    // cell's right half and wrongly drop column 0 from a drag (audit, v2.25.0).
+    let offx = (px - rx - pad_x).max(0.0);
+    let col = (offx / cw).floor() as usize;
     let line = ((py - ry - pad_y - titlebar_h) / ch).floor().max(0.0) as i32;
-    (col, line)
+    let side = if offx.rem_euclid(cw) < cw / 2.0 {
+        kettle_core::Side::Left
+    } else {
+        kettle_core::Side::Right
+    };
+    (col, line, side)
 }
 
 /// Cycle 909 (R1 — selection/copy while scrolled back): map a VIEWPORT-relative
@@ -3308,7 +3332,13 @@ impl App {
         true
     }
 
-    fn px_to_point(&self, ws: &WindowState, rect: Rect, px: f32, py: f32) -> kettle_core::Point {
+    fn px_to_point(
+        &self,
+        ws: &WindowState,
+        rect: Rect,
+        px: f32,
+        py: f32,
+    ) -> (kettle_core::Point, kettle_core::Side) {
         let (cw, ch) = ws
             .renderer
             .as_ref()
@@ -3320,7 +3350,7 @@ impl App {
         // active tab's pane count.
         let titlebar_h =
             self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
-        let (col, line) = px_to_cell(
+        let (col, line, side) = px_to_cell(
             px,
             py,
             rect,
@@ -3328,7 +3358,10 @@ impl App {
             (self.cfg.padding_x, self.cfg.padding_y),
             titlebar_h,
         );
-        kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col))
+        (
+            kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col)),
+            side,
+        )
     }
 
     /// Cycle 288: pull the on-screen text of `row` (viewport-relative)
@@ -3478,7 +3511,7 @@ impl App {
             kettle_core::SelectionType::Simple | kettle_core::SelectionType::Block
         );
         if let Some(rect) = self.focused_rect(ws, area) {
-            let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+            let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
             if let Some(pane) = ws.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
@@ -3486,7 +3519,10 @@ impl App {
                 // so a selection started while scrolled back anchors on the
                 // history row the user sees, not the active screen.
                 let p = viewport_point_to_grid(vp, t.grid().display_offset());
-                t.selection = Some(kettle_core::Selection::new(ty, p, kettle_core::Side::Left));
+                // The anchor carries the pointer's sub-cell side so a Simple/Block
+                // drag trims the start cell when the press lands in its right half
+                // (Semantic/Lines ignore the side — they snap to token bounds).
+                t.selection = Some(kettle_core::Selection::new(ty, p, side));
             }
         }
     }
@@ -3681,7 +3717,7 @@ impl App {
             return;
         }
         if let Some(rect) = self.focused_rect(ws, area) {
-            let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+            let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
             if let Some(pane) = ws.mux.focused()
                 && let Ok(mut t) = pane.term.term.lock()
             {
@@ -3689,7 +3725,10 @@ impl App {
                 // borrow so the dragged end-point tracks scrollback too.
                 let p = viewport_point_to_grid(vp, t.grid().display_offset());
                 if let Some(sel) = t.selection.as_mut() {
-                    sel.update(p, kettle_core::Side::Right);
+                    // The drag end carries the pointer's sub-cell side so the
+                    // boundary cell is included only once the pointer crosses its
+                    // midpoint (xterm/Alacritty parity) — not always.
+                    sel.update(p, side);
                 }
             }
         }
@@ -3706,7 +3745,7 @@ impl App {
             Some(r) => r,
             None => return false,
         };
-        let vp = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         if let Some(pane) = ws.mux.focused()
             && let Ok(mut t) = pane.term.term.lock()
         {
@@ -3714,7 +3753,9 @@ impl App {
             // history row while scrolled back.
             let p = viewport_point_to_grid(vp, t.grid().display_offset());
             if let Some(sel) = t.selection.as_mut() {
-                sel.update(p, kettle_core::Side::Right);
+                // Sub-cell side so Shift+Click lands the boundary on the same
+                // half-cell rule as a drag.
+                sel.update(p, side);
                 // Enter drag mode so a follow-up mouse-move keeps extending —
                 // matches every Mac/Linux text-control: shift-click, then drag.
                 ws.selecting = true;
@@ -4227,7 +4268,9 @@ impl App {
     /// itself clamps the reported coordinate to the window.
     fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
         let rect = self.focused_rect(ws, self.area(ws))?;
-        let p = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        // Mouse-tracking reports a cell, not a selection boundary — the sub-cell
+        // side is irrelevant here, so discard it.
+        let (p, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         let (row, col) = (p.line.0.max(0) as usize, p.column.0);
         // Clamp to the pane's geometric grid (same cell size AND titlebar inset
         // `px_to_point` used): a click in the right/bottom padding rounds up to
@@ -15794,21 +15837,21 @@ mod tests {
         let tb = ch + 6.0; // renderer's pane_titlebar_h
 
         // No titlebar (single-pane tab): content origin = ry + pad = 24.
-        let (_, line0) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0);
+        let (_, line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0);
         assert_eq!(line0, 0, "py at content origin → row 0 (no titlebar)");
 
         // With a titlebar: content origin shifts down by `tb` to 24 + 22 = 46.
-        let (_, line_origin) = px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb);
+        let (_, line_origin, _) = px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb);
         assert_eq!(
             line_origin, 0,
             "py at the titlebar'd content origin → row 0"
         );
         // One cell below the titlebar'd origin → row 1 (was ~row 2 before the
         // fix: that off-by-one is exactly what the audit caught).
-        let (_, line1) = px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb);
+        let (_, line1, _) = px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb);
         assert_eq!(line1, 1);
         // A click up in the titlebar band clamps to row 0 (never negative).
-        let (_, clamped) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb);
+        let (_, clamped, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb);
         assert_eq!(clamped, 0);
 
         // grid_of: the titlebar steals height, so fewer rows are reported.
@@ -15818,6 +15861,49 @@ mod tests {
         assert!(
             rows_tb < rows_no,
             "titlebar must reduce reported rows ({rows_tb} < {rows_no})"
+        );
+    }
+
+    #[test]
+    fn px_to_cell_reports_sub_cell_side() {
+        use super::px_to_cell;
+        use kettle_core::Side;
+        let rect = (10.0, 20.0, 800.0, 600.0);
+        let (cw, ch, pad) = (8.0_f32, 16.0_f32, 4.0_f32);
+        // Content origin x = rx + pad = 14.0; each cell is `cw` wide.
+        let ox = 10.0 + pad; // 14.0
+        let y = 30.0; // any in-grid row
+
+        // Left half of cell 0 → Left.
+        let (c0, _, s0) = px_to_cell(ox + 1.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(c0, 0);
+        assert_eq!(s0, Side::Left, "left half of the cell → Left");
+
+        // Right half of cell 0 → Right.
+        let (_, _, s1) = px_to_cell(ox + 6.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(s1, Side::Right, "right half of the cell → Right");
+
+        // The exact midpoint counts as the right half (matches alacritty's
+        // `< half ⇒ Left` boundary — anything ≥ half is Right).
+        let (_, _, s2) = px_to_cell(ox + cw / 2.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(s2, Side::Right, "exact midpoint → Right");
+
+        // The side is a within-cell property: the same sub-cell offset in a later
+        // column yields the same side (no drift across the row).
+        let (c3, _, s3) = px_to_cell(ox + cw * 5.0 + 1.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(c3, 5);
+        assert_eq!(s3, Side::Left, "side is independent of the column index");
+
+        // A pointer in the LEFT PADDING (left of column 0) clamps to col 0 AND
+        // Side::Left, so a drag starting there still INCLUDES the first cell.
+        // (Audit v2.25.0: deriving the side from the raw negative offset via
+        // `rem_euclid` wrapped it into the right half and dropped column 0.)
+        let (c4, _, s4) = px_to_cell(ox - 3.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        assert_eq!(c4, 0, "left of origin clamps to column 0");
+        assert_eq!(
+            s4,
+            Side::Left,
+            "left of origin → Side::Left (first cell kept)"
         );
     }
 

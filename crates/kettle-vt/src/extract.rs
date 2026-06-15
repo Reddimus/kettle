@@ -571,7 +571,11 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     };
     let (host, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
-        None => ("", rest),
+        // No path component at all (e.g. `file://localhost` with no trailing
+        // slash). A valid OSC 7 cwd is always an absolute path beginning with
+        // `/` (or a `/C:/…` drive form), so a slash-less remainder is never a
+        // usable cwd — reject rather than emit a bogus one (audit, v2.25.0).
+        None => return None,
     };
     let host = host.trim();
     if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
@@ -803,6 +807,13 @@ mod tests {
             parse_osc7_with_host("file://buildbox/home/u", Some("myhost")),
             None
         );
+        // A host with NO path component (no slash) is not a usable cwd — reject
+        // rather than emit a bogus relative cwd like "localhost" (audit v2.25.0).
+        assert_eq!(
+            parse_osc7_with_host("file://localhost", Some("myhost")),
+            None
+        );
+        assert_eq!(parse_osc7_with_host("file://myhost", Some("myhost")), None);
         assert_eq!(
             parse_osc7_with_host("kitty-shell-cwd://buildbox/home/u", Some("myhost")),
             None

@@ -2639,6 +2639,50 @@ mod conformance {
         );
     }
 
+    /// The pointer's sub-cell `Side` (which half of a cell the cursor is in) must
+    /// change which boundary cells a Simple drag includes. kettle's `px_to_cell`
+    /// now computes this side instead of hardcoding Left/Right; this pins the
+    /// alacritty `Selection::to_range` (`range_simple`) contract kettle relies on,
+    /// so a future alacritty bump that changed the trimming would fail loudly here
+    /// rather than silently re-introducing the "off by one letter" selection.
+    #[test]
+    fn selection_side_trims_inclusive_range_per_alacritty() {
+        use alacritty_terminal::index::Side;
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        let (mut t, mut p) = harness(20, 2);
+        feed(&mut t, &mut p, b"ABCDEFGH");
+        let a = Point::new(Line(0), Column(2)); // 'C'
+        let b = Point::new(Line(0), Column(5)); // 'F'
+
+        // Anchor on the LEFT of 'C', end on the RIGHT of 'F' → the full inclusive
+        // span C..F is copied.
+        let mut wide = Selection::new(SelectionType::Simple, a, Side::Left);
+        wide.update(b, Side::Right);
+        t.selection = Some(wide);
+        let wide_s = t.selection_to_string().unwrap_or_default();
+        assert_eq!(
+            wide_s, "CDEF",
+            "Left-anchor/Right-end selects the full span"
+        );
+
+        // Anchor on the RIGHT of 'C', end on the LEFT of 'F' → alacritty trims BOTH
+        // boundary cells (C..F → D..E). This is exactly the cell-by-cell behavior a
+        // drag must reproduce as the pointer crosses each cell's midpoint.
+        let mut narrow = Selection::new(SelectionType::Simple, a, Side::Right);
+        narrow.update(b, Side::Left);
+        t.selection = Some(narrow);
+        let narrow_s = t.selection_to_string().unwrap_or_default();
+        assert_eq!(
+            narrow_s, "DE",
+            "Right-anchor/Left-end trims both boundary cells"
+        );
+
+        assert!(
+            narrow_s.len() < wide_s.len(),
+            "the sub-cell side must change which boundary cells are copied"
+        );
+    }
+
     /// Cycle 921 (agent-first A1/A2): `screen_text_of` is the single sanctioned
     /// grid scrape behind the control server's `read_screen` and `run_command`
     /// output slicing. Pin: document order (history first, then active screen),

@@ -4,6 +4,40 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.25.0] — 2026-06-14
+
+  **Cell-locked text rendering + sub-cell selection accuracy.** Fixes two
+  long-standing, related glitches: text that was "every now and then misaligned"
+  and a mouse selection that felt "off by one letter".
+
+  ### Fixed
+  - **Glyphs no longer drift off the cell grid.** Pane text is now rendered the
+    way Alacritty / kitty / WezTerm / Ghostty do — a new cell-locked instanced
+    glyph pipeline pins every glyph to its terminal cell (`col × cell_w`).
+    Previously each row was laid out as one continuous shaped run, so any glyph
+    whose advance differed from the monospace cell width — fallback-font glyphs
+    (CJK, color emoji, some symbols), ligature clusters, a bold/italic face of a
+    different width — shifted **every following glyph** off the grid that the
+    selection highlight, the block cursor, link underlines and mouse hit-testing
+    all assume. For ordinary primary-font ASCII the position is unchanged (its
+    advance already equals the cell width), so this is a fix purely where drift
+    occurred. Rasterization, antialiasing, gamma and theme colors are identical
+    to before — only the X position changes. Verified live (a row of CJK that
+    drifted several cells in the old path now lands exactly on the grid).
+  - **Mouse selection respects the sub-cell pointer position.** Dragging to
+    select now computes which HALF of a cell the pointer is in (matching
+    xterm / Alacritty / iTerm2) instead of always anchoring on a fixed side, so
+    the boundary cell is included only once you cross its midpoint — no more
+    "off by one letter". Copy (`selection_to_string`) follows automatically.
+    Word / line / double-click selection is unchanged (it snaps to token
+    boundaries, which ignore the sub-cell side).
+
+  ### Added
+  - **`text-renderer` config key** (`grid` | `legacy`, default `grid`). `grid` is
+    the new cell-locked path above; `legacy` restores the previous continuous
+    layout as a one-release rollback escape hatch (slated for removal). See
+    **[CONFIG.md](docs/CONFIG.md)**.
+
 ## [2.24.1] — 2026-06-14
 
   ### Changed

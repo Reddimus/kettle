@@ -258,10 +258,31 @@ pub enum BackgroundType {
     /// Procedural GPU starfield (v2.24.0): a slow forward-flight field of
     /// soft-glowing, subtly-colored stars rendered by a WGSL fragment shader —
     /// true-color, perfectly looping, ~zero memory (no decoded frames). Needs no
-    /// `background_image`; tuned by `starfield-speed` / `-density` / `-glow`.
+    /// `background_image`. v2.24.1: a FIXED built-in example — the look (slow
+    /// drift, center-invisible cubic fade-in) is baked into the shader, not
+    /// config-tunable (the `starfield-speed` / `-density` / `-glow` knobs were
+    /// removed; an old config still carrying them just warns "unknown key").
     Starfield,
     /// Transparent (uses `background_darkness` to dim).
     Transparent,
+}
+
+/// `text-renderer` (v2.25.0): how pane (terminal grid) text is rasterized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextRenderer {
+    /// Cell-locked: every glyph is pinned to its grid cell (`col * cell_w`), the
+    /// way Alacritty / kitty / WezTerm / Ghostty render. Fixes fallback-glyph
+    /// drift — em-dashes, middle-dots, smart quotes, Nerd icons, CJK and
+    /// ligature clusters whose advance ≠ the cell width used to shift the rest
+    /// of a row off the grid that selection highlights, the block cursor and
+    /// mouse hit-testing assume ("misaligned text" / "selection off by one
+    /// letter"). The default.
+    #[default]
+    Grid,
+    /// Legacy: the pre-2.25.0 continuous glyphon layout (each row shaped as one
+    /// advance-positioned run). A rollback escape hatch kept for one release in
+    /// case a font/emoji/ligature regression surfaces; slated for removal.
+    Legacy,
 }
 
 /// `background-animation`: how an ANIMATED background (a `Starfield`, or an
@@ -1244,6 +1265,9 @@ pub struct Config {
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:118
     /// `background_type`): background style.
     pub background_type: BackgroundType,
+    /// `text-renderer` (v2.25.0): cell-locked grid rendering (default) vs the
+    /// legacy continuous glyphon layout. See [`TextRenderer`].
+    pub text_renderer: TextRenderer,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:117
     /// `background_image`): path to background image. No-op
     /// until Bucket-D bg-image render lands.
@@ -1863,6 +1887,7 @@ impl Default for Config {
             use_theme_colors: false,
             http_proxy: String::new(),
             background_type: BackgroundType::Solid,
+            text_renderer: TextRenderer::default(),
             background_animation: BackgroundAnimation::default(),
             chrome_background: ChromeBackground::default(),
             background_image: String::new(),
@@ -2636,6 +2661,9 @@ impl Config {
                         v.to_ascii_lowercase().as_str(),
                         "solid" | "image" | "starfield" | "transparent"
                     )
+                }
+                "text-renderer" | "text_renderer" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "grid" | "legacy")
                 }
                 "background-animation" | "background_animation" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -3673,6 +3701,12 @@ impl Config {
                         "starfield" => BackgroundType::Starfield,
                         "transparent" => BackgroundType::Transparent,
                         _ => BackgroundType::Solid,
+                    };
+                }
+                "text-renderer" | "text_renderer" => {
+                    cfg.text_renderer = match e.value.to_ascii_lowercase().as_str() {
+                        "legacy" => TextRenderer::Legacy,
+                        _ => TextRenderer::Grid,
                     };
                 }
                 "background-animation" | "background_animation" => {
@@ -5351,6 +5385,23 @@ tab-bar-width = 200\n";
             BackgroundType::Starfield
         );
         assert!(Config::detect_malformed_values("background-type = starfield").is_empty());
+
+        // v2.25.0: text-renderer defaults to the cell-locked grid path; legacy
+        // is the opt-out rollback escape hatch.
+        assert_eq!(d.text_renderer, TextRenderer::Grid);
+        assert_eq!(
+            Config::parse_text("text-renderer = legacy").text_renderer,
+            TextRenderer::Legacy
+        );
+        assert_eq!(
+            Config::parse_text("text_renderer = grid").text_renderer,
+            TextRenderer::Grid
+        );
+        assert!(Config::detect_malformed_values("text-renderer = grid").is_empty());
+        // An old config that still carries the removed starfield knobs must
+        // parse cleanly (the value falls through) — they surface only as
+        // unknown-key warnings, never a hard error.
+        let _ = Config::parse_text("starfield-speed = 0.02");
     }
 
     #[test]

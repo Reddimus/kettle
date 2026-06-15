@@ -486,7 +486,7 @@ struct ExecArgs {
     /// Working directory for the child (default: inherit).
     #[arg(short = 'd', long = "cwd", value_name = "DIR")]
     cwd: Option<std::path::PathBuf>,
-    /// Kill the child and exit 124 after this many seconds.
+    /// Kill the child and exit 124 after this many seconds (finite, ≥ 0).
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
     /// Strip ANSI escape sequences — emit plain text (good for assertions).
@@ -763,12 +763,31 @@ fn main() -> anyhow::Result<()> {
                 let rows = args
                     .rows
                     .unwrap_or_else(|| probed.map(|(_, r)| r).unwrap_or(24));
+                // `Duration::from_secs_f64` PANICS (aborts the process) on a
+                // negative, NaN, infinite, or overflowing value — all reachable
+                // from the CLI (`--timeout=nan`, `--timeout=-1`, `--timeout=1e400`
+                // which parses to +inf). Validate before converting and exit
+                // cleanly. The MCP / control-server timeout paths already clamp;
+                // this brings the `kettle exec` CLI to parity. Audit, v2.25.0.
+                let timeout = match args.timeout {
+                    None => None,
+                    Some(s) if s.is_finite() && (0.0..=u32::MAX as f64).contains(&s) => {
+                        Some(std::time::Duration::from_secs_f64(s))
+                    }
+                    Some(_) => {
+                        eprintln!(
+                            "kettle exec: --timeout must be a finite number of seconds in 0..={}",
+                            u32::MAX
+                        );
+                        std::process::exit(exec::EXIT_INTERNAL);
+                    }
+                };
                 let opts = exec::ExecOpts {
                     argv: args.argv,
                     cols,
                     rows,
                     cwd: args.cwd,
-                    timeout: args.timeout.map(std::time::Duration::from_secs_f64),
+                    timeout,
                     mode,
                     record: args.record,
                     // stdin forwarding is deferred to a follow-up: the pump

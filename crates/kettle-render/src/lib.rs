@@ -40,6 +40,7 @@
 
 mod bg_image;
 mod color;
+mod glyphpipe;
 mod imgpipe;
 mod quad;
 mod snapshot;
@@ -55,17 +56,20 @@ use std::sync::Arc;
 
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
-use glyphon::cosmic_text::{AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding};
+use glyphon::cosmic_text::{AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
-use kettle_config::{Config, Rgb, ScrollbarMode};
+// `kettle_config::TextRenderer` (the grid|legacy mode enum) is aliased so it
+// doesn't collide with glyphon's `TextRenderer` (the renderer) imported above.
+use kettle_config::{Config, Rgb, ScrollbarMode, TextRenderer as TextRendererMode};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use color::{
     dim as dim_color, reply_for_query, reply_for_text_area_size, resolve, resolve_query,
 };
+use glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
 use quad::{QuadInstance, QuadPipeline};
 
 /// A search match in a pane's viewport (grid coords, pre-scrolled).
@@ -572,6 +576,23 @@ pub struct Renderer {
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
+    /// v2.25.0: cell-locked pane-text renderer (the default `text-renderer=grid`
+    /// path). Pins every glyph to its grid cell so fallback/ligature/CJK glyphs
+    /// can't drift off the `col*cell_w` grid that selection / cursor / hit-testing
+    /// use. glyphon's `text_renderer` above still draws chrome / titlebars /
+    /// menus / the cursor glyph (none of which are grid-locked).
+    glyph_pipeline: GlyphPipeline,
+    /// Pooled per-frame scratch for the glyph instances emitted into
+    /// `glyph_pipeline` (high-water-mark reuse like `quad_scratch`).
+    glyph_instances: Vec<GlyphInstance>,
+    /// Pooled per-pane scissor ranges paired with `glyph_instances`, so each
+    /// pane's text is clipped to its own rect at draw time (persists across idle
+    /// frames alongside the instance buffer).
+    glyph_clips: Vec<GlyphClip>,
+    /// Pooled per-run scratch: byte offset of each char in a row (char index ==
+    /// grid column, since `build_pane` pushes exactly one char per cell). Reused
+    /// across runs/frames to keep the glyph-emit walk allocation-free.
+    glyph_char_starts: Vec<u32>,
     /// Bundled Regular is loaded eagerly; styled faces are loaded on first
     /// bold/italic terminal content so first-window startup pays for one face,
     /// not the full family.
@@ -1002,6 +1023,9 @@ impl Renderer {
         let bg_imgs = imgpipe::ImagePipeline::new(&device, format);
         // v2.24.0: procedural starfield wallpaper, same back-most slot.
         let starfield = starfield::StarfieldPipeline::new(&device, format);
+        // v2.25.0: cell-locked pane-text pipeline (the `text-renderer=grid`
+        // default). Always constructed; only emitted/drawn in grid mode.
+        let glyph_pipeline = GlyphPipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -1012,6 +1036,10 @@ impl Renderer {
             atlas,
             viewport,
             text_renderer,
+            glyph_pipeline,
+            glyph_instances: Vec::new(),
+            glyph_clips: Vec::new(),
+            glyph_char_starts: Vec::new(),
             bundled_style_faces_loaded: false,
             pane_buffer_ids: Vec::new(),
             pane_buffers: Vec::new(),
@@ -1194,6 +1222,10 @@ impl Renderer {
         // size change preserves the user's chosen scale.
         self.cell_w = cw * self.cell_scale_w.max(0.01);
         self.cell_h = ch * self.cell_scale_h.max(0.01);
+        // The cell-locked glyph cache keys bake in the physical font size; a
+        // size / scale / family change makes every cached slot stale, so drop
+        // them (the atlas textures keep their allocation; the packer resets).
+        self.glyph_pipeline.clear();
     }
 
     /// Cycle 654 (sub-cycle 3 of terminalshot design): queue a
@@ -1247,16 +1279,6 @@ impl Renderer {
         self.chrome_style_key = 0;
     }
 
-    /// Render a full frame of tiled panes plus the tab bar and search overlay.
-    /// v2.21.x: whether the background-image is an animation the event loop
-    /// should PROACTIVELY keep redrawing (feeds the app's ~30 fps anim tick).
-    /// True only for a decoded MULTI-frame background with
-    /// `background-animation != off`, and — for the default `when-focused` —
-    /// only while the window is focused, so an unfocused window costs ZERO idle
-    /// (the battery behavior Ghostty's always-on custom shaders lack). The
-    /// frame shown is still time-correct on any other repaint (see the bg
-    /// frame-select in `render_frame_with_status`); this only governs proactive
-    /// waking.
     /// Repaint cap for the procedural starfield (`background-type = starfield`).
     /// The drift is slow, so a low rate keeps idle CPU near today's level while
     /// the steps stay imperceptible; the shader's `time` is continuous either
@@ -1264,6 +1286,16 @@ impl Renderer {
     /// reuse the GIF's edge-trigger + wake machinery unchanged.
     const STARFIELD_FPS: u64 = 10;
 
+    /// Whether the background is ANIMATING and the event loop should proactively
+    /// keep redrawing it (feeds the app's anim tick). True for a procedural
+    /// starfield, OR a decoded MULTI-frame image (animated GIF / APNG / WebP) with
+    /// `background-animation != off`. For `background-animation = when-focused` it
+    /// is true only while the window is focused; the DEFAULT is `Always` (v2.24.0)
+    /// — it animates even unfocused, but the event loop still FREEZES the wake when
+    /// the window is minimized or occluded, so a hidden window costs zero idle (the
+    /// battery behavior Ghostty's always-on custom shaders lack). The frame shown is
+    /// time-correct on any other repaint (see the bg frame-select in
+    /// `render_frame_with_status`); this only governs proactive waking.
     pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
         use kettle_config::BackgroundType;
         // Shared focus/Off gate.
@@ -2851,23 +2883,28 @@ impl Renderer {
             let pane_fg = pv.snap.colors[256]
                 .map(|c| Rgb::new(c.r, c.g, c.b))
                 .unwrap_or(theme.foreground);
-            areas.push(TextArea {
-                buffer: &self.pane_buffers[i],
-                left: rx + pad_x,
-                // Cycle 383: shift cell text below the titlebar
-                // when active. Same offset used inside build_pane
-                // (which renders cells/cursor/images/links).
-                top: ry + pad_y + pane_titlebar_h,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: rx as i32,
-                    top: ry as i32,
-                    right: (rx + rw) as i32,
-                    bottom: (ry + rh) as i32,
-                },
-                default_color: GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b),
-                custom_glyphs: &[],
-            });
+            // v2.25.0: in the default grid mode, pane cell text is drawn by the
+            // cell-locked `glyph_pipeline` (emitted below), NOT glyphon — so don't
+            // push a pane TextArea here. Legacy mode keeps the old glyphon path.
+            if cfg.text_renderer == TextRendererMode::Legacy {
+                areas.push(TextArea {
+                    buffer: &self.pane_buffers[i],
+                    left: rx + pad_x,
+                    // Cycle 383: shift cell text below the titlebar
+                    // when active. Same offset used inside build_pane
+                    // (which renders cells/cursor/images/links).
+                    top: ry + pad_y + pane_titlebar_h,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: rx as i32,
+                        top: ry as i32,
+                        right: (rx + rw) as i32,
+                        bottom: (ry + rh) as i32,
+                    },
+                    default_color: GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b),
+                    custom_glyphs: &[],
+                });
+            }
         }
         // Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
         // sub-cycle 3): per-pane title text. Push the TextAreas
@@ -3317,6 +3354,22 @@ impl Renderer {
                 menu_areas,
                 &mut self.swash,
             )?;
+            // v2.25.0: cell-locked pane text. In the default grid mode, emit one
+            // pinned glyph instance per cell from the freshly-shaped pane buffers;
+            // legacy mode left the pane text in `areas` (glyphon) above, so emit
+            // nothing. Gated by need_prepare exactly like the glyphon prepares, so
+            // an idle frame keeps the last uploaded instance buffer + redraws it.
+            let mut gi = std::mem::take(&mut self.glyph_instances);
+            let mut gc = std::mem::take(&mut self.glyph_clips);
+            gi.clear();
+            gc.clear();
+            if cfg.text_renderer == TextRendererMode::Grid {
+                self.emit_pane_glyphs(panes, cfg, pane_titlebar_h, &mut gi, &mut gc);
+            }
+            self.glyph_pipeline
+                .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
+            self.glyph_instances = gi;
+            self.glyph_clips = gc;
         }
         // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
         // glyph in its own renderer. Runs EVERY frame a block cursor is visible
@@ -3469,6 +3522,11 @@ impl Renderer {
             }
             self.quads.draw(&mut pass);
             self.imgs.draw(&mut pass);
+            // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
+            // images and below chrome text (titlebars / menus) and the cursor
+            // glyph. A no-op (count 0) in legacy mode, where pane text rides the
+            // glyphon `text_renderer` below.
+            self.glyph_pipeline.draw(&mut pass, &self.glyph_clips);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
             // Dimming + scrollbar sit on top of glyphs.
@@ -4159,6 +4217,12 @@ impl Renderer {
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
             Some((rh - cfg.padding_y * 2.0).max(1.0)),
         );
+        // Terminal rows are hard-wrapped by the VT engine at `cols`; the renderer
+        // must NEVER soft-wrap. Wrap::None keeps exactly one layout run per buffer
+        // line — both so a too-wide fallback glyph can't push the line onto a
+        // phantom second visual row, AND so the cell-locked emit can rely on
+        // `char index == grid column`. cosmic-text no-ops this when unchanged.
+        buf.set_wrap(&mut self.font_system, Wrap::None);
         let ff = font_features(cfg);
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
@@ -4296,6 +4360,114 @@ impl Renderer {
         self.span_scratch = spans;
         self.span_breaks_scratch = span_line_breaks;
         text_changed
+    }
+
+    /// v2.25.0 (cell-locked rendering): walk every visible pane's freshly-shaped
+    /// `Buffer` and emit ONE pinned glyph instance per laid-out glyph, positioned
+    /// at its grid cell (`pane_origin + col*cell_w`) instead of cosmic-text's
+    /// continuous advance. Rasterization + the cache key + the vertical / bearing
+    /// math are byte-identical to glyphon (see `glyphpipe.rs`); only the X is
+    /// substituted, and only that differs from the legacy path — a primary-face
+    /// monospace glyph already has advance == cell_w, so its position is
+    /// unchanged. The drift cases (fallback punctuation, Nerd icons, color emoji,
+    /// CJK, ligatures, mismatched-width bold/italic) are what get pinned.
+    fn emit_pane_glyphs(
+        &mut self,
+        panes: &[PaneView<'_>],
+        cfg: &Config,
+        pane_titlebar_h: f32,
+        out: &mut Vec<GlyphInstance>,
+        clips: &mut Vec<GlyphClip>,
+    ) {
+        let pad_x = cfg.padding_x;
+        let pad_y = cfg.padding_y;
+        let default_fg = cfg.theme.foreground;
+        // Split `*self` into disjoint field borrows so the glyph pipeline (mut),
+        // the swash cache + font system (mut, for rasterization), the shaped pane
+        // buffers (shared) and the scratch all coexist during the walk.
+        let Self {
+            glyph_pipeline,
+            swash,
+            font_system,
+            pane_buffers,
+            glyph_char_starts,
+            gpu,
+            cell_w,
+            ..
+        } = self;
+        let cw = *cell_w;
+        let device = &gpu.device;
+        let queue = &gpu.queue;
+
+        for (i, pv) in panes.iter().enumerate() {
+            let (rx, ry, rw, rh) = pv.rect;
+            let ox = rx + pad_x;
+            let oy = ry + pad_y + pane_titlebar_h;
+            // This pane's glyphs form one contiguous instance range; record it
+            // with the pane rect so `draw` can scissor-clip text to the pane.
+            let clip_start = out.len() as u32;
+            // Per-pane default fg (OSC 10 / theme), the fallback for a glyph with
+            // no explicit color span. Mirrors the glyphon pane TextArea's
+            // `default_color`.
+            let pane_fg = pv.snap.colors[256]
+                .map(|c| Rgb::new(c.r, c.g, c.b))
+                .unwrap_or(default_fg);
+            let default_color = GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b);
+
+            let buf = &pane_buffers[i];
+            for run in buf.layout_runs() {
+                // Map a cluster's byte offset → grid column. `Wrap::None`
+                // guarantees one run per buffer line and `build_pane` pushes
+                // exactly one char per cell, so the Nth char IS grid column N.
+                glyph_char_starts.clear();
+                for (b, _) in run.text.char_indices() {
+                    glyph_char_starts.push(b as u32);
+                }
+                let line_y = run.line_y;
+                for glyph in run.glyphs.iter() {
+                    let col = glyph_grid_col(glyph_char_starts, glyph.start);
+                    let fs = glyph.font_size;
+                    // Pin the pen to the cell, snapped to an integer physical
+                    // pixel (crisp + cache-friendly: x_bin = 0), while keeping any
+                    // intra-cluster x_offset. Feeding cosmic-text's `physical()`
+                    // an offset that lands the logical X exactly there reuses its
+                    // exact cache-key + vertical + subpixel math, so the rasterized
+                    // bitmap is byte-identical to glyphon's.
+                    let cell_left = ox + col as f32 * cw;
+                    let x_off_px = fs * glyph.x_offset;
+                    let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
+                    let phys = glyph.physical((off_x, oy), 1.0);
+                    let key = phys.cache_key;
+                    let slot = match glyph_pipeline.ensure_glyph(device, queue, key, || {
+                        RasterGlyph::from_swash(swash.get_image(font_system, key).as_ref()?)
+                    }) {
+                        Some(s) => s,
+                        None => continue, // empty / whitespace glyph — nothing to draw
+                    };
+                    let color = glyph.color_opt.unwrap_or(default_color);
+                    let qx = phys.x + slot.left;
+                    let qy = line_y.round() as i32 + phys.y - slot.top;
+                    out.push(GlyphInstance {
+                        pos: [qx as f32, qy as f32],
+                        size: [slot.w, slot.h],
+                        uv: [slot.atlas_x, slot.atlas_y],
+                        color: [
+                            color.r() as f32 / 255.0,
+                            color.g() as f32 / 255.0,
+                            color.b() as f32 / 255.0,
+                            color.a() as f32 / 255.0,
+                        ],
+                        kind: slot.kind,
+                        _pad: [0; 3],
+                    });
+                }
+            }
+            clips.push(GlyphClip {
+                rect: [rx, ry, rw, rh],
+                start: clip_start,
+                count: out.len() as u32 - clip_start,
+            });
+        }
     }
 }
 
@@ -5269,6 +5441,29 @@ fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
             (cfg.background_opacity as f64) * (cfg.background_darkness as f64)
         }
     }
+}
+
+/// Grid column of the cluster a laid-out glyph belongs to (v2.25.0 cell-locked
+/// rendering). `char_starts[k]` is the byte offset of the k-th char in the row
+/// text, and because `build_pane` writes exactly ONE char per grid cell (the
+/// wide-char spacer included), `k` IS the grid column. A glyph's `cluster_start`
+/// byte indexes into that same row text, so its column is the char whose byte
+/// range contains the cluster start — the last `char_starts` entry `<= start`.
+fn glyph_grid_col(char_starts: &[u32], cluster_start: usize) -> usize {
+    char_starts
+        .partition_point(|&bs| (bs as usize) <= cluster_start)
+        .saturating_sub(1)
+}
+
+/// Cell-locked logical pen X (physical px), snapped to an integer pixel so the
+/// glyph is crisp and shares one subpixel-bin (x_bin = 0) cache slot regardless
+/// of cell: the grid cell's left edge plus any intra-cluster `x_offset` (kept so
+/// a combining mark still stacks on its base). Substituting this for cosmic-text's
+/// advance-accumulated `glyph.x` IS the fix — for a primary-face monospace glyph
+/// (advance == cell_w) it equals the glyph's old position, so ordinary text is
+/// unchanged; only advance-mismatched glyphs (fallback / CJK / ligature) move.
+fn cell_locked_pen_x(cell_left: f32, x_offset_px: f32) -> f32 {
+    (cell_left + x_offset_px).round()
 }
 
 fn measure_cell(
@@ -7556,5 +7751,91 @@ mod settings_panel_cols_tests {
         // A hypothetical sparse category never renders narrower than 44 cols.
         assert_eq!(settings_panel_cols(&["x".to_string()]) as usize, 44);
         assert_eq!(settings_panel_cols(&[]) as usize, 44);
+    }
+}
+
+#[cfg(test)]
+mod glyph_cell_lock_tests {
+    use super::{cell_locked_pen_x, glyph_grid_col};
+
+    /// `char index == grid column` because `build_pane` writes one char per cell
+    /// (wide-char spacer included). The cluster→column map must resolve each
+    /// glyph's start byte to its char's column, including a multi-byte char's
+    /// interior byte and the spacer that follows a wide glyph.
+    #[test]
+    fn glyph_grid_col_maps_cluster_byte_to_column() {
+        // Row text "a你 b": 'a'@0 (1B), '你'@1 (3B), spacer ' '@4 (1B), 'b'@5.
+        // One char per cell ⇒ a=col0, 你=col1, spacer=col2, b=col3.
+        let starts = [0u32, 1, 4, 5];
+        assert_eq!(glyph_grid_col(&starts, 0), 0, "'a' → col 0");
+        assert_eq!(glyph_grid_col(&starts, 1), 1, "'你' → col 1");
+        assert_eq!(glyph_grid_col(&starts, 4), 2, "spacer → col 2");
+        assert_eq!(
+            glyph_grid_col(&starts, 5),
+            3,
+            "'b' → col 3 (past the wide cell)"
+        );
+        // A cluster byte inside the multi-byte char still maps to its column.
+        assert_eq!(
+            glyph_grid_col(&starts, 3),
+            1,
+            "interior byte of '你' → col 1"
+        );
+        // Defensive: a start before the first char clamps to column 0.
+        assert_eq!(glyph_grid_col(&starts, 0), 0);
+    }
+
+    /// The pen is pinned to the cell and snapped to an integer pixel; a
+    /// primary-face glyph (x_offset 0) lands exactly on `cell_left`, and a
+    /// combining mark's offset is preserved before snapping.
+    #[test]
+    fn cell_locked_pen_snaps_to_the_cell() {
+        assert_eq!(
+            cell_locked_pen_x(40.0, 0.0),
+            40.0,
+            "integer cell_left is unchanged"
+        );
+        assert_eq!(cell_locked_pen_x(40.4, 0.0), 40.0, "snaps down");
+        assert_eq!(cell_locked_pen_x(40.6, 0.0), 41.0, "snaps up");
+        assert_eq!(
+            cell_locked_pen_x(40.0, 2.0),
+            42.0,
+            "intra-cluster x_offset kept"
+        );
+        // The whole point: column N pins to N*cw regardless of upstream drift.
+        let cw = 8.4_f32;
+        for col in 0..80u32 {
+            let cell_left = 10.0 + col as f32 * cw;
+            assert_eq!(
+                cell_locked_pen_x(cell_left, 0.0),
+                cell_left.round(),
+                "column {col} pen must be its own cell, never drifted by neighbors"
+            );
+        }
+    }
+
+    /// Wiring drift guards: the grid path must NOT push a pane TextArea (that
+    /// would double-draw via glyphon), the cell-locked draw must sit in the
+    /// render pass, and the emit must be gated on grid mode.
+    #[test]
+    fn grid_path_wiring_is_present() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("if cfg.text_renderer == TextRendererMode::Legacy {"),
+            "pane TextArea must be pushed to glyphon ONLY in legacy mode"
+        );
+        assert!(
+            src.contains("self.glyph_pipeline.draw(&mut pass);"),
+            "the cell-locked glyph pipeline must draw in the render pass"
+        );
+        assert!(
+            src.contains("if cfg.text_renderer == TextRendererMode::Grid {")
+                && src.contains("self.emit_pane_glyphs("),
+            "glyph emission must be gated on grid mode"
+        );
+        assert!(
+            src.contains("buf.set_wrap(&mut self.font_system, Wrap::None);"),
+            "pane buffers must be Wrap::None so a row is one run + char==column holds"
+        );
     }
 }

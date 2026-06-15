@@ -1,5 +1,45 @@
 # Performance
 
+## v2.25.0 — cell-locked glyph rendering: no hot-path regression
+
+The cell-locked glyph pipeline (`text-renderer = grid`, the new default) replaces
+glyphon's per-pane `Buffer`/`prepare` for pane text with `emit_pane_glyphs` + an
+instanced glyph pass. The concern was the render hot path, so it was measured
+directly. The pane-shaping cache (`pane_line_keys`) and the lock-free snapshot
+pipeline are unchanged, so PTY parsing (the throughput path) is untouched by
+design — and the measurements bear that out.
+
+**Throughput — grid vs legacy, same release binary, both orderings** (Surface
+Book 3, discrete GPU per the live config; `scripts/perf/throughput.ps1`, MB/s,
+median of 5). Run-to-run variance was ~10 % and the *second* run of each pair was
+always faster regardless of mode (GPU clock warm-up), so the orderings are
+averaged to cancel that bias:
+
+| payload | grid | legacy | Δ |
+|---|---|---|---|
+| ascii | 1.45 | 1.54 | −6 % |
+| sgr-heavy | 1.15 | 1.23 | −6 % |
+| unicode/CJK | 2.58 | 2.63 | −2 % |
+
+The deltas sit inside the ±10 % inter-run noise — i.e. **no significant
+throughput regression**. (The absolute numbers are well below the v2.21.x
+integrated-GPU figures below because the live config pins the discrete NVIDIA
+`gpu-power-preference = high`, which trades cold-start + flood throughput for the
+discrete path — a config choice, not a code change.)
+
+**Idle CPU** (60 s, blinking cursor, solid background): **4.56 %** in grid mode —
+unchanged from the v2.21.0 present-bound floor (~3.8 %), confirming that the grid
+path's per-blink re-emit costs essentially nothing (it runs on the same
+`need_prepare` damage gate as the glyphon prepare it replaces). **Fresh working
+set** 293 MB (≈ the 307 MB documented below). **Startup** is unchanged in
+character — discrete-GPU-wake-dominated (~2–3 s on this dual-GPU laptop); the new
+pipeline adds only a single shader-module compile + two small atlas textures at
+`Renderer::new`.
+
+Net: kettle remains a throughput-and-footprint competitor (beats WezTerm, trades
+with Alacritty, behind Windows Terminal's shared-process model), and the
+cell-locked renderer is at parity with the path it replaces.
+
 ## v2.23.x — re-verification + the animated-background idle fix
 
 Re-ran `scripts/perf/perf-all.ps1` against **Alacritty** and **WezTerm**
