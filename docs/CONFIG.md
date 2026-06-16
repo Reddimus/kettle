@@ -32,6 +32,7 @@ keys). The file is **watched and reloaded live**.
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
+| `cell-width` / `cell-height` | float 0.5–3.0 | `1.0` | Multiplier applied to measured terminal cell width / height. Values are clamped at parse time and reload live with font metric changes |
 | `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` (default) is cell-locked rendering: every glyph is pinned to its terminal cell (`col × cell_w`), the way Alacritty/kitty/WezTerm/Ghostty render — so fallback-font glyphs (CJK, color emoji, some symbols) and ligatures can't drift off the grid that selection / cursor / mouse hit-testing use. `legacy` restores the pre-2.25.0 continuous layout as a rollback escape hatch. Leave it on `grid` unless you are isolating a renderer regression |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The cursor BLOCK color. `cursor-bg-color` (Terminator `cursor_bg_color`) is an alias |
@@ -203,6 +204,7 @@ per-key audit against Terminator's source.
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
+| `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to close-window, close-tab, and close-pane actions; panes sitting idle at an integrated-shell prompt do not count as work to lose |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
 
 ### Terminator-parity config keys by disposition
@@ -234,10 +236,8 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 
 | Key | What Terminator does with it | Why it's future-work |
 |---|---|---|
-| `ask-before-closing` | Close-confirmation dialog (always / multiple-terminals / never) | Needs modal dialog primitive |
 | `always-split-with-profile` | New splits inherit the parent pane's profile | Needs the profile concept formalized first |
 | `autoclean-groups` | Auto-remove empty broadcast groups | Needs named broadcast groups (Bucket D) |
-| `cell-width` / `cell-height` | Font cell-grid pixel size overrides | Render-layer font-metric override |
 | `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
 | `scroll-tabbar` | Horizontal-scroll across many tab segments | Needs scrollable tab-bar UI for many-tab cases |

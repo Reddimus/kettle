@@ -1034,12 +1034,8 @@ pub struct Config {
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
-    ///
-    /// NOTE (cycle 563): parsed but currently no-op — kettle-ui
-    /// doesn't consume this field yet. Users setting
-    /// `ask-before-closing = always` see the same behavior as
-    /// `never`. Field kept for forward-compat; a future cycle
-    /// wiring the confirm-on-close dialog reads it here.
+    /// Consumed by kettle-ui for close-window, close-tab, and close-pane
+    /// confirmation prompts.
     pub ask_before_closing: AskBeforeClosing,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:81
     /// `close_button_on_tab`): show ✕ on tabs.
@@ -1294,12 +1290,11 @@ pub struct Config {
     pub background_darkness: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:93
     /// `cell_height`): vertical cell scaling (default 1.0).
-    /// kettle's font metrics derive from glyph rendering; this
-    /// is a no-op stub for config compatibility (Bucket E in
-    /// audit doc — VTE-specific behavior).
+    /// Applied by kettle-render as a multiplier on measured cell height.
     pub cell_height: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:94
-    /// `cell_width`): horizontal cell scaling. No-op stub.
+    /// `cell_width`): horizontal cell scaling. Applied by kettle-render as a
+    /// multiplier on measured cell width.
     pub cell_width: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:124
     /// `detachable_tabs`): allow dragging tabs between windows.
@@ -4239,7 +4234,10 @@ login-shell = true\n\
 term = xterm-256color\n\
 colorterm = truecolor\n\
 tab-bar-position = left\n\
-tab-bar-width = 200\n";
+tab-bar-width = 200\n\
+ask-before-closing = multiple-terminals\n\
+cell-width = 1.1\n\
+cell-height = 1.2\n";
         let (_cfg, unknown) = Config::parse_collect(sample);
         assert!(
             unknown.is_empty(),
@@ -4249,6 +4247,52 @@ tab-bar-width = 200\n";
         assert!(
             malformed.is_empty(),
             "the documented sample values must validate clean: {malformed:?}"
+        );
+    }
+
+    /// Cycle 960 (audit): user-facing config docs must not regress shipped keys
+    /// back into the future-work table, and the main Keys table should not
+    /// duplicate a primary row name.
+    #[test]
+    fn config_reference_table_has_no_stale_or_duplicate_rows() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_md =
+            std::fs::read_to_string(manifest.join("../../docs/CONFIG.md")).expect("docs/CONFIG.md");
+
+        let future = config_md
+            .split("#### Genuine future work")
+            .nth(1)
+            .and_then(|s| s.split("## Editing the config").next())
+            .expect("future-work table");
+        for shipped in ["ask-before-closing", "cell-width", "cell-height"] {
+            assert!(
+                !future.contains(shipped),
+                "{shipped} is shipped and must not be documented as future work"
+            );
+        }
+
+        let keys_table = config_md
+            .split("## Keys")
+            .nth(1)
+            .and_then(|s| s.split("### Auto light/dark").next())
+            .expect("main Keys table");
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
+        for line in keys_table.lines() {
+            let Some(rest) = line.strip_prefix("| `") else {
+                continue;
+            };
+            let Some((key, _)) = rest.split_once('`') else {
+                continue;
+            };
+            *seen.entry(key.to_string()).or_insert(0) += 1;
+        }
+        let duplicates: Vec<_> = seen
+            .into_iter()
+            .filter_map(|(key, count)| (count > 1).then_some((key, count)))
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "main CONFIG.md Keys table has duplicate primary rows: {duplicates:?}"
         );
     }
 

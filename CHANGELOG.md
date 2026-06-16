@@ -41,6 +41,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     keeping normal tab switching and in-window reordering available.
 
   ### Documentation / packaging
+  - Corrected the config reference for shipped Terminator-parity settings:
+    `ask-before-closing` and `cell-width` / `cell-height` now live in the main
+    key table instead of the future-work table, matching the runtime wiring.
+    Added doc drift guards for stale future-work rows and duplicate config rows.
   - Refreshed stale install and package-template version references so the
     v2.25.1 release bump can keep README / INSTALL / Homebrew / AUR / Nix
     surfaces in lockstep.
