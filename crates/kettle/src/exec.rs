@@ -500,13 +500,11 @@ fn spawn_stdin_pump(writer: kettle_core::PtyWriter) {
                 Ok(n) => writer.write(&buf[..n]),
             }
         }
-        // Windows ConPTY does not turn a conin pipe-close into EOF for
-        // ReadConsole-based children (`sort`, `more`); the console EOF is
-        // Ctrl+Z at the start of a line followed by Enter. Send that nudge
-        // first, THEN close the pipe (covers both line-buffered console
-        // readers and raw pipe readers). Unix PTYs EOF cleanly on close alone.
-        #[cfg(windows)]
-        writer.write(b"\x1a\r\n");
+        // Closing the PTY input side is the least surprising EOF signal across
+        // platforms. Do not inject Ctrl+Z on Windows: under ConPTY, console
+        // shells such as `cmd` can treat it as an interrupt/control condition
+        // and exit with STATUS_CONTROL_C_EXIT even after reading the intended
+        // input line.
         writer.close();
     });
 }
