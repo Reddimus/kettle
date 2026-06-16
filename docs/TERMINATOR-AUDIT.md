@@ -402,7 +402,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |
 | `sticky` (on all workspaces) | config.py | 🟡 | cycle-694 — wired on macOS via `winit::platform::macos::WindowExtMacOS::set_visible_on_all_workspaces(true)`, called post-construction (Window-level method, not a build-time attribute like cycle-691's `with_skip_taskbar`). X11/Wayland remain Bucket E (winit 0.30 doesn't expose `_NET_WM_STATE_STICKY`; would need raw-window-handle direct atom writes — heavy dep for one config key). A Terminator config that sets `sticky = true` works correctly on macOS; on other platforms the value parses without effect. |
 | `hide_from_taskbar` | config.py | 🟡 | cycle-691 — wired on Windows via `WindowAttributesExtWindows::with_skip_taskbar` (winit 0.30 only exposes the API there). X11/Wayland/macOS remain Bucket E (would need raw-window-handle direct atom writes). A Terminator config that sets `hide_from_taskbar = true` works correctly on Windows; on other platforms the value parses without effect. |
-| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | A | cycles 637 + 638 + 648 + 652 + 660 + 662 — 7/8 sub-cycles complete end-to-end + deployed. should_prompt helper, state types, keyboard nav state machine, renderer bottom-bar projection, CloseWindow/CloseTab/ClosePane interception via maybe_confirm_then dispatch wrapper. Sub-cycle 7 (mouse hit-test) deferred — the bottom-bar renderer is keyboard-driven by design (Tab/←→/Enter/Esc); per-button mouse hit-testing on the bar-projected layout would need pixel-accurate label rects that the text shaper doesn't expose. Will land when sub-cycle 3.5 ships the centered-panel renderer (whose discrete button rects are known at compose time). Cycle-661/663 deploys. | cycle-662 |
+| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | A | cycles 637 + 638 + 648 + 652 + 660 + 662 + 944 — complete end-to-end + deployed. should_prompt helper, state types, keyboard nav state machine, renderer bottom-bar projection, CloseWindow/CloseTab/ClosePane interception via maybe_confirm_then dispatch wrapper, and mouse hit-testing for the visible `[Cancel]` / `[Close]` buttons. Cycle 944 right-aligns the buttons, flips the pointer cursor over them, and routes clicks through the same safe cancel/confirm dispatch path as keyboard input. Centered-panel rendering remains optional polish, not a functional blocker. | cycle-944 |
 | ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart | (covered) |
 | ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (kettle-ui/mux.rs cycle 343) so the spawn argv gets `-l` when true | (covered) |
 | ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ cycle 359 — `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) | cycle-359 |
@@ -701,7 +701,7 @@ through sub-cycles. Status snapshot at cycle 677:
 |------------------------------|--------|------------|-------|
 | `plugins/remote.py`          | ✅ A   | 7/7        | SSH/Docker/Podman/kubectl detect + right-click reconnect. Deployed cycle 659. |
 | `plugins/auto_theme.py`      | ✅ A   | 7/7        | Manual + clock schedule + sunrise/sunset (NOAA solar). Deployed cycle 671. |
-| `ask_before_closing`         | ✅ A   | 7/8 + 1 polish-deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer is keyboard-driven. Mouse hit-test deferred to a follow-up centered-panel renderer upgrade. Deployed cycle 661+663. |
+| `ask_before_closing`         | ✅ A   | Complete; centered-panel polish deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer supports keyboard navigation and mouse clicks on the visible `[Cancel]` / `[Close]` buttons. Deployed cycle 944. |
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed cycle 674. |
 | `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu surface readback + focused-pane crop + desktop notification. Deployed cycle 688. |
 | Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via cycle-302 IPC remain. Deployed cycles 679-682. |
@@ -714,8 +714,8 @@ the deployed binary** (last deploy at cycle 688, commit
     + right-click Reconnect (cycles 629-658)
   - `plugins/auto_theme.py`: manual toggle + clock schedule
     + NOAA solar-position sunrise/sunset (cycles 616-670)
-  - `ask_before_closing`: keyboard-driven confirm modal on
-    every close-family action (cycles 637-662)
+  - `ask_before_closing`: keyboard + mouse confirm modal on
+    every close-family action (cycles 637-662, 944)
   - `tab_position = left/right`: 180-600 px vertical strip
     (cycles 633/647-674)
   - Named broadcast groups: BroadcastScope::Group(name) +

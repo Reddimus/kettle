@@ -2453,16 +2453,33 @@ impl Renderer {
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
                 if !buttons_label.is_empty() {
-                    buttons_label.push_str("   ");
+                    buttons_label.push_str("  ");
                 }
-                let marker = if i == dlg.focus_idx { "▶ " } else { "  " };
+                let marker = if i == dlg.focus_idx { "▶" } else { " " };
+                buttons_label.push('[');
                 buttons_label.push_str(marker);
+                buttons_label.push(' ');
                 buttons_label.push_str(&btn.label);
+                buttons_label.push(']');
             }
-            let label = format!(
-                "  ⚠ {}      {}      (Tab/←→ focus · Enter confirm · Esc cancel)",
-                dlg.prompt, buttons_label
-            );
+            let prompt = format!("  ⚠ {}", dlg.prompt);
+            let help = "  Tab/←→ · Enter · Esc";
+            let max_cols = if cw > 0.0 { (sw / cw) as usize } else { 0 };
+            let buttons_cols = buttons_label.chars().count();
+            let min_gap = 2usize;
+            let mut left = format!("{prompt}{help}");
+            let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
+            if max_left > 0 && left.chars().count() > max_left {
+                left = prompt;
+            }
+            if max_left > 3 && left.chars().count() > max_left {
+                left = left.chars().take(max_left - 3).collect::<String>();
+                left.push_str("...");
+            }
+            let gap = max_cols
+                .saturating_sub(left.chars().count() + buttons_cols)
+                .max(1);
+            let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
             self.search_buffer

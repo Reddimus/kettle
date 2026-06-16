@@ -43,6 +43,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `scripts/check-agent-cli-smoke.sh` now always checks `kettle exec` PTY
     environment, `kettle exec --json` output, and `kettle mcp --self-test`
     before the optional Codex CLI / Claude Code / Neovim / AstroNvim probes.
+  - **Close-confirmation buttons are clickable.** The `ask-before-closing`
+    prompt now right-aligns visible `[Cancel]` / `[Close]` buttons in its
+    bottom bar, switches the pointer cursor over those buttons, and dispatches
+    mouse clicks through the same safe cancel/confirm path as keyboard input.
 
   ### Documentation / packaging
   - Corrected the config reference for shipped Terminator-parity settings:

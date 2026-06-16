@@ -1,11 +1,11 @@
 # Terminator `ask_before_closing` — confirm-dialog primitive design
 
-> Status: design only (cycle 637). The config key + `AskBeforeClosing`
-> enum are wired (cycles 343-360). The runtime modal-overlay confirm
-> primitive that would consume the config value is a Bucket D effort
-> because the same primitive should serve future "unsaved layout?"
-> + "kill running command?" flows. This design lays out the shared
-> primitive + its first user (`ask_before_closing`).
+> Status: shipped as the close-confirmation primitive. The config key +
+> `AskBeforeClosing` enum are wired, CloseWindow / CloseTab / ClosePane route
+> through the prompt, keyboard navigation is supported, and cycle 944 added
+> mouse hit-testing for the visible bottom-bar buttons. A centered modal panel
+> remains optional renderer polish; the functional `ask_before_closing` path is
+> complete.
 
 ## What it is
 
@@ -22,8 +22,9 @@ End-state UX in kettle:
 - With `ask-before-closing = multiple_terminals` (default), a modal
   overlay appears asking "Close 4 panes?" with two buttons:
   `[Cancel]` / `[Close]`. Default focus is Cancel (safe default).
-- Click Close or press Enter → window closes.
-- Click Cancel or press Escape → modal closes, no action.
+- Click Close or focus Close and press Enter → window closes.
+- Click Cancel, focus Cancel and press Enter, or press Escape → modal closes,
+  no action.
 
 The primitive is reusable:
 - "Killing a running process — proceed?" (cycle X: when a pane has
@@ -146,11 +147,11 @@ Pure — testable in isolation.
 |-----------|-----------|---------------|
 | 1 | `should_prompt` pure helper + drift guard on all 3×{0..N} input shapes | Pure drift guard |
 | 2 | `ConfirmDialogState` + `ConfirmAction` enum + App field | Compiles + existing tests pass |
-| 3 | Renderer `paint_confirm_dialog` (centered modal + dimming backdrop) | Snapshot test on the layout |
+| 3 | Renderer bottom-bar projection; centered modal + dimming backdrop remains polish | Snapshot / visual smoke on the layout |
 | 4 | Keyboard nav: `Tab` cycles focus; `Enter` confirms; `Esc` cancels | Drift guard on key dispatch |
 | 5 | Wire `Action::CloseWindow` through `maybe_confirm_then` | Drift guard + manual e2e |
 | 6 | Wire `Action::CloseTab` + `Action::ClosePane` similarly | Drift guard |
-| 7 | Mouse: click button hit-test + cursor-icon flip on hover | Manual e2e |
+| 7 | Mouse: click button hit-test + cursor-icon flip on hover | Pure geometry drift guard + manual e2e |
 | 8 | Audit doc + CONFIG.md + CHANGELOG | doc-only |
 
 Estimated test growth: +6-8 (the pure `should_prompt` covers a
@@ -183,6 +184,8 @@ $ kettle
 # press Esc → modal closes, window stays open
 # press Ctrl+Shift+Q again, Tab to focus Close, press Enter
 # verify: window closes
+# repeat and click the visible [Cancel] / [Close] buttons in the bottom bar
+# verify: the pointer cursor appears over buttons and clicks dispatch correctly
 
 # In config: ask-before-closing = always
 # now even single-pane CloseWindow prompts

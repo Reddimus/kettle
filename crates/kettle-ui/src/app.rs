@@ -684,6 +684,66 @@ fn tab_close_hover_icon(over_close: bool) -> Option<CursorIcon> {
     }
 }
 
+fn confirm_button_label(button: &ConfirmButton) -> &str {
+    match button {
+        ConfirmButton::Cancel => "Cancel",
+        ConfirmButton::Confirm { label, .. } => label.as_str(),
+    }
+}
+
+fn confirm_dialog_button_cells(button: &ConfirmButton) -> usize {
+    // Renderer format is `[<marker> <label>]`, where marker is either `▶` or a
+    // single space. The hit-test uses the same cell budget so clicks track the
+    // visible right-aligned button row.
+    confirm_button_label(button).chars().count() + 4
+}
+
+fn confirm_dialog_button_hit(
+    buttons: &[ConfirmButton],
+    px: f32,
+    py: f32,
+    window_w: f32,
+    window_h: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<usize> {
+    if buttons.is_empty() || window_w <= 0.0 || window_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return None;
+    }
+
+    let bar_h = cell_h + 10.0;
+    let bar_y = window_h - bar_h;
+    if py < bar_y || py >= window_h {
+        return None;
+    }
+
+    let gap_cells = 2usize;
+    let buttons_cells = buttons
+        .iter()
+        .map(confirm_dialog_button_cells)
+        .sum::<usize>()
+        + gap_cells.saturating_mul(buttons.len().saturating_sub(1));
+    let cols = (window_w / cell_w).floor().max(0.0) as usize;
+    if buttons_cells == 0 || buttons_cells > cols {
+        return None;
+    }
+
+    let mut x_cells = cols - buttons_cells;
+    for (idx, button) in buttons.iter().enumerate() {
+        let w_cells = confirm_dialog_button_cells(button);
+        let x0 = x_cells as f32 * cell_w;
+        let x1 = (x_cells + w_cells) as f32 * cell_w;
+        if px >= x0 && px < x1 {
+            return Some(idx);
+        }
+        x_cells += w_cells;
+        if idx + 1 < buttons.len() {
+            x_cells += gap_cells;
+        }
+    }
+    None
+}
+
 /// Pure: which tab segment's close-button (`✕`) rect contains the cursor,
 /// if any. Walks `segments` once and returns the first hit (segments don't
 /// overlap in the tab bar layout; cycle-tab-bar invariant). Used both to
@@ -2889,6 +2949,47 @@ impl App {
         Some(Self::resize_cursor_for(seams[i].dir))
     }
 
+    fn confirm_button_hovered(&self, ws: &WindowState) -> bool {
+        let Some(dialog) = ws.confirm_dialog.as_ref() else {
+            return false;
+        };
+        let Some(window) = ws.window.as_ref() else {
+            return false;
+        };
+        let size = window.inner_size();
+        let (cw, ch) = self.cell_px(ws);
+        confirm_dialog_button_hit(
+            &dialog.buttons,
+            ws.cursor.x as f32,
+            ws.cursor.y as f32,
+            size.width as f32,
+            size.height as f32,
+            cw as f32,
+            ch as f32,
+        )
+        .is_some()
+    }
+
+    fn confirm_button_click_result(&self, ws: &WindowState) -> Option<ConfirmKeyResult> {
+        let dialog = ws.confirm_dialog.as_ref()?;
+        let window = ws.window.as_ref()?;
+        let size = window.inner_size();
+        let (cw, ch) = self.cell_px(ws);
+        let idx = confirm_dialog_button_hit(
+            &dialog.buttons,
+            ws.cursor.x as f32,
+            ws.cursor.y as f32,
+            size.width as f32,
+            size.height as f32,
+            cw as f32,
+            ch as f32,
+        )?;
+        match dialog.buttons.get(idx)? {
+            ConfirmButton::Cancel => Some(ConfirmKeyResult::Cancel),
+            ConfirmButton::Confirm { .. } => Some(ConfirmKeyResult::Confirm),
+        }
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
@@ -2917,10 +3018,16 @@ impl App {
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
+        let confirm_hover = if self.confirm_button_hovered(ws) {
+            Some(CursorIcon::Pointer)
+        } else {
+            None
+        };
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
         // Cycle 904: a split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let want = close_hover
+            .or(confirm_hover)
             .or(chrome)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
@@ -13262,6 +13369,33 @@ impl App {
                 {
                     return;
                 }
+                // Confirm dialog buttons are real click targets. Handle them
+                // before the generic modal swallow below so a visible
+                // [Cancel] / [Close] affordance does not behave like inert
+                // text. Clicks elsewhere in the modal still get swallowed.
+                if ws.confirm_dialog.is_some()
+                    && bcode == 0
+                    && let Some(result) = self.confirm_button_click_result(ws)
+                {
+                    match result {
+                        ConfirmKeyResult::Confirm => {
+                            if let Some(to_run) =
+                                ws.confirm_dialog.as_ref().map(|s| s.on_confirm.clone())
+                            {
+                                ws.confirm_dialog = None;
+                                self.dispatch_confirm_action(ws, to_run, event_loop);
+                            }
+                        }
+                        ConfirmKeyResult::Cancel => {
+                            ws.confirm_dialog = None;
+                        }
+                        ConfirmKeyResult::Move(_) | ConfirmKeyResult::Ignore => {}
+                    }
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Cycle 786 (audit A1, critical): with any *other* modal open
                 // (search / palette / ssh / settings / layout-picker / hint /
                 // confirm dialog / inline title-edit / vi copy-mode) the click
@@ -17238,6 +17372,47 @@ mod tests {
         assert_eq!(
             confirm_dialog_keypress(0, 0, ConfirmKey::Yes),
             ConfirmKeyResult::Cancel
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_button_hit_tracks_right_aligned_button_row() {
+        use super::{ConfirmButton, confirm_dialog_button_hit};
+
+        let buttons = vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: "Close".into(),
+                destructive: true,
+            },
+        ];
+        let sw = 800.0;
+        let sh = 600.0;
+        let cw = 8.0;
+        let ch = 16.0;
+        let y = sh - (ch + 10.0) + 4.0;
+
+        // `[  Cancel]  [  Close]` consumes 10 + 2 + 9 = 21 cells,
+        // right-aligned inside a 100-cell window.
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 79.0 * cw + 1.0, y, sw, sh, cw, ch),
+            Some(0),
+            "clicking the visible Cancel button should cancel"
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, y, sw, sh, cw, ch),
+            Some(1),
+            "clicking the visible Close button should confirm"
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 90.0 * cw + 1.0, y, sw, sh, cw, ch),
+            None,
+            "the gap between buttons is not a button"
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, sh - ch - 20.0, sw, sh, cw, ch),
+            None,
+            "clicks above the confirm bar are still generic modal clicks"
         );
     }
 
