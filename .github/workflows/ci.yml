@@ -296,13 +296,21 @@ jobs:
           echo "screenshot OK ($size bytes)"
       - name: CLI smoke (all OSes)
         run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            KETTLE_CI_BIN="./target/debug/kettle.exe"
+          else
+            KETTLE_CI_BIN="./target/debug/kettle"
+          fi
+          if [ ! -x "$KETTLE_CI_BIN" ]; then
+            cargo build -q -p kettle
+          fi
           # --version exercises the cycle-192/195 build.rs git-SHA
           # capture. On a CI checkout (clean tip) we expect
           # "kettle X.Y.Z (sha12)" — verify the format with grep so
           # a regression that drops the SHA (e.g. build.rs git
           # invocation silently failing) fails CI instead of going
           # un-noticed.
-          cargo run -q -p kettle -- --version | tee /tmp/kettle-version.txt
+          "$KETTLE_CI_BIN" --version | tee /tmp/kettle-version.txt
           grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' /tmp/kettle-version.txt
           # Cycle 282: `--help` itself wasn't smoked previously. Pin
           # the help output's shape: clap's "Usage: kettle ..." prelude,
@@ -312,7 +320,7 @@ jobs:
           # --gpu-info) all surface. A clap-derive regression that
           # silently drops or renames a flag would fail this step
           # instead of slipping past CI to a confused user.
-          cargo run -q -p kettle -- --help > /tmp/kettle-help.txt
+          "$KETTLE_CI_BIN" --help > /tmp/kettle-help.txt
           grep -qE '^Usage: kettle' /tmp/kettle-help.txt
           grep -q -- '--config' /tmp/kettle-help.txt
           grep -q -- '--screenshot' /tmp/kettle-help.txt
@@ -325,7 +333,7 @@ jobs:
           # fresh CI runner there's no kettle config, so it falls
           # back to defaults and reports "status: OK". Just verify
           # it exits 0 and includes the kettle: build-identity line.
-          cargo run -q -p kettle -- --check-config | grep -E '^kettle:  [0-9]'
+          "$KETTLE_CI_BIN" --check-config | grep -E '^kettle:  [0-9]'
           # Cycle 228: when no config file exists at the resolved
           # default path (which is exactly the state on a fresh CI
           # runner), --check-config now emits a `hint:` line pointing
@@ -333,27 +341,27 @@ jobs:
           # appears so a future regression that drops the hint
           # (or breaks the path interpolation) is caught here, not
           # by a confused first-time user.
-          cargo run -q -p kettle -- --check-config \
+          "$KETTLE_CI_BIN" --check-config \
             | grep -E '^hint: +kettle --print-default-config > '
-          cargo run -q -p kettle -- --config-path
+          "$KETTLE_CI_BIN" --config-path
           # `--list-themes` should always be 500+ entries (the bundled
           # iTerm2-Color-Schemes ghostty set). A regression in
           # `theme_filter` that over-rejects (cycle 167 / 186 / 187 /
           # 190) would drop the count below 400.
-          cargo run -q -p kettle -- --list-themes > themes.txt
+          "$KETTLE_CI_BIN" --list-themes > themes.txt
           test "$(wc -l < themes.txt)" -gt 400
           # `--list-actions` should list every action name + aliases,
           # plus the parametric/unbind tail lines. Floor at 50 leaves
           # plenty of headroom; a missing-action regression would
           # drop the count fast (each Action variant tends to have
           # 2-3 alias rows).
-          cargo run -q -p kettle -- --list-actions > actions.txt
+          "$KETTLE_CI_BIN" --list-actions > actions.txt
           test "$(wc -l < actions.txt)" -gt 50
           # `--list-keybinds` should show the default Terminator-
           # compatible set (~55 chords). Floor at 40 keeps the assertion
           # from going stale on cycle-115-style chord-shadow rebalances
           # while still catching "I accidentally cleared `defaults()`".
-          cargo run -q -p kettle -- --list-keybinds > keybinds.txt
+          "$KETTLE_CI_BIN" --list-keybinds > keybinds.txt
           test "$(wc -l < keybinds.txt)" -gt 40
           # Cycle 240: `--list-ssh-hosts` on a fresh CI runner has no
           # configured hosts. The cycle-105 `format_ssh_hosts` empty
@@ -363,7 +371,7 @@ jobs:
           # contract here so a regression that drops the fallback
           # — silently producing no output — fails CI instead of
           # surprising the user.
-          cargo run -q -p kettle -- --list-ssh-hosts \
+          "$KETTLE_CI_BIN" --list-ssh-hosts \
             | grep -E '^\(no ssh-host entries configured\)$'
           # `--print-default-config` is the one-command first-launch
           # bootstrap (`kettle --print-default-config > ~/.config/
@@ -374,9 +382,9 @@ jobs:
           # `--check-config` confirms the parser accepts the output —
           # if the example file ever introduces a malformed example
           # value, this catches it before users hit it.
-          cargo run -q -p kettle -- --print-default-config > /tmp/k.cfg
+          "$KETTLE_CI_BIN" --print-default-config > /tmp/k.cfg
           test "$(wc -l < /tmp/k.cfg)" -gt 50
-          cargo run -q -p kettle -- --config /tmp/k.cfg --check-config \
+          "$KETTLE_CI_BIN" --config /tmp/k.cfg --check-config \
             | grep -E '^status: +OK'
           # Cycle 317: --profile NAME interaction smoke. Cycle 313
           # extracted resolve_config_path so every introspection
@@ -400,7 +408,7 @@ jobs:
           mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
           echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
           # --profile picks up the file → check-config exits non-zero:
-          out=$(cargo run -q -p kettle -- --profile cibad --check-config 2>&1) && \
+          out=$("$KETTLE_CI_BIN" --profile cibad --check-config 2>&1) && \
               { echo "::error::--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
                 echo "$out"; \
                 exit 1; }
@@ -429,12 +437,12 @@ jobs:
           # shell-integration target Windows users actually use
           # (install.ps1 -WithShellIntegration), so it must be smoked too.
           for sh in bash zsh fish powershell; do
-            cargo run -q -p kettle -- --shell-integration "$sh" > "/tmp/k.${sh}"
+            "$KETTLE_CI_BIN" --shell-integration "$sh" > "/tmp/k.${sh}"
             grep -q "OSC 133" "/tmp/k.${sh}"
             test "$(wc -l < /tmp/k.${sh})" -gt 8
           done
           # Unknown shell exits non-zero with a clear error.
-          if cargo run -q -p kettle -- --shell-integration tcsh 2>/dev/null; then
+          if "$KETTLE_CI_BIN" --shell-integration tcsh 2>/dev/null; then
             echo "expected --shell-integration tcsh to error"; exit 1
           fi
           # Cycle 237: --print-completions <shell> emits a per-shell
@@ -445,12 +453,12 @@ jobs:
           # primary contract; this is the CLI-surface end-to-end
           # smoke for the wiring between Cli and clap_complete.
           for sh in bash zsh fish powershell; do
-            cargo run -q -p kettle -- --print-completions "$sh" > "/tmp/k.completions.${sh}"
+            "$KETTLE_CI_BIN" --print-completions "$sh" > "/tmp/k.completions.${sh}"
             test "$(wc -c < /tmp/k.completions.${sh})" -gt 200
             grep -q "kettle" "/tmp/k.completions.${sh}"
           done
           # Unknown shell errors clearly.
-          if cargo run -q -p kettle -- --print-completions tcsh 2>/dev/null; then
+          if "$KETTLE_CI_BIN" --print-completions tcsh 2>/dev/null; then
             echo "expected --print-completions tcsh to error"; exit 1
           fi
           # Cycle 241: pin the cycle-106 / cycle-107 hard-fail surface
@@ -466,10 +474,10 @@ jobs:
           # --config-path because -d needs a windowed run otherwise).
           typo=/tmp/kettle-ci-definitely-no-such-path-$RANDOM
           rm -rf "$typo"
-          if cargo run -q -p kettle -- --config "$typo" --config-path 2>/dev/null; then
+          if "$KETTLE_CI_BIN" --config "$typo" --config-path 2>/dev/null; then
             echo "expected --config $typo to exit nonzero"; exit 1
           fi
-          if cargo run -q -p kettle -- --working-directory "$typo" --config-path 2>/dev/null; then
+          if "$KETTLE_CI_BIN" --working-directory "$typo" --config-path 2>/dev/null; then
             echo "expected --working-directory $typo to exit nonzero"; exit 1
           fi
           # And the happy path: passing the bootstrap config we just
@@ -479,7 +487,7 @@ jobs:
           # \AppData\Local\Temp\k.cfg`) before kettle sees it, so
           # `--config-path` echoes the Windows form. The basename is
           # invariant across all three OSes.
-          cargo run -q -p kettle -- --config /tmp/k.cfg --config-path \
+          "$KETTLE_CI_BIN" --config /tmp/k.cfg --config-path \
             | grep -qE 'k\.cfg$'
         shell: bash
 
