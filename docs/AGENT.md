@@ -86,14 +86,19 @@ On Windows the child runs under a ConPTY (pseudoconsole). Two consequences:
   ConPTY's screen-differ before kettle ever sees it. `kettle exec` adds a short
   settle-drain to mitigate this, but a near-instant command may still under-emit.
 
-### Limitations
+### Stdin forwarding
 
-- **stdin forwarding is not yet implemented.** `echo y | kettle exec -- prog`
-  does not pipe stdin to the child today (the agent-critical paths — run a
-  command, capture output, propagate the exit code — need no stdin). Tracked as
-  a follow-up: the pump works on Unix PTYs but Windows `std::io::Stdin` console
-  translation over a pipe handle drops bytes, and ConPTY does not turn a
-  conin-pipe-close into EOF for `ReadConsole`-based readers (`sort`, `more`).
+When `kettle exec` is launched with piped or redirected stdin, it forwards that
+input to the child PTY and closes the PTY input side on EOF:
+
+```sh
+printf 'hello\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'
+```
+
+Interactive terminal stdin is not stolen from the user, and null stdin
+(`/dev/null` / `NUL`) stays closed rather than being treated as useful input.
+The MCP `kettle_run` tool still gives the child no stdin by design; use
+`kettle exec` directly for stdin-driven one-shot commands.
 
 ## Control server + `kettle ctl`
 
@@ -234,7 +239,6 @@ If you don't want any of this, do nothing — it stays off.
 
 ## Future work
 
-- stdin forwarding for `kettle exec` (see Limitations).
 - A live-grid `screenshot` method (`send_keys` shipped in v2.20).
 - Re-hosting the server on the `kettle-muxd` session daemon
   ([MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)) — clients are unaffected.

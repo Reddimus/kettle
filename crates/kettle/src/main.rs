@@ -790,14 +790,11 @@ fn main() -> anyhow::Result<()> {
                     timeout,
                     mode,
                     record: args.record,
-                    // stdin forwarding is deferred to a follow-up: the pump
-                    // works on Unix PTYs but on Windows `std::io::Stdin`'s
-                    // console translation over a pipe handle drops the bytes
-                    // before they reach the child, and ConPTY does not turn a
-                    // conin pipe-close into EOF for ReadConsole-based readers.
-                    // The agent-critical paths (run a command, capture output,
-                    // propagate the exit code) need no stdin. See docs/AGENT.md.
-                    forward_stdin: false,
+                    // Forward only non-interactive stdin (pipe/file/socket).
+                    // A real terminal remains attached to the user, and
+                    // /dev/null/NUL stays closed rather than being mistaken for
+                    // useful input.
+                    forward_stdin: exec::stdin_is_pipe(),
                 };
                 std::process::exit(exec::run_exec(opts));
             }

@@ -69,8 +69,8 @@ pub struct ExecOpts {
     pub mode: OutputMode,
     /// Asciicast (.cast) record path — verbatim output + resize audit trail.
     pub record: Option<PathBuf>,
-    /// Forward this process's stdin to the PTY (set when stdin is not an
-    /// interactive console — see `stdin_is_pipe`).
+    /// Forward this process's stdin to the PTY (set for pipe/file/socket stdin
+    /// — see `stdin_is_pipe`).
     pub forward_stdin: bool,
 }
 
@@ -220,7 +220,7 @@ pub fn run_exec_with(
         }
     };
 
-    // Optional stdin → PTY pump (only when stdin isn't an interactive console).
+    // Optional stdin → PTY pump (only for pipe/file/socket stdin).
     // The pump holds a cloneable `PtyWriter`, so the (non-`Sync`) `Terminal`
     // stays owned by this loop.
     if opts.forward_stdin {
@@ -511,19 +511,21 @@ fn spawn_stdin_pump(writer: kettle_core::PtyWriter) {
     });
 }
 
-/// True when stdin is NOT an interactive console — i.e. it's a pipe/file we
-/// should forward to the PTY (`echo y | kettle exec -- …`). On an interactive
-/// TTY we do NOT steal stdin (the human is pointed at the GUI).
-///
-/// Retained for the deferred stdin-forwarding follow-up (the pump + this gate
-/// are correct on Unix; the Windows pipe-stdin path needs a raw-handle reader
-/// before it's re-wired in main). `#[allow(dead_code)]` until then.
-#[allow(dead_code)]
+/// True when stdin is a pipe/file/socket we should forward to the PTY
+/// (`echo y | kettle exec -- …`). On an interactive TTY we do NOT steal stdin
+/// (the human is pointed at the GUI), and `/dev/null`/`NUL` stays closed rather
+/// than being treated as useful input.
 pub fn stdin_is_pipe() -> bool {
     #[cfg(unix)]
     {
-        // isatty(0) == 0 → not a tty → forward.
-        unsafe { libc::isatty(0) == 0 }
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(0, &mut st) != 0 {
+                return false;
+            }
+            let kind = st.st_mode & libc::S_IFMT;
+            kind == libc::S_IFIFO || kind == libc::S_IFREG || kind == libc::S_IFSOCK
+        }
     }
     #[cfg(windows)]
     {

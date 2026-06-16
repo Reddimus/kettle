@@ -114,12 +114,34 @@ fn exec_timeout_returns_124() {
     );
 }
 
-// NOTE: stdin forwarding (`echo y | kettle exec -- prog`) is deferred to a
-// follow-up — the pump works on Unix PTYs but Windows `std::io::Stdin` console
-// translation over a pipe handle drops the bytes, and ConPTY does not turn a
-// conin pipe-close into EOF for ReadConsole-based readers. The agent-critical
-// paths (run a command, capture output, propagate exit code) need no stdin, so
-// there is no stdin e2e here yet. See docs/AGENT.md "Limitations".
+#[test]
+fn exec_forwards_piped_stdin() {
+    #[cfg(windows)]
+    let argv = [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "$line=[Console]::In.ReadLine(); Write-Output \"stdin:$line\"",
+    ];
+    #[cfg(unix)]
+    let argv = [
+        "sh",
+        "-c",
+        "IFS= read -r line; printf 'stdin:%s\\n' \"$line\"",
+    ];
+
+    let (code, out, err) = run_exec(
+        &["--timeout", "5.0", "--strip-ansi"],
+        &argv,
+        Some(b"agent-stdin-42\n"),
+    );
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_forwards_piped_stdin: no PTY");
+        return;
+    }
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("stdin:agent-stdin-42"), "stdout was: {out:?}");
+}
 
 #[test]
 fn exec_json_emits_start_and_exit_events() {

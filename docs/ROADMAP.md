@@ -1439,15 +1439,12 @@ features list. What's left is genuinely-multi-week threads + polish.
       discovery registry reserves a `kind` field — `"gui"` today,
       `"muxd"` later); what remains is the standalone daemon that
       re-hosts the server side and owns PTYs cross-process.
-- [ ] **stdin forwarding for `kettle exec`** — the agent-critical paths
-      (run a command, capture output, propagate the exit code) need no
-      stdin, so `echo y | kettle exec -- prog` does not pipe stdin to the
-      child today. The pump works on Unix PTYs; the outstanding piece is
-      Windows ConPTY conin EOF for `ReadConsole`-based readers (`sort`,
-      `more`). See `docs/AGENT.md` Limitations.
-- [ ] **`send_keys` (named keys / chords) + a live-grid `screenshot`
-      control method** for `kettle ctl` / the MCP surface (per
-      `docs/AGENT.md` Future work).
+- [x] **stdin forwarding for `kettle exec`** — `kettle exec` now forwards
+      pipe/file/socket stdin to the child PTY and closes the PTY input side on
+      EOF, while leaving interactive terminal stdin and `/dev/null` / `NUL`
+      alone. Covered by `crates/kettle/tests/exec.rs`.
+- [ ] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
+      surface (per `docs/AGENT.md` Future work). `send_keys` already shipped.
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
       adoption (sub-cycle 7 final piece of detachable tabs). Internal
       optimization that preserves running shells across cross-window
