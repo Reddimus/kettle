@@ -117,12 +117,7 @@ fn exec_timeout_returns_124() {
 #[test]
 fn exec_forwards_piped_stdin() {
     #[cfg(windows)]
-    let argv = [
-        "powershell.exe",
-        "-NoProfile",
-        "-Command",
-        "$line=[Console]::In.ReadLine(); Write-Output \"stdin:$line\"",
-    ];
+    let argv = ["cmd", "/V:ON", "/C", "set /P LINE=& echo stdin:!LINE!"];
     #[cfg(unix)]
     let argv = [
         "sh",
