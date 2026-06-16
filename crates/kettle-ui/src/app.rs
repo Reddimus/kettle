@@ -173,6 +173,24 @@ fn copy_clipboard_decision(selection: Option<&str>, smart_copy: bool) -> Option<
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteSource {
+    Clipboard,
+    Primary,
+}
+
+/// Terminator parity for `putty_paste_style_source_clipboard`: right-click
+/// PuTTY paste defaults to the PRIMARY selection on Linux, matching terminal
+/// mouse-paste convention. Users who expect Windows/PuTTY-style clipboard
+/// paste can opt into the regular clipboard source.
+fn putty_paste_source(source_clipboard: bool) -> PasteSource {
+    if source_clipboard {
+        PasteSource::Clipboard
+    } else {
+        PasteSource::Primary
+    }
+}
+
 /// Cycle 604 (Terminator parity, `key_zoom_in` / `key_zoom_out` via
 /// Ctrl+wheel): pure decision for whether the wheel notch should resize
 /// the font.
@@ -13447,8 +13465,9 @@ impl App {
                     ws.mouse_btn = Some(bcode);
                     return;
                 }
-                // Middle-click in the content area pastes the clipboard
-                // (standard X11 terminal behavior; PRIMARY ≈ clipboard).
+                // Middle-click in the content area pastes the PRIMARY
+                // selection when the platform exposes one; otherwise it falls
+                // back to the regular clipboard.
                 //
                 // Cycle 350 (Terminator parity, terminatorlib/config.py:88
                 // `disable_mouse_paste`): when true, middle-click does
@@ -13456,7 +13475,7 @@ impl App {
                 // cases where accidental middle-clicks shouldn't leak
                 // clipboard content into commands.
                 if bcode == 1 && !self.cfg.disable_mouse_paste {
-                    self.paste_clipboard(ws);
+                    self.paste_primary(ws);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -13464,9 +13483,14 @@ impl App {
                 }
                 // Cycle 350 (Terminator parity, terminatorlib/config.py:89
                 // `putty_paste_style`): right-click pastes (PuTTY/Windows
-                // convention) instead of opening the context menu.
+                // convention) instead of opening the context menu. The
+                // companion `putty_paste_style_source_clipboard` decides
+                // whether the source is CLIPBOARD or PRIMARY.
                 if bcode == 2 && self.cfg.putty_paste_style {
-                    self.paste_clipboard(ws);
+                    match putty_paste_source(self.cfg.putty_paste_style_source_clipboard) {
+                        PasteSource::Clipboard => self.paste_clipboard(ws),
+                        PasteSource::Primary => self.paste_primary(ws),
+                    }
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15838,6 +15862,28 @@ mod tests {
         // No selection + smart_copy = false: clobber clipboard with
         // empty string. Terminator's deliberate-UX-choice mode.
         assert_eq!(copy_clipboard_decision(None, false).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn putty_paste_source_honors_clipboard_toggle() {
+        use super::{PasteSource, putty_paste_source};
+        assert_eq!(putty_paste_source(false), PasteSource::Primary);
+        assert_eq!(putty_paste_source(true), PasteSource::Clipboard);
+    }
+
+    #[test]
+    fn mouse_paste_routes_primary_and_putty_source() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("if bcode == 1 && !self.cfg.disable_mouse_paste {\n                    self.paste_primary(ws);"),
+            "middle-click paste must use paste_primary so X11 PRIMARY works"
+        );
+        assert!(
+            src.contains("match putty_paste_source(self.cfg.putty_paste_style_source_clipboard)")
+                && src.contains("PasteSource::Clipboard => self.paste_clipboard(ws)")
+                && src.contains("PasteSource::Primary => self.paste_primary(ws)"),
+            "PuTTY right-click paste must honor putty_paste_style_source_clipboard"
+        );
     }
 
     /// Cycle 604 drift guard: pin the `should_zoom_font` policy. The

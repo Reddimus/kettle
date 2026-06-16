@@ -198,7 +198,8 @@ per-key audit against Terminator's source.
 | `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (default; ripgrep/vim: case-insensitive until any uppercase), `always` / `sensitive` (force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
-| `putty-paste-style` | bool | `false` | Right-click pastes (PuTTY convention) |
+| `putty-paste-style` | bool | `false` | Right-click pastes instead of opening the context menu. By default it uses the same PRIMARY-first source as middle-click paste on Linux and falls back to the regular clipboard on platforms without PRIMARY |
+| `putty-paste-style-source-clipboard` | bool | `false` | When `putty-paste-style = true`, source right-click paste from the regular system clipboard instead of X11 PRIMARY |
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
@@ -226,7 +227,6 @@ Terminator's. Each key falls into one of three buckets:
 | `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
 | `http-proxy` | The kettle binary makes no HTTP requests, so a proxy setting is meaningless. (The install scripts `install-online.sh` use system curl — kettle the binary itself never fetches HTTP) |
 | `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
-| `putty-paste-style-source-clipboard` | Companion to `putty-paste-style` (right-click pastes); meaningful only when kettle wires `putty-paste-style` itself. Kettle currently surfaces right-click as the context menu — wiring putty-style would be a Bucket-C task that this companion key follows |
 
 #### Genuine future work — parsed for forward-compat
 

@@ -284,9 +284,10 @@
       (`thumb` + `target_offset`) shared by renderer + UI (+3 tests).
 - [x] `--config FILE` override: used by the run, live-reload watcher,
       `--config-path`, `--check-config` and `--screenshot` (+CLI test).
-- [x] Middle-click in the content area **pastes the clipboard**
-      (bracketed-paste-safe, standard X11 behavior); `Action::Paste`
-      and middle-click share `paste_clipboard()`.
+- [x] Middle-click in the content area **pastes PRIMARY first on Linux**
+      (clipboard fallback elsewhere, bracketed-paste-safe); `Action::Paste`,
+      `Action::PastePrimary`, middle-click, and PuTTY-style right-click all
+      share the same hardened paste funnel.
 - [x] OS window title tracks the **active** pane (tab/focus switches,
       not only OSC events); deduped; pure `window_title` (+1 test).
 - [x] Alt-drag **rectangular (block) selection** (`SelectionType::Block`,

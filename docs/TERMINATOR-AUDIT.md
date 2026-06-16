@@ -112,7 +112,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | (unbound) | broadcast_off/group/all | `ToggleBroadcastOff/All` (group mode = per-tab) | A (partial; group-mode is Bucket C) |
 | Ctrl+Shift+C | copy | `Copy` | A |
 | Ctrl+Shift+V | paste | `Paste` | A |
-| (unbound) | paste_selection | `PastePrimary` (cycle 345) | A (clipboard alias on non-X11; cycle 574 routed through `paste_clipboard` for clamp/bracketed/broadcast) |
+| (unbound) | paste_selection | `PastePrimary` (cycle 345) | A (cycle 755 PRIMARY-first on Linux with clipboard fallback elsewhere; shared clamp/bracketed/broadcast paste path) |
 | Shift+Return | send_newline | A | cycle-702 — `Action::SendNewline` writes a literal `\n` to the focused pane's PTY. Useful for shell line-editors that consume Enter normally but expect explicit `\n` for line continuation. Palette + 2 name aliases (`send_newline`, `send-newline`). Drift guard `from_name_accepts_send_newline_aliases` covers both. |
 | Ctrl+Plus | zoom_in | `IncreaseFontSize` | A |
 | Ctrl+Minus | zoom_out | `DecreaseFontSize` | A |
@@ -384,17 +384,16 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`bold_is_bright`~~ | config.py | ✅ cycle-333 config key + **render-wired** (cycle-355): `if bold && cfg.bold_is_bright { fg = color::bright_for_bold(fg, theme) }` maps SGR-bold palette[0..8] → bright palette[8..16] | cycle-355 |
 | ~~`link_single_click`~~ | config.py | ✅ cycle-333 config key + **mouse-wired**: `url_modifier = cfg.link_single_click \|\| ctrl \|\| super` in the left-click handler opens the URL under the cursor on a bare click | (covered) |
 | ~~`disable_mousewheel_zoom`~~ | config.py | ✅ cycle-334 — config key parsed; kettle has no Ctrl+wheel zoom feature today so the disable is a forward-compat stub | cycle-334 |
-| ~~`disable_mouse_paste`~~ | config.py | ✅ cycle-334 — config key parsed (mouse-handler wiring is a follow-up) | cycle-334 |
-| ~~`putty_paste_style`~~ | config.py | ✅ cycle-334 — config key parsed (right-click pastes; mouse-handler wiring is a follow-up) | cycle-334 |
-| ~~`smart_copy`~~ | config.py | ✅ cycle-334 — config key parsed; default true matches Terminator (no-op when no selection; behavior wiring is a follow-up) | cycle-334 |
+| ~~`disable_mouse_paste`~~ | config.py | ✅ cycle-350 + cycle-943 — config key parsed and mouse-wired; middle-click paste uses the PRIMARY-first paste path unless disabled | cycle-943 |
+| ~~`putty_paste_style`~~ | config.py | ✅ cycle-350 + cycle-943 — config key parsed and mouse-wired; right-click pastes instead of opening the context menu | cycle-943 |
+| ~~`putty_paste_style_source_clipboard`~~ | config.py | ✅ cycle-943 — when PuTTY right-click paste is enabled, `false` uses PRIMARY-first paste and `true` uses the regular clipboard source | cycle-943 |
+| ~~`smart_copy`~~ | config.py | ✅ cycle-609 — config key parsed and `Action::Copy` wired; default true preserves the existing clipboard when no selection exists, false clobbers with empty text | cycle-609 |
 | ~~`clear_select_on_copy`~~ | config.py | ✅ cycle-333 — bool config key + Action::Copy clears selection when true | cycle-333 |
-| ~~`putty_paste_style`~~ (right-click pastes) | config.py | ✅ cycle-350 — `Action::Paste` on right-click + `putty-paste-style` config key | cycle-350 |
-| ~~`disable_mouse_paste`~~ (no middle-click paste) | config.py | ✅ `disable-mouse-paste` config key wired to mouse-handler | (covered) |
 | ~~`case_sensitive`~~ (search) | config.py | ✅ cycle-617 — `search-case-sensitive = smart\|always\|never` (incl. Terminator's `case_sensitive = true/false` shorthand) | cycle-617 |
 | ~~`invert_search`~~ | config.py | ✅ cycle 335 — `invert-search` config key | cycle-335 |
 | ~~`force_no_bell`~~ | config.py | ✅ cycle-613 — wired post-process override of `bell` mode | cycle-613 |
-| ~~`term`~~ | config.py | ✅ cycle-335 — string config key (default `xterm-256color`; wiring to spawned shell env is a follow-up sub-cycle) | cycle-335 |
-| ~~`colorterm`~~ | config.py | ✅ cycle-335 — string config key (default `truecolor`; wiring is a follow-up sub-cycle) | cycle-335 |
+| ~~`term`~~ | config.py | ✅ cycle-343 — string config key (default `xterm-256color`) wired to spawned PTY env | cycle-343 |
+| ~~`colorterm`~~ | config.py | ✅ cycle-343 + cycle-799 — string config key (default `truecolor`) wired to spawned PTY env; WSL launches also propagate it via `WSLENV` | cycle-799 |
 | ~~`title_at_bottom`~~ | config.py | ✅ — `title-at-bottom` config key (lib.rs:520-522) wired in kettle-render at the per-pane titlebar layout (render/lib.rs:1099-1106 + 1583-1590). Flips bar to bottom of pane when true. | (covered) |
 | `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses cycle-620 homogeneous/non-homogeneous layout with overflow fallback — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
 | `homogeneous_tabbar` (equal-width tabs) | config.py | ✅ cycle-620 — `true` (kettle default) divides strip evenly; `false` sizes per title length with `close_w * 1.5` min-affordance + overflow falls back to homogeneous so a many-tab window never truncates | cycle-620 |
@@ -408,7 +407,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (kettle-ui/mux.rs cycle 343) so the spawn argv gets `-l` when true | (covered) |
 | ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ cycle 359 — `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) | cycle-359 |
 | `use_login_shell` | config.py | duplicate of `login_shell` | doc |
-| ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 — `Action::PastePrimary`; cycle-574 hardened it to go through `paste_clipboard` for `LOCAL_PASTE_MAX` clamp + bracketed-paste wrap + broadcast scope (arboard has no separate primary-selection API; on Linux+X11 the regular clipboard ≈ primary for keyboard paste, and middle-click already covers true X11 primary at a lower level) | cycle-345 |
+| ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ cycle-345 + cycle-755 + cycle-943 — `Action::PastePrimary` uses X11 PRIMARY on Linux and falls back to the regular clipboard on Wayland/macOS/Windows; middle-click and PuTTY-style right-click share the same hardened paste paths | cycle-943 |
 | `send_newline` | keybinds | ✅ Shift+Enter already sends newline | document |
 | ~~`reset_clear`~~ (Reset + Clear) | keybinds | ✅ cycle-342 — `Action::ResetAndClear` (composes Reset + ClearHistory) | cycle-342 |
 | ~~half-page scroll variants~~ | keybinds | ✅ cycle 342 — `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (aliases: `page_up_half` / `page_down_half`) | cycle-342 |
@@ -537,10 +536,10 @@ Phase 2: close Bucket B + C cycles in this order (cheapest user-visible win firs
 5. `link-single-click = true/false` (B; mouse-handler). One cycle.
 6. `clear-select-on-copy = true/false` (B). One cycle.
 7. `disable-mousewheel-zoom = true/false` (B). One cycle.
-8. `term` + `colorterm` env override (B). One cycle.
+8. ✅ `term` + `colorterm` env override (B). Cycle 343 wired both to PTY spawn; cycle 799 propagates terminal identity vars through Windows→WSL via `WSLENV`.
 9. `invert-search = true/false` (B). One cycle.
 10. `close-button-on-tab = true/false` (B; render tab chrome). One cycle.
-11. `Action::PastePrimary` (B; X11 primary selection). ✅ Cycle 345 added the action; cycle 574 routed it through `paste_clipboard` so it picks up the same `LOCAL_PASTE_MAX` clamp, bracketed-paste wrap, and broadcast scoping as `Action::Paste`.
+11. `Action::PastePrimary` (B; X11 primary selection). ✅ Cycle 345 added the action; cycle 755 reads X11 PRIMARY on Linux with clipboard fallback elsewhere; cycle 943 routes middle-click and PuTTY-style right-click through the correct source while keeping the shared `LOCAL_PASTE_MAX` clamp, bracketed-paste wrap, and broadcast scoping.
 12. ✅ Cycle 342 — `Action::ResetAndClear` (composed Reset + ClearHistory).
 13. `Action::ScrollPageUpHalf` / `ScrollPageDownHalf` (B). One cycle.
 14. `exit-action = close/restart/hold` (C). One cycle.

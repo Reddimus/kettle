@@ -1312,8 +1312,8 @@ pub struct Config {
     pub detachable_tabs: bool,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:96
     /// `putty_paste_style_source_clipboard`): when `putty_paste_
-    /// style` is true, also source from the system clipboard
-    /// (not just the X11 primary).
+    /// style` is true, source right-click paste from the regular
+    /// system clipboard instead of the X11 PRIMARY selection.
     pub putty_paste_style_source_clipboard: bool,
     /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12):
     /// Lua sandbox level.

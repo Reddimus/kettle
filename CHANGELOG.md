@@ -31,6 +31,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     at startup when available and handle live `ThemeChanged` events. An explicit
     `theme-schedule` remains the owner when configured so time-based switching
     and OS switching do not fight each other.
+  - **Mouse paste now uses the right selection source.** Middle-click paste uses
+    X11 PRIMARY on Linux with clipboard fallback elsewhere, and PuTTY-style
+    right-click paste now honors `putty-paste-style-source-clipboard` instead of
+    always reading the regular clipboard.
 
   ### Documentation / packaging
   - Refreshed stale install and package-template version references so the
