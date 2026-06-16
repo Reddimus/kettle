@@ -305,3 +305,7 @@ Separate workflows:
   paths, uninstalls through the saved helper, and, when the matching release tag
   exists, runs `install-online.sh` against the published tarball to verify
   SHA-256 checking plus prefix-local uninstall behavior.
+- `scripts/check-windows-installer.ps1` — runs on Windows CI after the release
+  binary is built, installs to a throwaway custom prefix, verifies the portable
+  install payload, then uninstalls through the saved helper without repeating
+  `-Prefix`.

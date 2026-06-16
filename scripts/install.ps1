@@ -77,6 +77,13 @@ $ErrorActionPreference = 'Stop'
 # Detect the layout: extracted-zip mode keeps `kettle.exe` next to
 # this script; in-repo mode has it under `target/release/`.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$prefixMarker = Join-Path $scriptDir ".kettle-install-prefix"
+if (-not $PSBoundParameters.ContainsKey('Prefix') -and (Test-Path $prefixMarker)) {
+    $savedPrefix = (Get-Content $prefixMarker -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($savedPrefix) {
+        $Prefix = $savedPrefix
+    }
+}
 $zipModeExe = Join-Path $scriptDir "kettle.exe"
 $repoModeExe = Join-Path (Split-Path -Parent $scriptDir) "target\release\kettle.exe"
 
@@ -227,6 +234,11 @@ if (Test-Path $shellIntegrationSrc) {
 # Copy this script too so the Add/Remove Programs UninstallString
 # resolves even after the user moves on from the source dir.
 Copy-Item -Force $MyInvocation.MyCommand.Definition (Join-Path $Prefix "install.ps1")
+# Persist the effective prefix next to the saved helper. This lets
+# `$Prefix\install.ps1 -Uninstall` work for portable/custom-prefix installs
+# without requiring the user to repeat `-Prefix`; release zip/source-tree copies
+# do not have this marker, so they keep the normal default-prefix behavior.
+Set-Content -Path (Join-Path $Prefix ".kettle-install-prefix") -Value $Prefix -NoNewline
 
 # Portable mode short-circuits the system-touching steps.
 if ($portable) {

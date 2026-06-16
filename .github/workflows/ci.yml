@@ -188,6 +188,13 @@ jobs:
             exit 1
           }
           Write-Host "Windows release build + piped --version smoke OK"
+      - name: Windows installer smoke
+        # Exercise install.ps1 in portable/custom-prefix mode on real Windows.
+        # The saved helper must be able to uninstall without repeating -Prefix,
+        # which is the path documented for portable installs.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/check-windows-installer.ps1
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:
