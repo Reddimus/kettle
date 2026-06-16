@@ -2437,13 +2437,10 @@ impl Renderer {
             // Cycle 660 (sub-cycle 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
             // a bottom-bar projection of the modal. v1 of the
             // renderer skips the fancy centered-panel + backdrop
-            // dimming + per-button accent border — the bottom bar
-            // gives the user immediate "a modal is open" feedback
-            // with prompt + button labels + focus indicator
-            // (the focused button gets a ▶ prefix). The full
-            // centered-modal painting is sub-cycle 3.5 (renderer
-            // polish); for now this lands the wiring so cycle 661
-            // can hook up the dispatch.
+            // The bottom bar gives immediate modal feedback with prompt,
+            // visible button labels, and a focus indicator. The UI hit-test
+            // path mirrors this text layout so keyboard and mouse activation
+            // dispatch through the same confirmation state machine.
             have_search = true;
             let bar_h = ch + 10.0;
             // Red-ish accent (palette[1]) to signal "destructive
