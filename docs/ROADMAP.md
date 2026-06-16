@@ -1427,6 +1427,35 @@ breakdown.
 The Terminator-parity sweep effectively closes the major missing-
 features list. What's left is genuinely-multi-week threads + polish.
 
+- [ ] **Renderer visual-regression hardening after v2.25.1.** Treat any pane
+      text disappearing/reappearing outside the cursor cell as a bug, not an
+      intentional blink. Keep `text-renderer = legacy` only as a user rollback,
+      not the product fix. Remaining work: expand grid-renderer regression
+      coverage for prompt-like rows (`➜  ~`, block cursor nearby, blink toggled),
+      add screenshot/pixel checks that non-cursor cells remain stable across
+      consecutive frames, and run those checks on Ubuntu plus the Windows 11 /
+      Windows 11 WSL paths before changing renderer defaults again.
+- [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
+      covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
+      Neovim, and configured Neovim/AstroNvim command paths. Remaining work is
+      live-window validation: drive Codex CLI, Claude Code CLI, AstroNvim,
+      tmux, shell prompts, paste, scrollback, selection, resize, split, tab,
+      menu, notification, and screenshot states inside Kettle with
+      `text-renderer = grid`, then compare captured frames for blank panes,
+      overlapping UI, stale text, and unintended blinking.
+- [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
+      close to Ghostty for startup, scrollback ingestion, resize, sustained
+      output, memory, and GPU/frame-time behavior. Remaining work: refresh the
+      same-machine benchmark rows in `docs/PERFORMANCE.md`, include Ubuntu,
+      Windows 11, and Windows 11 WSL where possible, and prioritize row-level
+      damage tracking plus persistent GPU cell buffers if grid-mode frame cost
+      remains above target.
+- [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
+      Windows, MSRV, nightly, aarch64 build, package templates, screenshot
+      smokes, and CLI smokes, but the durable release gate still needs manual
+      Windows 11 and Windows 11 WSL interactive passes on real desktops,
+      including integrated-GPU default selection (`gpu-power-preference = auto`)
+      and multi-shell launch behavior.
 - [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
       Keybinds category lists each action's current chord; Enter captures a new
       chord, binds it live, and appends a `keybind` line (via
