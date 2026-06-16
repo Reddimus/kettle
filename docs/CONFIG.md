@@ -42,6 +42,8 @@ keys). The file is **watched and reloaded live**.
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
 | `scrollback` | int / `infinite` | `10000` | Lines of history; `0`, `infinite` or `unlimited` = effectively unbounded |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
+| `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. If only one dimension is set, the other uses Kettle's startup baseline (`100x36`). Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence |
+| `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
 | `background-opacity` | float | `1.0` | 0..1 |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` accepted as Alacritty-spelled alias for `bar` |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
@@ -168,6 +170,8 @@ per-key audit against Terminator's source.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
+| `window-width` / `window-height` | int cells | unset | Fresh-window startup grid size. Width is clamped `[20, 400]`, height `[8, 200]`; if one side is omitted, the other uses Kettle's startup baseline (`100x36`). Session restore and explicit new-window geometry override this seed |
+| `window-position-x` / `window-position-y` | int px | unset | Fresh-window startup position in physical pixels. Negative values support multi-monitor layouts. Session restore and explicit new-window placement override this seed |
 | `gpu-power-preference` | enum | `auto` | Which GPU policy wgpu uses at startup: `auto` (platform/wgpu chooses — **default**) \| `low` (low-power / usually integrated) \| `high` (high-performance / often discrete). Used as the policy/fallback when no specific GPU is pinned (`gpu-device-id` below). On a dual-GPU laptop `high` may wake the discrete GPU from its low-power state; use it only when you want that render headroom. Single-GPU machines usually resolve all three policies to the same adapter. Also surfaced in Settings → Graphics |
 | `gpu-device-id` / `gpu-vendor-id` | hex u32 | `0` / `0` | Pin a *specific* GPU by its PCI device + vendor id (e.g. `0x2191` / `0x10de`). `0`/unset = use `gpu-power-preference`. Easiest set via Settings → Graphics → GPU device; the resolver falls back to the power-preference policy if the pinned GPU is absent (eGPU unplugged, driver swap) so a stale pin never fails startup. **Applies on next launch** |
 | `gpu-name` | string | — | Display name of the pinned GPU; also a fallback match if the `(vendor,device)` pair no longer enumerates. Written by the settings picker |

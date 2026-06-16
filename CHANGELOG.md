@@ -12,6 +12,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     variable-name validation, empty-value support, deterministic last-writer
     process-env behavior, and Windows → WSL forwarding via Kettle's existing
     `WSLENV` propagation path.
+  - **Fresh-window startup geometry.** Config now accepts `window-width` /
+    `window-height` in terminal cells and `window-position-x` /
+    `window-position-y` in physical pixels for deterministic startup placement.
+    Restored session geometry and explicit new-window placement still take
+    precedence.
 
   ### Fixed
   - **Grid renderer cursor-blink regression.** The v2.25.0 cell-locked

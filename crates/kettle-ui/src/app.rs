@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
-use kettle_config::{TabBarMode, TabBarPos};
+use kettle_config::{
+    Action, Config, Key as KKey, Mods, StatusBarMode, TabBarMode, TabBarPos, Trigger,
+};
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
     ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneSnapshot, PaneView,
@@ -1050,6 +1051,56 @@ fn grid_dims_px(
     let cols = ((w - pad_x * 2.0) / cw).floor().max(1.0) as usize;
     let rows = ((h - pad_y * 2.0 - titlebar_h) / ch).floor().max(1.0) as usize;
     (cols, rows)
+}
+
+const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
+const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
+const STARTUP_GEOMETRY_TAB_BAR_H: f64 = 24.0;
+const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
+const STARTUP_GEOMETRY_FALLBACK_COLS: u32 = 100;
+const STARTUP_GEOMETRY_FALLBACK_ROWS: u32 = 36;
+
+/// Convert optional cell-based startup geometry into an initial inner-window
+/// size. This runs before renderer/font metrics exist, so it intentionally uses
+/// the same conservative 8x16 baseline as `geometry-hinting`; the first normal
+/// layout pass reconciles exact metrics after the renderer starts.
+fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
+    if cfg.window_width.is_none() && cfg.window_height.is_none() {
+        return None;
+    }
+
+    let cols = cfg
+        .window_width
+        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_COLS)
+        .clamp(
+            kettle_config::WINDOW_WIDTH_MIN,
+            kettle_config::WINDOW_WIDTH_MAX,
+        );
+    let rows = cfg
+        .window_height
+        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_ROWS)
+        .clamp(
+            kettle_config::WINDOW_HEIGHT_MIN,
+            kettle_config::WINDOW_HEIGHT_MAX,
+        );
+
+    let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
+    let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
+
+    if matches!(cfg.tab_bar, TabBarMode::Always) {
+        match cfg.tab_bar_pos {
+            TabBarPos::Top | TabBarPos::Bottom => height += STARTUP_GEOMETRY_TAB_BAR_H,
+            TabBarPos::Left | TabBarPos::Right => {
+                width += f64::from(cfg.tab_bar_width.clamp(40.0, 600.0));
+            }
+        }
+    }
+
+    if !matches!(cfg.status_bar, StatusBarMode::Off) {
+        height += STARTUP_GEOMETRY_STATUS_BAR_H;
+    }
+
+    Some((width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32))
 }
 
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
@@ -11507,6 +11558,15 @@ impl App {
                 attrs = attrs.with_visible(false);
             }
         }
+        if let Some((w, h)) = startup_inner_size_px(&self.cfg) {
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        }
+        if self.cfg.window_position_x.is_some() || self.cfg.window_position_y.is_some() {
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                self.cfg.window_position_x.unwrap_or(0),
+                self.cfg.window_position_y.unwrap_or(0),
+            ));
+        }
         // Cycle 359 (Terminator parity, terminatorlib/config.py:74
         // `geometry_hinting`): when true, request that the WM resize
         // the window in font-cell increments (so a drag-resize lands
@@ -14789,7 +14849,8 @@ mod tests {
     use super::{
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
         find_menu_row_y, modal_swallows_pointer, rank_layouts, selection_kind,
-        should_restore_session, should_reveal_after_renderer_init, typeahead_match,
+        should_restore_session, should_reveal_after_renderer_init, startup_inner_size_px,
+        typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -14824,6 +14885,37 @@ mod tests {
             "restore-session = true"
         );
         assert!(should_restore_session(true, true));
+    }
+
+    #[test]
+    fn startup_geometry_cells_convert_to_inner_size() {
+        let mut cfg = kettle_config::Config {
+            window_width: Some(120),
+            window_height: Some(40),
+            ..Default::default()
+        };
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            Some((976, 680)),
+            "120x40 cells + default padding + default top tab bar"
+        );
+
+        cfg.tab_bar = kettle_config::TabBarMode::Auto;
+        cfg.status_bar = kettle_config::StatusBarMode::Bottom;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            Some((976, 678)),
+            "auto tab bar is hidden for a one-tab startup; status bar reserves its strip"
+        );
+
+        cfg.window_height = None;
+        cfg.tab_bar = kettle_config::TabBarMode::Always;
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            Some((1156, 614)),
+            "missing height falls back to the startup baseline; vertical tabs reserve width"
+        );
     }
 
     /// Cycle 919 (audit M2) drift guard: in `resumed()`, the explicit restore

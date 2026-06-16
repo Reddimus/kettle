@@ -53,6 +53,14 @@ pub use theme::Theme;
 /// bounded while never realistically clipping history).
 pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 
+/// Startup window geometry is specified in terminal cells, not pixels. Bounds
+/// keep accidental huge/silly configs diagnostic instead of silently spawning
+/// an unusable window.
+pub const WINDOW_WIDTH_MIN: u32 = 20;
+pub const WINDOW_WIDTH_MAX: u32 = 400;
+pub const WINDOW_HEIGHT_MIN: u32 = 8;
+pub const WINDOW_HEIGHT_MAX: u32 = 200;
+
 /// Parse the standard true/false aliases. Cycle 138 introduces this
 /// because every previous boolean config used `e.value != "false"`,
 /// which silently treats "no", "off", "0", and "disabled" as `true`.
@@ -1160,6 +1168,18 @@ pub struct Config {
     /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
     /// `window_state`): initial window state at launch.
     pub window_state: WindowState,
+    /// `window-width` / `window_width`: initial terminal width in cells.
+    /// `None` means let the platform/window manager choose kettle's default.
+    pub window_width: Option<u32>,
+    /// `window-height` / `window_height`: initial terminal height in cells.
+    /// `None` means let the platform/window manager choose kettle's default.
+    pub window_height: Option<u32>,
+    /// `window-position-x` / `window_position_x`: initial window x position in
+    /// physical pixels. Negative coordinates are valid on multi-monitor setups.
+    pub window_position_x: Option<i32>,
+    /// `window-position-y` / `window_position_y`: initial window y position in
+    /// physical pixels. Negative coordinates are valid on multi-monitor setups.
+    pub window_position_y: Option<i32>,
     /// `gpu-power-preference`: which adapter wgpu requests at startup.
     /// Defaults to `Auto`: let wgpu / the platform choose unless the user pins
     /// a specific GPU below or explicitly asks for low/high power preference.
@@ -1873,6 +1893,10 @@ impl Default for Config {
             focus: FocusMode::Click,
             handle_size: -1,
             window_state: WindowState::Normal,
+            window_width: None,
+            window_height: None,
+            window_position_x: None,
+            window_position_y: None,
             gpu_power_preference: GpuPowerPreference::default(),
             gpu_backend: GpuBackend::default(),
             gpu_vendor_id: 0,
@@ -2514,6 +2538,14 @@ impl Config {
                 "handle-size" | "handle_size" => {
                     v.parse::<i32>().is_ok_and(|n| (-1..=50).contains(&n))
                 }
+                "window-width" | "window_width" => v
+                    .parse::<u32>()
+                    .is_ok_and(|n| (WINDOW_WIDTH_MIN..=WINDOW_WIDTH_MAX).contains(&n)),
+                "window-height" | "window_height" => v
+                    .parse::<u32>()
+                    .is_ok_and(|n| (WINDOW_HEIGHT_MIN..=WINDOW_HEIGHT_MAX).contains(&n)),
+                "window-position-x" | "window_position_x" | "window-position-y"
+                | "window_position_y" => v.parse::<i32>().is_ok(),
                 "tab-bar-width" | "tab_bar_width" => {
                     v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
                 }
@@ -3510,6 +3542,26 @@ impl Config {
                         _ => WindowState::Normal,
                     };
                 }
+                "window-width" | "window_width" => {
+                    if let Ok(v) = e.value.parse::<u32>() {
+                        cfg.window_width = Some(v.clamp(WINDOW_WIDTH_MIN, WINDOW_WIDTH_MAX));
+                    }
+                }
+                "window-height" | "window_height" => {
+                    if let Ok(v) = e.value.parse::<u32>() {
+                        cfg.window_height = Some(v.clamp(WINDOW_HEIGHT_MIN, WINDOW_HEIGHT_MAX));
+                    }
+                }
+                "window-position-x" | "window_position_x" => {
+                    if let Ok(v) = e.value.parse::<i32>() {
+                        cfg.window_position_x = Some(v);
+                    }
+                }
+                "window-position-y" | "window_position_y" => {
+                    if let Ok(v) = e.value.parse::<i32>() {
+                        cfg.window_position_y = Some(v);
+                    }
+                }
                 "gpu-power-preference" | "gpu_power_preference" => {
                     cfg.gpu_power_preference = match e.value.to_ascii_lowercase().as_str() {
                         "high" | "high-performance" | "discrete" => GpuPowerPreference::High,
@@ -4278,6 +4330,10 @@ login-shell = true\n\
 term = xterm-256color\n\
 colorterm = truecolor\n\
 env = EDITOR=nvim\n\
+window-width = 120\n\
+window-height = 36\n\
+window-position-x = -1920\n\
+window-position-y = 80\n\
 tab-bar-position = left\n\
 tab-bar-width = 200\n\
 ask-before-closing = multiple-terminals\n\
@@ -5615,6 +5671,10 @@ cell-height = 1.2\n";
         assert_eq!(d.focus, FocusMode::Click);
         assert_eq!(d.handle_size, -1);
         assert_eq!(d.window_state, WindowState::Normal);
+        assert_eq!(d.window_width, None);
+        assert_eq!(d.window_height, None);
+        assert_eq!(d.window_position_x, None);
+        assert_eq!(d.window_position_y, None);
         assert!(!d.geometry_hinting);
         assert!(d.extra_styling);
         // FocusMode parsing.
@@ -5645,6 +5705,24 @@ cell-height = 1.2\n";
         );
         // handle_size clamp.
         assert_eq!(Config::parse_text("handle-size = 99").handle_size, 50);
+        let geom = Config::parse_text(
+            "window-width = 120\n\
+             window_height = 40\n\
+             window-position-x = -1920\n\
+             window_position_y = 80\n",
+        );
+        assert_eq!(geom.window_width, Some(120));
+        assert_eq!(geom.window_height, Some(40));
+        assert_eq!(geom.window_position_x, Some(-1920));
+        assert_eq!(geom.window_position_y, Some(80));
+        assert_eq!(
+            Config::parse_text("window-width = 9999").window_width,
+            Some(WINDOW_WIDTH_MAX)
+        );
+        assert_eq!(
+            Config::parse_text("window-height = 1").window_height,
+            Some(WINDOW_HEIGHT_MIN)
+        );
         // group bools both forms.
         assert!(Config::parse_text("split-to-group = true").split_to_group);
         assert!(Config::parse_text("split_to_group = true").split_to_group);
@@ -6328,6 +6406,20 @@ cell-height = 1.2\n";
             1
         );
         assert!(Config::detect_malformed_values("window-state = maximize\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("window-width = 9999\n").len(),
+            1
+        );
+        assert_eq!(
+            Config::detect_malformed_values("window-height = 4\n").len(),
+            1
+        );
+        assert!(Config::detect_malformed_values("window-position-x = -1920\n").is_empty());
+        assert!(Config::detect_malformed_values("window-position-y = 80\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("window-position-x = left\n").len(),
+            1
+        );
         // case-sensitive accepts named modes AND the Terminator bool form.
         assert!(Config::detect_malformed_values("case-sensitive = smart\n").is_empty());
         assert!(Config::detect_malformed_values("case-sensitive = true\n").is_empty());
