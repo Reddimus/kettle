@@ -1,5 +1,5 @@
 //! Hyperlink discovery: explicit OSC 8 links carried on cells, plus
-//! autodetected URLs in the visible grid.
+//! autodetected URLs and local file paths in the visible grid.
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
@@ -23,11 +23,34 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
 }
 
+fn path_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?:
+                [A-Za-z]:[\\/][A-Za-z0-9._@+%()=$!,;~{}-]+(?:[\\/][A-Za-z0-9._@+%()=$!,;~{}-]+)*(?::[0-9]+(?::[0-9]+)?)?
+              | (?:~|\.{1,2})/[A-Za-z0-9._@+%()=$!,;~{}-]+(?:/[A-Za-z0-9._@+%()=$!,;~{}-]+)*(?::[0-9]+(?::[0-9]+)?)?
+              | /[A-Za-z0-9._@+%()=$!,;~{}-]+(?:/[A-Za-z0-9._@+%()=$!,;~{}-]+)*(?::[0-9]+(?::[0-9]+)?)?
+              | (?:[A-Za-z0-9._@+%-]+/)+[A-Za-z0-9._@+%()=$!,;~{}-]+(?::[0-9]+(?::[0-9]+)?)?
+            )
+            "#,
+        )
+        .unwrap()
+    })
+}
+
 use crate::url_trim::trim_trailing;
 
 /// All links visible in the current viewport. Explicit OSC 8 links take
-/// precedence over autodetected URLs on the same cells.
+/// precedence over autodetected URLs and file paths on the same cells.
 pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
+    links_with_cwd(term, None)
+}
+
+/// All links visible in the current viewport, with `cwd` used to resolve
+/// relative file paths such as `crates/kettle-core/src/links.rs:42`.
+pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
@@ -81,8 +104,7 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
         let osc8_end = out.len();
 
         // Autodetected URLs (skip cells already covered by an OSC 8 link on
-        // THIS row — regex `find_iter` yields non-overlapping matches, so only
-        // OSC 8 links can collide with an autodetected one).
+        // THIS row).
         text.clear();
         col_of_byte.clear();
         for col in 0..cols {
@@ -119,6 +141,127 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
                 end_col: e,
                 uri,
             });
+        }
+        let row_links_end = out.len();
+        for m in path_re().find_iter(&text) {
+            let matched = trim_trailing(m.as_str());
+            if matched.is_empty() {
+                continue;
+            }
+            let s = col_of_byte.get(m.start()).copied().unwrap_or(0);
+            let e = col_of_byte
+                .get(m.start() + matched.len().saturating_sub(1))
+                .copied()
+                .unwrap_or(s);
+            if out[osc8_start..row_links_end]
+                .iter()
+                .any(|l| !(e < l.start_col || s > l.end_col))
+            {
+                continue;
+            }
+            let Some(uri) = path_match_to_file_uri(matched, cwd) else {
+                continue;
+            };
+            out.push(Link {
+                row,
+                start_col: s,
+                end_col: e,
+                uri,
+            });
+        }
+    }
+    out
+}
+
+fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
+    let path = strip_location_suffix(raw);
+    if path.is_empty() || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with("//")
+        || has_parent_component(&normalized)
+        || normalized.to_ascii_lowercase().contains("%2e")
+    {
+        return None;
+    }
+
+    let absolute = if is_windows_drive_path(&normalized) {
+        format!("/{normalized}")
+    } else if normalized.starts_with('/') {
+        normalized
+    } else if let Some(rest) = normalized.strip_prefix("~/") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        let home = home.replace('\\', "/");
+        if home.is_empty() || home.starts_with("//") || has_parent_component(&home) {
+            return None;
+        }
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        let cwd = cwd?;
+        let cwd = cwd.replace('\\', "/");
+        if cwd.is_empty() || cwd.starts_with("//") || has_parent_component(&cwd) {
+            return None;
+        }
+        let rel = normalized.strip_prefix("./").unwrap_or(&normalized);
+        if rel.starts_with('/') || rel.is_empty() {
+            return None;
+        }
+        format!("{}/{}", cwd.trim_end_matches('/'), rel)
+    };
+
+    if !absolute.starts_with('/') || absolute.starts_with("//") || has_parent_component(&absolute) {
+        return None;
+    }
+    let uri = format!("file://{}", encode_file_path(&absolute));
+    is_safe_url(&uri).then_some(uri)
+}
+
+fn strip_location_suffix(path: &str) -> &str {
+    let mut end = path.len();
+    for _ in 0..2 {
+        let Some(pos) = path[..end].rfind(':') else {
+            break;
+        };
+        if is_windows_drive_colon(path, pos) {
+            break;
+        }
+        if path[pos + 1..end].chars().all(|c| c.is_ascii_digit()) {
+            end = pos;
+        } else {
+            break;
+        }
+    }
+    &path[..end]
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+fn is_windows_drive_colon(path: &str, pos: usize) -> bool {
+    let b = path.as_bytes();
+    pos == 1 && b.len() >= 3 && b[0].is_ascii_alphabetic() && (b[2] == b'/' || b[2] == b'\\')
+}
+
+fn has_parent_component(path: &str) -> bool {
+    path.split('/').any(|part| part == "..")
+}
+
+fn encode_file_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                out.push(b as char)
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
@@ -191,7 +334,7 @@ fn is_local_file_url(uri: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_url;
+    use super::{is_safe_url, path_match_to_file_uri};
 
     #[test]
     fn allows_web_and_mail_rejects_custom_schemes() {
@@ -236,5 +379,38 @@ mod tests {
         // Percent-encoded / backslash traversal → rejected.
         assert!(!is_safe_url("file:///x/%2e%2e/etc/passwd"));
         assert!(!is_safe_url("file://\\\\evil\\share"));
+    }
+
+    #[test]
+    fn path_matches_become_local_file_urls() {
+        assert_eq!(
+            path_match_to_file_uri(
+                "crates/kettle-core/src/links.rs:12:3",
+                Some("/home/me/kettle")
+            )
+            .as_deref(),
+            Some("file:///home/me/kettle/crates/kettle-core/src/links.rs")
+        );
+        assert_eq!(
+            path_match_to_file_uri("/home/me/kettle/src/main.rs:7", None).as_deref(),
+            Some("file:///home/me/kettle/src/main.rs")
+        );
+        assert_eq!(
+            path_match_to_file_uri(r"C:\Users\me\src\main.rs:9", None).as_deref(),
+            Some("file:///C:/Users/me/src/main.rs")
+        );
+        assert_eq!(
+            path_match_to_file_uri("C:/Users/me/src/main.rs:9:2", None).as_deref(),
+            Some("file:///C:/Users/me/src/main.rs")
+        );
+    }
+
+    #[test]
+    fn path_matches_reject_remote_and_traversal_shapes() {
+        assert!(path_match_to_file_uri("crates/kettle/src/main.rs", None).is_none());
+        assert!(path_match_to_file_uri("../secret/file.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("//evil/share/file.txt", None).is_none());
+        assert!(path_match_to_file_uri("src/%2e%2e/secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/main.rs", Some("//evil/share")).is_none());
     }
 }

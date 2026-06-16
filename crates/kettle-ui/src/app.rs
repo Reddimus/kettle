@@ -2114,13 +2114,13 @@ pub(crate) type FocusKey = (usize, Option<u64>);
 /// Cycle 803 cache key for the search re-scan: `(query, focus, tab last-output)`.
 pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
 /// Cycle 803 cache key for the viewport link re-scan: `(focus, tab last-output,
-/// scroll display_offset)`.
+/// scroll display_offset, focused cwd)`.
 /// v2.20.0 (review fix): the middle component is the focused pane's
 /// `output_generation` — the old key used the tab's `last_output_at`, which
 /// the activity latch only updates for BACKGROUND tabs, so active-tab output
 /// never invalidated the link scan at all (links went stale until a scroll
 /// or focus change) and the P6 debounce was unreachable.
-pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>);
+pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<String>);
 
 /// v2.20.0 P6 (perf): minimum interval between viewport link re-scans when
 /// only the OUTPUT timestamp changed (streaming). Focus/scroll changes bypass
@@ -4843,7 +4843,8 @@ impl App {
                 .mux
                 .focused()
                 .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
-            (self.focus_key(ws), out_gen, off)
+            let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
+            (self.focus_key(ws), out_gen, off, cwd)
         };
         if ws.links_scan_key.as_ref() == Some(&key) {
             return;
@@ -4858,7 +4859,8 @@ impl App {
         // link (mouse move for hover, key for hint mode) repaints first, so
         // a post-stream stale window can't be observed by the user.
         if let (Some(prev), Some(at)) = (ws.links_scan_key.as_ref(), ws.last_links_scan) {
-            let output_only = prev.0 == key.0 && prev.2 == key.2 && prev.1 != key.1;
+            let output_only =
+                prev.0 == key.0 && prev.2 == key.2 && prev.3 == key.3 && prev.1 != key.1;
             if output_only && at.elapsed() < LINKS_SCAN_DEBOUNCE {
                 return;
             }
@@ -4866,7 +4868,13 @@ impl App {
         ws.links = ws
             .mux
             .focused()
-            .and_then(|p| p.term.term.lock().ok().map(|t| kettle_core::links(&t)))
+            .and_then(|p| {
+                p.term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|t| kettle_core::links::links_with_cwd(&t, key.3.as_deref()))
+            })
             .unwrap_or_default();
         ws.links_scan_key = Some(key);
         ws.last_links_scan = Some(std::time::Instant::now());

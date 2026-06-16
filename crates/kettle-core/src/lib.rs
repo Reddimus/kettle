@@ -15,8 +15,8 @@
 //!   (`Ctrl+Shift+F`), `build_regex` literal fallback, `reveal_offset`
 //!   for jump-to-match.
 //! - [`links`](mod@links) — explicit OSC 8 hyperlinks + autodetected
-//!   URLs in the visible grid; `is_safe_url` allowlist for safe
-//!   `open::that_detached` dispatch.
+//!   URLs and local file paths in the visible grid; `is_safe_url`
+//!   allowlist for safe `open::that_detached` dispatch.
 //! - [`hints`] — quick-select hint targets (`Ctrl+Shift+H`): URLs,
 //!   paths, IPs, git hashes; `detect` returns a sorted list of
 //!   `HintSpan`s.
@@ -52,7 +52,7 @@ pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedCo
 
 pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{ImageData, Images, Placement};
-pub use links::{Link, links};
+pub use links::{Link, links, links_with_cwd};
 pub use search::{CaseSensitivity, Match, search, search_with};
 pub use term::{CommandFinished, PtyWriter, ScreenText, SharedTerm, Terminal};
 // Cycle 745: OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`

@@ -2765,6 +2765,41 @@ mod conformance {
         );
     }
 
+    /// Agent CLIs and editors print project-relative file locations constantly
+    /// (`crates/foo/src/lib.rs:12:3`). Kettle should make those clickable using
+    /// the pane cwd while still letting URL detection own URL-shaped text.
+    #[test]
+    fn links_with_cwd_detects_file_paths_without_splitting_urls() {
+        let (mut t, mut p) = harness(100, 3);
+        feed(
+            &mut t,
+            &mut p,
+            b"err crates/kettle-core/src/links.rs:12:3 and https://example.test/a/b\r\nabs /etc/hosts:4",
+        );
+
+        let links = crate::links::links_with_cwd(&t, Some("/home/me/kettle"));
+        assert!(
+            links
+                .iter()
+                .any(|k| k.uri == "file:///home/me/kettle/crates/kettle-core/src/links.rs"),
+            "project-relative file path should resolve against pane cwd: {links:?}"
+        );
+        assert!(
+            links.iter().any(|k| k.uri == "file:///etc/hosts"),
+            "absolute file path should become a local file URI: {links:?}"
+        );
+        let web_links: Vec<_> = links
+            .iter()
+            .filter(|k| k.uri.contains("example.test"))
+            .collect();
+        assert_eq!(
+            web_links.len(),
+            1,
+            "path detection must not split a URL into an extra file link: {links:?}"
+        );
+        assert_eq!(web_links[0].uri, "https://example.test/a/b");
+    }
+
     /// Cycle 909 (R1): a real drag-select (Simple selection spanning rows) made
     /// while scrolled to the top of history must copy the VISIBLE history rows,
     /// not the active screen — the exact action a user does when copying an

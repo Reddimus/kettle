@@ -182,6 +182,11 @@ pure `viewport_point_to_grid_applies_display_offset` (kettle-ui). The same
 conversion now also feeds smart double-click selection and its grid-row text
 read, so word-select works while scrolled too.
 
+**Agent/editor file links.** `links_with_cwd_detects_file_paths_without_splitting_urls`
+drives the same grid harness with Codex/Claude-style `path/to/file.rs:line:col`
+output and verifies that pane-cwd-relative paths become local `file://` links
+without splitting URL text into extra file links.
+
 **Output coalescing (cycle 910).** Apps that repaint without DEC 2026
 synchronized output (Claude Code toggles `?25l/?25h` ~1750×/session and never
 opens 2026) can be snapshot mid-repaint under load — the transient "cursor above

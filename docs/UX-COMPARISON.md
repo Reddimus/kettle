@@ -84,7 +84,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **GPU rendering** | ✅ wgpu | ✅ (custom) | ✅ (OpenGL) | ✅ (wgpu) | ⛔ (GTK/VTE) | ✅ (OpenGL) |
 | Ligatures | ✅ toggle | ✅ | ✅ | ✅ | 🟡 | ⛔ |
 | Inline images | ✅ sixel+kitty+iTerm2 | ✅ | ✅ (origin kitty) | ✅ | ⛔ | ⛔ |
-| Hyperlinks (OSC 8) | ✅ +autodetect | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Hyperlinks (OSC 8) | ✅ + URL and cwd-aware file-path autodetect | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ### Citations (upstream source we verified / borrowed from)
 
@@ -399,7 +399,7 @@ are marked, so the 6 shipped features occupy 8 "now" rows.
 | Title reporting from shell (cwd at prompt, command while running) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Script-only, feature-gated; the tab strip shows live command names. |
 | Cursor shape at prompt (bar at prompt, reset for commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Script-only DECSCUSR emission; the engine already renders the shapes. |
 | Resize overlay (transient cols×rows popup) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 (dup of the `resize-overlay` row) | Same feature inventoried by the UX-area agent, which scored it high. |
-| File-path linkification (URL-detection regex parity) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | kettle owns both the path regex and the link-open pipeline; this wires them together. Ghostty's url.zig test corpus is liftable. |
+| File-path linkification (URL-detection regex parity) | Ghostty | ✅ | high | M | ✅ shipped v2.25.1 | Local absolute, Windows drive, and pane-cwd-relative paths now feed the same link-open pipeline as URLs while preserving the local-only `file://` safety gate. Ghostty's larger url.zig corpus remains useful for future regex expansion. |
 | System dark/light appearance following | Ghostty | ✅ | high | S | ✅ shipped v2.25.1 | Duplicate of the theme-following row; the `system` alias now routes through winit OS appearance changes. |
 | Native global hotkey (`global:` keybinds) for quake mode | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Removes quake-mode's biggest friction; Windows-first RegisterHotKey — Ghostty has no Windows port to copy. |
 | Link previews (hover destination strip) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Anti-spoofing win for OSC 8; a status-strip preview gets most of the value cheaply. |

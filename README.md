@@ -74,8 +74,9 @@ and **WezTerm** into one tool.
   setup.
 - **Search overlay** — `Ctrl+Shift+F`, real regex with **smart-case**
   (case-insensitive until you type an uppercase), highlight + cycle.
-- **Hyperlinks** — OSC 8 + URL autodetection, underlined with hover, open
-  with `Ctrl`/`Cmd`+click.
+- **Hyperlinks** — OSC 8, URL autodetection, and cwd-aware local file-path
+  links for agent/editor output, underlined with hover and opened with
+  `Ctrl`/`Cmd`+click.
 - **Inline images** — Sixel, kitty graphics, and iTerm2 (OSC 1337) decoded
   and GPU-composited (`img2sixel`, `kitten icat`, `imgcat`).
 - **Shell integration** — OSC 133 prompt marks; jump between prompts with

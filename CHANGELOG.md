@@ -47,6 +47,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     prompt now right-aligns visible `[Cancel]` / `[Close]` buttons in its
     bottom bar, switches the pointer cursor over those buttons, and dispatches
     mouse clicks through the same safe cancel/confirm path as keyboard input.
+  - **Agent/editor file paths are clickable links.** Local absolute paths,
+    Windows drive paths, and pane-cwd-relative paths such as
+    `crates/kettle-core/src/links.rs:12:3` now resolve to local `file://` links
+    through the same hover, context-menu, and `Ctrl`/`Cmd`+click path as URLs.
+    The existing local-only `file://` safety gate still rejects traversal,
+    remote authorities, UNC-like paths, and unsafe schemes.
 
   ### Documentation / packaging
   - Corrected the config reference for shipped Terminator-parity settings:
