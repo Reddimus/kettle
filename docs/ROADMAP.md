@@ -1440,9 +1440,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       `"muxd"` later); what remains is the standalone daemon that
       re-hosts the server side and owns PTYs cross-process.
 - [x] **stdin forwarding for `kettle exec`** — `kettle exec` now forwards
-      pipe/file/socket stdin to the child PTY and closes the PTY input side on
-      EOF, while leaving interactive terminal stdin and `/dev/null` / `NUL`
-      alone. Covered by `crates/kettle/tests/exec.rs`.
+      pipe/file/socket stdin to the child PTY while leaving interactive
+      terminal stdin and `/dev/null` / `NUL` alone. Unix closes the PTY input
+      side on EOF; Windows ConPTY keeps conin open until child exit/timeout to
+      avoid STATUS_CONTROL_C_EXIT. Covered by `crates/kettle/tests/exec.rs`.
 - [ ] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
       surface (per `docs/AGENT.md` Future work). `send_keys` already shipped.
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY

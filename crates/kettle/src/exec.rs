@@ -500,12 +500,17 @@ fn spawn_stdin_pump(writer: kettle_core::PtyWriter) {
                 Ok(n) => writer.write(&buf[..n]),
             }
         }
-        // Closing the PTY input side is the least surprising EOF signal across
-        // platforms. Do not inject Ctrl+Z on Windows: under ConPTY, console
-        // shells such as `cmd` can treat it as an interrupt/control condition
-        // and exit with STATUS_CONTROL_C_EXIT even after reading the intended
-        // input line.
+        // Unix PTYs deliver EOF to the child when the input side closes.
+        #[cfg(unix)]
         writer.close();
+        // Windows ConPTY is different: closing conin while a console child is
+        // still alive can make `cmd`/PowerShell exit with STATUS_CONTROL_C_EXIT
+        // even after they read the intended input line. Leave the handle open;
+        // it is closed by Terminal::drop after the child exits or a timeout
+        // kills it. EOF-only Windows console programs should be run with an
+        // explicit timeout or an input protocol that terminates before EOF.
+        #[cfg(windows)]
+        drop(writer);
     });
 }
 
