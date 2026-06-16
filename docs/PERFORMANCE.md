@@ -100,12 +100,13 @@ fix removes the *wasted* repaints, not the necessary ones.
 **Honest weak axis: cold start.** kettle's wgpu device + pipeline + font init
 makes startup ~1 s on the integrated GPU and ~1.9–2.2 s on the discrete one —
 slower than Alacritty/WezTerm/WT (~0.26–0.48 s). The v2.23.0 **default flip to
-the discrete GPU** (more render headroom for wallpapers/large windows) widens
-that gap by ~1 s; `gpu-power-preference = low` restores the faster integrated
-cold start. So on the equal-weighted `score.ps1` composite (throughput +
-startup + idle + memory), kettle leads on throughput and on memory-vs-WT but
-trails on startup; it is a **throughput-and-footprint leader, not a cold-start
-leader**.
+the discrete GPU** (more render headroom for wallpapers/large windows) widened
+that gap by ~1 s at the time; current v2.25.1 builds default back to
+`gpu-power-preference = auto`, with `low` available for an explicit integrated
+adapter preference and `high` for dedicated-GPU headroom. So on the
+equal-weighted `score.ps1` composite (throughput + startup + idle + memory),
+kettle leads on throughput and on memory-vs-WT but trails on startup; it is a
+**throughput-and-footprint leader, not a cold-start leader**.
 
 ## v2.20.0 — the cross-terminal benchmark harness + the perf overhaul
 
@@ -243,8 +244,9 @@ v2.21.0 corrected two root-cause attributions this doc previously got wrong, by
   with `PowerPreference::HighPerformance`, which on this dual-GPU laptop wakes
   the **discrete NVIDIA** from its low-power state. Defaulting to the low-power
   (integrated) adapter cut **spawn → first-visible-window from 2202 ms to
-  ~999 ms (median of 5)**. The new `gpu-power-preference` key (`low` default |
-  `high` | `auto`) lets a discrete-only/desktop user opt back in. Trade-off: the
+  ~999 ms (median of 5)**. The then-new `gpu-power-preference` key (`low`
+  default at v2.21.0 | `high` | `auto`) let a discrete-only/desktop user opt
+  back in; current releases default to `auto`. Trade-off: the
   integrated adapter's buffers live in **system RAM**, so the measured fresh
   working set rose from 306.8 MB (discrete, GPU memory hidden in VRAM) to
   ~471 MB (integrated, GPU memory now counted) — an honest number, comparable to

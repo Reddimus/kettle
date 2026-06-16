@@ -1137,9 +1137,8 @@ pub struct Config {
     /// `window_state`): initial window state at launch.
     pub window_state: WindowState,
     /// `gpu-power-preference`: which adapter wgpu requests at startup.
-    /// Defaults to `High` (discrete/dedicated, v2.23.0) — see
-    /// [`GpuPowerPreference`]. This is the POLICY/fallback used when no specific
-    /// GPU is pinned below.
+    /// Defaults to `Auto`: let wgpu / the platform choose unless the user pins
+    /// a specific GPU below or explicitly asks for low/high power preference.
     pub gpu_power_preference: GpuPowerPreference,
     /// `gpu-backend` (v2.23.0): pin the wgpu backend (DX12/Vulkan/Metal/GL), or
     /// `Auto` (default). See [`GpuBackend`].
@@ -2750,7 +2749,15 @@ impl Config {
                 ),
                 "gpu-power-preference" | "gpu_power_preference" => matches!(
                     v.to_ascii_lowercase().as_str(),
-                    "low" | "high" | "high-performance" | "discrete" | "auto" | "none"
+                    "low"
+                        | "low-power"
+                        | "integrated"
+                        | "high"
+                        | "high-performance"
+                        | "discrete"
+                        | "auto"
+                        | "automatic"
+                        | "none"
                 ),
                 "gpu-backend" | "gpu_backend" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -3472,7 +3479,7 @@ impl Config {
                     cfg.gpu_power_preference = match e.value.to_ascii_lowercase().as_str() {
                         "high" | "high-performance" | "discrete" => GpuPowerPreference::High,
                         "low" | "low-power" | "integrated" => GpuPowerPreference::Low,
-                        "auto" | "none" => GpuPowerPreference::Auto,
+                        "auto" | "automatic" | "none" => GpuPowerPreference::Auto,
                         _ => GpuPowerPreference::Auto,
                     };
                 }
@@ -5579,11 +5586,27 @@ tab-bar-width = 200\n";
             GpuPowerPreference::High
         );
         assert_eq!(
+            Config::parse_text("gpu-power-preference = high-performance").gpu_power_preference,
+            GpuPowerPreference::High
+        );
+        assert_eq!(
             Config::parse_text("gpu-power-preference = auto").gpu_power_preference,
             GpuPowerPreference::Auto
         );
         assert_eq!(
+            Config::parse_text("gpu-power-preference = automatic").gpu_power_preference,
+            GpuPowerPreference::Auto
+        );
+        assert_eq!(
             Config::parse_text("gpu-power-preference = low").gpu_power_preference,
+            GpuPowerPreference::Low
+        );
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = low-power").gpu_power_preference,
+            GpuPowerPreference::Low
+        );
+        assert_eq!(
+            Config::parse_text("gpu-power-preference = integrated").gpu_power_preference,
             GpuPowerPreference::Low
         );
         // Unknown value falls back to the safe default, not a parse error.
@@ -5591,11 +5614,24 @@ tab-bar-width = 200\n";
             Config::parse_text("gpu-power-preference = bogus").gpu_power_preference,
             GpuPowerPreference::Auto
         );
-        // `--check-config` accepts every documented spelling.
-        assert!(
-            Config::detect_malformed_values("gpu-power-preference = high").is_empty(),
-            "high must validate"
-        );
+        // `--check-config` accepts every documented spelling and UI label.
+        for value in [
+            "auto",
+            "automatic",
+            "none",
+            "low",
+            "low-power",
+            "integrated",
+            "high",
+            "high-performance",
+            "discrete",
+        ] {
+            let text = format!("gpu-power-preference = {value}");
+            assert!(
+                Config::detect_malformed_values(&text).is_empty(),
+                "{value} must validate"
+            );
+        }
         assert!(
             !Config::detect_malformed_values("gpu-power-preference = nonsense").is_empty(),
             "an invalid value must be flagged by --check-config"

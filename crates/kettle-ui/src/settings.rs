@@ -727,6 +727,29 @@ mod tests {
     }
 
     #[test]
+    fn gpu_power_preference_defaults_to_automatic_in_settings() {
+        let cats = categories(&[]);
+        let graphics = cats
+            .iter()
+            .find(|c| c.name == "Graphics")
+            .expect("Graphics");
+        let pref = graphics
+            .fields
+            .iter()
+            .find(|f| f.key == "gpu-power-preference")
+            .expect("gpu-power-preference field");
+
+        assert_eq!(read(&Config::default(), pref), "automatic");
+        match &pref.kind {
+            FieldKind::Choice { values, labels, .. } => {
+                assert_eq!(values.first().copied(), Some("auto"));
+                assert_eq!(labels.first().copied(), Some("automatic"));
+            }
+            other => panic!("expected GPU preference choice field, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn background_category_has_starfield_path_and_gating() {
         use kettle_config::BackgroundType as BT;
         let cats = categories(&[]);
