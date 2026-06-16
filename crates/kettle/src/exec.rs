@@ -208,6 +208,7 @@ pub fn run_exec_with(
         None,
         "xterm-256color",
         "truecolor",
+        &[],
         false,
         tx,
         waker,

@@ -99,6 +99,7 @@ keys). The file is **watched and reloaded live**.
 | `login-shell` | bool | `false` | Launch the shell as a login shell (`-l`). Ignored for `wsl.exe` (where `-l` means "list distros" — see the WSL note below) |
 | `term` | string | `xterm-256color` | The `TERM` value exported to the PTY |
 | `colorterm` | string | `truecolor` | The `COLORTERM` value exported to the PTY (advertises 24-bit color) |
+| `env` | `KEY=VALUE` | — | Repeatable; exports user environment variables to every spawned pane. Names must use portable env syntax (`[A-Za-z_][A-Za-z0-9_]*`), empty values are allowed, and later duplicates win. Kettle still owns terminal identity vars through `term`, `colorterm`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`; user vars are also appended to `WSLENV` for Windows → WSL launches |
 
 ### Auto light/dark theme switching
 

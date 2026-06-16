@@ -303,6 +303,27 @@ fn augment_wslenv(existing: &str, vars: &[&str]) -> String {
     out
 }
 
+fn child_wslenv(parent: &str, extra_env: &[(String, String)]) -> String {
+    let wslenv_base = extra_env
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("WSLENV"))
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(parent);
+    let mut wslenv_vars: Vec<&str> = extra_env
+        .iter()
+        .filter_map(|(name, _)| {
+            if name.eq_ignore_ascii_case("WSLENV") {
+                None
+            } else {
+                Some(name.as_str())
+            }
+        })
+        .collect();
+    wslenv_vars.extend(["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"]);
+    augment_wslenv(wslenv_base, &wslenv_vars)
+}
+
 /// Cycle 805: a shell choice for the new-tab `▾` dropdown — a display label and
 /// the argv to spawn for it.
 pub type ShellChoice = (String, Vec<String>);
@@ -833,6 +854,7 @@ impl Terminal {
             word_delimiters,
             term_env,
             colorterm_env,
+            &[],
             login_shell,
             event_tx,
             waker,
@@ -859,6 +881,7 @@ impl Terminal {
         word_delimiters: Option<&str>,
         term_env: &str,
         colorterm_env: &str,
+        extra_env: &[(String, String)],
         login_shell: bool,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
@@ -912,6 +935,11 @@ impl Terminal {
                 c
             }
         };
+        // Apply user pane env before terminal identity env so `term` /
+        // `colorterm` stay authoritative for those protocol-critical values.
+        for (name, value) in extra_env {
+            cmd.env(name, value);
+        }
         // Cycle 343: honor cfg.term + cfg.colorterm (empty preserves
         // kettle's default).
         cmd.env(
@@ -952,10 +980,7 @@ impl Terminal {
         // the child isn't `wsl.exe` — it's just an extra, ignored env var.
         cmd.env(
             "WSLENV",
-            augment_wslenv(
-                &std::env::var("WSLENV").unwrap_or_default(),
-                &["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"],
-            ),
+            child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
         );
         match cwd {
             Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
@@ -2368,7 +2393,7 @@ mod detect_shells_tests {
 
 #[cfg(test)]
 mod wslenv_tests {
-    use super::augment_wslenv;
+    use super::{augment_wslenv, child_wslenv};
 
     #[test]
     fn appends_with_u_flag_preserves_existing_and_dedups() {
@@ -2390,6 +2415,23 @@ mod wslenv_tests {
             "COLORTERM/up:X:TERM_PROGRAM/u"
         );
         assert_eq!(augment_wslenv("COLORTERM", &["COLORTERM"]), "COLORTERM");
+        assert_eq!(
+            augment_wslenv("EDITOR/u", &["EDITOR", "KETTLE_ENV", "EDITOR"]),
+            "EDITOR/u:KETTLE_ENV/u"
+        );
+    }
+
+    #[test]
+    fn child_wslenv_preserves_user_base_and_forwards_extra_env() {
+        let extra_env = vec![
+            ("EDITOR".to_string(), "nvim".to_string()),
+            ("WSLENV".to_string(), "USER_BASE/p".to_string()),
+            ("EDITOR".to_string(), "vim".to_string()),
+        ];
+        assert_eq!(
+            child_wslenv("PARENT/p", &extra_env),
+            "USER_BASE/p:EDITOR/u:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u"
+        );
     }
 }
 

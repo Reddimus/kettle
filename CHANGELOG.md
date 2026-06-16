@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [2.25.1] — 2026-06-15
 
+  ### Added
+  - **Pane environment overrides.** Config now accepts repeatable
+    `env = KEY=VALUE` entries for every spawned GUI pane, with portable
+    variable-name validation, empty-value support, deterministic last-writer
+    process-env behavior, and Windows → WSL forwarding via Kettle's existing
+    `WSLENV` propagation path.
+
   ### Fixed
   - **Grid renderer cursor-blink regression.** The v2.25.0 cell-locked
     `text-renderer = grid` path now keeps pane glyph uploads on their own damage

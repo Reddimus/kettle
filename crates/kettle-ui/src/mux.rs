@@ -887,6 +887,7 @@ impl Mux {
             Some(cfg.word_delimiters.as_str()),
             &cfg.term,
             &cfg.colorterm,
+            &cfg.env,
             cfg.login_shell,
             tx,
             waker,

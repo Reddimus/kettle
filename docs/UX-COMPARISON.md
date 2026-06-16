@@ -372,9 +372,9 @@ Status: ✅ have · 🟡 partial · ⛔ missing · ❔ unverified. Statuses refl
 the adversarial cross-check where one exists (11 rows differ from the raw
 inventory). Two features were independently inventoried twice by different
 area agents (resize overlay; prompt-aware close confirm) — duplicate rows
-are marked, so the 7 shipped features occupy 9 "now" rows.
+are marked, so the 8 shipped features occupy 10 "now" rows.
 
-#### Verdict: now — 39 rows (7 features shipped; the rest capped by the v2.20.0 decision gate)
+#### Verdict: now — 39 rows (8 features shipped; the rest capped by the v2.20.0 decision gate)
 
 | Feature | Source | kettle | Value | Effort | Verdict | Rationale |
 |---|---|---|---|---|---|---|
@@ -382,7 +382,7 @@ are marked, so the 7 shipped features occupy 9 "now" rows.
 | `clipboard-paste-protection` + `clipboard-paste-bracketed-safe` | Ghostty | ✅ | high | M | ✅ shipped v2.25.1 | `clipboard-paste-protection = true` confirms multi-line clipboard/PRIMARY/PuTTY-style pastes only when a writable target lacks bracketed paste; bracketed editor/agent targets paste immediately with the existing injection guard. |
 | `confirm-close-surface` (prompt-aware close confirmation) | Ghostty | 🟡 | high | M | ✅ shipped v2.20.0 | Data-loss guard every mainstream terminal has; kettle already had the confirm dialog and OSC 133 prompt state. |
 | `window-width`/`window-height` (grid cells) + position | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Common ask; session restore already does monitor-clamped placement, so the hard parts are written. |
-| `env` (repeatable KEY=VALUE injection) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Trivial next to the existing term/colorterm export site; frequently wanted (EDITOR, LANG overrides). |
+| `env` (repeatable KEY=VALUE injection) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | `env = KEY=VALUE` is repeatable for every spawned GUI pane, validates portable env names, allows empty values, preserves deterministic process-env override behavior, and forwards user vars across Windows → WSL via `WSLENV`. |
 | `resize-overlay` (+ `-position`, `-duration`) | Ghostty | ⛔ | medium | S | ✅ shipped v2.20.0 (mode key only; `-position`/`-duration` not adopted — chip centered, 750 ms fixed) | Isolated render feature on existing overlay machinery; pairs with `geometry-hinting`. |
 | Custom theme files + user theme directory | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A theme file is a constrained reuse of the existing key=value parser; unlocks the iTerm2/Gogh ecosystem. |
 | `command-palette-entry` (user-defined palette commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Palette and parsed action grammar both exist; mirrors `menu-item`, compounds with the agent server. |

@@ -87,6 +87,27 @@ pub(crate) fn parse_hex_or_dec_u32(s: &str) -> Option<u32> {
         .or_else(|| u32::from_str_radix(t, 16).ok())
 }
 
+/// Parse a portable `KEY=VALUE` environment assignment. The value may be empty
+/// and may itself contain `=`; the name is intentionally restricted to the
+/// POSIX/Windows-compatible subset so a checked config behaves the same on
+/// Linux, Windows, and through WSLENV.
+pub(crate) fn parse_env_assignment(s: &str) -> Option<(String, String)> {
+    let (name, value) = s.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -1022,6 +1043,10 @@ pub struct Config {
     /// `truecolor` signals 24-bit color support to programs that
     /// honor it (vim, nvim, tmux, ...).
     pub colorterm: String,
+    /// User-defined environment variables for spawned panes. Repeatable
+    /// `env = KEY=VALUE`; applied before Kettle's terminal identity vars so
+    /// `term` / `colorterm` remain the authoritative way to change those.
+    pub env: Vec<(String, String)>,
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:122
     /// `login_shell`): when true, spawn the shell with `-l` (login
     /// shell semantics — reads /etc/profile, ~/.profile,
@@ -1821,6 +1846,7 @@ impl Default for Config {
             search_case_sensitive: SearchCaseSensitivity::Smart,
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
+            env: Vec::new(),
             login_shell: false,
             exit_action: ExitAction::Close,
             agent_server: AgentServer::Off,
@@ -2864,6 +2890,7 @@ impl Config {
                 // check-config time so users see the issue before
                 // an event they expected to fire never does.
                 "trigger" => regex::Regex::new(v.trim()).is_ok(),
+                "env" => parse_env_assignment(v).is_some(),
                 "menu-item" | "menu_item" => v
                     .split_once('=')
                     .is_some_and(|(l, c)| !l.trim().is_empty() && !c.trim().is_empty()),
@@ -3308,6 +3335,11 @@ impl Config {
                     let v = e.value.trim();
                     if !v.is_empty() {
                         cfg.colorterm = v.to_string();
+                    }
+                }
+                "env" => {
+                    if let Some(pair) = parse_env_assignment(&e.value) {
+                        cfg.env.push(pair);
                     }
                 }
                 "login-shell" | "login_shell" => {
@@ -4245,6 +4277,7 @@ delete-binding = escape-sequence\n\
 login-shell = true\n\
 term = xterm-256color\n\
 colorterm = truecolor\n\
+env = EDITOR=nvim\n\
 tab-bar-position = left\n\
 tab-bar-width = 200\n\
 ask-before-closing = multiple-terminals\n\
@@ -6073,6 +6106,7 @@ cell-height = 1.2\n";
         assert!(!d.invert_search);
         assert_eq!(d.term, "xterm-256color");
         assert_eq!(d.colorterm, "truecolor");
+        assert!(d.env.is_empty());
         assert!(Config::parse_text("invert-search = true").invert_search);
         assert!(Config::parse_text("invert_search = true").invert_search);
         assert_eq!(
@@ -6080,6 +6114,15 @@ cell-height = 1.2\n";
             "screen-256color"
         );
         assert_eq!(Config::parse_text("colorterm = 24bit").colorterm, "24bit");
+        assert_eq!(
+            Config::parse_text("env = EDITOR=nvim\nenv = FOO=bar=baz\nenv = EMPTY=\n").env,
+            vec![
+                ("EDITOR".to_string(), "nvim".to_string()),
+                ("FOO".to_string(), "bar=baz".to_string()),
+                ("EMPTY".to_string(), String::new())
+            ]
+        );
+        assert!(Config::parse_text("env = BAD-NAME=value").env.is_empty());
         // Empty value preserves the default (avoids breaking shells
         // that rely on a non-empty TERM).
         assert_eq!(Config::parse_text("term =").term, "xterm-256color");
@@ -6219,11 +6262,15 @@ cell-height = 1.2\n";
              background-opacity = high\n\
              scroll-multiplier = fast\n\
              cursor-blink-interval = forever\n\
-             scrollback = lots\n",
+             scrollback = lots\n\
+             env = 1BAD=value\n\
+             env = NO_SEPARATOR\n",
         );
-        assert_eq!(bad.len(), 6, "all six should be flagged: {bad:?}");
+        assert_eq!(bad.len(), 8, "all eight should be flagged: {bad:?}");
         assert!(bad.iter().any(|b| b.contains("font-size")));
         assert!(bad.iter().any(|b| b.contains("scrollback")));
+        assert!(bad.iter().any(|b| b.contains("1BAD")));
+        assert!(bad.iter().any(|b| b.contains("NO_SEPARATOR")));
         // Valid values pass cleanly.
         let ok = Config::detect_malformed_values(
             "font-size = 14\n\
@@ -6231,7 +6278,9 @@ cell-height = 1.2\n";
              background-opacity = 0.8\n\
              scrollback = infinite\n\
              scrollback = 0\n\
-             cursor-blink-interval = 800\n",
+             cursor-blink-interval = 800\n\
+             env = EDITOR=nvim\n\
+             env = EMPTY=\n",
         );
         assert!(ok.is_empty(), "all valid: {ok:?}");
         // Unknown keys aren't *malformed* — that's a separate diagnostic
