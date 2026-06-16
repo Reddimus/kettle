@@ -222,16 +222,24 @@ uninstall:
 uninstall:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Uninstall
 
-# Build the current release binary AND (re)install it in one step, so
-# the Start-menu / PATH / Windows-Search "kettle" launches THIS build.
-# `just install` alone installs whatever is already in target/release/
-# (which may be stale or absent); this recipe rebuilds first, closing
-# the "built but forgot to reinstall" gap. Run after any change you
-# want reflected in the installed app — and after every release cut —
-# to keep the installed app synced to the repo. The dependency order
-# (`release` then `install`) guarantees the binary is current before
-# the installer copies it + refreshes the Add/Remove-Programs version.
-install-local: release install
+# Build the current release binary AND (re)install it in one step, so the
+# Start-menu / PATH / Windows-Search "kettle" launches THIS build. `just install`
+# alone installs whatever is already in target/release/ (which may be stale or
+# absent); this recipe rebuilds first, closing the "built but forgot to reinstall"
+# gap. Run after any change you want reflected in the installed app — and after
+# every release cut — to keep the installed app synced to the repo.
+#
+# Unix uses `--skip-build` after the `release` dependency so local deployment
+# does not compile the same release binary twice. Windows install.ps1 already
+# expects the release artifact built by the dependency.
+[unix]
+install-local: release
+    ./scripts/install.sh --skip-build
+    @echo "local install synced to the current release build"
+
+[windows]
+install-local: release
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
     @echo "local install synced to the current release build"
 
 # === Misc ==========================================================
