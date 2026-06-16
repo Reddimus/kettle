@@ -231,6 +231,28 @@ same renderer readback path as the UI screenshot action. It works in
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
 
+## Local Smoke Checks
+
+Two optional scripts cover the agent workflows that depend on tools installed on
+the developer's machine, so they are intentionally not CI gates:
+
+```sh
+scripts/check-agent-cli-smoke.sh
+```
+
+Runs Codex CLI, Claude Code CLI, clean Neovim, and configured Neovim/AstroNvim
+through `kettle exec` when those commands are present on `PATH`; missing tools
+are reported as skips.
+
+```sh
+just live-render-smoke
+```
+
+Starts a real Kettle window with `text-renderer = grid`, captures several live
+screenshots through `kettle ctl screenshot`, and fails if cursor blink changes a
+broad region instead of a cursor-sized box. This needs a visible X11/Wayland
+desktop session.
+
 ## Security & threat model
 
 - **Off by default.** No server, no socket, no registry entry unless you opt in.

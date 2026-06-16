@@ -50,6 +50,10 @@ if have nvim; then
     "Neovim TUI truecolor command path" \
     'termguicolors' \
     nvim --clean -n --cmd 'set termguicolors' '+set termguicolors?' '+qall!'
+  run_and_match \
+    "Neovim configured/AstroNvim command path" \
+    'termguicolors' \
+    nvim -n --cmd 'set termguicolors' '+set termguicolors?' '+qall!'
 else
   echo "agent-cli smoke: Neovim/AstroNvim skipped (nvim not on PATH)"
 fi

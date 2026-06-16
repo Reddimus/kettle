@@ -246,6 +246,21 @@ menu-shot *ARGS:
     @echo "use 'just menu' instead — it renders the same menu offscreen"
     @echo "via the cycle-251 visual-regression pipeline."
 
+# Start a real kettle window with `text-renderer = grid`, capture live
+# screenshots through `kettle ctl screenshot`, and assert cursor blink changes
+# only a cursor-sized region. This is Linux desktop-local by design: it needs a
+# visible X11/Wayland session and complements the CI offscreen renderer tests.
+[unix]
+live-render-smoke:
+    ./scripts/check-live-render-smoke.sh
+
+[windows]
+live-render-smoke:
+    @echo "live-render-smoke is currently a Unix desktop helper."
+    @echo "Windows coverage comes from CI's windows-latest build/test/CLI smoke;"
+    @echo "manual Windows live screenshot smoke can use 'kettle --agent-server full'"
+    @echo "plus 'kettle ctl screenshot'."
+
 # Clean every build artifact — `cargo clean` plus any temp PNGs
 # the screenshot / menu / bench recipes may have left in the OS
 # temp dir.
