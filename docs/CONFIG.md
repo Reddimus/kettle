@@ -83,9 +83,9 @@ keys). The file is **watched and reloaded live**.
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex \[`:: cmd args`\] | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value before an optional ` :: ` — alternation like `(BUILD SUCCESSFUL\|FAILED)` survives intact. With ` :: cmd args`, the command is spawned instead (argv form, **no shell**); since v2.20, `{0}`/`{1}`… in the argv substitute the match's capture groups (Terminator `run_cmd_on_match` parity — substitution can only change an argument's *value*, never add arguments) |
 | `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | v2.20, Ghostty parity — a transient centered `cols×rows` chip while the window is being resized. `after-first` shows it on every resize except the initial window placement; `never` disables |
-| `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` switches between them on a schedule (see `theme-schedule`) |
+| `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference via winit when the platform reports one. If `theme-schedule` is set, the schedule owns the switch instead |
 | `light-theme` / `dark-theme` | string | — (falls back to `theme`) | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`) |
-| `theme-schedule` | string | — | Auto light/dark switch for `theme-mode = auto`. Either two `HH:MM <role>` entries (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
+| `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
 | `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
 | `allow-bold` | bool | `true` | When `false`, the SGR bold attribute is suppressed — useful on fonts without a bold companion (Terminator `allow_bold`) |
 | `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
@@ -101,8 +101,17 @@ keys). The file is **watched and reloaded live**.
 
 ### Auto light/dark theme switching
 
-Set `theme-mode = auto` to follow a schedule. Either give an explicit
-light window:
+Set `theme-mode = auto` (or `system` / `follow-system`) with a light/dark
+theme pair to follow the OS appearance preference when winit reports one:
+
+```ini
+theme-mode  = auto
+light-theme = TokyoNight Day
+dark-theme  = TokyoNight Night
+```
+
+Add `theme-schedule` when you want kettle to ignore OS appearance changes and
+switch by time instead:
 
 ```ini
 theme-mode     = auto

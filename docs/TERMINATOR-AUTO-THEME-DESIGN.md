@@ -1,11 +1,12 @@
 # Terminator `auto_theme.py` — auto-detect sunrise/sunset design
 
-> Status: design only (cycle 632). Cycle 616 shipped the *manual*
-> half of `plugins/auto_theme.py`: a `toggle_light_dark` chord plus
-> `light-theme` / `dark-theme` config keys. The *auto* half — system
-> dark-mode detection + sunrise/sunset scheduling — needs platform-
-> specific portal queries and is multi-cycle. Same shape as the other
-> Bucket D design docs.
+> Status: partially shipped. Cycle 616 shipped the *manual* half of
+> `plugins/auto_theme.py`: a `toggle_light_dark` chord plus
+> `light-theme` / `dark-theme` config keys. Later cycles added clock
+> and sunrise/sunset scheduling. v2.25.1 wires OS appearance following
+> through winit's current window theme and `ThemeChanged` event; no
+> separate `dark-light` watcher task is required for the direct
+> light/dark theme-pair case.
 
 ## What it is
 
@@ -19,15 +20,14 @@ Terminator's auto_theme has three modes:
 End-state UX in kettle:
 
 - The user sets `theme-mode = auto` in `~/.config/kettle/config`.
-- kettle queries the OS preference once at launch + listens for
-  changes (DBus signal on Linux/Wayland; CGEvent on macOS; registry
-  notification on Windows).
+- kettle queries winit's current window theme once at launch when the
+  platform reports one + listens for live `ThemeChanged` events.
 - The current theme tracks the OS preference live: switching
-  GNOME's "dark style" toggle in Settings flips kettle to its
-  `dark-theme` immediately, no restart.
+  OS appearance toggle flips kettle to its `dark-theme` immediately,
+  no restart, on platforms/compositors that emit the winit event.
 - Plus an optional `theme-schedule = sunrise/sunset` (or hour:min
-  numeric) that flips the theme on a wall-clock schedule
-  independent of the OS preference.
+  numeric) that flips the theme on a wall-clock schedule and takes
+  precedence over OS appearance changes.
 
 ## Why multi-cycle
 
@@ -35,29 +35,17 @@ Two layers, each non-trivial:
 
 ### Layer 1 — OS preference detection
 
-**Linux** (Wayland + X11):
-  - DBus portal `org.freedesktop.appearance.ColorScheme` (newer)
-  - DBus signal `org.freedesktop.portal.Settings.SettingChanged`
-    on key `color-scheme` (0=no-pref, 1=dark, 2=light)
-  - Fallback: GTK `gtk-theme-name` settings string match (older
-    distros without the portal).
+Implemented through winit 0.30:
 
-**macOS**:
-  - `defaults read -g AppleInterfaceStyle` returns "Dark" or
-    nothing (light is implicit).
-  - `NSDistributedNotificationCenter` `AppleInterfaceThemeChangedNotification`
-    fires on the user-pref toggle.
+- `Window::theme()` supplies the initial value when supported.
+- `WindowEvent::ThemeChanged(Theme)` supplies live changes.
+- No polling thread, registry watcher, DBus subscription, or
+  additional dependency is needed in kettle's app layer.
 
-**Windows**:
-  - Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\
-    Personalize\AppsUseLightTheme` (0=dark, 1=light)
-  - `RegNotifyChangeKeyValue` on that key for live changes.
-
-Decision: use the `dark-light` crate (~30 stars, well-maintained,
-cross-platform). It handles all three platforms with a single
-`dark_light::detect()` call + a `subscribe()` for change events.
-Sound choice for v1; lift to direct portal queries only if
-dark-light fails on some user's setup.
+Platform caveat: winit reports `None` or no event on some Linux
+compositor/window-system combinations. In that case `light-theme` /
+`dark-theme`, `toggle_light_dark`, and `theme-schedule` remain the
+fallbacks.
 
 ### Layer 2 — Sunrise/sunset scheduling
 
@@ -98,47 +86,33 @@ Plus a clock-time schedule shorthand: `theme-schedule = 18:00 dark,
                                   │
                                   ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ kettle_ui::theme_watcher (NEW module)                                │
-│                                                                      │
-│  1. ThemeMode::Auto:                                                 │
-│     spawn task: dark_light::subscribe(|new_mode| { send_event })     │
-│     initial value: dark_light::detect()                              │
-│                                                                      │
-│  2. Schedule::Clock:                                                 │
-│     spawn task: every 60s, check now vs (dark_at, light_at)          │
-│     fire ThemeModeEvent::AutoUpdated if crossing a boundary          │
-│                                                                      │
-│  3. Schedule::SunriseSunset:                                         │
-│     compute today's sunrise + sunset from lat/long at midnight       │
-│     spawn task: at next boundary, fire event + recompute             │
-│                                                                      │
-│  Events feed into the App's existing reload-theme path               │
-│  (cycle 616 dispatch + Action::ToggleLightDark machinery).           │
-└──────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────┐
 │ kettle_ui::app::App                                                  │
 │                                                                      │
-│  on ThemeModeEvent::AutoUpdated(is_dark):                            │
-│      target = if is_dark { &cfg.dark_theme } else { &cfg.light_theme }│
-│      apply_theme(target)  ← same path as ToggleLightDark             │
+│  1. ThemeMode::Auto with no theme-schedule:                          │
+│     - on startup, read Window::theme() when available                 │
+│     - on WindowEvent::ThemeChanged(theme), resolve the theme pair     │
+│                                                                      │
+│  2. Schedule::Clock / SunriseSunset:                                 │
+│     - poll the configured schedule from the existing wait/redraw loop │
+│     - when present, schedule takes precedence over OS following       │
+│                                                                      │
+│  Both routes reuse resolve_theme_for_mode + apply_theme_name.         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-The watcher task runs off the main render thread; events come back
-via the existing winit event-loop user-event queue.
+No watcher task is needed for OS appearance following; the event is already
+delivered on the main winit event loop.
 
 ## Sub-cycle roadmap
 
 | Sub-cycle | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | `ThemeMode` enum + `theme-mode` config key | Drift guard on parser arms |
-| 2 | `dark-light` crate dep + initial-detect at launch | Manual e2e on Linux+GNOME |
-| 3 | DBus / NSDistributedNotificationCenter / Registry subscribe via dark-light::subscribe | Manual e2e on each platform |
-| 4 | `ThemeSchedule::Clock` (HH:MM dark_at + light_at) + 60s tick task | Pure unit test on the boundary-crossing logic |
-| 5 | `ThemeSchedule::SunriseSunset` (lat/long) + sunrise crate | Pure unit tests on solar-position calc for known dates |
-| 6 | App-side event handler — reuses cycle-616 apply_theme | Drift guard on the event-routing |
+| 2 | Initial OS preference via winit `Window::theme()` | Source drift guard + manual e2e where supported |
+| 3 | Live OS updates via winit `WindowEvent::ThemeChanged` | Source drift guard + manual e2e on each platform/compositor that emits it |
+| 4 | `ThemeSchedule::Clock` (HH:MM dark_at + light_at) + app-loop poll | Pure unit test on the boundary-crossing logic |
+| 5 | `ThemeSchedule::SunriseSunset` (lat/long) | Pure unit tests on solar-position calc for known dates |
+| 6 | Shared App-side apply helper for schedule + OS following | Drift guard on the event-routing |
 | 7 | Audit doc + CONFIG.md + CHANGELOG | doc-only |
 
 Estimated test growth: +10-12 (the pure boundary-crossing + solar
@@ -183,14 +157,10 @@ theme-schedule-long = -122.4194
 
 ## Risks + mitigations
 
-- **Risk:** dark-light crate doesn't compile on some target (e.g.
-  WSL2, Wayland-only distros without portal). **Mitigation:** the
-  cycle-616 manual toggle remains the fallback. Detection is
+- **Risk:** winit returns no initial theme or emits no theme-change event on
+  some Linux compositor/window-system combinations. **Mitigation:** the
+  cycle-616 manual toggle and `theme-schedule` remain fallbacks. Detection is
   opt-in via `theme-mode = auto`.
-- **Risk:** DBus / NSDistributedNotificationCenter subscribe blocks
-  on first launch. **Mitigation:** subscribe in a spawned task;
-  the initial detect runs synchronously at launch but with a
-  100 ms timeout (fall back to Light on timeout).
 - **Risk:** schedule task drifts if the system sleeps. **Mitigation:**
   recompute the next boundary from wall-clock on resume, not from
   a counted-down sleep.

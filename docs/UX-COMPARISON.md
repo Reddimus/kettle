@@ -356,9 +356,6 @@ v2.20.0 decision gate shipped, the rest are tracked.
   newlines (copy-paste command injection), bracketed pastes safe by default;
   packaged with the existing OSC 52 deny-read posture as a coherent
   "kettle clipboard protections" story.
-- **System light/dark theme following** — `theme = light:X,dark:Y`
-  semantics via winit `ThemeChanged`; every other piece (theme pair keys,
-  live swap, reload) already exists.
 - **Native global hotkey** — `global:`-prefix keybinds, `RegisterHotKey` on
   Windows first. Ghostty has no Windows port at all — kettle can leapfrog
   upstream on its primary platform.
@@ -381,7 +378,7 @@ are marked, so the 6 shipped features occupy 8 "now" rows.
 
 | Feature | Source | kettle | Value | Effort | Verdict | Rationale |
 |---|---|---|---|---|---|---|
-| System-appearance theme following (`theme = light:X,dark:Y`) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | All theme-swap machinery exists; only winit `ThemeChanged` wiring is missing — schedule mode is a workaround for this. |
+| System-appearance theme following (`theme = light:X,dark:Y`) | Ghostty | ✅ | high | M | ✅ shipped v2.25.1 | `theme-mode = auto` / `system` / `follow-system` applies the platform's current winit window theme at startup and handles live `ThemeChanged` events; `theme-schedule` remains an explicit time-based override. |
 | `clipboard-paste-protection` + `clipboard-paste-bracketed-safe` | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Confirm-dialog primitive and centralized paste path exist; matches kettle's OSC 52 security stance. |
 | `confirm-close-surface` (prompt-aware close confirmation) | Ghostty | 🟡 | high | M | ✅ shipped v2.20.0 | Data-loss guard every mainstream terminal has; kettle already had the confirm dialog and OSC 133 prompt state. |
 | `window-width`/`window-height` (grid cells) + position | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Common ask; session restore already does monitor-clamped placement, so the hard parts are written. |
@@ -403,7 +400,7 @@ are marked, so the 6 shipped features occupy 8 "now" rows.
 | Cursor shape at prompt (bar at prompt, reset for commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Script-only DECSCUSR emission; the engine already renders the shapes. |
 | Resize overlay (transient cols×rows popup) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 (dup of the `resize-overlay` row) | Same feature inventoried by the UX-area agent, which scored it high. |
 | File-path linkification (URL-detection regex parity) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | kettle owns both the path regex and the link-open pipeline; this wires them together. Ghostty's url.zig test corpus is liftable. |
-| System dark/light appearance following | Ghostty | 🟡 | high | S | → backlog (capped by the v2.20.0 decision gate) | Duplicate of the theme-following row; the current `system` alias spelling implies it works today. |
+| System dark/light appearance following | Ghostty | ✅ | high | S | ✅ shipped v2.25.1 | Duplicate of the theme-following row; the `system` alias now routes through winit OS appearance changes. |
 | Native global hotkey (`global:` keybinds) for quake mode | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Removes quake-mode's biggest friction; Windows-first RegisterHotKey — Ghostty has no Windows port to copy. |
 | Link previews (hover destination strip) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Anti-spoofing win for OSC 8; a status-strip preview gets most of the value cheaply. |
 | User theme directory (custom theme files) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Duplicate of the theme-files row; user-over-bundled precedence is hours of loader work. |
@@ -537,8 +534,9 @@ stealing (or explicitly avoiding) independent of any single feature pick:
   to config keys would stop CONFIG.md drift (~120 hand-maintained rows).
 - **Conditional config / theme-as-config** — theme files are just config
   files, and a conditional-config engine re-resolves the conditional key set
-  when the system light/dark state flips. The right shape for
-  `theme-mode = system` without ad-hoc theme-swap code.
+  when the system light/dark state flips. Kettle now handles the direct
+  light/dark theme-pair case through winit; conditional config remains the
+  larger future shape for arbitrary per-theme config.
 - **Typed Duration values** — `750ms`, `1h30m`, max-clamped, vs kettle's
   growing pile of `*-ms` integer keys. A one-time Duration parser cleans up
   existing and future keys with old spellings kept as aliases.

@@ -114,10 +114,9 @@ pub enum BellMode {
 ///   done. Default; cycle-616 behavior unchanged.
 /// - `Light` — always use `light-theme`.
 /// - `Dark` — always use `dark-theme`.
-/// - `Auto` — follow the OS dark-mode preference at launch.
-///   Sub-cycle 2 wires the `dark-light` crate to actually
-///   subscribe; v1 of the *enum* just accepts the value so a
-///   Terminator config copies in clean.
+/// - `Auto` — follow the OS dark-mode preference when winit reports
+///   one; if `theme-schedule` is configured, the schedule owns the
+///   light/dark switch instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
     #[default]
@@ -1178,9 +1177,9 @@ pub struct Config {
     /// Cycle 641 (Terminator parity, `plugins/auto_theme.py`):
     /// theme-mode policy. Default `Explicit` preserves cycle-616
     /// "use the `theme = …` value" behavior. `Light` / `Dark` /
-    /// `Auto` are the Terminator AutoTheme modes; sub-cycle 2+ of
-    /// the auto-theme design will wire `Auto` to the OS dark-mode
-    /// subscribe.
+    /// `Auto` are the Terminator AutoTheme modes. `Auto` follows the
+    /// OS light/dark preference when winit reports one; an explicit
+    /// `theme-schedule` overrides OS following.
     pub theme_mode: ThemeMode,
     /// Cycle 664 (sub-cycle 4 of auto-theme design): wall-clock
     /// schedule for switching between `light_theme` and `dark_theme`.
@@ -3575,8 +3574,8 @@ impl Config {
                 }
                 "theme-mode" | "theme_mode" => {
                     // Cycle 641 (Terminator parity, `plugins/auto_theme.py`).
-                    // Sub-cycle 1 of auto-theme design — surface only;
-                    // sub-cycle 2 wires the dark-light crate subscribe.
+                    // `system` / `follow-system` are accepted aliases because
+                    // winit's window theme event is now the OS-following path.
                     cfg.theme_mode = match e.value.trim().to_ascii_lowercase().as_str() {
                         "light" => ThemeMode::Light,
                         "dark" => ThemeMode::Dark,

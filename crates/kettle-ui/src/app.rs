@@ -15,7 +15,9 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Fullscreen, UserAttentionType, Window, WindowId};
+use winit::window::{
+    CursorIcon, Fullscreen, Theme as WindowTheme, UserAttentionType, Window, WindowId,
+};
 
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
@@ -8329,13 +8331,48 @@ impl App {
             &self.cfg.dark_theme,
             None,
         ) {
-            log::info!("theme-schedule: switching to {next}");
+            self.apply_theme_name(ws, "theme-schedule", next);
+        }
+    }
+
+    fn apply_theme_name(&mut self, ws: &mut WindowState, source: &str, next: String) {
+        log::info!("{source}: switching to {next}");
+        self.cfg.theme_name = next.clone();
+        self.cfg.theme = kettle_config::Theme::by_name(&next);
+        self.save_session(ws);
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+    }
+
+    fn os_theme_choice(&self, theme: WindowTheme) -> Option<String> {
+        if self.cfg.theme_mode != kettle_config::ThemeMode::Auto {
+            return None;
+        }
+        if self.cfg.theme_schedule.is_some() {
+            return None;
+        }
+        let os_dark = matches!(theme, WindowTheme::Dark);
+        kettle_config::resolve_theme_for_mode(
+            kettle_config::ThemeMode::Auto,
+            &self.cfg.theme_name,
+            &self.cfg.light_theme,
+            &self.cfg.dark_theme,
+            Some(os_dark),
+        )
+    }
+
+    fn apply_initial_os_theme_preference(&mut self, theme: WindowTheme) {
+        if let Some(next) = self.os_theme_choice(theme) {
+            log::info!("theme-mode=auto: initial OS theme selects {next}");
             self.cfg.theme_name = next.clone();
             self.cfg.theme = kettle_config::Theme::by_name(&next);
-            self.save_session(ws);
-            if let Some(w) = &ws.window {
-                w.request_redraw();
-            }
+        }
+    }
+
+    fn apply_os_theme_preference(&mut self, ws: &mut WindowState, theme: WindowTheme) {
+        if let Some(next) = self.os_theme_choice(theme) {
+            self.apply_theme_name(ws, "theme-mode=auto", next);
         }
     }
 
@@ -12275,6 +12312,9 @@ impl App {
         self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
         ws.window = Some(window);
+        if let Some(theme) = ws.window.as_ref().and_then(|w| w.theme()) {
+            self.apply_initial_os_theme_preference(theme);
+        }
         if should_reveal_after_renderer_init(self.cfg.window_state)
             && let Some(w) = &ws.window
         {
@@ -12771,6 +12811,9 @@ impl App {
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
+            }
+            WindowEvent::ThemeChanged(theme) => {
+                self.apply_os_theme_preference(ws, theme);
             }
             WindowEvent::ModifiersChanged(m) => {
                 ws.mods = m.state();
@@ -15111,6 +15154,49 @@ mod tests {
             src.contains("let cmd_override = self.startup.command.take();")
                 && src.contains("let cwd_override = self.startup.cwd.take();"),
             "the -e/-d overrides are the only consumed-once startup fields"
+        );
+    }
+
+    /// Drift guard for `theme-mode = auto` / `system` / `follow-system`.
+    /// OS appearance following must apply both the initial window theme and
+    /// live `WindowEvent::ThemeChanged` updates, while `theme-schedule` remains
+    /// the explicit owner when configured.
+    #[test]
+    fn system_theme_following_is_wired() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        assert!(
+            src.contains(concat!(
+                "WindowEvent::ThemeChanged",
+                "(theme) => {\n                self.apply_os_theme_preference(ws, theme);"
+            )),
+            "winit ThemeChanged events must feed theme-mode=auto"
+        );
+        assert!(
+            src.contains(concat!("ws.window.as_ref().and_then", "(|w| w.theme())")),
+            "startup must apply the platform's current window theme when winit reports one"
+        );
+        assert!(
+            src.contains(concat!(
+                "self.apply_initial_os_theme_preference",
+                "(theme);"
+            )),
+            "startup OS theme application must use the pre-session-save path"
+        );
+        let initial_body = src
+            .split(concat!("fn apply_initial_os_theme_preference", "("))
+            .nth(1)
+            .and_then(|s| s.split(concat!("fn apply_os_theme_preference", "(")).next())
+            .expect("initial OS theme helper exists");
+        assert!(
+            !initial_body.contains(concat!("save_", "session")),
+            "initial OS theme application must not save an empty startup session"
+        );
+        assert!(
+            src.contains(concat!(
+                "if self.cfg.theme_schedule.is_some",
+                "() {\n            return None;\n        }"
+            )),
+            "theme-schedule must not fight OS appearance following"
         );
     }
 

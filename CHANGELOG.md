@@ -26,6 +26,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     policy as discrete/high-performance on machines that only expose integrated
     graphics. Explicit `high` and `low` remain available, and a pinned GPU still
     wins over the policy.
+  - **`theme-mode = auto` now follows OS appearance changes.** The
+    `auto` / `system` / `follow-system` modes apply winit's current window theme
+    at startup when available and handle live `ThemeChanged` events. An explicit
+    `theme-schedule` remains the owner when configured so time-based switching
+    and OS switching do not fight each other.
 
   ### Documentation / packaging
   - Refreshed stale install and package-template version references so the
