@@ -3909,19 +3909,32 @@ mod conformance {
 
     #[test]
     fn da1_primary_attributes_exact_params() {
-        // Primary DA (CSI c) must reply exactly CSI ? 6 c — VT2xx-class id
-        // with no extensions — so apps don't probe for features we lack.
+        // Primary DA (CSI c) must reply exactly with Kettle's truthful feature
+        // set: VT2xx-class id + shipped sixel + shipped OSC 52 clipboard.
         let (mut t, mut p, rx) = harness_rx(10, 3);
         feed(&mut t, &mut p, b"\x1b[c");
         assert_eq!(
             drain_pty(&rx),
-            "\x1b[?6c",
-            "DA1 reply must be exactly CSI ? 6 c"
+            crate::event::PRIMARY_DA_REPLY,
+            "DA1 reply must advertise VT2xx + sixel + OSC 52"
         );
         // CSI 0 c is an explicit-parameter alias for the same query.
         let (mut t2, mut p2, rx2) = harness_rx(10, 3);
         feed(&mut t2, &mut p2, b"\x1b[0c");
-        assert_eq!(drain_pty(&rx2), "\x1b[?6c", "CSI 0 c == CSI c");
+        assert_eq!(
+            drain_pty(&rx2),
+            crate::event::PRIMARY_DA_REPLY,
+            "CSI 0 c == CSI c"
+        );
+        // DECID is the older ESC Z spelling of Primary DA and should stay in
+        // lockstep with CSI c.
+        let (mut t3, mut p3, rx3) = harness_rx(10, 3);
+        feed(&mut t3, &mut p3, b"\x1bZ");
+        assert_eq!(
+            drain_pty(&rx3),
+            crate::event::PRIMARY_DA_REPLY,
+            "DECID == CSI c"
+        );
     }
 
     #[test]

@@ -139,7 +139,8 @@
 
 - [x] Conformance: XTWINOPS CSI 18 t text-area size (8;rows;cols t),
       DSR CSI 5 n device-status (→ CSI 0 n), exact DA1 reply
-      `CSI ? 6 c` incl. the `CSI 0 c` alias (44 conformance tests).
+      `CSI ? 6;4;52 c` incl. the `CSI 0 c` alias and DECID, advertising
+      the shipped sixel and OSC 52 surfaces (44+ conformance tests).
       CSI 14 t pixel size routes through a windowing callback — exercised
       live, not asserted headless.
 

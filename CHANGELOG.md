@@ -17,6 +17,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `window-position-y` in physical pixels for deterministic startup placement.
     Restored session geometry and explicit new-window placement still take
     precedence.
+  - **Device Attributes advertise shipped terminal features.** Primary DA now
+    replies `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's
+    existing sixel decoder and OSC 52 clipboard support.
 
   ### Fixed
   - **Grid renderer cursor-blink regression.** The v2.25.0 cell-locked

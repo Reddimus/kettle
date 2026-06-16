@@ -6,6 +6,16 @@ pub use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::event::EventListener;
 use crossbeam_channel::Sender;
 
+const UPSTREAM_PRIMARY_DA_REPLY: &str = "\x1b[?6c";
+
+/// Primary Device Attributes advertised by Kettle.
+///
+/// `6` keeps the VT102/VT2xx-compatible identity that existing programs expect,
+/// while `4` advertises sixel graphics and `52` advertises OSC 52 clipboard
+/// support. Both extension bits are truthful for Kettle's shipped protocol
+/// surface; the OSC 52 read direction remains policy-gated by config.
+pub(crate) const PRIMARY_DA_REPLY: &str = "\x1b[?6;4;52c";
+
 /// Wakes the UI event loop (a winit `EventLoopProxy` is plugged in here).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -25,6 +35,12 @@ impl EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
+        let event = match event {
+            TermEvent::PtyWrite(s) if s == UPSTREAM_PRIMARY_DA_REPLY => {
+                TermEvent::PtyWrite(PRIMARY_DA_REPLY.to_string())
+            }
+            other => other,
+        };
         let _ = self.tx.send(event);
         (self.waker)();
     }
@@ -68,5 +84,23 @@ mod tests {
         let proxy = EventProxy::new(tx, Arc::new(|| {}));
         drop(rx);
         proxy.send_event(TermEvent::Wakeup); // must not panic
+    }
+
+    #[test]
+    fn primary_da_reply_advertises_shipped_extensions() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+
+        proxy.send_event(TermEvent::PtyWrite("\x1b[?6c".into()));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TermEvent::PtyWrite(s)) if s == super::PRIMARY_DA_REPLY
+        ));
+
+        proxy.send_event(TermEvent::PtyWrite("\x1b[>0;276;0c".into()));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TermEvent::PtyWrite(s)) if s == "\x1b[>0;276;0c"
+        ));
     }
 }

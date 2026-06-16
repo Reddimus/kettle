@@ -372,9 +372,9 @@ Status: ✅ have · 🟡 partial · ⛔ missing · ❔ unverified. Statuses refl
 the adversarial cross-check where one exists (11 rows differ from the raw
 inventory). Two features were independently inventoried twice by different
 area agents (resize overlay; prompt-aware close confirm) — duplicate rows
-are marked, so the 8 shipped features occupy 10 "now" rows.
+are marked, so the 10 shipped features occupy 12 "now" rows.
 
-#### Verdict: now — 39 rows (8 features shipped; the rest capped by the v2.20.0 decision gate)
+#### Verdict: now — 39 rows (10 features shipped; the rest capped by the v2.20.0 decision gate)
 
 | Feature | Source | kettle | Value | Effort | Verdict | Rationale |
 |---|---|---|---|---|---|---|
@@ -389,7 +389,7 @@ are marked, so the 8 shipped features occupy 10 "now" rows.
 | Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ | high | M | → backlog (capped by the v2.20.0 decision gate) | Biggest TUI-compat unlock (Neovim/fish/helix); engine flag exists, needs a CSI-u encoder honoring TermMode bits. |
 | Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
 | XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
-| DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | kettle ships a 426-line sixel decoder DA1 probers cannot discover; cheap truth-in-advertising fix. |
+| DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | Primary DA now reports `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's shipped sixel decoder and OSC 52 clipboard support. |
 | Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A few lines in the extractor; the notification dispatcher exists. Unlocks ntfy-style long-build alerts. |
 | Hardened shell-integration scripts (robust OSC 133 marking) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Pure script work improving shipped jump-to-prompt; re-implement from spec — Ghostty's scripts are GPLv3. |
 | OSC 7 cwd emission in kettle snippets (incl. PowerShell) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | One emission per prompt activates the cwd-inherit pipeline kettle already built; best cost/value in the inventory. |
@@ -560,9 +560,9 @@ stealing (or explicitly avoiding) independent of any single feature pick:
   generating the struct, reset logic, and DECRQM/DECRPM reporting. If kettle
   intercepts engine-unknown modes (2048, 2031), a small table-driven
   registry in kettle-vt prevents drift.
-- **Device attributes as data** — DA1/DA2/DA3 modeled as a conformance level
-  plus a feature list rather than a hardcoded string, so new capabilities
-  (sixel=4, clipboard=52) are one-line additions.
+- **Device attributes as data** — DA1 now advertises Kettle's shipped sixel
+  and OSC 52 support; a future DA2/DA3 table should still model identity and
+  feature bits as data rather than scattered hardcoded strings.
 - **One pre-engine reply layer** — kettle-vt's extractor is the proven
   interception point and the PtyWrite reply channel already exists; the
   protocol cluster (XTGETTCAP, DECRQSS, DA1, graphics `a=q`, OSC 9 notify)
