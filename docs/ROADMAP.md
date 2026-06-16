@@ -1446,8 +1446,9 @@ features list. What's left is genuinely-multi-week threads + polish.
 - [ ] **Native Windows ConPTY stdin forwarding for `kettle exec`** — disabled
       until the input lifecycle avoids `STATUS_CONTROL_C_EXIT` for console
       children on Windows CI.
-- [ ] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
-      surface (per `docs/AGENT.md` Future work). `send_keys` already shipped.
+- [x] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
+      surface. It queues the existing live renderer readback, works in
+      `agent-server=read-only`, and returns the saved PNG path.
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
       adoption (sub-cycle 7 final piece of detachable tabs). Internal
       optimization that preserves running shells across cross-window

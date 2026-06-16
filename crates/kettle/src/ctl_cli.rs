@@ -179,6 +179,15 @@ fn pretty(method: &str, result: &Value) -> String {
             .and_then(|t| t.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{result}\n")),
+        "screenshot" => {
+            let path = result.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let scope = if result.get("full_window").and_then(|v| v.as_bool()) == Some(true) {
+                format!("window {}", result["window"])
+            } else {
+                format!("pane {}", result["pane"])
+            };
+            format!("saved screenshot of {scope} to {path}\n")
+        }
         "run_command" => {
             let code = result.get("exit_code");
             let timed = result.get("timed_out").and_then(|t| t.as_bool()) == Some(true);

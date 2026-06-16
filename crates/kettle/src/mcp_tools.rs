@@ -1,8 +1,8 @@
 //! Cycle 932 (agent-first A3): the MCP tool registry.
 //!
 //! `kettle_run` runs a command headlessly via the A1 exec engine in-process.
-//! The other tools (`kettle_list_panes`, `kettle_read_screen`, `kettle_send_text`,
-//! `kettle_run_command`) drive a running kettle via the A2 control client; when
+//! The other tools (`kettle_list_panes`, `kettle_read_screen`, `kettle_screenshot`,
+//! `kettle_send_text`, `kettle_run_command`) drive a running kettle via the A2 control client; when
 //! no server is discoverable they return an `isError` result with actionable
 //! text (start `kettle --agent-server full`).
 
@@ -49,6 +49,20 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "pane": {"type": "integer", "description": "pane id (default: focused)"},
                     "scrollback_lines": {"type": "integer", "description": "extra history lines to include"}
+                }
+            }
+        }),
+        json!({
+            "name": "kettle_screenshot",
+            "description": "Save a live PNG screenshot from a running kettle. Defaults to the \
+                focused pane crop; pass pane for a specific pane, full_window=true for the whole \
+                window, and path to choose the output file. Works in read-only mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane": {"type": "integer", "description": "pane id (default: focused pane)"},
+                    "full_window": {"type": "boolean", "description": "capture the whole target window instead of cropping to a pane"},
+                    "path": {"type": "string", "description": "output PNG path (default: cache/kettle/shots/kettle-<time>-<pid>.png)"}
                 }
             }
         }),
@@ -143,6 +157,15 @@ pub fn call_tool(params: &Value) -> Value {
                 p.insert("scrollback_lines".into(), sb.clone());
             }
             ctl_call("read_screen", Value::Object(p))
+        }
+        "kettle_screenshot" => {
+            let mut p = serde_json::Map::new();
+            for k in ["pane", "full_window", "path"] {
+                if let Some(v) = args.get(k) {
+                    p.insert(k.into(), v.clone());
+                }
+            }
+            ctl_call("screenshot", Value::Object(p))
         }
         "kettle_send_text" => {
             let Some(text) = args.get("text").and_then(|t| t.as_str()) else {
@@ -292,7 +315,7 @@ mod tests {
     #[test]
     fn tool_specs_have_required_shape() {
         let specs = tool_specs();
-        assert!(specs.len() >= 7, "v2.20.0 added send_keys + wait_for");
+        assert!(specs.len() >= 8, "screenshot is part of the agent plane");
         for s in &specs {
             assert!(s["name"].is_string(), "tool missing name: {s}");
             assert!(s["description"].is_string(), "tool missing description");

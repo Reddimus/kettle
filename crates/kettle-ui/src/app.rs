@@ -7617,6 +7617,7 @@ impl App {
                     renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
                         out_path: path,
                         crop,
+                        completion: None,
                     });
                     // Cycle 689 (sub-cycle 5): toast notification.
                     // Optimistic — we fire BEFORE the GPU readback
@@ -8636,6 +8637,10 @@ impl App {
             "list_tabs" => Response::ok(req.id, self.ctl_list_tabs(ws)),
             "list_panes" => Response::ok(req.id, self.ctl_list_panes(ws)),
             "read_screen" => self.ctl_read_screen(ws, req),
+            "screenshot" => {
+                self.ctl_screenshot(ws, req, reply);
+                return;
+            }
             "subscribe" => {
                 if let Some(c) = &mut self.ctl {
                     c.set_subscribed(conn_id);
@@ -8798,6 +8803,144 @@ impl App {
             ),
             None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
         }
+    }
+
+    /// `screenshot`: queue a live-surface PNG capture and reply when the next
+    /// rendered frame saves it. Defaults to the focused pane crop; pass
+    /// `{full_window:true}` to capture the whole window, or `{path:"…"}` to
+    /// choose the output file.
+    fn ctl_screenshot(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+        reply: crate::ctl_server::ReplyTx,
+    ) {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let full_window = req
+            .params
+            .get("full_window")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let pane = if full_window && req.params.get("pane").is_none() {
+            None
+        } else {
+            match self.ctl_resolve_pane(ws, &req.params) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, e));
+                    return;
+                }
+            }
+        };
+        let target_seq = match pane {
+            Some(id) if ws.mux.panes.contains_key(&id) => Some(ws.seq),
+            Some(id) => self
+                .windows
+                .values()
+                .find(|w| w.mux.panes.contains_key(&id))
+                .map(|w| w.seq),
+            None => Some(ws.seq),
+        };
+        let Some(target_seq) = target_seq else {
+            let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished"));
+            return;
+        };
+        let crop = if full_window {
+            None
+        } else {
+            let Some(pane_id) = pane else {
+                let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, "missing pane"));
+                return;
+            };
+            let target = if target_seq == ws.seq {
+                Some(&*ws)
+            } else {
+                self.windows.get(&target_seq)
+            };
+            target.and_then(|target| {
+                let area = self.area(target);
+                let active = target.mux.active;
+                target
+                    .mux
+                    .layout(active, area)
+                    .into_iter()
+                    .find(|(id, _)| *id == pane_id)
+                    .map(|(_, rect)| rect)
+            })
+        };
+        let path = match req.params.get("path").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => std::path::PathBuf::from(s),
+            Some(_) => {
+                let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, "'path' is empty"));
+                return;
+            }
+            None => {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let cache = cache_dir_from_env(|k| std::env::var(k).ok());
+                session_screenshot_path(secs, std::process::id(), cache.as_deref())
+            }
+        };
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::INTERNAL,
+                format!("could not create screenshot directory: {e}"),
+            ));
+            return;
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let renderer = if target_seq == ws.seq {
+            ws.renderer.as_mut()
+        } else {
+            self.windows
+                .get_mut(&target_seq)
+                .and_then(|w| w.renderer.as_mut())
+        };
+        let Some(renderer) = renderer else {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::INTERNAL,
+                "target window has no renderer",
+            ));
+            return;
+        };
+        renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
+            out_path: path.clone(),
+            crop,
+            completion: Some(done_tx),
+        });
+        if target_seq == ws.seq {
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        } else if let Some(target) = self.windows.get(&target_seq)
+            && let Some(w) = &target.window
+        {
+            w.request_redraw();
+        }
+        let request_id = req.id;
+        std::thread::spawn(move || {
+            let resp = match done_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(Ok(saved)) => Response::ok(
+                    request_id,
+                    serde_json::json!({
+                        "path": saved,
+                        "pane": pane,
+                        "window": target_seq,
+                        "full_window": full_window,
+                    }),
+                ),
+                Ok(Err(e)) => Response::err(request_id, ec::INTERNAL, e),
+                Err(_) => Response::err(request_id, ec::INTERNAL, "screenshot capture timed out"),
+            };
+            let _ = reply.send(resp);
+        });
     }
 
     /// `send_text`: write text to a pane's PTY (default: focused).

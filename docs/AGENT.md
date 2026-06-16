@@ -41,7 +41,7 @@ flowchart LR
         app --> panes
     end
     cc -->|kettle_run| exec
-    cc -->|"list_panes / read_screen<br/>send_text / send_keys<br/>wait_for / run_command"| mcp["kettle mcp"]
+    cc -->|"list_panes / read_screen / screenshot<br/>send_text / send_keys<br/>wait_for / run_command"| mcp["kettle mcp"]
     mcp -->|spawn| exec
     mcp -->|"kettle-ctl client"| ipc["local IPC<br/>Unix socket / Windows named pipe"]
     ctl["kettle ctl"] -->|kettle-ctl client| ipc
@@ -217,11 +217,16 @@ Or a project-scoped `.mcp.json`:
 ```
 
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
-`kettle_list_panes`, `kettle_read_screen`, `kettle_send_text`,
-`kettle_send_keys`, `kettle_wait_for`, `kettle_run_command` (these drive a
-running kettle, so start it with `kettle --agent-server full`). When no
-server is found, the control-backed tools return an actionable error pointing
-at `--agent-server`.
+`kettle_list_panes`, `kettle_read_screen`, `kettle_screenshot`,
+`kettle_send_text`, `kettle_send_keys`, `kettle_wait_for`,
+`kettle_run_command` (these drive a running kettle, so start it with
+`kettle --agent-server full`). When no server is found, the control-backed
+tools return an actionable error pointing at `--agent-server`.
+
+The control surface also exposes `screenshot`, which saves a live PNG using the
+same renderer readback path as the UI screenshot action. It works in
+`agent-server=read-only`; by default it captures the focused pane crop, and
+`--json '{"full_window":true}'` captures the whole window.
 
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
@@ -244,7 +249,6 @@ If you don't want any of this, do nothing — it stays off.
 
 ## Future work
 
-- A live-grid `screenshot` method (`send_keys` shipped in v2.20).
 - Re-hosting the server on the `kettle-muxd` session daemon
   ([MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)) — clients are unaffected.
 - An "agent waiting for input" surfacing (the command-notify plumbing already

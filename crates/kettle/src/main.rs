@@ -424,7 +424,7 @@ enum Cmd {
     /// child's exit code; 124 on `--timeout`, 125 on an internal error.
     Exec(ExecArgs),
     /// Drive a running kettle's agent control server: call a method (e.g.
-    /// `list_panes`, `read_screen`, `send_text`, `run_command`) or stream
+    /// `list_panes`, `read_screen`, `screenshot`, `send_text`, `run_command`) or stream
     /// events. The target kettle must run with `agent-server` enabled.
     Ctl(CtlArgs),
     /// Run a Model Context Protocol server over stdio, exposing kettle as native
@@ -443,7 +443,7 @@ struct McpArgs {
 #[derive(clap::Args, Debug)]
 struct CtlArgs {
     /// The method to call (`get_state`, `list_tabs`, `list_panes`,
-    /// `read_screen`, `send_text`, `send_keys`, `wait_for`, `run_command`),
+    /// `read_screen`, `screenshot`, `send_text`, `send_keys`, `wait_for`, `run_command`),
     /// or `events` to stream the event feed.
     method: String,
     /// Target a specific pane id (else the focused pane).

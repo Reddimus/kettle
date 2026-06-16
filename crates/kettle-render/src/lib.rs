@@ -846,6 +846,10 @@ pub struct ScreenshotRequest {
     /// (the focused pane's geometry). If `None`, capture the
     /// whole window.
     pub crop: Option<(f32, f32, f32, f32)>,
+    /// Optional completion signal for programmatic callers (`kettle ctl
+    /// screenshot` / MCP). The UI action leaves this `None` and keeps its
+    /// optimistic notification behavior.
+    pub completion: Option<std::sync::mpsc::Sender<Result<std::path::PathBuf, String>>>,
 }
 
 impl Renderer {
@@ -3579,10 +3583,17 @@ impl Renderer {
         // happens off-thread; this path is best-effort: errors log
         // but don't fail the frame.
         let screenshot_req = self.pending_screenshot.take();
-        if let Some(req) = &screenshot_req
-            && let Err(e) = self.capture_live_surface(&frame, req)
-        {
-            log::warn!("take_screenshot capture failed: {e}");
+        if let Some(req) = &screenshot_req {
+            let result = self
+                .capture_live_surface(&frame, req)
+                .map(|_| req.out_path.clone())
+                .map_err(|e| e.to_string());
+            if let Some(tx) = &req.completion {
+                let _ = tx.send(result.clone());
+            }
+            if let Err(e) = result {
+                log::warn!("take_screenshot capture failed: {e}");
+            }
         }
         frame.present();
         // Only trim when we prepared this frame (see the `need_prepare` gate):

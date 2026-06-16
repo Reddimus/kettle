@@ -589,6 +589,7 @@ pub const READ_ONLY_METHODS: &[&str] = &[
     "list_tabs",
     "list_panes",
     "read_screen",
+    "screenshot",
     "subscribe",
 ];
 
