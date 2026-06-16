@@ -516,8 +516,8 @@ fn spawn_stdin_pump(writer: kettle_core::PtyWriter) {
 
 /// True when stdin is a pipe/file/socket we should forward to the PTY
 /// (`echo y | kettle exec -- …`). On an interactive TTY we do NOT steal stdin
-/// (the human is pointed at the GUI), and `/dev/null`/`NUL` stays closed rather
-/// than being treated as useful input.
+/// (the human is pointed at the GUI), and `/dev/null` stays closed rather than
+/// being treated as useful input.
 pub fn stdin_is_pipe() -> bool {
     #[cfg(unix)]
     {
@@ -532,26 +532,15 @@ pub fn stdin_is_pipe() -> bool {
     }
     #[cfg(windows)]
     {
-        windows_stdin_is_pipe()
+        // Native Windows ConPTY currently exits console children with
+        // STATUS_CONTROL_C_EXIT when we drive stdin this way. Keep stdin
+        // forwarding disabled there until the ConPTY input lifecycle has a
+        // separate, proven implementation. WSL uses the Unix branch.
+        false
     }
     #[cfg(not(any(unix, windows)))]
     {
         false
-    }
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn windows_stdin_is_pipe() -> bool {
-    use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType};
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
-    // A console device is FILE_TYPE_CHAR; a pipe/file is something else.
-    unsafe {
-        let h = GetStdHandle(STD_INPUT_HANDLE);
-        if h.is_null() {
-            return false;
-        }
-        GetFileType(h) != FILE_TYPE_CHAR
     }
 }
 

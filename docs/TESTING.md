@@ -234,7 +234,7 @@ These need a real display and are run by hand (or on real hardware):
     smoke rather than a portable CI gate.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
-    Also verify stdin-driven one-shots:
+    On Unix/WSL, also verify stdin-driven one-shots:
     `printf 'ok\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'`.
   - **Control server + `kettle ctl`**: launch `kettle --agent-server full`, then
     cross-process `kettle ctl get_state` / `list_panes` / `send_text` /

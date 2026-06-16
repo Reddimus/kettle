@@ -88,22 +88,22 @@ On Windows the child runs under a ConPTY (pseudoconsole). Two consequences:
 
 ### Stdin forwarding
 
-When `kettle exec` is launched with piped or redirected stdin, it forwards that
-input to the child PTY:
+On Unix and WSL, when `kettle exec` is launched with piped or redirected stdin,
+it forwards that input to the child PTY:
 
 ```sh
 printf 'hello\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'
 ```
 
-Interactive terminal stdin is not stolen from the user, and null stdin
-(`/dev/null` / `NUL`) stays closed rather than being treated as useful input.
-On Unix, EOF on the input pipe closes the PTY input side. On Windows ConPTY,
-the forwarded bytes are delivered, but the input handle stays open until the
-child exits or `--timeout` kills it; closing conin early can interrupt console
-children. Use line/protocol-delimited input for Windows one-shots, or set an
-explicit timeout for EOF-only programs. The MCP `kettle_run` tool still gives
-the child no stdin by design; use `kettle exec` directly for stdin-driven
-one-shot commands.
+Interactive terminal stdin is not stolen from the user, and `/dev/null` stays
+closed rather than being treated as useful input. EOF on the input pipe closes
+the PTY input side.
+
+Native Windows ConPTY stdin forwarding remains disabled: closing or otherwise
+driving conin from a non-interactive parent currently makes console children
+exit with `STATUS_CONTROL_C_EXIT` on the Windows CI runner. WSL uses the Unix
+path above. The MCP `kettle_run` tool still gives the child no stdin by design;
+use `kettle exec` directly for Unix/WSL stdin-driven one-shot commands.
 
 ## Control server + `kettle ctl`
 
