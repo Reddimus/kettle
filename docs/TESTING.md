@@ -237,7 +237,10 @@ These need a real display and are run by hand (or on real hardware):
     binary auto-detaches stdout from an interactive shell, so a piped invocation
     from the same console shows nothing).
   - **`kettle mcp`**: `kettle mcp --self-test` (in-process handshake +
-    `tools/list` + one `kettle_run`).
+    `tools/list` + one `kettle_run`). CI also runs
+    `crates/kettle/tests/mcp_stdio.rs`, which spawns the real `kettle mcp`
+    process and speaks newline-delimited JSON-RPC over stdio — the boundary
+    Claude Code / Codex use when the server is registered as an MCP.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
 
