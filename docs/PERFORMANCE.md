@@ -29,6 +29,19 @@ final installed binary on the integrated adapter the default policy chooses on
 this machine. Kettle beats Terminator and Ghostty on both probes and remains in
 the same practical class as Alacritty for the flood path.
 
+Reproduce and gate this Ubuntu peer comparison with:
+
+```sh
+just linux-perf
+# or:
+scripts/perf/linux-compare.sh --runs 7 --out-dir target/perf-results/linux-v2.25.1
+```
+
+The script writes Hyperfine JSON for both probes plus `linux-score.json`, and it
+fails if Kettle is slower than Terminator or more than 10% slower than Ghostty on
+either workload. It is desktop-local by design because it needs installed GUI
+terminal peers and a real X11/Wayland session.
+
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
 The cell-locked glyph pipeline (`text-renderer = grid`, the new default) replaces
@@ -227,11 +240,16 @@ honest numbers.
 
 ### Current performance gate
 
-New performance work should publish a same-machine `perf-all.ps1` result and
-run `scripts/perf/score.ps1` on it. The score gate normalizes throughput,
+New Windows performance work should publish a same-machine `perf-all.ps1` result
+and run `scripts/perf/score.ps1` on it. The score gate normalizes throughput,
 startup, idle CPU, and memory against the best terminal in the run; it fails if
 kettle is outside the top half, beats fewer than two peer terminals, or regresses
 more than the configured threshold when a baseline directory is supplied.
+
+Linux desktop performance work should also run `just linux-perf` when Terminator
+and Ghostty are installed. That gate is intentionally narrower than the Windows
+suite, but it directly protects the Ubuntu requirement that Kettle beat
+Terminator and stay close to Ghostty on launch/ASCII-flood probes.
 
 ### v2.21.0 — startup 2.2× faster, damage-aware idle, corrected root causes
 

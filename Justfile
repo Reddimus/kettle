@@ -178,6 +178,21 @@ bench:
 bench:
     & ./scripts/bench.ps1
 
+# Compare Kettle against installed Linux peer terminals using Hyperfine:
+# Terminator and Ghostty are required, Alacritty is included when present.
+# This is desktop-local by design (needs a graphical Linux session) and gates
+# the Ubuntu "better than Terminator, close to Ghostty" requirement with
+# repeatable JSON output under target/perf-results/linux-local/.
+[unix]
+linux-perf:
+    ./scripts/perf/linux-compare.sh
+
+[windows]
+linux-perf:
+    @echo "linux-perf is a Linux desktop benchmark."
+    @echo "On Windows use: pwsh -File scripts/perf/perf-all.ps1 -Label after"
+    @echo "then:          pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after"
+
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (the cycle-0 install script — Linux

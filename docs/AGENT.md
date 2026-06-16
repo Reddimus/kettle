@@ -253,6 +253,16 @@ screenshots through `kettle ctl screenshot`, and fails if cursor blink changes a
 broad region instead of a cursor-sized box. This needs a visible X11/Wayland
 desktop session.
 
+```sh
+just linux-perf
+```
+
+Runs the Linux Hyperfine peer gate when `terminator` and `ghostty` are installed
+(`alacritty` is included when present). It builds the release binary, launches
+each terminal for a `/bin/true` startup probe and a ~4 MiB ASCII flood probe,
+then fails if Kettle does not beat Terminator or stay within 10% of Ghostty.
+This is also desktop-local because it opens real GUI terminal windows.
+
 ## Security & threat model
 
 - **Off by default.** No server, no socket, no registry entry unless you opt in.

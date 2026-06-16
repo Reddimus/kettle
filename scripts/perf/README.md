@@ -1,12 +1,14 @@
 # Cross-terminal performance harness
 
 The pinned methodology behind the comparative numbers in `docs/PERFORMANCE.md`.
-Everything runs the SAME way against every terminal (kettle, Windows Terminal,
-Alacritty, WezTerm), windows normalized to the same pixel size, medians of
-repeated runs.
+The Windows harness runs the SAME way against every terminal (kettle, Windows
+Terminal, Alacritty, WezTerm), windows normalized to the same pixel size,
+medians of repeated runs. The Linux desktop harness below covers the Ubuntu
+Terminator/Ghostty smoke target with Hyperfine and explicit pass/fail rules.
 
 | Script | Measures | How |
 | --- | --- | --- |
+| `linux-compare.sh` | Linux startup + ASCII flood | Hyperfine: launch terminal, run `/bin/true`, close; launch terminal, print ~4 MiB ASCII, close. Requires Terminator + Ghostty; includes Alacritty when installed; fails if kettle does not beat Terminator or is more than 10% slower than Ghostty |
 | `gen-payloads.ps1` | — | Deterministic payloads: ~16 MB plain ASCII, ~6.1 MB SGR-heavy, ~4.3 MB CJK/emoji |
 | `run-inside.ps1` | throughput | Runs INSIDE the terminal; times chunked console writes of each payload (termbench principle: the terminal's consumption backpressures the writer); writes JSON, no screen scraping |
 | `throughput.ps1` | throughput + post-flood memory | Orchestrates run-inside per terminal; samples process-tree working set right after the flood |
@@ -18,11 +20,28 @@ repeated runs.
 
 ## Prerequisites
 
+- Linux desktop smoke: `hyperfine`, `terminator`, `ghostty`; optional
+  `alacritty`; a graphical X11/Wayland session. `linux-compare.sh` builds
+  `target/release/kettle` by default and uses a temporary config with
+  `text-renderer = grid`, `gpu-power-preference = auto`, no restore, and no
+  update check.
 - Terminals: `wt` on PATH; Alacritty portable at `C:\Users\kevm9\Repos\research\bin\alacritty.exe`; WezTerm portable at `...\bin\wezterm\wezterm-gui.exe`; kettle from `target\release\kettle.exe` (build first). Paths are overridable parameters on every script.
 - vtebench built in WSL: `CARGO_TARGET_DIR=$HOME/vtebench-target cargo build --release` from a clone of `alacritty/vtebench`.
 - A quiet machine: close other GPU/CPU-heavy apps; plugged in, high-performance power profile; do not move the mouse during the latency probe.
 
 ## Score gate
+
+For the Ubuntu Terminator/Ghostty target:
+
+```sh
+just linux-perf
+# or:
+scripts/perf/linux-compare.sh --runs 7 --out-dir target/perf-results/linux-v2.25.1
+```
+
+That writes `linux-startup.json`, `linux-ascii-flood.json`, and
+`linux-score.json`. The gate is deliberately narrow and repeatable: Kettle must
+beat Terminator and remain within 10% of Ghostty on both probes.
 
 Run the full harness, then score the result directory:
 
