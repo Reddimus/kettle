@@ -5,8 +5,9 @@ set -euo pipefail
 #
 # This needs a real desktop session. It starts a temporary kettle window with
 # the control server enabled, captures several live screenshots across cursor
-# blink phases, decodes the PNGs with Python stdlib only, and fails if blink
-# changes a broad region instead of a cursor-sized box.
+# blink phases, decodes the PNGs with Python stdlib only, and fails if the
+# prompt-like marker is absent from rendered frames or if blink changes a broad
+# region instead of a cursor-sized box.
 
 KETTLE="${KETTLE_BIN:-kettle}"
 FRAMES="${KETTLE_LIVE_RENDER_FRAMES:-6}"
@@ -35,6 +36,11 @@ text-renderer = grid
 agent-server = full
 cursor-blink = true
 cursor-blink-interval = 250
+background = #000000
+foreground = #ffffff
+cursor-color = #ffff00
+cursor-fg-color = #000000
+minimum-contrast = 0
 tab-bar = off
 status-bar = off
 restore-session = false
@@ -59,7 +65,7 @@ while ! "$KETTLE" ctl --pid "$pid" list_panes --raw >"$tmp/panes.json" 2>/dev/nu
   sleep 0.1
 done
 
-"$KETTLE" ctl --pid "$pid" send_text --text "printf KETTLE_LIVE_RENDER_SMOKE" >/dev/null
+"$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_SMOKE'" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
 "$KETTLE" ctl --pid "$pid" wait_for --text "KETTLE_LIVE_RENDER_SMOKE" \
   --json '{"timeout_ms":5000,"quiet_ms":150}' >/dev/null
@@ -82,8 +88,11 @@ frame_count = int(sys.argv[2])
 screen = json.loads(Path(sys.argv[3]).read_text())
 cols = max(1, int(screen.get("cols", 1)))
 rows = max(1, int(screen.get("rows", 1)))
-if "KETTLE_LIVE_RENDER_SMOKE" not in screen.get("text", ""):
+screen_text = screen.get("text", "")
+if "KETTLE_LIVE_RENDER_SMOKE" not in screen_text:
     raise SystemExit("live-render smoke: marker text is not present on screen")
+if "\u279c  ~ KETTLE_LIVE_RENDER_SMOKE" not in screen_text:
+    raise SystemExit("live-render smoke: prompt-shaped marker is not present on screen")
 
 
 def read_rgba_png(path):
@@ -162,8 +171,27 @@ cell_h = max(1.0, height / rows)
 max_w = cell_w * 4.0
 max_h = cell_h * 3.0
 max_changed = cell_w * cell_h * 8.0
+min_ink_pixels = max(200, int(cell_w * cell_h * 3.0))
 nonzero_pairs = 0
 worst = (0, None, 0, 0, 0)
+ink_counts = []
+
+for frame_idx, (_, _, rgba_rows) in enumerate(frames, start=1):
+    ink = 0
+    for row in rgba_rows:
+        for x in range(width):
+            off = x * 4
+            r, g, b, a = row[off : off + 4]
+            # The temp config is white text on black bg with a yellow cursor.
+            # This rejects blank/mostly-empty frames without depending on OCR.
+            if a > 0 and (r * 299 + g * 587 + b * 114) >= 80_000:
+                ink += 1
+    ink_counts.append(ink)
+    if ink < min_ink_pixels:
+        raise SystemExit(
+            "live-render smoke: rendered frame has too little visible text: "
+            f"frame={frame_idx} ink_pixels={ink} min={min_ink_pixels}"
+        )
 
 for idx in range(len(frames) - 1):
     _, _, a = frames[idx]
@@ -198,6 +226,7 @@ changed, bbox, bw, bh, pair = worst
 print(
     "live-render smoke: OK "
     f"frames={frame_count} worst_pair={pair}->{pair + 1} changed={changed} "
-    f"bbox={bbox} bbox_size=({bw}x{bh}) image=({width}x{height})"
+    f"bbox={bbox} bbox_size=({bw}x{bh}) "
+    f"ink=min:{min(ink_counts)} max:{max(ink_counts)} image=({width}x{height})"
 )
 PY

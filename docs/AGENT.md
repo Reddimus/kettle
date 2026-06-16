@@ -250,8 +250,11 @@ just live-render-smoke
 
 Starts a real Kettle window with `text-renderer = grid`, captures several live
 screenshots through `kettle ctl screenshot`, and fails if cursor blink changes a
-broad region instead of a cursor-sized box. This needs a visible X11/Wayland
-desktop session.
+broad region instead of a cursor-sized box. The script also draws a high-contrast
+prompt-shaped `➜  ~ KETTLE_LIVE_RENDER_SMOKE` marker and rejects blank or
+mostly-empty screenshot frames, so the rendered PNGs must prove that normal
+prompt glyphs remain visible across blink phases. This needs a visible
+X11/Wayland desktop session.
 
 ```sh
 just linux-perf
