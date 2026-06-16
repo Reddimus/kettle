@@ -377,7 +377,7 @@ fn is_known_shell(prog: &str) -> bool {
 
 /// Cycle 917 (#2, user-reported on native Ubuntu): is this shell invocation a
 /// ONE-SHOT / non-interactive command rather than an interactive session? A
-/// foreground `node` (Claude Code) or `nvim` routinely spawns transient
+/// foreground agent/editor (`claude`/`codex`/`nvim`) routinely spawns transient
 /// `sh -c "…"` / `bash -c "…"` helpers; cloning one into a split spawns a shell
 /// that runs the command and exits immediately, leaving a blank/dead pane
 /// ("new pane but no terminal would load"). Only an interactive shell should be
@@ -1388,14 +1388,14 @@ mod tests {
         assert_eq!(find_foreground_shell(1, &mut tree), None);
     }
 
-    /// Cycle 917 (#2, user-reported on native Ubuntu): a foreground `node`
-    /// (Claude Code) or `nvim` spawns transient `sh -c "…"` helpers. The detector
-    /// must NOT clone a one-shot helper into a split — doing so spawns a shell
-    /// that runs the command and exits immediately, leaving a blank/dead pane
-    /// ("new pane but no terminal would load"). With no INTERACTIVE shell
+    /// Cycle 917 (#2, user-reported on native Ubuntu): a foreground agent/editor
+    /// (`claude`/`codex`/`nvim`) spawns transient `sh -c "…"` helpers. The
+    /// detector must NOT clone a one-shot helper into a split — doing so spawns a
+    /// shell that runs the command and exits immediately, leaving a blank/dead
+    /// pane ("new pane but no terminal would load"). With no INTERACTIVE shell
     /// descendant, it returns None so the caller clones the pane's real shell.
     #[test]
-    fn foreground_shell_ignores_node_spawned_sh_dash_c_helper() {
+    fn foreground_shell_ignores_agent_and_editor_spawned_oneshot_helpers() {
         let mut tree = MockProcessTree::new();
         tree.add(100, None, &["bash", "-l"]); // pane's login shell (BFS starts at its children)
         tree.add(200, Some(100), &["node", "/usr/bin/claude"]); // Claude Code CLI
@@ -1404,6 +1404,26 @@ mod tests {
             find_foreground_shell(100, &mut tree),
             None,
             "a node-spawned `sh -c` helper must not be cloned into a split"
+        );
+
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["zsh", "-l"]);
+        tree.add(200, Some(100), &["codex", "exec"]);
+        tree.add(300, Some(200), &["bash", "-lc", "cargo test -p kettle"]);
+        assert_eq!(
+            find_foreground_shell(100, &mut tree),
+            None,
+            "a Codex-spawned `bash -lc` helper must not be cloned into a split"
+        );
+
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["fish"]);
+        tree.add(200, Some(100), &["nvim"]);
+        tree.add(300, Some(200), &["fish", "--command", "lazygit"]);
+        assert_eq!(
+            find_foreground_shell(100, &mut tree),
+            None,
+            "an editor-spawned one-shot shell helper must not be cloned into a split"
         );
     }
 

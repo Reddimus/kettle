@@ -227,6 +227,11 @@ These need a real display and are run by hand (or on real hardware):
   installer. WSL verification should cover Linux shells and the same CLI/agent
   flows launched from inside a WSL pane.
 - **Agent gauntlet** (run on **Windows + WSL**; see [AGENT.md](AGENT.md)):
+  - **Local agent/TUI CLIs**: `scripts/check-agent-cli-smoke.sh` launches any
+    installed Codex CLI, Claude Code CLI, and Neovim/AstroNvim through
+    `kettle exec --strip-ansi` and verifies they print/paint and exit cleanly.
+    Missing optional tools are reported as skips, so this is a real-machine
+    smoke rather than a portable CI gate.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
   - **Control server + `kettle ctl`**: launch `kettle --agent-server full`, then
