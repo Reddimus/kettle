@@ -372,9 +372,9 @@ Status: ✅ have · 🟡 partial · ⛔ missing · ❔ unverified. Statuses refl
 the adversarial cross-check where one exists (11 rows differ from the raw
 inventory). Two features were independently inventoried twice by different
 area agents (resize overlay; prompt-aware close confirm) — duplicate rows
-are marked, so the 10 shipped features occupy 12 "now" rows.
+are marked, so the 11 shipped features occupy 13 "now" rows.
 
-#### Verdict: now — 39 rows (10 features shipped; the rest capped by the v2.20.0 decision gate)
+#### Verdict: now — 39 rows (11 features shipped; the rest capped by the v2.20.0 decision gate)
 
 | Feature | Source | kettle | Value | Effort | Verdict | Rationale |
 |---|---|---|---|---|---|---|
@@ -390,7 +390,7 @@ are marked, so the 10 shipped features occupy 12 "now" rows.
 | Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
 | XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
 | DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | Primary DA now reports `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's shipped sixel decoder and OSC 52 clipboard support. |
-| Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A few lines in the extractor; the notification dispatcher exists. Unlocks ntfy-style long-build alerts. |
+| Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | `OSC 9 ; message` and `OSC 777 ; notify ; title ; body` now parse into bounded desktop notifications through the existing notification dispatcher; `OSC 9;4` remains taskbar progress. |
 | Hardened shell-integration scripts (robust OSC 133 marking) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Pure script work improving shipped jump-to-prompt; re-implement from spec — Ghostty's scripts are GPLv3. |
 | OSC 7 cwd emission in kettle snippets (incl. PowerShell) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | One emission per prompt activates the cwd-inherit pipeline kettle already built; best cost/value in the inventory. |
 | OSC 7 `kitty-shell-cwd://` scheme + hostname validation | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | Interop bug-fix: docs already claimed kitty integration is picked up — untrue for this scheme until now. |

@@ -4049,6 +4049,10 @@ impl App {
         // is destructive, so the command-notify, the run_command correlator, and
         // event subscribers must all be fed from one place, AFTER this pane loop.
         let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
+        // Protocol desktop notifications (OSC 9 / OSC 777) drained once per
+        // pass and dispatched after the pane loop so the UI owns all toasts.
+        let mut protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)> =
+            Vec::new();
         // Cycle 412: pane ids whose shell exited with cfg.exit_action
         // = Restart. Queued during the drain; appended to
         // ws.pending_pane_restarts after the iteration so the
@@ -4231,6 +4235,9 @@ impl App {
             for ev in pane.term.drain_command_finished_events() {
                 command_finished_local.push((pane_id, ev));
             }
+            for ev in pane.term.drain_protocol_notifications() {
+                protocol_notifications_local.push((pane_id, ev));
+            }
         }
         if bell {
             if self.cfg.bell.visual() {
@@ -4315,6 +4322,23 @@ impl App {
                 serde_json::json!({
                     "exit_code": ev.exit_code,
                     "duration_ms": ev.duration.as_millis() as u64,
+                }),
+            );
+        }
+        for (pane_id, ev) in protocol_notifications_local {
+            fire_notify(&ev.title, &ev.body);
+            if !ws.window_focused
+                && let Some(w) = &ws.window
+            {
+                w.request_user_attention(Some(UserAttentionType::Informational));
+                ws.attention_active = true;
+            }
+            self.ctl_broadcast(
+                "protocol_notification",
+                Some(pane_id),
+                serde_json::json!({
+                    "title": ev.title,
+                    "body": ev.body,
                 }),
             );
         }
@@ -14885,6 +14909,23 @@ mod tests {
             "restore-session = true"
         );
         assert!(should_restore_session(true, true));
+    }
+
+    #[test]
+    fn protocol_notifications_are_wired_to_ui_dispatch() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("drain_protocol_notifications()"),
+            "drain_events must consume OSC 9/777 notification requests"
+        );
+        assert!(
+            src.contains("fire_notify(&ev.title, &ev.body);"),
+            "protocol notifications must use the desktop notification helper"
+        );
+        assert!(
+            src.contains("\"protocol_notification\""),
+            "protocol notifications must be visible to control/event subscribers"
+        );
     }
 
     #[test]

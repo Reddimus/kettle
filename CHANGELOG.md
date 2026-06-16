@@ -20,6 +20,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - **Device Attributes advertise shipped terminal features.** Primary DA now
     replies `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's
     existing sixel decoder and OSC 52 clipboard support.
+  - **Protocol desktop notifications.** PTY programs can now request desktop
+    notifications with `OSC 9 ; message` or
+    `OSC 777 ; notify ; title ; body`; Kettle validates, caps, and dispatches
+    them through the existing notification helper.
 
   ### Fixed
   - **Grid renderer cursor-blink regression.** The v2.25.0 cell-locked

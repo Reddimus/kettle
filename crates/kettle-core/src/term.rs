@@ -105,6 +105,15 @@ pub struct CommandFinished {
     pub exit_code: Option<i32>,
 }
 
+/// A protocol-requested desktop notification from the PTY. Produced by
+/// `OSC 9 ; message` or `OSC 777 ; notify ; title ; body` after the extractor
+/// validates and caps each field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolNotification {
+    pub title: String,
+    pub body: String,
+}
+
 pub struct Terminal {
     pub term: SharedTerm,
     // Cycle 742: `Option` so `Drop` can `.take()` and drop the master
@@ -148,6 +157,9 @@ pub struct Terminal {
     /// emitted thousands of fake OSC 133 D sequences would otherwise
     /// grow this Vec indefinitely.
     pub command_finished: Arc<Mutex<Vec<CommandFinished>>>,
+    /// Protocol desktop notifications requested by the PTY. Bounded in the
+    /// reader thread so a hostile program cannot queue unbounded toasts.
+    pub protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>>,
     /// Latest working directory reported via OSC 7.
     pub cwd: Arc<Mutex<Option<String>>>,
     /// Cycle 745: latest OSC 9;4 progress state (drives the OS taskbar
@@ -1085,6 +1097,8 @@ impl Terminal {
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_start_seen_for_struct = output_start_seen.clone();
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
+        let protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
         // The reader thread writes it; the App polls the focused pane's value
@@ -1123,6 +1137,7 @@ impl Terminal {
             let output_started_at = output_started_at.clone();
             let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
+            let protocol_notifications = protocol_notifications.clone();
             let cwd_cell = cwd_cell.clone();
             let progress_cell = progress_cell.clone();
             let cell_px = cell_px.clone();
@@ -1405,6 +1420,16 @@ impl Terminal {
                                             }
                                             (waker)();
                                         }
+                                        Chunk::Notification { title, body } => {
+                                            if let Ok(mut q) = protocol_notifications.lock() {
+                                                if q.len() >= 32 {
+                                                    let d = q.len() - 31;
+                                                    q.drain(0..d);
+                                                }
+                                                q.push(ProtocolNotification { title, body });
+                                            }
+                                            (waker)();
+                                        }
                                     }
                                 }
                                 // C4: bump BEFORE the wakeup so the UI's
@@ -1434,6 +1459,7 @@ impl Terminal {
             prompts,
             output_started_at,
             command_finished,
+            protocol_notifications,
             cwd: cwd_cell,
             progress: progress_cell,
             argv: argv.to_vec(),
@@ -1539,6 +1565,16 @@ impl Terminal {
     /// completed since the last drain.
     pub fn drain_command_finished_events(&self) -> Vec<CommandFinished> {
         self.command_finished
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    /// Pop every protocol desktop notification the reader thread queued since
+    /// the previous call. Empty when no PTY program emitted OSC 9/777
+    /// notification requests.
+    pub fn drain_protocol_notifications(&self) -> Vec<ProtocolNotification> {
+        self.protocol_notifications
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default()

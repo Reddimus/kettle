@@ -70,6 +70,9 @@ pub enum Chunk {
     /// OSC 9;4 progress report — drives the OS taskbar/dock progress
     /// indicator (Windows Terminal's behavior).
     Progress(Progress),
+    /// Protocol desktop notification (`OSC 9 ; message` or
+    /// `OSC 777 ; notify ; title ; body`).
+    Notification { title: String, body: String },
 }
 
 /// OSC 9;4 taskbar-progress state. PowerShell 7 `Write-Progress` (with
@@ -91,6 +94,8 @@ pub enum Progress {
     /// state 4 — paused / warning, 0..=100% (yellow).
     Warning(u8),
 }
+
+const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 
 #[derive(PartialEq)]
 enum Mode {
@@ -294,13 +299,21 @@ impl Extractor {
         // OSC 9;4 progress report (ConEmu / Windows Terminal taskbar
         // progress). pwsh 7 `Write-Progress` + `winget` emit it; the VT
         // engine ignores it, so consume it here and surface a Progress chunk
-        // the UI maps onto the OS taskbar indicator. Other OSC 9 sequences
-        // (e.g. iTerm2's `OSC 9;<msg>` notification) are NOT matched here and
-        // fall through to the default handling unchanged.
+        // the UI maps onto the OS taskbar indicator.
         if mode == Mode::Osc && seq.starts_with(b"9;4;") {
             if let Some(p) = parse_osc9_4(&seq) {
                 out.push(Chunk::Progress(p));
             }
+            return;
+        }
+        // OSC 9;<message> (iTerm2-style) and OSC 777;notify;<title>;<body>
+        // (ConEmu-style) are terminal-to-desktop notification requests. Consume
+        // only recognized notify shapes; leave unrelated OSC 777 commands
+        // untouched for downstream compatibility.
+        if mode == Mode::Osc
+            && let Some((title, body)) = parse_protocol_notification(&seq)
+        {
+            out.push(Chunk::Notification { title, body });
             return;
         }
         // OSC 1 (icon name) — VTE/alacritty drop it entirely (their
@@ -669,6 +682,45 @@ fn parse_osc9_4(seq: &[u8]) -> Option<Progress> {
         4 => Progress::Warning(pct),
         _ => return None,
     })
+}
+
+fn parse_protocol_notification(seq: &[u8]) -> Option<(String, String)> {
+    if let Some(rest) = seq.strip_prefix(b"9;") {
+        let title = clean_notify_field(rest, false)?;
+        return Some((title, String::new()));
+    }
+
+    let rest = seq.strip_prefix(b"777;")?;
+    let mut parts = rest.splitn(3, |&b| b == b';');
+    if !parts.next()?.eq_ignore_ascii_case(b"notify") {
+        return None;
+    }
+    let title = clean_notify_field(parts.next().unwrap_or_default(), false)
+        .unwrap_or_else(|| "kettle".to_string());
+    let body = clean_notify_field(parts.next().unwrap_or_default(), true).unwrap_or_default();
+    Some((title, body))
+}
+
+fn clean_notify_field(bytes: &[u8], allow_newline: bool) -> Option<String> {
+    if bytes.is_empty() || bytes.len() > MAX_NOTIFY_FIELD_BYTES {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len().min(MAX_NOTIFY_FIELD_BYTES));
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        if ch == '\n' && allow_newline {
+            out.push('\n');
+        } else if ch == '\t' || ch == '\r' || ch == '\n' || ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {

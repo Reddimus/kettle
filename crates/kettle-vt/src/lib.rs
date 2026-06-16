@@ -15,6 +15,8 @@
 //!   focused pane's directory.
 //! - **OSC 133** (FinalTerm shell integration) — `Chunk::Prompt(kind)`
 //!   for the jump-to-prompt navigation (Ctrl+Up / Ctrl+Down).
+//! - **OSC 9/777 notifications** — `Chunk::Notification { title, body }`
+//!   for desktop notification dispatch.
 //!
 //! Modules (all `pub`):
 //! - [`extract`] — the state-machine `Extractor` itself; main entry
@@ -233,6 +235,16 @@ mod tests {
             .collect()
     }
 
+    fn notification_chunks(chunks: &[Chunk]) -> Vec<(String, String)> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                Chunk::Notification { title, body } => Some((title.clone(), body.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn osc9_4_progress_is_parsed_and_consumed() {
         // state 1 with pct, BEL-terminated; surrounding text passes through.
@@ -274,9 +286,67 @@ mod tests {
         let mut e = Extractor::new();
         assert!(progress_chunks(&e.feed(b"\x1b]9;4;9;5\x07")).is_empty());
 
-        // A non-9;4 OSC 9 (e.g. iTerm2 notification) is NOT a progress chunk.
+        // A non-9;4 OSC 9 is a notification, not a progress chunk.
         let mut e = Extractor::new();
         assert!(progress_chunks(&e.feed(b"\x1b]9;hello\x07")).is_empty());
+    }
+
+    #[test]
+    fn osc9_and_osc777_notifications_are_parsed_and_consumed() {
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"a\x1b]9;Build finished\x07b");
+        assert_eq!(
+            notification_chunks(&chunks),
+            vec![("Build finished".to_string(), String::new())]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter_map(|c| match c {
+                    Chunk::Pass(b) => Some(b.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>(),
+            b"ab"
+        );
+
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"\x1b]777;notify;Build done;cargo test passed\x1b\\");
+        assert_eq!(
+            notification_chunks(&chunks),
+            vec![("Build done".to_string(), "cargo test passed".to_string())]
+        );
+
+        // Control characters are cleaned before the UI sees the fields.
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"\x1b]777;notify;Bad\rTitle;line1\nline2\x07");
+        assert_eq!(
+            notification_chunks(&chunks),
+            vec![("Bad Title".to_string(), "line1\nline2".to_string())]
+        );
+
+        // Unknown OSC 777 commands are not ours; preserve them byte-for-byte.
+        let mut e = Extractor::new();
+        let chunks = e.feed(b"\x1b]777;unknown;payload\x07");
+        assert!(notification_chunks(&chunks).is_empty());
+        assert_eq!(
+            chunks
+                .iter()
+                .filter_map(|c| match c {
+                    Chunk::Pass(b) => Some(b.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>(),
+            b"\x1b]777;unknown;payload\x07"
+        );
+
+        // Oversized fields are dropped instead of allocating/dispatching a
+        // huge desktop notification.
+        let mut e = Extractor::new();
+        let huge = format!("\x1b]9;{}\x07", "x".repeat(9 << 10));
+        assert!(notification_chunks(&e.feed(huge.as_bytes())).is_empty());
     }
 
     #[test]

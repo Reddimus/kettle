@@ -34,6 +34,10 @@
       the focused pane's `ESC]9;4;state;pct` drives the Windows taskbar
       button via `ITaskbarList3` (normal/error/indeterminate/paused);
       no-op off Windows (cycle 745)
+- [x] OSC 9 / OSC 777 desktop notifications: PTY programs can request a
+      bounded desktop notification with `OSC 9 ; message` or
+      `OSC 777 ; notify ; title ; body`; taskbar progress remains the separate
+      `OSC 9;4` path.
 
 - [x] Session save/restore: OSC 7 cwd capture, tab/split tree + per-pane
       cwd serialized to session.json, restored on launch, autosaved on
