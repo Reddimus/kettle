@@ -87,9 +87,10 @@ and **WezTerm** into one tool.
 - **Configurable bell** — visual flash and/or window-attention
   (taskbar/dock urgency); `bell = off|visual|attention|both`.
 - **Polished input** — safe bracketed paste (newline-normalized,
-  injection-guarded), double-click word / triple-click line selection +
-  **Alt-drag rectangular (block) selection**, auto-copy, middle-click
-  paste, focus-aware hollow cursor, configurable blink, visual bell.
+  injection-guarded), confirmation for risky multi-line raw pastes,
+  double-click word / triple-click line selection + **Alt-drag rectangular
+  (block) selection**, auto-copy, middle-click paste, focus-aware hollow
+  cursor, configurable blink, visual bell.
 - **Drag-and-drop files** — drop any file onto the window and its
   shell-quoted path is inserted at the cursor (with a trailing space, so
   `cat ` + drop + Enter works). Honors broadcast mode.

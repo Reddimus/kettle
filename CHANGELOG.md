@@ -53,6 +53,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     through the same hover, context-menu, and `Ctrl`/`Cmd`+click path as URLs.
     The existing local-only `file://` safety gate still rejects traversal,
     remote authorities, UNC-like paths, and unsafe schemes.
+  - **Multi-line raw pastes now ask before sending.** `clipboard-paste-protection`
+    defaults on and confirms clipboard/PRIMARY/PuTTY-style pastes only when a
+    writable target would receive raw, non-bracketed multi-line text. Bracketed
+    paste targets such as editors and agent CLIs continue immediately, while
+    shells that could execute embedded newlines get a safe cancel-first prompt.
 
   ### Documentation / packaging
   - Corrected the config reference for shipped Terminator-parity settings:

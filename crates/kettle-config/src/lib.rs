@@ -966,6 +966,10 @@ pub struct Config {
     /// where you don't want clipboard content to leak in via
     /// accidental middle-clicks.
     pub disable_mouse_paste: bool,
+    /// Confirm risky multi-line pastes when the target pane has not enabled
+    /// bracketed paste. Single-line pastes and editor/agent panes that opt into
+    /// bracketed paste continue without a prompt.
+    pub clipboard_paste_protection: bool,
     /// Cycle 334 (Terminator parity, terminatorlib/config.py:89
     /// `putty_paste_style`): when true, right-click pastes (PuTTY/
     /// Windows convention). When false, right-click opens the
@@ -1808,6 +1812,7 @@ impl Default for Config {
             clear_select_on_copy: false,
             disable_mousewheel_zoom: false,
             disable_mouse_paste: false,
+            clipboard_paste_protection: true,
             putty_paste_style: false,
             smart_copy: true,
             invert_search: false,
@@ -2279,6 +2284,8 @@ impl Config {
         "check-for-updates",
         "clear-select-on-copy",
         "clear_select_on_copy",
+        "clipboard-paste-protection",
+        "clipboard_paste_protection",
         "close-button-on-tab",
         "close_button_on_tab",
         "copy-on-select",
@@ -3239,6 +3246,11 @@ impl Config {
                 "disable-mouse-paste" | "disable_mouse_paste" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.disable_mouse_paste = b;
+                    }
+                }
+                "clipboard-paste-protection" | "clipboard_paste_protection" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.clipboard_paste_protection = b;
                     }
                 }
                 "putty-paste-style" | "putty_paste_style" => {
@@ -6080,12 +6092,19 @@ cell-height = 1.2\n";
         let d = Config::default();
         assert!(!d.disable_mousewheel_zoom);
         assert!(!d.disable_mouse_paste);
+        assert!(d.clipboard_paste_protection);
         assert!(!d.putty_paste_style);
         assert!(d.smart_copy);
         assert!(Config::parse_text("disable-mousewheel-zoom = true").disable_mousewheel_zoom);
         assert!(Config::parse_text("disable_mousewheel_zoom = true").disable_mousewheel_zoom);
         assert!(Config::parse_text("disable-mouse-paste = true").disable_mouse_paste);
         assert!(Config::parse_text("disable_mouse_paste = true").disable_mouse_paste);
+        assert!(
+            !Config::parse_text("clipboard-paste-protection = false").clipboard_paste_protection
+        );
+        assert!(
+            !Config::parse_text("clipboard_paste_protection = false").clipboard_paste_protection
+        );
         assert!(Config::parse_text("putty-paste-style = true").putty_paste_style);
         assert!(Config::parse_text("putty_paste_style = true").putty_paste_style);
         assert!(!Config::parse_text("smart-copy = false").smart_copy);

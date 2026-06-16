@@ -2148,6 +2148,25 @@ impl Mux {
         }
     }
 
+    /// Return true when any writable pane in the active broadcast target set
+    /// would receive a raw paste instead of bracketed paste wrapping. Used by
+    /// the app-level paste protection prompt: a multi-line paste is safe to
+    /// send directly only when every target has enabled BRACKETED_PASTE.
+    pub fn broadcast_paste_has_raw_writable_target(&self) -> bool {
+        self.broadcast_target_ids().into_iter().any(|id| {
+            self.panes.get(&id).is_some_and(|p| {
+                !p.read_only
+                    && !p
+                        .term
+                        .term
+                        .lock()
+                        .ok()
+                        .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+                        .unwrap_or(false)
+            })
+        })
+    }
+
     /// Distribute a clipboard paste to every pane in the active tab's
     /// broadcast set. Cycle-174 companion to `broadcast_write` and
     /// `broadcast_scroll_to_bottom`: with broadcast on (group-input

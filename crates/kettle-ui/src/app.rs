@@ -650,6 +650,41 @@ const OSC52_MAX: usize = 1 << 20;
 /// spare; bigger pastes are almost certainly a fat-finger.
 const LOCAL_PASTE_MAX: usize = 4 << 20;
 
+fn text_contains_line_break(text: &str) -> bool {
+    text.as_bytes().iter().any(|b| matches!(*b, b'\n' | b'\r'))
+}
+
+fn paste_needs_confirmation(
+    text: &str,
+    protection_enabled: bool,
+    any_target_without_bracketed_paste: bool,
+) -> bool {
+    protection_enabled && any_target_without_bracketed_paste && text_contains_line_break(text)
+}
+
+fn paste_confirm_prompt(text: &str) -> String {
+    let mut line_breaks = 0usize;
+    let mut prev_cr = false;
+    for b in text.bytes() {
+        match b {
+            b'\r' => {
+                line_breaks += 1;
+                prev_cr = true;
+            }
+            b'\n' if prev_cr => {
+                prev_cr = false;
+            }
+            b'\n' => {
+                line_breaks += 1;
+                prev_cr = false;
+            }
+            _ => prev_cr = false,
+        }
+    }
+    let commands = line_breaks.saturating_add(1);
+    format!("Paste {commands} lines into a shell-like target?")
+}
+
 /// Pure: when the mouse is over chrome (tab bar or any modal overlay), the
 /// OS cursor should be the standard arrow rather than the text I-beam —
 /// matches iTerm2 / WezTerm / Ghostty / kitty: chrome surfaces are
@@ -1579,6 +1614,9 @@ pub enum ConfirmAction {
     CloseTab,
     /// Close the focused pane.
     ClosePane,
+    /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
+    /// paste protection prompt.
+    PasteText(Box<str>),
 }
 
 /// Cycle 648: which buttons a confirm modal shows. v1 is just
@@ -3790,6 +3828,35 @@ impl App {
         // generic byte-clamper that preserves char boundaries — exactly
         // what we want for any paste channel.
         let text = clamp_osc52(&text, LOCAL_PASTE_MAX);
+        let raw_target = if ws.mux.is_broadcast_on() {
+            ws.mux.broadcast_paste_has_raw_writable_target()
+        } else {
+            !self
+                .focused_mode(ws)
+                .contains(kettle_core::TermMode::BRACKETED_PASTE)
+        };
+        if paste_needs_confirmation(text, self.cfg.clipboard_paste_protection, raw_target) {
+            ws.confirm_dialog = Some(ConfirmDialogState {
+                prompt: paste_confirm_prompt(text),
+                buttons: vec![
+                    ConfirmButton::Cancel,
+                    ConfirmButton::Confirm {
+                        label: "Paste".into(),
+                        destructive: false,
+                    },
+                ],
+                focus_idx: 0,
+                on_confirm: ConfirmAction::PasteText(text.to_string().into_boxed_str()),
+            });
+            return;
+        }
+        self.paste_text_confirmed(ws, text);
+    }
+
+    fn paste_text_confirmed(&mut self, ws: &mut WindowState, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         // Cycle 876: record that a paste happened and its length — NEVER the
         // pasted content (a common secret vector). The per-key hook captures
         // the Ctrl+V chord; this marker captures the size without the bytes.
@@ -8571,6 +8638,9 @@ impl App {
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
+            }
+            ConfirmAction::PasteText(text) => {
+                self.paste_text_confirmed(ws, &text);
             }
         }
     }
@@ -17380,6 +17450,32 @@ mod tests {
         assert_eq!(
             confirm_dialog_keypress(0, 0, ConfirmKey::Yes),
             ConfirmKeyResult::Cancel
+        );
+    }
+
+    #[test]
+    fn paste_protection_only_prompts_for_raw_multiline_targets() {
+        use super::{paste_confirm_prompt, paste_needs_confirmation};
+
+        assert!(!paste_needs_confirmation("printf hello", true, true));
+        assert!(paste_needs_confirmation(
+            "printf hello\nprintf world",
+            true,
+            true
+        ));
+        assert!(!paste_needs_confirmation(
+            "printf hello\nprintf world",
+            true,
+            false
+        ));
+        assert!(!paste_needs_confirmation(
+            "printf hello\nprintf world",
+            false,
+            true
+        ));
+        assert_eq!(
+            paste_confirm_prompt("one\r\ntwo\nthree"),
+            "Paste 3 lines into a shell-like target?"
         );
     }
 
