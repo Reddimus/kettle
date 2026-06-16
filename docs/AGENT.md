@@ -240,8 +240,11 @@ the developer's machine, so they are intentionally not CI gates:
 scripts/check-agent-cli-smoke.sh
 ```
 
-Runs Codex CLI, Claude Code CLI, clean Neovim, and configured Neovim/AstroNvim
-through `kettle exec` when those commands are present on `PATH`; missing tools
+Always verifies Kettle's own non-interactive agent path first: `kettle exec`
+PTY environment (`TERM=xterm-256color`, `COLORTERM=truecolor`), `kettle exec
+--json` output events, and `kettle mcp --self-test`. Then it runs Codex CLI,
+Claude Code CLI, clean Neovim, and configured Neovim/AstroNvim through
+`kettle exec` when those commands are present on `PATH`; missing optional tools
 are reported as skips.
 
 ```sh

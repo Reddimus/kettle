@@ -39,6 +39,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     tear-off, the Wayland release-only fallback, and the
     `move_tab_to_new_window` keyboard/palette action now honor the setting while
     keeping normal tab switching and in-window reordering available.
+  - **Agent CLI smoke covers Kettle's own non-interactive surfaces.** The local
+    `scripts/check-agent-cli-smoke.sh` now always checks `kettle exec` PTY
+    environment, `kettle exec --json` output, and `kettle mcp --self-test`
+    before the optional Codex CLI / Claude Code / Neovim / AstroNvim probes.
 
   ### Documentation / packaging
   - Corrected the config reference for shipped Terminator-parity settings:
