@@ -8052,6 +8052,10 @@ impl App {
                 // process respawned the shells from argv+cwd, losing running
                 // programs. The receive-side `--tab-handoff` parsing stays
                 // one release for an upgrade-in-flight old sender.
+                if !self.cfg.detachable_tabs {
+                    log::info!("move_tab_to_new_window ignored because detachable-tabs = false");
+                    return;
+                }
                 if ws.mux.tabs.len() <= 1 {
                     // Moving a lone tab out of its window is a no-op: you'd
                     // get the same window back.
@@ -11549,6 +11553,9 @@ impl App {
     /// _NET_WM_MOVERESIZE; macOS: performWindowDragWithEvent). Returns true
     /// when a tear happened — the source window no longer owns the gesture.
     fn maybe_tear_off(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) -> bool {
+        if !self.cfg.detachable_tabs {
+            return false;
+        }
         if !matches!(
             ws.detach_drag,
             crate::detach::DragState::DraggingInside { .. }
@@ -13390,9 +13397,14 @@ impl App {
                                 // threshold moves the whole window (Chromium
                                 // semantics), which is how a torn-off window
                                 // re-docks into a sibling.
-                                ws.detach_drag =
-                                    crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
-                                ws.drag_press = Some((px, py));
+                                if self.cfg.detachable_tabs {
+                                    ws.detach_drag =
+                                        crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
+                                    ws.drag_press = Some((px, py));
+                                } else {
+                                    ws.detach_drag = crate::detach::DragState::default();
+                                    ws.drag_press = None;
+                                }
                             }
                         }
                     }
@@ -13686,7 +13698,11 @@ impl App {
                     ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
                     ws.drag_press = None;
                     let wayland = ws.window.as_deref().is_some_and(window_is_wayland);
-                    if dropped_outside && wayland && ws.mux.tabs.len() > 1 {
+                    if self.cfg.detachable_tabs
+                        && dropped_outside
+                        && wayland
+                        && ws.mux.tabs.len() > 1
+                    {
                         let closing_idx = ws.mux.active;
                         if let Some(dt) = ws.mux.detach_tab(closing_idx) {
                             // `outer_position` errs on Wayland — `None` lets
@@ -16522,8 +16538,10 @@ mod tests {
         );
         // 4. The at-release tear is Wayland-only now.
         assert!(
-            src.contains("if dropped_outside && wayland && ws.mux.tabs.len() > 1 {"),
-            "the Released-arm tear must be gated to Wayland"
+            src.contains(
+                "if self.cfg.detachable_tabs\n                        && dropped_outside\n                        && wayland\n                        && ws.mux.tabs.len() > 1\n                    {"
+            ),
+            "the Released-arm tear must be gated to Wayland and detachable-tabs"
         );
         // 5. The drop commits the latched dock from the left-release —
         //    GATED on the primary button being physically up (cycle-943
@@ -16551,6 +16569,33 @@ mod tests {
         assert!(
             src.contains(".is_some_and(|t| t.seq == seq || t.carrier == seq)"),
             "finish_window_dispatch must abandon tracking for a dying torn/carrier window"
+        );
+    }
+
+    /// Cycle 959 drift guard: the Terminator-parity detachable-tabs setting is
+    /// a real runtime switch, not just a parsed compatibility key.
+    #[test]
+    fn detachable_tabs_config_gates_all_detach_paths() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("if !self.cfg.detachable_tabs {\n                    log::info!(\"move_tab_to_new_window ignored because detachable-tabs = false\");"),
+            "keyboard/palette move_tab_to_new_window must honor detachable-tabs = false"
+        );
+        assert!(
+            src.contains(
+                "fn maybe_tear_off(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) -> bool {\n        if !self.cfg.detachable_tabs {"
+            ),
+            "mouse threshold tear-off must honor detachable-tabs = false"
+        );
+        assert!(
+            src.contains("if self.cfg.detachable_tabs {\n                                    ws.detach_drag ="),
+            "tab press must not arm the cross-window detach FSM when disabled"
+        );
+        assert!(
+            src.contains(
+                "if self.cfg.detachable_tabs\n                        && dropped_outside\n                        && wayland\n                        && ws.mux.tabs.len() > 1\n                    {"
+            ),
+            "Wayland release-only tear-off must honor detachable-tabs = false"
         );
     }
 

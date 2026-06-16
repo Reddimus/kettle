@@ -202,6 +202,7 @@ per-key audit against Terminator's source.
 | `putty-paste-style-source-clipboard` | bool | `false` | When `putty-paste-style = true`, source right-click paste from the regular system clipboard instead of X11 PRIMARY |
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
+| `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
 
 ### Terminator-parity config keys by disposition
@@ -215,7 +216,6 @@ Terminator's. Each key falls into one of three buckets:
 
 | Key | Why it's a "no-op" but works |
 |---|---|
-| `detachable-tabs` | Terminator: a toggle to enable cross-window tab drag. kettle: cross-window detach drag is always available via `Action::MoveTabToNewWindow` + the drag-state machine in `crates/kettle-ui/src/detach.rs`. The config toggle isn't read, but the feature it gates is on by default |
 | `homogeneous-tabbar` | Terminator: a toggle for equal-width tab segments. kettle: tab bar ALWAYS tiles segments equally (single-source-of-truth: `app.rs::tab_bar::seg_w = strip / n`). Setting the toggle has no effect because there's no inhomogeneous mode to disable |
 | `sticky` (X11 _NET_WM_STATE_STICKY) | **macOS is fully wired** — `sticky = true` calls `app.rs::set_visible_on_all_spaces`, which sets `NSWindowCollectionBehavior::CanJoinAllSpaces \| Stationary` on the underlying NSWindow, pinning the window to every Space. **X11 / Wayland are not wired** — winit 0.30 exposes no portable "stick to all workspaces" API (the X11 `_NET_WM_STATE_STICKY` hint has no winit binding and Wayland has no equivalent), so on those platforms the key is logged (not silently dropped) and `always-on-top` is the closest available cross-platform substitute |
 | `inactive-color-offset` | Kettle's `unfocused-split-opacity` is the implemented variant. The exact math differs (Terminator: two separate fg + bg offsets; kettle: single opacity blend), but the user-visible effect — dim unfocused panes — is equivalent |

@@ -35,6 +35,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     X11 PRIMARY on Linux with clipboard fallback elsewhere, and PuTTY-style
     right-click paste now honors `putty-paste-style-source-clipboard` instead of
     always reading the regular clipboard.
+  - **`detachable-tabs = false` now disables cross-window detach.** Mouse
+    tear-off, the Wayland release-only fallback, and the
+    `move_tab_to_new_window` keyboard/palette action now honor the setting while
+    keeping normal tab switching and in-window reordering available.
 
   ### Documentation / packaging
   - Refreshed stale install and package-template version references so the

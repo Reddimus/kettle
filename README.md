@@ -266,7 +266,8 @@ the tab bar tears it off into a live window under the pointer; dropping
 that window onto another kettle window's tab bar merges it there — the
 `move_tab_to_new_window` action does the tear from the keyboard. (On
 Wayland, where clients can't position windows, the tear happens at
-release instead.)
+release instead.) Set `detachable-tabs = false` to disable cross-window
+tear-off while keeping tab switching and in-window reordering.
 
 > **Tip — right-click anywhere in a pane** for the context menu: Copy /
 > Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled

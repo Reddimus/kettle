@@ -1303,12 +1303,9 @@ pub struct Config {
     pub cell_width: f32,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:124
     /// `detachable_tabs`): allow dragging tabs between windows.
-    /// NOTE (corrected cycle 780): the detachable-tabs FEATURE landed in
-    /// cycles 397-410 (Wayland-fallback / SCM_RIGHTS / file-fallback — see
-    /// ARCHITECTURE.md) and `Action::MoveTabToNewWindow` is always
-    /// available. This on/off *toggle* field, however, is not yet consumed
-    /// — setting `detachable-tabs = false` does not currently disable the
-    /// action. Kept for forward-compat; a future cycle gates the action on it.
+    /// When false, cross-window tab tear-off and the
+    /// `move_tab_to_new_window` action are disabled; in-window tab switching
+    /// and reordering remain available.
     pub detachable_tabs: bool,
     /// Cycle 341 (Terminator parity, terminatorlib/config.py:96
     /// `putty_paste_style_source_clipboard`): when `putty_paste_
