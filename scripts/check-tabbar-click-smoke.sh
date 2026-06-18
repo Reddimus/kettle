@@ -30,13 +30,13 @@ cat > "$cfg" <<'CFG'
 agent-server = full
 tab-bar = always
 tab-bar-pos = top
-homogeneous-tabbar = true
-tab-max-width = 240
 status-bar = off
 restore-session = false
 update-check = false
 background = #101010
 foreground = #f4f4f4
+window-width = 220
+window-height = 30
 CFG
 
 "$KETTLE" --config "$cfg" --agent-server full >"$out/kettle.log" 2>&1 &
@@ -125,11 +125,8 @@ python3 - "$out/geometry-before-press.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 widths = [float(seg["rect"]["width"]) for seg in data["tab_bar"]["segments"]]
-if widths and max(widths) > 260.0:
-    raise SystemExit(
-        "tabbar-click smoke: short tabs inflated into oversized homogeneous segments: "
-        f"widths={[round(w, 1) for w in widths]}"
-    )
+if len(widths) >= 2 and not all(abs(w - widths[0]) < 1.0 for w in widths[1:]):
+    raise SystemExit(f"tabbar-click smoke: homogeneous segments not equal: {widths}")
 PY
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/before-press.png\"}" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_mouse --json "$(press_segment_center "$out/geometry-before-press.json" 1)" >/dev/null
@@ -248,6 +245,11 @@ before = json.loads((out / "geometry-before-press.json").read_text())
 pressed = json.loads((out / "geometry-pressed.json").read_text())
 jittered = json.loads((out / "geometry-jittered.json").read_text())
 released = json.loads((out / "geometry-released.json").read_text())
+before_active = [s for s in before["tab_bar"]["segments"] if s.get("active")]
+if len(before_active) != 1:
+    raise SystemExit(f"tabbar-click smoke: expected one resting active tab, got {before_active}")
+before_active = before_active[0]
+resting_full = before_active["rect"]
 if not pressed.get("tab_drag_active"):
     raise SystemExit("tabbar-click smoke: press did not arm tab drag state")
 if not pressed.get("tab_drag_armed"):
@@ -265,7 +267,9 @@ if released.get("tab_drag_active") or released.get("tab_drag_armed") or released
     raise SystemExit("tabbar-click smoke: release left tab drag state latched")
 
 before_rect, before_idx = active_rect(before)
-pressed_rect, pressed_idx = active_rect(pressed)
+pressed_active_rect, pressed_idx = active_rect(pressed)
+pressed_active = [s for s in pressed["tab_bar"]["segments"] if s.get("active")][0]
+pressed_close = pressed_active["close"]
 bar = pressed["tab_bar"]
 y0 = bar["y"]
 y1 = bar["y"] + bar["height"]
@@ -273,7 +277,11 @@ changed = changed_pixels(out / "before-press.png", out / "pressed.png", y0, y1)
 outside = [
     (x, y)
     for x, y in changed
-    if not (rect_contains(before_rect, x, y) or rect_contains(pressed_rect, x, y))
+    if not (
+        rect_contains(before_rect, x, y)
+        or rect_contains(pressed_active_rect, x, y)
+        or rect_contains(pressed_close, x, y)
+    )
 ]
 if outside:
     xs = [x for x, _ in outside]
@@ -305,7 +313,8 @@ analysis = {
     "before_active": before_idx,
     "pressed_active": pressed_idx,
     "before_active_rect": before_rect,
-    "pressed_active_rect": pressed_rect,
+    "before_active_hit_rect": resting_full,
+    "pressed_active_rect": pressed_active_rect,
     "tabbar_y": y0,
     "tabbar_height": bar["height"],
     "press_changed_pixels": len(changed),

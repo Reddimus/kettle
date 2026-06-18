@@ -1878,7 +1878,6 @@ impl Renderer {
                 let (x, seg_y, w, seg_h) = s.rect;
                 if s.active {
                     quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                    // Active accent bar on the left edge.
                     // Cycle 178: when broadcast / group-input mode is on,
                     // use a warning-yellow accent (theme palette index 3,
                     // the standard ANSI "yellow" slot) for the active tab
@@ -2571,14 +2570,17 @@ impl Renderer {
                 // than letting the prefix push it past the right edge.
                 let n = (s.idx + 1).to_string();
                 let avail = ((w - tabbar.height).max(0.0) / cw.max(1.0)) as usize;
-                let fixed_w =
-                    1 + kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")])
-                        .chars()
-                        .count();
+                let fixed_label = format!(
+                    " {}",
+                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")])
+                );
+                let fixed_w = display_width(&fixed_label);
                 let maxc = avail.saturating_sub(fixed_w).max(3);
-                // v2.24.0: middle-ellipsis keeps the program/leaf name visible
-                // (head-priority truncation hid it behind the drive path).
-                let title = middle_ellipsis(&s.title, maxc);
+                // Tab labels get path-tail truncation: if a wide equal-width
+                // segment has room, show the title unchanged; once it doesn't,
+                // preserve the rightmost path tail because that is usually the
+                // project/directory the user is trying to distinguish.
+                let title = fit_tab_title(&s.title, maxc);
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
                 // Title only — the ✕ is rendered separately below so we
@@ -5232,6 +5234,27 @@ fn middle_ellipsis(s: &str, n: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// Build a tab title that fits `n` display columns. Unlike pane titles, tabs
+/// favor the *right* side of path-like strings when they must truncate: in a
+/// path, the tail is normally the project/leaf (`...flight-event-line-server-go`)
+/// and is more useful than the home or drive prefix. Non-path titles keep the
+/// older middle-ellipsis behavior.
+fn fit_tab_title(s: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    if display_width(s) <= n {
+        return s.to_string();
+    }
+    if !s.contains(['/', '\\']) {
+        return middle_ellipsis(s, n);
+    }
+    if n < 3 {
+        return take_cols_back(s, n);
+    }
+    format!("...{}", take_cols_back(s, n - 3))
+}
+
 /// Build a per-pane titlebar label that fits `budget` display columns, shedding
 /// the least-useful parts first (the v2.24.0 progressive-shed UX): full →
 /// drop the `WxH` size text → drop the `[group]` tag → middle-ellipsize the
@@ -7822,6 +7845,29 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
+    /// Cycle 964 drift guard. Tab text must use the full rendered segment rect
+    /// as its budget, including the active tab. Otherwise a wide equal-width
+    /// tab can still middle-ellipsize a path to the compact active affordance
+    /// even though the full segment has room.
+    #[test]
+    fn tab_text_uses_full_segment_rect_budget() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("let (_, _, w, _) = s.rect;"),
+            "tab label shaping must budget from the full tab segment"
+        );
+        assert!(
+            src.contains("let (x, _, w, _) = s.rect;"),
+            "tab label drawing bounds must use the full tab segment"
+        );
+        let visual_token = ["visual", "_rect"].concat();
+        let pressed_token = ["pressed", "_rect"].concat();
+        assert!(
+            !src.contains(&visual_token) && !src.contains(&pressed_token),
+            "tab text must not depend on compact visual/pressed rects"
+        );
+    }
+
     /// Cycle 791 drift guard (audit C1). Image-placement draw must keep the
     /// `len > 1` fast-path so the common 0–1-image pane doesn't pay a per-frame
     /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
@@ -7891,7 +7937,7 @@ mod pane_buffer_lifecycle_tests {
 
 #[cfg(test)]
 mod title_fit_tests {
-    use super::{display_width, fit_pane_title, middle_ellipsis};
+    use super::{display_width, fit_pane_title, fit_tab_title, middle_ellipsis};
 
     #[test]
     fn middle_ellipsis_fits_and_keeps_both_ends() {
@@ -7927,6 +7973,55 @@ mod title_fit_tests {
         }
         assert_eq!(middle_ellipsis("a", 0), "");
         assert_eq!(middle_ellipsis("abc", 1), "…");
+    }
+
+    #[test]
+    fn tab_title_keeps_full_path_when_budget_fits() {
+        let title = "~/Repos/SPT-1/flight-event-line-server-go";
+        assert_eq!(fit_tab_title(title, display_width(title)), title);
+        assert_eq!(fit_tab_title(title, display_width(title) + 10), title);
+    }
+
+    #[test]
+    fn tab_title_preserves_posix_path_tail_with_ascii_ellipsis() {
+        let title = "~/Repos/SPT-1/flight-event-line-server-go";
+        let cut = fit_tab_title(title, 30);
+        assert_eq!(cut, "...flight-event-line-server-go");
+        assert!(cut.ends_with("flight-event-line-server-go"));
+        assert!(cut.starts_with("..."));
+        assert!(
+            !cut.contains('…'),
+            "tab path truncation uses ASCII dots: {cut}"
+        );
+        assert!(display_width(&cut) <= 30);
+    }
+
+    #[test]
+    fn tab_title_preserves_windows_path_tail_with_ascii_ellipsis() {
+        let title = r"C:\src\proj\flight-event-line-server-go";
+        let cut = fit_tab_title(title, 30);
+        assert_eq!(cut, r"...flight-event-line-server-go");
+        assert!(cut.ends_with(r"flight-event-line-server-go"));
+        assert!(cut.starts_with("..."));
+        assert!(display_width(&cut) <= 30);
+    }
+
+    #[test]
+    fn tab_title_uses_tail_only_for_tiny_path_budget() {
+        let title = "~/Repos/SPT-1/flight-event-line-server-go";
+        assert_eq!(fit_tab_title(title, 2), "go");
+        assert_eq!(fit_tab_title(title, 1), "o");
+        assert_eq!(fit_tab_title(title, 0), "");
+    }
+
+    #[test]
+    fn tab_title_keeps_middle_ellipsis_for_non_paths() {
+        let title = "abcdefghijklmnopqrstuvwxyz";
+        let cut = fit_tab_title(title, 11);
+        assert!(cut.contains('…'));
+        assert!(cut.starts_with('a'), "front kept: {cut}");
+        assert!(cut.ends_with('z'), "back kept: {cut}");
+        assert!(display_width(&cut) <= 11);
     }
 
     #[test]

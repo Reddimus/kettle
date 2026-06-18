@@ -41,7 +41,7 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 
 `dbus`, `focus`, `handle_size`, `geometry_hinting`, `window_state`,
 `borderless`, `extra_styling`, `tab_position`, `broadcast_default`,
-`close_button_on_tab`, `scroll_tabbar`, `homogeneous_tabbar`,
+`close_button_on_tab`, `scroll_tabbar`,
 `hide_from_taskbar`, `always_on_top`, `hide_on_lose_focus`, `sticky`,
 `use_custom_url_handler`, `custom_url_handler`, `inactive_color_offset`,
 `inactive_bg_color_offset`, `enabled_plugins`, `ask_before_closing`,
@@ -395,8 +395,8 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`term`~~ | config.py | ✅ cycle-343 — string config key (default `xterm-256color`) wired to spawned PTY env | cycle-343 |
 | ~~`colorterm`~~ | config.py | ✅ cycle-343 + cycle-799 — string config key (default `truecolor`) wired to spawned PTY env; WSL launches also propagate it via `WSLENV` | cycle-799 |
 | ~~`title_at_bottom`~~ | config.py | ✅ — `title-at-bottom` config key (lib.rs:520-522) wired in kettle-render at the per-pane titlebar layout (render/lib.rs:1099-1106 + 1583-1590). Flips bar to bottom of pane when true. | (covered) |
-| `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses cycle-620 homogeneous/non-homogeneous layout with overflow fallback — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
-| `homogeneous_tabbar` / `tab_max_width` | config.py | ✅ cycle-620 + cycle-956 + 961 — `false` (kettle default) sizes per title length so the active/pressed visual stays bound to the visible label; `true` requests equal-width tabs, but horizontal segments are capped by `tab-max-width` (default 240 px, `0` disables) so a two-tab wide-monitor window does not paint a half-screen selected tab; overflow still shrinks evenly so many-tab windows fit | cycle-620 / 956 / 961 |
+| `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses equal-width segments across the available strip — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
+| `homogeneous_tabbar` / `tab_max_width` | config.py | ✅ cycle-964 — kettle always uses equal-width tabs across the available strip and does not expose either Terminator knob. The full segment is the active surface, hit target, drag target, and title budget. | cycle-964 |
 | ~~`close_button_on_tab`~~ (toggle ✕ on tabs) | config.py | ✅ `close-button-on-tab` config key wired to tab-bar render | (covered) |
 | ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |
 | ~~`always_on_top`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `WindowLevel::AlwaysOnTop` | cycle-332 |

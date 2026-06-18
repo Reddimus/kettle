@@ -65,7 +65,6 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Bell | `bell` | off · visual · attention · both |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback MB | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
-| Tab max width | `tab-max-width` | 0–800 px; 0 disables the horizontal tab width cap |
 | Copy on select | `copy-on-select` | on / off |
 | Hide mouse while typing | `mouse-hide-while-typing` | on / off |
 | Focus mode | `focus` | click · follows-mouse · system |

@@ -1194,8 +1194,7 @@
       +) arms the drag; `CursorMoved` events compute the target index from the
       same rendered segment rects used for painting/hit-testing and call
       `Mux::move_active_tab`; release disarms. v1.3.0, updated in cycle-956
-      when natural-width tabs became the default so drag targeting could not
-      drift from the visible tab geometry.
+      so drag targeting could not drift from the rendered tab geometry.
 
 - [x] **Coordinated-disclosure policy + supply-chain automation.**
       `SECURITY.md` points security reports at GitHub's private
@@ -1447,13 +1446,11 @@ features list. What's left is genuinely-multi-week threads + polish.
       not show the drag ghost/highlight before movement crosses the drag
       threshold. It also diffs tab-bar screenshots and requires all press-time
       pixel changes to stay inside the old/new active tab rectangles. Cycle-956
-      switched the default horizontal tab layout to natural-width segments and
-      made tab drag targeting use the rendered segment rects, so the active /
-      pressed UI stays aligned to the visible clicked tab instead of filling a
-      huge equal-width slice of the strip. Cycle-961 added `tab-max-width`
-      (default 240 px, `0` disables) so even explicitly homogeneous tabs stay
-      visually bounded on wide monitors; the smoke now fails if short tabs
-      inflate back into oversized homogeneous segments. `just underline-scroll-smoke`
+      made tab drag targeting use the rendered segment rects. Cycle-962 restored
+      the original equal-width homogeneous layout. Cycle-964 removed the
+      `homogeneous-tabbar` setting entirely: horizontal tabs always divide the
+      available strip evenly, active tabs use the full segment fill, and tab
+      titles use the full segment budget before ellipsizing. `just underline-scroll-smoke`
       opens underlined sentinel text plus `git diff | delta`; when
       `svn`/`svnadmin` are installed it also creates a local SVN
       repository and includes `svn diff | delta` in the same `less -R` stream.

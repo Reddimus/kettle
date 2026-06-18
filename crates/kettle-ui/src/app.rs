@@ -560,60 +560,16 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
     }
 }
 
-/// Cycle 620 (Terminator parity, terminatorlib/config.py:88
-/// `homogeneous_tabbar`): per-tab widths for the tab-bar strip.
-///
-/// `homogeneous = true` divides the strip evenly across all tabs —
-/// `strip / n` per tab.
-///
-/// `homogeneous = false` (kettle default) sizes each tab by its title length: a
-/// natural width of `title_chars * cell_w + chrome_w * 2 + close_btn_w`
-/// where `chrome_w` is half the tab height (matching kettle's
-/// existing inner padding) and `close_btn_w` is one tab-height
-/// (matching the existing ✕ hit-zone in cycle-46). If the sum of
-/// natural widths exceeds the strip, we silently fall back to
-/// homogeneous so a many-tab window doesn't overflow.
-///
-/// Pure — no `&self`, no renderer, no winit. Tests can hand it
-/// any title slice + strip width + cell metric.
+/// Cycle 620/964: equal-width tab segments for the tab-bar strip.
+/// Pure — no `&self`, no renderer, no winit. Tests can hand it any title slice
+/// + strip width.
 fn compute_tab_segment_widths<'a>(
     titles: impl ExactSizeIterator<Item = &'a str>,
     strip: f32,
-    cell_w: f32,
-    tab_h: f32,
-    homogeneous: bool,
-    max_width: f32,
 ) -> Vec<f32> {
-    let titles: Vec<&str> = titles.collect();
     let n = titles.len().max(1);
     let strip = strip.max(1.0);
-    let max_width = if max_width.is_finite() && max_width > 0.0 {
-        Some(max_width.max(tab_h * 1.5))
-    } else {
-        None
-    };
-    let cap = |w: f32| max_width.map_or(w, |m| w.min(m));
-    if homogeneous {
-        return vec![cap(strip / n as f32); titles.len().max(1)];
-    }
-    let chrome = (tab_h * 0.5).max(4.0);
-    let close_w = tab_h;
-    let natural: Vec<f32> = titles
-        .iter()
-        .map(|t| {
-            let chars = t.chars().count().max(1) as f32;
-            cap((chars * cell_w + chrome * 2.0 + close_w).max(close_w * 1.5))
-        })
-        .collect();
-    let sum: f32 = natural.iter().sum();
-    if sum > strip {
-        // Doesn't fit naturally — fall back to homogeneous so
-        // every tab stays visible (no truncation of the strip).
-        let w = strip / n as f32;
-        vec![w; titles.len().max(1)]
-    } else {
-        natural
-    }
+    vec![strip / n as f32; titles.len().max(1)]
 }
 
 /// Cycle 805: split the trailing new-tab button into `(arrow_left, plus_right)`
@@ -2273,12 +2229,6 @@ pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
 /// or focus change) and the P6 debounce was unreachable.
 pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<String>);
 
-/// v2.20.0 P6 (perf): minimum interval between viewport link re-scans when
-/// only the OUTPUT timestamp changed (streaming). Focus/scroll changes bypass
-/// it. 150ms keeps worst-case link-detection latency imperceptible while
-/// cutting the per-frame regex pass under flood by ~9×.
-pub(crate) const LINKS_SCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
-
 /// v2.20.0 (Ghostty `resize-overlay` parity): how long the transient
 /// `cols×rows` chip stays up after the last resize event (Ghostty's
 /// `resize-overlay-duration` default).
@@ -3329,26 +3279,9 @@ impl App {
         let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
-        let cell_w = ws
-            .renderer
-            .as_ref()
-            .map(|r| r.cell_w)
-            .unwrap_or(8.0)
-            .max(1.0);
-        // Cycle 620 (Terminator parity, terminatorlib/config.py:88
-        // `homogeneous_tabbar`): per-tab widths from a pure helper.
-        // `homogeneous = false` (kettle default) sizes each tab to its title
-        // length so a short tab like "fish" isn't padded out as wide as a long
-        // tab like "vim ~/Projects/some-long-path"; `true` preserves the
-        // equal-width Terminator-style strip for users who want it.
-        let widths = compute_tab_segment_widths(
-            titles.iter().map(|s| s.as_str()),
-            strip,
-            cell_w,
-            height,
-            self.cfg.homogeneous_tabbar,
-            self.cfg.tab_max_width,
-        );
+        // Cycle 620/964: top/bottom tabs always divide the available strip
+        // evenly. The full segment is both the hit target and text budget.
+        let widths = compute_tab_segment_widths(titles.iter().map(|s| s.as_str()), strip);
         let active = ws.mux.active;
         // Pre-compute x offsets from the cumulative widths so the
         // closure stays a stateless map. (Slight allocation, but
@@ -5107,22 +5040,10 @@ impl App {
         if ws.links_scan_key.as_ref() == Some(&key) {
             return;
         }
-        // v2.20.0 P6: during streaming, `last_output_at` moves with every
-        // read, so the cycle-803 key misses on EVERY painted frame and the
-        // per-cell regex pass ran at up to 60/s. Debounce output-only
-        // changes; focus / scroll changes still rescan immediately (there
-        // the viewport jumped — stale link rects would be visibly wrong).
-        // While debounced, `links_scan_key` is left at the old value so the
-        // next painted frame re-evaluates; any interaction that could USE a
-        // link (mouse move for hover, key for hint mode) repaints first, so
-        // a post-stream stale window can't be observed by the user.
-        if let (Some(prev), Some(at)) = (ws.links_scan_key.as_ref(), ws.last_links_scan) {
-            let output_only =
-                prev.0 == key.0 && prev.2 == key.2 && prev.3 == key.3 && prev.1 != key.1;
-            if output_only && at.elapsed() < LINKS_SCAN_DEBOUNCE {
-                return;
-            }
-        }
+        // Focused interactive apps like `less -R` redraw visible text by
+        // writing output, not by changing terminal scrollback display_offset.
+        // Re-scan immediately on focused output_generation changes so path/
+        // URL underline overlay rects stay attached to the current text.
         ws.links = ws
             .mux
             .focused()
@@ -5135,7 +5056,6 @@ impl App {
             })
             .unwrap_or_default();
         ws.links_scan_key = Some(key);
-        ws.last_links_scan = Some(std::time::Instant::now());
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
@@ -9736,6 +9656,7 @@ impl App {
                     if bcode == 0 {
                         ws.tab_drag_active = true;
                         ws.tab_drag_press = Some((px, py));
+                        ws.tab_pressed_idx = Some(seg.idx);
                         if self.cfg.detachable_tabs {
                             ws.detach_drag =
                                 crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
@@ -9782,6 +9703,7 @@ impl App {
             ws.dragging_split = None;
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
+            ws.tab_pressed_idx = None;
             ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
             ws.drag_press = None;
             handled = true;
@@ -9821,6 +9743,7 @@ impl App {
             let dy = ws.cursor.y as f32 - oy;
             if (dx * dx + dy * dy).sqrt() > tab_reorder_drag_threshold_px(self.tab_bar_h(ws)) {
                 ws.tab_drag_press = None;
+                ws.tab_pressed_idx = None;
             }
         }
     }
@@ -12575,6 +12498,7 @@ impl App {
         if ws.mux.tabs.len() <= 1 {
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
+            ws.tab_pressed_idx = None;
             ws.detach_drag = crate::detach::DragState::default();
             ws.drag_press = None;
             // Frame-relative grab = where the pointer is right now
@@ -12691,6 +12615,7 @@ impl App {
         // The gesture leaves this window no matter how open_window goes.
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;
+        ws.tab_pressed_idx = None;
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
@@ -14046,6 +13971,7 @@ impl App {
                         > tab_reorder_drag_threshold_px(self.tab_bar_h(ws))
                     {
                         ws.tab_drag_press = None;
+                        ws.tab_pressed_idx = None;
                     }
                 }
                 if ws.tab_drag_active
@@ -14054,10 +13980,8 @@ impl App {
                 {
                     let bar = self.tab_bar(ws);
                     if bar.height > 0.0 && !bar.segments.is_empty() {
-                        // Cycle 821/956: use the same rendered segment rects
-                        // that click hit-testing and painting use. This keeps
-                        // drag targeting correct for both homogeneous and
-                        // natural-width tab bars.
+                        // Cycle 821/956/964: use the same rendered segment
+                        // rects that click hit-testing and painting use.
                         let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
                         let delta = target as i32 - ws.mux.active as i32;
                         if delta != 0 && ws.mux.move_active_tab(delta) {
@@ -14375,6 +14299,7 @@ impl App {
                             if bcode == 0 {
                                 ws.tab_drag_active = true;
                                 ws.tab_drag_press = Some((px, py));
+                                ws.tab_pressed_idx = Some(seg.idx);
                                 // C6 (tear-off): arm the detach FSM alongside
                                 // the in-window reorder. v2.19.0: armed for a
                                 // LONE tab too — dragging it past the band
@@ -14611,6 +14536,7 @@ impl App {
                     // disarms the CursorMoved handler.
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
+                    ws.tab_pressed_idx = None;
                     // C6 (tear-off), WAYLAND ONLY since v2.19.0: a release
                     // while the detach FSM is OUTSIDE the window tears the
                     // dragged tab off into a new window. Everywhere else
@@ -14864,6 +14790,7 @@ impl App {
                     ws.dragging_scrollbar = false;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
+                    ws.tab_pressed_idx = None;
                     // Cycle 904: a focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
                     ws.mouse_btn = None;
@@ -14980,6 +14907,7 @@ impl App {
                     ws.drag_press = None;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
+                    ws.tab_pressed_idx = None;
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15800,7 +15728,7 @@ mod tests {
         assert!(
             src.contains("if ws.selecting && self.cfg.copy_on_select {")
                 && src.contains("ws.selecting = false;")
-                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
@@ -18531,94 +18459,50 @@ mod tests {
         assert!(cache_dir_from_env(|_| None).is_none());
     }
 
-    /// Cycle 620 drift guard. `compute_tab_segment_widths` is the
-    /// pure layout helper behind the tab bar. Verify:
-    ///   - homogeneous = true divides the strip evenly up to tab-max-width
-    ///   - homogeneous = false sizes per title length when there's room
-    ///   - sum > strip falls back to homogeneous (no truncation)
+    /// Cycle 620/964 drift guard. `compute_tab_segment_widths` is the pure
+    /// layout helper behind the tab bar. Verify:
+    ///   - all titles divide the strip evenly
+    ///   - title length does not affect segment width
     ///   - empty title list yields one safe-width segment (no div/0)
-    ///   - one-char titles still satisfy a minimum (close-btn-affordance)
     #[test]
-    fn compute_tab_segment_widths_homogeneous_and_natural() {
+    fn compute_tab_segment_widths_equal_width_only() {
         use super::compute_tab_segment_widths;
-        let cell_w = 10.0;
-        let tab_h = 24.0;
-        // Homogeneous: every width is strip/n when that is below the cap.
-        let widths = compute_tab_segment_widths(
-            ["a", "bb", "ccc"].into_iter(),
-            300.0,
-            cell_w,
-            tab_h,
-            true,
-            240.0,
-        );
+        let widths = compute_tab_segment_widths(["a", "bb", "ccc"].into_iter(), 300.0);
         assert_eq!(widths, vec![100.0, 100.0, 100.0]);
-        // Non-homogeneous with plenty of room: each width is
-        // chars*cell_w + 2*chrome + close_w (= 1*10 + 24 + 24 = 58
-        // for "a", but min clamp = close_w * 1.5 = 36, so 58 wins).
         let widths = compute_tab_segment_widths(
-            ["a", "bb", "ccc"].into_iter(),
-            1_000.0,
-            cell_w,
-            tab_h,
-            false,
-            240.0,
+            ["a", "very-long-title-that-has-room", "ccc"].into_iter(),
+            900.0,
         );
-        assert_eq!(widths.len(), 3);
-        // Wider title ⇒ wider segment.
-        assert!(widths[2] > widths[1]);
-        assert!(widths[1] > widths[0]);
-        // Min affordance: a single-char title is at least 1.5*tab_h.
-        assert!(widths[0] >= tab_h * 1.5);
-        // Overflow falls back to homogeneous: sum > strip.
-        let titles: Vec<String> = (0..20).map(|i| format!("tab-{i}-with-padding")).collect();
-        let widths = compute_tab_segment_widths(
-            titles.iter().map(|s| s.as_str()),
-            200.0,
-            cell_w,
-            tab_h,
-            false,
-            240.0,
-        );
-        // All equal because we fell back to homogeneous.
-        assert!(widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01));
+        assert_eq!(widths, vec![300.0, 300.0, 300.0]);
         // Empty list ⇒ one safe segment (no div/0). The bar code
         // never actually sees this (renders nothing when there are
         // no tabs), but the helper still has to be panic-safe.
-        let widths: Vec<f32> = compute_tab_segment_widths(
-            std::iter::empty::<&str>(),
-            100.0,
-            cell_w,
-            tab_h,
-            true,
-            240.0,
-        );
+        let widths: Vec<f32> = compute_tab_segment_widths(std::iter::empty::<&str>(), 100.0);
         assert_eq!(widths, vec![100.0]);
     }
 
+    /// Link/path overlay underlines must follow focused output immediately.
+    /// `less -R` redraws the viewport with output bytes while
+    /// `display_offset` stays fixed, so an output-only debounce leaves stale
+    /// link rects visibly attached to the previous frame.
     #[test]
-    fn compute_tab_segment_widths_caps_wide_tabs() {
-        use super::compute_tab_segment_widths;
-        let cell_w = 8.0;
-        let tab_h = 24.0;
-
-        let widths =
-            compute_tab_segment_widths(["~", "~"].into_iter(), 1800.0, cell_w, tab_h, true, 240.0);
-        assert_eq!(widths, vec![240.0, 240.0]);
-
-        let uncapped =
-            compute_tab_segment_widths(["~", "~"].into_iter(), 1800.0, cell_w, tab_h, true, 0.0);
-        assert_eq!(uncapped, vec![900.0, 900.0]);
-
-        let long = compute_tab_segment_widths(
-            ["a very long tab title that should not claim the monitor"].into_iter(),
-            1800.0,
-            cell_w,
-            tab_h,
-            false,
-            160.0,
+    fn focused_link_scans_are_not_output_debounced() {
+        let app_src = include_str!("app.rs");
+        let window_src = include_str!("window_state.rs");
+        let removed_const = format!("LINKS_SCAN_{}", "DEBOUNCE");
+        let removed_field = format!("last_{}_scan", "links");
+        assert!(
+            !app_src.contains(&removed_const),
+            "focused output link scans must not be debounce-delayed"
         );
-        assert_eq!(long, vec![160.0]);
+        assert!(
+            !window_src.contains(&removed_field),
+            "WindowState must not keep a timestamp for output-only link-scan debounce"
+        );
+        assert!(
+            app_src.contains("output_generation"),
+            "link scan key must still include focused output_generation"
+        );
     }
 
     /// Cycle 805 drift guard. `split_new_tab_button` splits the trailing

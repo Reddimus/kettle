@@ -424,13 +424,13 @@ def run_tabbar(kettle: str, root: Path) -> Path:
                 "agent-server = full",
                 "tab-bar = always",
                 "tab-bar-pos = top",
-                "homogeneous-tabbar = true",
-                "tab-max-width = 240",
                 "status-bar = off",
                 "restore-session = false",
                 "update-check = false",
                 "background = #101010",
                 "foreground = #f4f4f4",
+                "window-width = 220",
+                "window-height = 30",
             ]
         )
         + "\n"
@@ -453,9 +453,9 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         live.screenshot(out / "before-press.png")
         segments = before["tab_bar"]["segments"]  # type: ignore[index]
         widths = [float(seg["rect"]["width"]) for seg in segments]  # type: ignore[index]
-        if widths and max(widths) > 260.0:
+        if len(widths) >= 2 and not all(abs(w - widths[0]) < 1.0 for w in widths[1:]):
             raise SystemExit(
-                "tabbar smoke: short tabs inflated into oversized homogeneous segments: "
+                "tabbar smoke: homogeneous segments not equal: "
                 f"widths={[round(w, 1) for w in widths]}"
             )
         seg = before["tab_bar"]["segments"][1]["rect"]  # type: ignore[index]
@@ -478,6 +478,12 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         (out / "geometry-released.json").write_text(json.dumps(released, indent=2) + "\n")
         live.screenshot(out / "released.png")
 
+    before_active = [s for s in before["tab_bar"]["segments"] if s.get("active")]  # type: ignore[index]
+    if len(before_active) != 1:
+        raise SystemExit(f"tabbar smoke: expected one resting active tab, got {before_active}")
+    before_active = before_active[0]
+    resting_full = before_active["rect"]
+
     if not pressed.get("tab_drag_active") or not pressed.get("tab_drag_armed"):
         raise SystemExit("tabbar smoke: press did not remain click-armed")
     if pressed.get("tab_drag_visible"):
@@ -486,11 +492,16 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         raise SystemExit("tabbar smoke: small tab-click jitter promoted to drag")
     if jittered.get("tab_drag_visible"):
         raise SystemExit("tabbar smoke: drag ghost became visible during small click jitter")
+    active = [s for s in pressed["tab_bar"]["segments"] if s.get("active")]  # type: ignore[index]
+    if len(active) != 1:
+        raise SystemExit(f"tabbar smoke: expected one active tab after press, got {active}")
     if released.get("tab_drag_active") or released.get("tab_drag_armed") or released.get("tab_drag_visible"):
         raise SystemExit("tabbar smoke: release left drag state latched")
 
     before_rect, before_idx = active_rect(before)
-    pressed_rect, pressed_idx = active_rect(pressed)
+    pressed_active_rect, pressed_idx = active_rect(pressed)
+    pressed_active = [s for s in pressed["tab_bar"]["segments"] if s.get("active")][0]  # type: ignore[index]
+    pressed_close = pressed_active["close"]
     bar = pressed["tab_bar"]  # type: ignore[index]
     y0 = float(bar["y"])
     y1 = y0 + float(bar["height"])
@@ -498,7 +509,11 @@ def run_tabbar(kettle: str, root: Path) -> Path:
     outside = [
         (x, y)
         for x, y in changed
-        if not (rect_contains(before_rect, x, y) or rect_contains(pressed_rect, x, y))
+        if not (
+            rect_contains(before_rect, x, y)
+            or rect_contains(pressed_active_rect, x, y)
+            or rect_contains(pressed_close, x, y)
+        )
     ]
     if outside:
         xs = [x for x, _ in outside]
@@ -525,7 +540,8 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         "before_active": before_idx,
         "pressed_active": pressed_idx,
         "before_active_rect": before_rect,
-        "pressed_active_rect": pressed_rect,
+        "before_active_hit_rect": resting_full,
+        "pressed_active_rect": pressed_active_rect,
         "press_changed_pixels": len(changed),
         "press_outside_allowed_rects": len(outside),
         "release_changed_pixels": len(release_changed),
@@ -601,7 +617,9 @@ def underline_command(repo: Path, svn_checkout: Optional[Path]) -> str:
             f"{svn_marker}"
             "1..120 | ForEach-Object { "
             "if ($_ % 2 -eq 1) { '{0}[4mUNDERLINE_{2}_{1:D3}{0}[24m link https://example.invalid/{1:D3}' -f $esc,$_,'SENTINEL' } "
-            "else { 'PLAIN_{1}_{0:D3} link https://example.invalid/{0:D3}' -f $_,'SENTINEL' } }; "
+            "else { 'PLAIN_{1}_{0:D3} link https://example.invalid/{0:D3}' -f $_,'SENTINEL' }; "
+            "'PATH_POSIX_SENTINEL_{0:D3} crates/kettle-ui/src/app.rs:{0}:1' -f $_; "
+            r"'PATH_WIN_SENTINEL_{0:D3} C:\src\kettle\crates\kettle-ui\src\app.rs:{0}:1' -f $_ }; "
             "git diff --color=always | delta --paging=never --line-numbers; "
             f"{svn_diff_part}"
             "} | less -R"
@@ -620,6 +638,8 @@ def underline_command(repo: Path, svn_checkout: Optional[Path]) -> str:
         "if [ $((i % 2)) -eq 1 ]; then "
         "printf '\\033[4mUNDERLINE_%s_%03d\\033[24m link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; "
         "else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; fi; "
+        "printf 'PATH_POSIX_SENTINEL_%03d crates/kettle-ui/src/app.rs:%d:1\\n' \"$i\" \"$i\"; "
+        "printf 'PATH_WIN_SENTINEL_%03d %s:%d:1\\n' \"$i\" 'C:\\src\\kettle\\crates\\kettle-ui\\src\\app.rs' \"$i\"; "
         "done; git diff --color=always | delta --paging=never --line-numbers; "
         f"{svn_diff_part}"
         "} | less -R"
@@ -675,6 +695,7 @@ def run_underline(kettle: str, root: Path) -> Path:
 
     top_sentinels: List[int] = []
     underline_frames = 0
+    path_overlay_frames = 0
     analysis: List[Dict[str, object]] = []
     for i in range(1, 9):
         data = json.loads((out / f"cells-{i}.json").read_text())
@@ -694,16 +715,36 @@ def run_underline(kettle: str, root: Path) -> Path:
             underline_frames += 1
         found: List[Tuple[int, int]] = []
         plain_found: List[Tuple[int, int]] = []
+        path_found: List[Tuple[int, str, int, int]] = []
+        text_by_row: Dict[int, str] = {}
         for row, row_cells in sorted(rows.items()):
             text = "".join(ch for _, ch in sorted(row_cells))
+            text_by_row[row] = text
             if "UNDERLINE_SENTINEL_" in text:
                 num = int(text.split("UNDERLINE_SENTINEL_", 1)[1][:3])
                 found.append((row, num))
             if "PLAIN_SENTINEL_" in text:
                 num = int(text.split("PLAIN_SENTINEL_", 1)[1][:3])
                 plain_found.append((row, num))
+            for marker, probe in (
+                ("PATH_POSIX_SENTINEL_", "crates/kettle-ui/src/app.rs"),
+                ("PATH_WIN_SENTINEL_", r"C:\src\kettle\crates\kettle-ui\src\app.rs"),
+            ):
+                if marker not in text:
+                    continue
+                start = text.find(probe)
+                if start < 0:
+                    raise SystemExit(f"underline smoke: {marker} row is missing probe path in cells-{i}.json: {text!r}")
+                end = start
+                while end < len(text) and not text[end].isspace():
+                    end += 1
+                if end <= start:
+                    raise SystemExit(f"underline smoke: {marker} row has empty path token in cells-{i}.json: {text!r}")
+                path_found.append((row, marker.rstrip("_"), start, end - 1))
         if not found:
             raise SystemExit(f"underline smoke: no sentinel text visible in cells-{i}.json")
+        if not path_found:
+            raise SystemExit(f"underline smoke: no path sentinel text visible in cells-{i}.json")
         top_sentinels.append(found[0][1])
         width, height, rgba_rows = read_rgba_png(out / f"frame-{i}.png")
         geo = json.loads((out / f"geometry-{i}.json").read_text())
@@ -744,12 +785,71 @@ def run_underline(kettle: str, root: Path) -> Path:
             if best > max_plain_hits:
                 raise SystemExit(f"underline smoke: underline leaked onto plain row on frame {i} row {row}")
             plain_pixel_rows.append({"row": row, "sentinel": number, "baseline_pixel_hits": best, "sampled_columns": len(sample_cols), "pixel_y": best_y, "near_solid_threshold": max_plain_hits})
-        analysis.append({"frame": i, "top_sentinel": found[0][1], "cell": {"width": cell_w, "height": cell_h}, "content": content, "underline_rows": sorted(underline_rows), "sentinels": [{"row": r, "number": n} for r, n in found], "plain_sentinels": [{"row": r, "number": n} for r, n in plain_found], "pixel_rows": pixel_rows, "plain_pixel_rows": plain_pixel_rows})
+        path_pixel_rows = []
+        for row, marker, start_col, end_col in path_found[:10]:
+            sample_cols = list(range(start_col, min(end_col + 1, start_col + 36)))
+            baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
+            best = 0
+            best_y = baseline
+            for y in range(baseline - 2, baseline + 3):
+                hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
+                if hits > best:
+                    best = hits
+                    best_y = y
+            threshold = max(10, int(len(sample_cols) * 0.65))
+            if best < threshold:
+                raise SystemExit(
+                    f"underline smoke: path underline not aligned on frame {i} row {row} "
+                    f"{marker} hits={best}/{len(sample_cols)} threshold={threshold}"
+                )
+            path_overlay_frames += 1
+            leak_checks = []
+            for neighbor in (row - 1, row + 1):
+                if neighbor < 0 or neighbor >= rows_n:
+                    continue
+                neighbor_text = text_by_row.get(neighbor, "")
+                if (
+                    "PATH_POSIX_SENTINEL_" in neighbor_text
+                    or "PATH_WIN_SENTINEL_" in neighbor_text
+                    or "http://" in neighbor_text
+                    or "https://" in neighbor_text
+                    or neighbor in underline_rows
+                ):
+                    continue
+                neighbor_baseline = int(round(origin_y + neighbor * cell_h + cell_h - 2.0))
+                neighbor_best = 0
+                neighbor_y = neighbor_baseline
+                for y in range(neighbor_baseline - 2, neighbor_baseline + 3):
+                    hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
+                    if hits > neighbor_best:
+                        neighbor_best = hits
+                        neighbor_y = y
+                leak_threshold = max(10, int(len(sample_cols) * 0.65))
+                if neighbor_best >= leak_threshold:
+                    raise SystemExit(
+                        f"underline smoke: path underline leaked to adjacent row on frame {i} "
+                        f"row {row}->{neighbor} hits={neighbor_best}/{len(sample_cols)}"
+                    )
+                leak_checks.append({"row": neighbor, "hits": neighbor_best, "pixel_y": neighbor_y, "threshold": leak_threshold})
+            path_pixel_rows.append({
+                "row": row,
+                "marker": marker,
+                "start_col": start_col,
+                "end_col": end_col,
+                "underline_pixel_hits": best,
+                "sampled_columns": len(sample_cols),
+                "pixel_y": best_y,
+                "threshold": threshold,
+                "adjacent_rows": leak_checks,
+            })
+        analysis.append({"frame": i, "top_sentinel": found[0][1], "cell": {"width": cell_w, "height": cell_h}, "content": content, "underline_rows": sorted(underline_rows), "sentinels": [{"row": r, "number": n} for r, n in found], "plain_sentinels": [{"row": r, "number": n} for r, n in plain_found], "path_sentinels": [{"row": r, "marker": m, "start_col": s, "end_col": e} for r, m, s, e in path_found], "pixel_rows": pixel_rows, "plain_pixel_rows": plain_pixel_rows, "path_pixel_rows": path_pixel_rows})
     if underline_frames == 0:
         raise SystemExit("underline smoke: no underlined cells observed")
+    if path_overlay_frames == 0:
+        raise SystemExit("underline smoke: no autodetected path underlines observed")
     if not (top_sentinels[0] < top_sentinels[4] and top_sentinels[-1] < top_sentinels[4]):
         raise SystemExit(f"underline smoke: down/up scroll sequence failed: {top_sentinels}")
-    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "top_sentinels": top_sentinels, "delta_fixtures": {"git": True, "svn": svn_enabled}, "frames_detail": analysis}, indent=2) + "\n")
+    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "path_overlay_frames": path_overlay_frames, "top_sentinels": top_sentinels, "delta_fixtures": {"git": True, "svn": svn_enabled}, "frames_detail": analysis}, indent=2) + "\n")
     return out
 
 

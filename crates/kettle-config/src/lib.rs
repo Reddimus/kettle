@@ -1126,14 +1126,6 @@ pub struct Config {
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
     /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
     pub scroll_tabbar: bool,
-    /// Cycle 337/956 (Terminator parity, terminatorlib/config.py:83
-    /// `homogeneous_tabbar`): equal-width tabs when true. Kettle defaults to
-    /// natural-width tabs so the active-tab visual stays bound to the label.
-    pub homogeneous_tabbar: bool,
-    /// Terminator parity (`tab_max_width`) + wide-monitor UX: cap horizontal
-    /// tab segments so a two-tab window does not turn one selected tab into a
-    /// half-screen highlight. `0` disables the cap.
-    pub tab_max_width: f32,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
@@ -1919,8 +1911,6 @@ impl Default for Config {
             new_tab_after_current_tab: false,
             title_at_bottom: false,
             scroll_tabbar: false,
-            homogeneous_tabbar: false,
-            tab_max_width: 240.0,
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
@@ -2410,8 +2400,6 @@ impl Config {
         "hide-on-lose-focus",
         "hide_from_taskbar",
         "hide_on_lose_focus",
-        "homogeneous-tabbar",
-        "homogeneous_tabbar",
         "icon-bell",
         "icon_bell",
         "invert-search",
@@ -2597,9 +2585,6 @@ impl Config {
                 "tab-bar-width" | "tab_bar_width" => {
                     v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
                 }
-                "tab-max-width" | "tab_max_width" => v
-                    .parse::<f32>()
-                    .is_ok_and(|n| n == 0.0 || (80.0..=800.0).contains(&n)),
                 "background-darkness" | "background_darkness" => {
                     v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
                 }
@@ -3482,18 +3467,6 @@ impl Config {
                 "scroll-tabbar" | "scroll_tabbar" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.scroll_tabbar = b;
-                    }
-                }
-                "homogeneous-tabbar" | "homogeneous_tabbar" => {
-                    if let Some(b) = parse_bool(&e.value) {
-                        cfg.homogeneous_tabbar = b;
-                    }
-                }
-                "tab-max-width" | "tab_max_width" => {
-                    if let Ok(v) = e.value.trim().parse::<f32>()
-                        && v.is_finite()
-                    {
-                        cfg.tab_max_width = if v <= 0.0 { 0.0 } else { v.clamp(80.0, 800.0) };
                     }
                 }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
@@ -4399,7 +4372,6 @@ window-position-x = -1920\n\
 window-position-y = 80\n\
 tab-bar-position = left\n\
 tab-bar-width = 200\n\
-tab-max-width = 240\n\
 ask-before-closing = multiple-terminals\n\
 cell-width = 1.1\n\
 cell-height = 1.2\n";
@@ -6006,7 +5978,6 @@ cell-height = 1.2\n";
         assert!(!d.new_tab_after_current_tab);
         assert!(!d.title_at_bottom);
         assert!(!d.scroll_tabbar);
-        assert!(!d.homogeneous_tabbar);
         assert!(!d.hide_on_lose_focus);
         assert!(!d.sticky);
         assert!(!d.hide_from_taskbar);
@@ -6027,15 +5998,6 @@ cell-height = 1.2\n";
         // sticky is single-form (no underscore variant — it's
         // already a single word).
         assert!(Config::parse_text("sticky = true").sticky);
-        // Natural-width tabs are the default; homogeneous-tabbar remains
-        // available for users who prefer equal-width segments.
-        assert!(Config::parse_text("homogeneous-tabbar = true").homogeneous_tabbar);
-        assert!(!Config::parse_text("homogeneous-tabbar = false").homogeneous_tabbar);
-        assert!((d.tab_max_width - 240.0).abs() < f32::EPSILON);
-        assert!(
-            (Config::parse_text("tab-max-width = 320").tab_max_width - 320.0).abs() < f32::EPSILON
-        );
-        assert!((Config::parse_text("tab_max_width = 0").tab_max_width - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -6545,7 +6507,6 @@ cell-height = 1.2\n";
         for (good, bad) in [
             ("handle-size = 12", "handle-size = 9000"),
             ("tab-bar-width = 200", "tab-bar-width = 5"),
-            ("tab-max-width = 240", "tab-max-width = 20"),
             ("background-darkness = 0.4", "background-darkness = 2.0"),
             ("cell-height = 1.2", "cell-height = 9.0"),
             ("cell-width = 1.0", "cell-width = 0.1"),
@@ -7322,12 +7283,19 @@ cell-height = 1.2\n";
     #[test]
     fn unknown_keys_are_reported_not_fatal() {
         let (cfg, unknown) = Config::parse_collect(
-            "font-size = 14\nfont-szie = 99\ntheme = TokyoNight Night\nbogus = x\n",
+            "font-size = 14\nfont-szie = 99\ntheme = TokyoNight Night\nbogus = x\nhomogeneous-tabbar = true\n",
         );
         // Valid keys still applied.
         assert_eq!(cfg.font_size, 14.0);
         // Typo'd / unknown keys collected, sorted + deduped.
-        assert_eq!(unknown, vec!["bogus".to_string(), "font-szie".to_string()]);
+        assert_eq!(
+            unknown,
+            vec![
+                "bogus".to_string(),
+                "font-szie".to_string(),
+                "homogeneous-tabbar".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -7677,12 +7645,6 @@ cell-height = 1.2\n";
         // Garbage value leaves the default.
         let cfg = Config::parse_text("tab-bar-width = wide\n");
         assert!((cfg.tab_bar_width - 180.0).abs() < f32::EPSILON);
-
-        let bad = Config::detect_malformed_values(
-            "tab-max-width = 60\n\
-             tab_max_width = wide\n",
-        );
-        assert_eq!(bad.len(), 2, "bad tab max widths should flag: {bad:?}");
     }
 
     /// Cycle 670 drift guard. `sunrise_sunset_utc_secs` reproduces

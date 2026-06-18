@@ -81,10 +81,6 @@ pub(crate) struct WindowState {
     /// Cycle 803: cache key for the last viewport link-autodetect scan — see
     /// app.rs (`update_links` re-scans only on output, scroll, or focus).
     pub(crate) links_scan_key: Option<LinksScanKey>,
-    /// v2.20.0 P6: when the last link scan actually ran — output-only changes
-    /// within `LINKS_SCAN_DEBOUNCE` of it are skipped (streaming floods moved
-    /// `last_output_at` every painted frame).
-    pub(crate) last_links_scan: Option<std::time::Instant>,
     pub(crate) mouse_btn: Option<u8>,
     /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
     /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
@@ -154,6 +150,10 @@ pub(crate) struct WindowState {
     /// threshold; this prevents the drag ghost from flashing under a normal
     /// tab switch.
     pub(crate) tab_drag_press: Option<(f32, f32)>,
+    /// Tab index currently held by a left-button click before release. This is
+    /// a visual press state only; hit-test and drag behavior use the segment
+    /// rects and `tab_drag_*` fields.
+    pub(crate) tab_pressed_idx: Option<usize>,
     /// Cycle 402: tab tear-off drag FSM state. Distinct from the in-window
     /// `tab_drag_active` reorder (cycle 249); both fire from the same
     /// mouse-down on the tab bar. Wired live in C6 of the multi-window
@@ -275,7 +275,6 @@ impl WindowState {
             search_revealed: None,
             search_scan_key: None,
             links_scan_key: None,
-            last_links_scan: None,
             mouse_btn: None,
             last_mouse_cell: None,
             links: Vec::new(),
@@ -297,6 +296,7 @@ impl WindowState {
             last_cursor_icon: None,
             tab_drag_active: false,
             tab_drag_press: None,
+            tab_pressed_idx: None,
             detach_drag: crate::detach::DragState::default(),
             drag_press: None,
             dock_preview: None,
