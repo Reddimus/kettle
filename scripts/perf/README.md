@@ -8,7 +8,7 @@ Terminator/Ghostty smoke target with Hyperfine and explicit pass/fail rules.
 
 | Script | Measures | How |
 | --- | --- | --- |
-| `linux-compare.sh` | Linux startup + ASCII flood | Hyperfine: launch terminal, run `/bin/true`, close; launch terminal, print ~4 MiB ASCII, close. Requires Terminator + Ghostty; includes Alacritty when installed; fails if kettle does not beat Terminator or is more than 10% slower than Ghostty |
+| `linux-compare.sh` | Linux startup + ASCII/SGR flood | Hyperfine: launch terminal, run `/bin/true`, close; launch terminal, print ~4 MiB ASCII, close; launch terminal, print 35k SGR/underline lines, close. Requires Terminator + Ghostty; includes Alacritty when installed; fails if kettle does not beat Terminator or is more than 10% slower than Ghostty |
 | `gen-payloads.ps1` | — | Deterministic payloads: ~16 MB plain ASCII, ~6.1 MB SGR-heavy, ~4.3 MB CJK/emoji |
 | `run-inside.ps1` | throughput | Runs INSIDE the terminal; times chunked console writes of each payload (termbench principle: the terminal's consumption backpressures the writer); writes JSON, no screen scraping |
 | `throughput.ps1` | throughput + post-flood memory | Orchestrates run-inside per terminal; samples process-tree working set right after the flood |
@@ -39,9 +39,10 @@ just linux-perf
 scripts/perf/linux-compare.sh --runs 7 --out-dir target/perf-results/linux-v2.25.1
 ```
 
-That writes `linux-startup.json`, `linux-ascii-flood.json`, and
+That writes `linux-startup.json`, `linux-ascii-flood.json`,
+`linux-ansi-underline-flood.json`, advisory `linux-rss-flood.json`, and
 `linux-score.json`. The gate is deliberately narrow and repeatable: Kettle must
-beat Terminator and remain within 10% of Ghostty on both probes.
+beat Terminator and remain within 10% of Ghostty on every timing probe.
 
 Run the full harness, then score the result directory:
 

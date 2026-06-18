@@ -18,13 +18,14 @@ Usage: scripts/perf/linux-compare.sh [--runs N] [--warmup N] [--out-dir DIR] [--
 Runs Linux desktop probes:
   - startup: launch a terminal, run /bin/true, close
   - ascii-flood: launch a terminal, print ~4 MiB ASCII, close
+  - ansi-underline-flood: launch a terminal, print 35k SGR/underline lines, close
   - rss-flood: max RSS while running the same ascii-flood lifecycle
 
 Required peers: terminator, ghostty.
 Optional context peer: alacritty.
 
 The score gate fails if Kettle is slower than Terminator or more than 10% slower
-than Ghostty on either required timing workload. RSS is recorded as advisory
+than Ghostty on each required timing workload. RSS is recorded as advisory
 evidence in OUT_DIR/linux-rss-flood.json and summarized in linux-score.json.
 EOF
 }
@@ -130,6 +131,7 @@ EOF
 export KETTLE_BIN="$kettle_bin"
 export KETTLE_CONFIG="$kettle_config"
 export ASCII_FLOOD_CMD='yes "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" | head -c 4194304'
+export ANSI_UNDERLINE_FLOOD_CMD='for i in $(seq 1 35000); do printf "\033[4mUNDERLINE_%05d\033[24m plain text https://example.invalid/%05d \033[38;2;180;220;255mcolor\033[0m\n" "$i" "$i"; done'
 
 write_wrapper() {
   local path="$1"
@@ -150,6 +152,12 @@ write_wrapper "$tmp_dir/kettle-flood" 'exec "$KETTLE_BIN" --config "$KETTLE_CONF
 write_wrapper "$tmp_dir/terminator-flood" 'exec terminator --no-dbus -x sh -lc "$ASCII_FLOOD_CMD"'
 # shellcheck disable=SC2016
 write_wrapper "$tmp_dir/ghostty-flood" 'exec ghostty -e sh -lc "$ASCII_FLOOD_CMD"'
+# shellcheck disable=SC2016
+write_wrapper "$tmp_dir/kettle-ansi-underline-flood" 'exec "$KETTLE_BIN" --config "$KETTLE_CONFIG" -e sh -lc "$ANSI_UNDERLINE_FLOOD_CMD"'
+# shellcheck disable=SC2016
+write_wrapper "$tmp_dir/terminator-ansi-underline-flood" 'exec terminator --no-dbus -x sh -lc "$ANSI_UNDERLINE_FLOOD_CMD"'
+# shellcheck disable=SC2016
+write_wrapper "$tmp_dir/ghostty-ansi-underline-flood" 'exec ghostty -e sh -lc "$ANSI_UNDERLINE_FLOOD_CMD"'
 
 startup_args=(
   --command-name kettle "$tmp_dir/kettle-startup"
@@ -161,18 +169,27 @@ flood_args=(
   --command-name terminator "$tmp_dir/terminator-flood"
   --command-name ghostty "$tmp_dir/ghostty-flood"
 )
+ansi_args=(
+  --command-name kettle "$tmp_dir/kettle-ansi-underline-flood"
+  --command-name terminator "$tmp_dir/terminator-ansi-underline-flood"
+  --command-name ghostty "$tmp_dir/ghostty-ansi-underline-flood"
+)
 terminal_names=(kettle terminator ghostty)
 if command -v alacritty >/dev/null 2>&1; then
   write_wrapper "$tmp_dir/alacritty-startup" 'exec alacritty -e sh -lc true'
   # shellcheck disable=SC2016
   write_wrapper "$tmp_dir/alacritty-flood" 'exec alacritty -e sh -lc "$ASCII_FLOOD_CMD"'
+  # shellcheck disable=SC2016
+  write_wrapper "$tmp_dir/alacritty-ansi-underline-flood" 'exec alacritty -e sh -lc "$ANSI_UNDERLINE_FLOOD_CMD"'
   startup_args+=(--command-name alacritty "$tmp_dir/alacritty-startup")
   flood_args+=(--command-name alacritty "$tmp_dir/alacritty-flood")
+  ansi_args+=(--command-name alacritty "$tmp_dir/alacritty-ansi-underline-flood")
   terminal_names+=(alacritty)
 fi
 
 startup_json="$out_dir/linux-startup.json"
 flood_json="$out_dir/linux-ascii-flood.json"
+ansi_json="$out_dir/linux-ansi-underline-flood.json"
 rss_json="$out_dir/linux-rss-flood.json"
 score_json="$out_dir/linux-score.json"
 rss_tsv="$tmp_dir/rss-flood.tsv"
@@ -185,6 +202,9 @@ hyperfine --runs "$runs" --warmup "$warmup" --export-json "$startup_json" "${sta
 echo ""
 echo "==> ascii-flood: launch terminal, print ~4 MiB ASCII, close"
 hyperfine --runs "$runs" --warmup "$warmup" --export-json "$flood_json" "${flood_args[@]}"
+echo ""
+echo "==> ansi-underline-flood: launch terminal, print 35k SGR/underline lines, close"
+hyperfine --runs "$runs" --warmup "$warmup" --export-json "$ansi_json" "${ansi_args[@]}"
 
 echo ""
 echo "==> rss-flood: max RSS while printing ~4 MiB ASCII"
@@ -205,12 +225,12 @@ for name in "${terminal_names[@]}"; do
   done
 done
 
-python3 - "$startup_json" "$flood_json" "$rss_tsv" "$rss_json" "$score_json" <<'PY'
+python3 - "$startup_json" "$flood_json" "$ansi_json" "$rss_tsv" "$rss_json" "$score_json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-startup_path, flood_path, rss_tsv_path, rss_path, score_path = map(Path, sys.argv[1:6])
+startup_path, flood_path, ansi_path, rss_tsv_path, rss_path, score_path = map(Path, sys.argv[1:7])
 
 def load_medians(path):
     with path.open("r", encoding="utf-8") as f:
@@ -240,6 +260,7 @@ def load_rss(path):
 workloads = {
     "startup": load_medians(startup_path),
     "ascii_flood": load_medians(flood_path),
+    "ansi_underline_flood": load_medians(ansi_path),
 }
 rss_samples, rss_medians = load_rss(rss_tsv_path)
 rss_path.write_text(
@@ -261,6 +282,7 @@ failures = []
 summary = {
     "startup_json": str(startup_path),
     "ascii_flood_json": str(flood_path),
+    "ansi_underline_flood_json": str(ansi_path),
     "rss_flood_json": str(rss_path),
     "workloads": {},
     "memory": {},
@@ -364,5 +386,6 @@ echo ""
 echo "results:"
 echo "  $startup_json"
 echo "  $flood_json"
+echo "  $ansi_json"
 echo "  $rss_json"
 echo "  $score_json"

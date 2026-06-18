@@ -178,11 +178,12 @@ bench:
 bench:
     & ./scripts/bench.ps1
 
-# Compare Kettle against installed Linux peer terminals using Hyperfine:
+# Compare Kettle against installed Linux peer terminals using Hyperfine.
 # Terminator and Ghostty are required, Alacritty is included when present.
 # This is desktop-local by design (needs a graphical Linux session) and gates
-# the Ubuntu "better than Terminator, close to Ghostty" requirement with
-# repeatable JSON output under target/perf-results/linux-local/.
+# the Ubuntu "better than Terminator, close to Ghostty" requirement across
+# startup, ASCII flood, and SGR/underline flood timings, plus advisory RSS
+# output under target/perf-results/linux-local/.
 [unix]
 linux-perf:
     ./scripts/perf/linux-compare.sh
