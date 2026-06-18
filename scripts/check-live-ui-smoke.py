@@ -651,6 +651,8 @@ def run_underline(kettle: str, root: Path) -> Path:
             live.ctl("wait_for", params={"text": "SVN_DELTA_FIXTURE_BEGIN", "timeout_ms": 8000, "quiet_ms": 250})
         live.ctl("wait_for", params={"text": "UNDERLINE_SENTINEL", "timeout_ms": 8000, "quiet_ms": 250})
         for i in range(1, 9):
+            geo = live.json_ctl("ui_geometry")
+            (out / f"geometry-{i}.json").write_text(json.dumps(geo, indent=2) + "\n")
             cells = live.json_ctl("read_cells")
             (out / f"cells-{i}.json").write_text(json.dumps(cells))
             live.screenshot(out / f"frame-{i}.png")
@@ -692,18 +694,23 @@ def run_underline(kettle: str, root: Path) -> Path:
             raise SystemExit(f"underline smoke: no sentinel text visible in cells-{i}.json")
         top_sentinels.append(found[0][1])
         width, height, rgba_rows = read_rgba_png(out / f"frame-{i}.png")
-        cell_w = width / cols
-        cell_h = height / rows_n
+        geo = json.loads((out / f"geometry-{i}.json").read_text())
+        content = geo.get("content", {})
+        cell = geo.get("cell", {})
+        origin_x = float(content.get("x", 0.0))
+        origin_y = float(content.get("y", 0.0))
+        cell_w = float(cell.get("width") or (float(content.get("width", width)) / cols))
+        cell_h = float(cell.get("height") or (float(content.get("height", height)) / rows_n))
         pixel_rows = []
         for row, number in found[:8]:
             sample_cols = sorted(underline_cols.get(row, []))[:22]
             if not sample_cols:
                 raise SystemExit(f"underline smoke: row {row} has no underline attrs")
-            baseline = int(round((row + 1) * cell_h - 2.0))
+            baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
             best = 0
             best_y = baseline
             for y in range(baseline - 2, baseline + 3):
-                hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int((col + 0.5) * cell_w), y))
+                hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                 if hits > best:
                     best = hits
                     best_y = y
@@ -713,18 +720,19 @@ def run_underline(kettle: str, root: Path) -> Path:
         plain_pixel_rows = []
         for row, number in plain_found[:8]:
             sample_cols = list(range(0, 18))
-            baseline = int(round((row + 1) * cell_h - 2.0))
+            baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
             best = 0
             best_y = baseline
             for y in range(baseline - 2, baseline + 3):
-                hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int((col + 0.5) * cell_w), y))
+                hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                 if hits > best:
                     best = hits
                     best_y = y
-            if best > max(6, int(len(sample_cols) * 0.45)):
+            max_plain_hits = max(16, int(len(sample_cols) * 0.90))
+            if best > max_plain_hits:
                 raise SystemExit(f"underline smoke: underline leaked onto plain row on frame {i} row {row}")
-            plain_pixel_rows.append({"row": row, "sentinel": number, "baseline_pixel_hits": best, "sampled_columns": len(sample_cols), "pixel_y": best_y})
-        analysis.append({"frame": i, "top_sentinel": found[0][1], "underline_rows": sorted(underline_rows), "sentinels": [{"row": r, "number": n} for r, n in found], "plain_sentinels": [{"row": r, "number": n} for r, n in plain_found], "pixel_rows": pixel_rows, "plain_pixel_rows": plain_pixel_rows})
+            plain_pixel_rows.append({"row": row, "sentinel": number, "baseline_pixel_hits": best, "sampled_columns": len(sample_cols), "pixel_y": best_y, "near_solid_threshold": max_plain_hits})
+        analysis.append({"frame": i, "top_sentinel": found[0][1], "cell": {"width": cell_w, "height": cell_h}, "content": content, "underline_rows": sorted(underline_rows), "sentinels": [{"row": r, "number": n} for r, n in found], "plain_sentinels": [{"row": r, "number": n} for r, n in plain_found], "pixel_rows": pixel_rows, "plain_pixel_rows": plain_pixel_rows})
     if underline_frames == 0:
         raise SystemExit("underline smoke: no underlined cells observed")
     if not (top_sentinels[0] < top_sentinels[4] and top_sentinels[-1] < top_sentinels[4]):

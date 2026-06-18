@@ -304,8 +304,11 @@ These need a real display and are run by hand (or on real hardware):
     inflating into full-strip homogeneous segments. Underline runs write
     `analysis.json` with the visible underlined sentinel sequence across down/up
     scrolling plus per-row underline/plain-row pixel hit counts from the PNG
-    frames, and `delta_fixtures` records whether the git and SVN `diff | delta`
-    fixtures were active. Interaction runs include
+    frames. The underline probe uses the renderer cell metrics from per-frame
+    `ui_geometry` rather than deriving cell size from the full screenshot, so
+    unused bottom/right surface pixels cannot masquerade as row drift.
+    `delta_fixtures` records whether the git and SVN `diff | delta` fixtures
+    were active. Interaction runs include
     `notification-events.jsonl` and `notification-event.json` for the OSC 777
     event-feed assertion. Native
     Windows runs the tabbar/underline recipes through

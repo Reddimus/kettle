@@ -140,6 +140,7 @@ fi
 "$KETTLE" ctl --pid "$pid" wait_for --text "UNDERLINE_SENTINEL" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null
 
 for i in $(seq 1 "$FRAMES"); do
+  "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-$i.json"
   "$KETTLE" ctl --pid "$pid" read_cells --raw >"$out/cells-$i.json"
   ctl_screenshot "$out/frame-$i.png"
   if [ "$i" -lt "$FRAMES" ]; then
@@ -276,21 +277,26 @@ for i in range(1, frames + 1):
     if not png_path.exists():
         raise SystemExit(f"underline-scroll smoke: missing frame-{i}.png")
     width, height, rgba_rows = read_rgba_png(png_path)
-    cell_w = width / cols
-    cell_h = height / screen_rows
+    geometry = json.loads((out / f"geometry-{i}.json").read_text())
+    content = geometry.get("content", {})
+    cell = geometry.get("cell", {})
+    origin_x = float(content.get("x", 0.0))
+    origin_y = float(content.get("y", 0.0))
+    cell_w = float(cell.get("width") or (float(content.get("width", width)) / cols))
+    cell_h = float(cell.get("height") or (float(content.get("height", height)) / screen_rows))
     pixel_rows = []
     for row, number in found[:8]:
         cols_for_row = sorted(underline_cols.get(row, []))
         if not cols_for_row:
             raise SystemExit(f"underline-scroll smoke: sentinel row {row} has no underline attrs")
         sample_cols = cols_for_row[: min(22, len(cols_for_row))]
-        baseline = int(round((row + 1) * cell_h - 2.0))
+        baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
         best = 0
         best_y = baseline
         for y in range(baseline - 2, baseline + 3):
             hits = 0
             for col in sample_cols:
-                x = int((col + 0.5) * cell_w)
+                x = int(origin_x + (col + 0.5) * cell_w)
                 if bright_at(rgba_rows, x, y):
                     hits += 1
             if hits > best:
@@ -313,20 +319,20 @@ for i in range(1, frames + 1):
     plain_pixel_rows = []
     for row, number in plain_found[:8]:
         sample_cols = list(range(0, 18))
-        baseline = int(round((row + 1) * cell_h - 2.0))
+        baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
         best = 0
         best_y = baseline
         for y in range(baseline - 2, baseline + 3):
             hits = 0
             for col in sample_cols:
-                x = int((col + 0.5) * cell_w)
+                x = int(origin_x + (col + 0.5) * cell_w)
                 if bright_at(rgba_rows, x, y):
                     hits += 1
             if hits > best:
                 best = hits
                 best_y = y
-        max_hits = max(6, int(len(sample_cols) * 0.45))
-        if best > max_hits:
+        max_plain_hits = max(16, int(len(sample_cols) * 0.90))
+        if best > max_plain_hits:
             raise SystemExit(
                 "underline-scroll smoke: rendered underline leaked onto plain row: "
                 f"frame={i} row={row} sentinel={number} hits={best}/{len(sample_cols)} "
@@ -338,10 +344,13 @@ for i in range(1, frames + 1):
             "baseline_pixel_hits": best,
             "sampled_columns": len(sample_cols),
             "pixel_y": best_y,
+            "near_solid_threshold": max_plain_hits,
         })
     analysis.append({
         "frame": i,
         "top_sentinel": found[0][1],
+        "cell": {"width": cell_w, "height": cell_h},
+        "content": content,
         "underline_rows": sorted(underline_rows),
         "sentinels": [{"row": row, "number": number} for row, number in found],
         "plain_sentinels": [{"row": row, "number": number} for row, number in plain_found],

@@ -9310,6 +9310,23 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
+        let cell = target
+            .renderer
+            .as_ref()
+            .map(|r| {
+                serde_json::json!({
+                    "width": r.cell_w,
+                    "height": r.cell_h,
+                    "font_size": r.font_size(),
+                })
+            })
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "width": 8.0,
+                    "height": 16.0,
+                    "font_size": 13.0,
+                })
+            });
         let bar = self.tab_bar(target);
         let segments: Vec<serde_json::Value> = bar
             .segments
@@ -9374,6 +9391,7 @@ impl App {
         serde_json::json!({
             "window": target.seq,
             "surface": {"width": surface.0, "height": surface.1},
+            "cell": cell,
             "content": rect_json(self.area(target)),
             "modals": {
                 "search": target.mux.search.open,
