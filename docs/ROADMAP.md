@@ -1432,11 +1432,14 @@ features list. What's left is genuinely-multi-week threads + polish.
       intentional blink. Keep `text-renderer = legacy` only as a user rollback,
       not the product fix. Current coverage includes `just live-render-smoke`,
       which renders a prompt-like `➜  ~` row in a live grid-renderer window and
-      asserts cursor blink only changes a cursor-sized pixel region. Remaining
-      work: add CI-safe grid-render unit coverage for the same invariant, expand
-      the fixture set beyond the zsh prompt marker, and run the live smoke on
+      asserts cursor blink only changes a cursor-sized pixel region. The
+      CI-safe offscreen renderer guard now exercises zsh-style, POSIX,
+      lambda/starship-style, git-status, and PowerShell-style prompt fixtures
+      through the cell-locked grid pipeline and asserts all non-cursor prompt
+      pixels survive a block-cursor blink. Remaining work: run the live smoke on
       Ubuntu plus the Windows 11 / Windows 11 WSL paths before changing renderer
-      defaults again.
+      defaults again, and keep adding fixtures when a new prompt shape exposes a
+      renderer edge case.
 - [ ] **Tab click and underline-scroll diagnostics.** `just tabbar-click-smoke`
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag

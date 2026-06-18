@@ -6554,10 +6554,11 @@ mod gpu_tests {
     /// prompt glyphs are uploaded ONCE through the cell-locked glyph pipeline,
     /// then two offscreen frames are rendered while only the cursor quad toggles.
     /// Every non-cursor pixel must stay byte-identical; a blink may change the
-    /// cursor cell only.
+    /// cursor cell only. Keep several prompt shapes here because the original
+    /// bug was reported with a zsh prompt, but the invariant is renderer-wide.
     #[test]
     fn grid_prompt_pixels_survive_cursor_blink() {
-        let Some((off, on, cursor_rect, prompt_rect)) =
+        let Some((off, on, cursor_rect, prompt_rects)) =
             grid_prompt_blink_frames().expect("grid prompt blink frames render")
         else {
             eprintln!("no GPU adapter on this host; skipped");
@@ -6569,33 +6570,35 @@ mod gpu_tests {
             "both blink phases must render the same surface size"
         );
 
-        let mut prompt_ink = 0u64;
         let mut changed_outside_cursor = 0u64;
         let bg = Config::default().theme.background;
-        for y in prompt_rect.1..prompt_rect.1 + prompt_rect.3 {
-            for x in prompt_rect.0..prompt_rect.0 + prompt_rect.2 {
-                let in_cursor = x >= cursor_rect.0
-                    && x < cursor_rect.0 + cursor_rect.2
-                    && y >= cursor_rect.1
-                    && y < cursor_rect.1 + cursor_rect.3;
-                let a = off.get_pixel(x, y);
-                let b = on.get_pixel(x, y);
-                if !in_cursor && a != b {
-                    changed_outside_cursor += 1;
-                }
-                if !in_cursor
-                    && ((a[0] as i16 - bg.r as i16).abs() > 6
-                        || (a[1] as i16 - bg.g as i16).abs() > 6
-                        || (a[2] as i16 - bg.b as i16).abs() > 6)
-                {
-                    prompt_ink += 1;
+        for (idx, prompt_rect) in prompt_rects.iter().enumerate() {
+            let mut prompt_ink = 0u64;
+            for y in prompt_rect.1..prompt_rect.1 + prompt_rect.3 {
+                for x in prompt_rect.0..prompt_rect.0 + prompt_rect.2 {
+                    let in_cursor = x >= cursor_rect.0
+                        && x < cursor_rect.0 + cursor_rect.2
+                        && y >= cursor_rect.1
+                        && y < cursor_rect.1 + cursor_rect.3;
+                    let a = off.get_pixel(x, y);
+                    let b = on.get_pixel(x, y);
+                    if !in_cursor && a != b {
+                        changed_outside_cursor += 1;
+                    }
+                    if !in_cursor
+                        && ((a[0] as i16 - bg.r as i16).abs() > 6
+                            || (a[1] as i16 - bg.g as i16).abs() > 6
+                            || (a[2] as i16 - bg.b as i16).abs() > 6)
+                    {
+                        prompt_ink += 1;
+                    }
                 }
             }
+            assert!(
+                prompt_ink > 80,
+                "expected visible prompt glyph ink outside cursor for fixture {idx}; got {prompt_ink} pixels"
+            );
         }
-        assert!(
-            prompt_ink > 120,
-            "expected visible prompt glyph ink outside cursor; got {prompt_ink} pixels"
-        );
         assert_eq!(
             changed_outside_cursor, 0,
             "cursor blink changed {changed_outside_cursor} non-cursor prompt pixels"
@@ -6606,7 +6609,7 @@ mod gpu_tests {
         image::RgbaImage,
         image::RgbaImage,
         (u32, u32, u32, u32),
-        (u32, u32, u32, u32),
+        Vec<(u32, u32, u32, u32)>,
     );
 
     fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
@@ -6648,8 +6651,20 @@ mod gpu_tests {
             let metrics = Metrics::new(24.0, 30.0);
             let mut measure = TextBuffer::new(&mut font_system, metrics);
             let (cw, ch) = measure_cell(&mut font_system, &mut measure, &family, metrics);
-            let w = (cw * 10.0 + 24.0).ceil() as u32;
-            let h = (ch + 24.0).ceil() as u32;
+            let fixtures = [
+                "➜  ~",
+                "$ ~/project",
+                "λ ~/src",
+                "❯ git status",
+                "PS C:\\Users\\dev>",
+            ];
+            let max_cols = fixtures
+                .iter()
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(1);
+            let w = (cw * (max_cols as f32 + 2.0) + 24.0).ceil() as u32;
+            let h = (ch * fixtures.len() as f32 + 24.0).ceil() as u32;
             let origin = (12.0_f32, 12.0_f32);
             let cursor_col = 4usize;
             let cursor_rect = (
@@ -6658,12 +6673,18 @@ mod gpu_tests {
                 cw.ceil() as u32,
                 ch.ceil() as u32,
             );
-            let prompt_rect = (
-                origin.0.round() as u32,
-                origin.1.round() as u32,
-                (cw * 5.0).ceil() as u32,
-                ch.ceil() as u32,
-            );
+            let prompt_rects: Vec<(u32, u32, u32, u32)> = fixtures
+                .iter()
+                .enumerate()
+                .map(|(row, text)| {
+                    (
+                        origin.0.round() as u32,
+                        (origin.1 + row as f32 * ch).round() as u32,
+                        (cw * (text.chars().count() as f32 + 1.0)).ceil() as u32,
+                        ch.ceil() as u32,
+                    )
+                })
+                .collect();
 
             let mut buf = TextBuffer::new(&mut font_system, metrics);
             buf.set_metrics(&mut font_system, metrics);
@@ -6671,7 +6692,7 @@ mod gpu_tests {
             buf.set_wrap(&mut font_system, Wrap::None);
             buf.set_text(
                 &mut font_system,
-                "➜  ~",
+                &fixtures.join("\n"),
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
@@ -6754,7 +6775,7 @@ mod gpu_tests {
                     theme.cursor,
                 )),
             )?;
-            Ok(Some((off, on, cursor_rect, prompt_rect)))
+            Ok(Some((off, on, cursor_rect, prompt_rects)))
         })
     }
 

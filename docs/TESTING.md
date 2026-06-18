@@ -92,8 +92,9 @@ discipline here.
   `cap_axis_cells` GPU-texture safety guard (cycle 119), color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12). The v2.25.1 grid-regression guard renders a
-  prompt-like `➜  ~` line through the cell-locked glyph pipeline,
+  Vulkan/Metal/DX12). The v2.25.1 grid-regression guard renders
+  zsh-style `➜  ~`, POSIX, lambda/starship-style, git-status, and
+  PowerShell-style prompt lines through the cell-locked glyph pipeline,
   toggles only the block cursor between two offscreen frames, and
   asserts every non-cursor prompt pixel remains unchanged. The
   cycle-251 `tests/menu_visual.rs`
