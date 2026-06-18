@@ -95,6 +95,15 @@ print(json.dumps({"event": "release", "x": x, "y": y, "button": "left"}))
 PY
 }
 
+move_jitter_from_cursor() {
+  python3 - "$1" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+x, y = data["cursor"]
+print(json.dumps({"event": "move", "x": float(x) + 6.0, "y": y}))
+PY
+}
+
 for i in 1 2; do
   "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-plus-$i.json"
   "$KETTLE" ctl --pid "$pid" send_mouse --json "$(click_rect_center "$out/geometry-plus-$i.json" tab_bar.new_tab)" >/dev/null
@@ -115,7 +124,11 @@ PY
 sleep 0.1
 "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-pressed.json"
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/pressed.png\"}" >/dev/null
-"$KETTLE" ctl --pid "$pid" send_mouse --json "$(release_at_cursor "$out/geometry-pressed.json")" >/dev/null
+"$KETTLE" ctl --pid "$pid" send_mouse --json "$(move_jitter_from_cursor "$out/geometry-pressed.json")" >/dev/null
+sleep 0.1
+"$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-jittered.json"
+"$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/jittered.png\"}" >/dev/null
+"$KETTLE" ctl --pid "$pid" send_mouse --json "$(release_at_cursor "$out/geometry-jittered.json")" >/dev/null
 sleep 0.1
 "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-released.json"
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/released.png\"}" >/dev/null
@@ -221,6 +234,7 @@ def changed_pixels(a_path, b_path, y0, y1):
 out = Path(sys.argv[1])
 before = json.loads((out / "geometry-before-press.json").read_text())
 pressed = json.loads((out / "geometry-pressed.json").read_text())
+jittered = json.loads((out / "geometry-jittered.json").read_text())
 released = json.loads((out / "geometry-released.json").read_text())
 if not pressed.get("tab_drag_active"):
     raise SystemExit("tabbar-click smoke: press did not arm tab drag state")
@@ -228,6 +242,10 @@ if not pressed.get("tab_drag_armed"):
     raise SystemExit("tabbar-click smoke: press should remain click-armed before movement")
 if pressed.get("tab_drag_visible"):
     raise SystemExit("tabbar-click smoke: drag ghost became visible during a plain click")
+if not jittered.get("tab_drag_active") or not jittered.get("tab_drag_armed"):
+    raise SystemExit("tabbar-click smoke: small tab-click jitter promoted to drag")
+if jittered.get("tab_drag_visible"):
+    raise SystemExit("tabbar-click smoke: drag ghost became visible during small click jitter")
 active = [s for s in pressed["tab_bar"]["segments"] if s.get("active")]
 if len(active) != 1 or active[0].get("index") != 1:
     raise SystemExit(f"tabbar-click smoke: expected tab 1 active after press, got {active}")

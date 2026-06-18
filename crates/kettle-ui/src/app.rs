@@ -1799,6 +1799,15 @@ fn tab_drag_target_index(cursor_x: f32, segments: &[kettle_render::TabSeg]) -> u
     segments.last().map(|seg| seg.idx).unwrap_or(0)
 }
 
+/// Pixel distance a held tab press must move before Kettle promotes the click
+/// into the in-window reorder gesture. This is intentionally larger than the
+/// low-level detachable-tab FSM threshold: a tab click should stay visually
+/// anchored to the selected segment through normal hand jitter, while a real
+/// drag still starts quickly at typical tab-bar heights.
+fn tab_reorder_drag_threshold_px(tab_bar_h: f32) -> f32 {
+    (tab_bar_h * 0.5).clamp(8.0, 16.0)
+}
+
 /// v2.19.0 (tear-off UX): Euclidean distance from a point to the nearest
 /// edge of a rect — `0.0` when the point is inside. The tear decision is
 /// "distance from the tab band ≥ threshold", which gives UNIFORM hysteresis
@@ -9801,7 +9810,7 @@ impl App {
         if let Some((ox, oy)) = ws.tab_drag_press {
             let dx = ws.cursor.x as f32 - ox;
             let dy = ws.cursor.y as f32 - oy;
-            if (dx * dx + dy * dy).sqrt() > crate::detach::DragState::DRAG_DISTANCE_THRESHOLD_PX {
+            if (dx * dx + dy * dy).sqrt() > tab_reorder_drag_threshold_px(self.tab_bar_h(ws)) {
                 ws.tab_drag_press = None;
             }
         }
@@ -14025,7 +14034,7 @@ impl App {
                     let dx = ws.cursor.x as f32 - ox;
                     let dy = ws.cursor.y as f32 - oy;
                     if (dx * dx + dy * dy).sqrt()
-                        > crate::detach::DragState::DRAG_DISTANCE_THRESHOLD_PX
+                        > tab_reorder_drag_threshold_px(self.tab_bar_h(ws))
                     {
                         ws.tab_drag_press = None;
                     }
@@ -17463,6 +17472,18 @@ mod tests {
         assert_eq!(tab_drag_target_index(f32::MAX, &natural), 2);
         // Empty bar → 0 (defensive no-op).
         assert_eq!(tab_drag_target_index(50.0, &[]), 0);
+    }
+
+    #[test]
+    fn tab_reorder_drag_threshold_filters_click_jitter() {
+        use super::tab_reorder_drag_threshold_px;
+        // Default-height tab bars get a 12px promotion distance. That leaves
+        // normal mouse-down jitter visually in the pressed-tab state instead of
+        // flashing the drag ghost beside the selected tab.
+        assert!((tab_reorder_drag_threshold_px(24.0) - 12.0).abs() < f32::EPSILON);
+        // Tiny and large bars are bounded so the gesture remains usable.
+        assert_eq!(tab_reorder_drag_threshold_px(8.0), 8.0);
+        assert_eq!(tab_reorder_drag_threshold_px(60.0), 16.0);
     }
 
     /// v2.19.0 (tear-off UX): the tear decision is uniform hysteresis in

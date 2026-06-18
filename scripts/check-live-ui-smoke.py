@@ -464,6 +464,12 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         (out / "geometry-pressed.json").write_text(json.dumps(pressed, indent=2) + "\n")
         live.screenshot(out / "pressed.png")
         cx, cy = pressed["cursor"]  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "move", "x": float(cx) + 6.0, "y": cy})
+        time.sleep(0.1)
+        jittered = live.json_ctl("ui_geometry")
+        (out / "geometry-jittered.json").write_text(json.dumps(jittered, indent=2) + "\n")
+        live.screenshot(out / "jittered.png")
+        cx, cy = jittered["cursor"]  # type: ignore[index]
         live.ctl("send_mouse", params={"event": "release", "x": cx, "y": cy, "button": "left"})
         time.sleep(0.1)
         released = live.json_ctl("ui_geometry")
@@ -474,6 +480,10 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         raise SystemExit("tabbar smoke: press did not remain click-armed")
     if pressed.get("tab_drag_visible"):
         raise SystemExit("tabbar smoke: drag ghost became visible during a plain click")
+    if not jittered.get("tab_drag_active") or not jittered.get("tab_drag_armed"):
+        raise SystemExit("tabbar smoke: small tab-click jitter promoted to drag")
+    if jittered.get("tab_drag_visible"):
+        raise SystemExit("tabbar smoke: drag ghost became visible during small click jitter")
     if released.get("tab_drag_active") or released.get("tab_drag_armed") or released.get("tab_drag_visible"):
         raise SystemExit("tabbar smoke: release left drag state latched")
 
