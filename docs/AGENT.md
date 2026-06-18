@@ -320,13 +320,15 @@ directly.
 just underline-scroll-smoke
 ```
 
-Builds a temporary git fixture, opens an underlined sentinel block plus
-`git diff --color=always | delta --paging=never` inside `less -R`, drives
-repeated down/up `j`/`k` input, and saves PNG frames, `read_cells` snapshots,
-and `analysis.json` under
+Builds a temporary git fixture and, when `svn`/`svnadmin` are installed, a
+temporary SVN fixture. It opens an underlined sentinel block plus `git diff
+--color=always | delta --paging=never` and optional `svn diff | delta` output
+inside `less -R`, drives repeated down/up `j`/`k` input, and saves PNG frames,
+`read_cells` snapshots, and `analysis.json` under
 `target/diagnostics/underline-scroll-*` for frame-by-frame underline analysis.
-The smoke parses the PNGs with Python stdlib and records per-row underline pixel
-hit counts for underlined rows and neighboring plain rows, so a delayed underline
+The smoke parses the PNGs with Python stdlib, records which delta fixtures were
+active, and records per-row underline pixel hit counts for underlined rows and
+neighboring plain rows, so a delayed underline
 draw fails as an alignment/leak error, not just as a missing terminal attribute.
 On native Windows, `just tabbar-click-smoke` and `just underline-scroll-smoke`
 delegate to `scripts/check-live-ui-smoke.py`; on WSL they use the Unix shell

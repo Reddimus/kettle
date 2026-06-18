@@ -1445,11 +1445,14 @@ features list. What's left is genuinely-multi-week threads + polish.
       not show the drag ghost/highlight before movement crosses the drag
       threshold. It also diffs tab-bar screenshots and requires all press-time
       pixel changes to stay inside the old/new active tab rectangles. `just
-      underline-scroll-smoke` opens `git diff | delta`, drives repeated down/up
-      scroll input, and saves PNG, `read_cells`, and `analysis.json` frames under
-      `target/diagnostics`. The underline smoke now also parses each PNG and
-      asserts rendered underline pixels are present on the same rows as the
-      `read_cells` underlined sentinel text and absent from neighboring plain
+      underline-scroll-smoke` opens underlined sentinel text plus `git diff |
+      delta`; when `svn`/`svnadmin` are installed it also creates a local SVN
+      repository and includes `svn diff | delta` in the same `less -R` stream.
+      It drives repeated down/up scroll input and saves PNG, `read_cells`, and
+      `analysis.json` frames under `target/diagnostics`; `analysis.json` records
+      which delta fixtures were active. The underline smoke now also parses each
+      PNG and asserts rendered underline pixels are present on the same rows as
+      the `read_cells` underlined sentinel text and absent from neighboring plain
       sentinel rows. Native Windows recipes now run the Python stdlib driver
       (`scripts/check-live-ui-smoke.py`); WSL uses the Unix shell scripts.
       Remaining work: run both diagnostics on native Windows 11 and Windows 11

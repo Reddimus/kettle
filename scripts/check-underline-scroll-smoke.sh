@@ -27,6 +27,8 @@ case "$out" in
   *) out="$(pwd)/$out" ;;
 esac
 repo="$out/repo"
+svn_checkout="$out/svn-checkout"
+svn_enabled=0
 mkdir -p "$repo"
 pid=""
 cleanup() {
@@ -55,6 +57,28 @@ trap cleanup EXIT
     fi
   done > fixture.txt
 )
+
+if command -v svn >/dev/null 2>&1 && command -v svnadmin >/dev/null 2>&1; then
+  svn_repo="$out/svnrepo"
+  svnadmin create "$svn_repo"
+  svn checkout "file://$svn_repo" "$svn_checkout" >/dev/null
+  (
+    cd "$svn_checkout"
+    for i in $(seq 1 180); do
+      printf 'stable svn line %03d\n' "$i"
+    done > fixture.txt
+    svn add fixture.txt >/dev/null
+    svn commit -m base >/dev/null
+    for i in $(seq 1 180); do
+      if [ $((i % 4)) -eq 0 ]; then
+        printf 'svn changed underlined token_%03d and link https://example.invalid/svn/%03d\n' "$i" "$i"
+      else
+        printf 'stable svn line %03d\n' "$i"
+      fi
+    done > fixture.txt
+  )
+  svn_enabled=1
+fi
 
 cfg="$out/config"
 cat > "$cfg" <<'CFG'
@@ -100,9 +124,19 @@ ctl_screenshot() {
   fi
 }
 
-cmd="cd '$repo' && { for i in \$(seq 1 120); do if [ \$((i % 2)) -eq 1 ]; then printf '\033[4mUNDERLINE_%s_%03d\033[24m link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; fi; done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
+svn_marker=""
+svn_diff_part=""
+if [ "$svn_enabled" -eq 1 ]; then
+  svn_marker="printf 'SVN_DELTA_FIXTURE_BEGIN\n';"
+  svn_diff_part="( cd '$svn_checkout' && svn diff | delta --paging=never --line-numbers );"
+fi
+cmd="cd '$repo' && { printf 'GIT_DELTA_FIXTURE_BEGIN\n'; $svn_marker for i in \$(seq 1 120); do if [ \$((i % 2)) -eq 1 ]; then printf '\033[4mUNDERLINE_%s_%03d\033[24m link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; fi; done; git diff --color=always | delta --paging=never --line-numbers; $svn_diff_part } | less -R"
 "$KETTLE" ctl --pid "$pid" send_text --text "$cmd" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
+"$KETTLE" ctl --pid "$pid" wait_for --text "GIT_DELTA_FIXTURE_BEGIN" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null
+if [ "$svn_enabled" -eq 1 ]; then
+  "$KETTLE" ctl --pid "$pid" wait_for --text "SVN_DELTA_FIXTURE_BEGIN" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null
+fi
 "$KETTLE" ctl --pid "$pid" wait_for --text "UNDERLINE_SENTINEL" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null
 
 for i in $(seq 1 "$FRAMES"); do
@@ -320,6 +354,10 @@ if underline_frames == 0:
     "frames": frames,
     "underline_frames": underline_frames,
     "top_sentinels": top_sentinels,
+    "delta_fixtures": {
+        "git": True,
+        "svn": (out / "svn-checkout").exists(),
+    },
     "frames_detail": analysis,
 }, indent=2) + "\n")
 mid = frames // 2

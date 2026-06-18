@@ -518,24 +518,73 @@ def make_git_fixture(repo: Path) -> None:
     (repo / "fixture.txt").write_text("".join(changed))
 
 
-def underline_command(repo: Path) -> str:
+def make_svn_fixture(checkout: Path) -> bool:
+    if shutil.which("svn") is None or shutil.which("svnadmin") is None:
+        return False
+    repo = checkout.parent / "svnrepo"
+    subprocess.run(["svnadmin", "create", str(repo)], check=True)
+    subprocess.run(["svn", "checkout", repo.resolve().as_uri(), str(checkout)], check=True, stdout=subprocess.DEVNULL)
+    base = "".join(f"stable svn line {i:03d}\n" for i in range(1, 181))
+    (checkout / "fixture.txt").write_text(base)
+    subprocess.run(["svn", "add", "fixture.txt"], cwd=checkout, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["svn", "commit", "-m", "base"],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    changed = []
+    for i in range(1, 181):
+        if i % 4 == 0:
+            changed.append(f"svn changed underlined token_{i:03d} and link https://example.invalid/svn/{i:03d}\n")
+        else:
+            changed.append(f"stable svn line {i:03d}\n")
+    (checkout / "fixture.txt").write_text("".join(changed))
+    return True
+
+
+def underline_command(repo: Path, svn_checkout: Optional[Path]) -> str:
     if platform.system() == "Windows":
         repo_s = str(repo).replace("'", "''")
+        svn_marker = ""
+        svn_diff_part = ""
+        if svn_checkout is not None:
+            svn_s = str(svn_checkout).replace("'", "''")
+            svn_marker = "Write-Output SVN_DELTA_FIXTURE_BEGIN; "
+            svn_diff_part = (
+                f"Set-Location -LiteralPath '{svn_s}'; "
+                "svn diff | delta --paging=never --line-numbers; "
+                f"Set-Location -LiteralPath '{repo_s}'; "
+            )
         return (
             f"Set-Location -LiteralPath '{repo_s}'; "
             "$esc=[char]27; "
-            "& { 1..120 | ForEach-Object { "
+            "& { Write-Output GIT_DELTA_FIXTURE_BEGIN; "
+            f"{svn_marker}"
+            "1..120 | ForEach-Object { "
             "if ($_ % 2 -eq 1) { '{0}[4mUNDERLINE_{2}_{1:D3}{0}[24m link https://example.invalid/{1:D3}' -f $esc,$_,'SENTINEL' } "
             "else { 'PLAIN_{1}_{0:D3} link https://example.invalid/{0:D3}' -f $_,'SENTINEL' } }; "
-            "git diff --color=always | delta --paging=never --line-numbers } | less -R"
+            "git diff --color=always | delta --paging=never --line-numbers; "
+            f"{svn_diff_part}"
+            "} | less -R"
         )
     repo_s = str(repo).replace("'", "'\"'\"'")
+    svn_marker = ""
+    svn_diff_part = ""
+    if svn_checkout is not None:
+        svn_s = str(svn_checkout).replace("'", "'\"'\"'")
+        svn_marker = "printf 'SVN_DELTA_FIXTURE_BEGIN\\n'; "
+        svn_diff_part = f"( cd '{svn_s}' && svn diff | delta --paging=never --line-numbers ); "
     return (
-        f"cd '{repo_s}' && {{ for i in $(seq 1 120); do "
+        f"cd '{repo_s}' && {{ printf 'GIT_DELTA_FIXTURE_BEGIN\\n'; "
+        f"{svn_marker}"
+        "for i in $(seq 1 120); do "
         "if [ $((i % 2)) -eq 1 ]; then "
         "printf '\\033[4mUNDERLINE_%s_%03d\\033[24m link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; "
         "else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; fi; "
-        "done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
+        "done; git diff --color=always | delta --paging=never --line-numbers; "
+        f"{svn_diff_part}"
+        "} | less -R"
     )
 
 
@@ -543,6 +592,9 @@ def run_underline(kettle: str, root: Path) -> Path:
     out = root / f"underline-scroll-{time.strftime('%Y%m%d-%H%M%S')}"
     repo = out / "repo"
     make_git_fixture(repo)
+    svn_checkout = out / "svn-checkout"
+    svn_enabled = make_svn_fixture(svn_checkout)
+    svn_fixture = svn_checkout if svn_enabled else None
     cfg = out / "config"
     cfg.write_text(
         "\n".join(
@@ -566,8 +618,11 @@ def run_underline(kettle: str, root: Path) -> Path:
     )
     extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
-        live.ctl("send_text", params={"text": underline_command(repo)})
+        live.ctl("send_text", params={"text": underline_command(repo, svn_fixture)})
         live.ctl("send_keys", params={"keys": ["enter"]})
+        live.ctl("wait_for", params={"text": "GIT_DELTA_FIXTURE_BEGIN", "timeout_ms": 8000, "quiet_ms": 250})
+        if svn_enabled:
+            live.ctl("wait_for", params={"text": "SVN_DELTA_FIXTURE_BEGIN", "timeout_ms": 8000, "quiet_ms": 250})
         live.ctl("wait_for", params={"text": "UNDERLINE_SENTINEL", "timeout_ms": 8000, "quiet_ms": 250})
         for i in range(1, 9):
             cells = live.json_ctl("read_cells")
@@ -648,7 +703,7 @@ def run_underline(kettle: str, root: Path) -> Path:
         raise SystemExit("underline smoke: no underlined cells observed")
     if not (top_sentinels[0] < top_sentinels[4] and top_sentinels[-1] < top_sentinels[4]):
         raise SystemExit(f"underline smoke: down/up scroll sequence failed: {top_sentinels}")
-    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "top_sentinels": top_sentinels, "frames_detail": analysis}, indent=2) + "\n")
+    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "top_sentinels": top_sentinels, "delta_fixtures": {"git": True, "svn": svn_enabled}, "frames_detail": analysis}, indent=2) + "\n")
     return out
 
 
