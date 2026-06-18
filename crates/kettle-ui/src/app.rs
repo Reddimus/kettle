@@ -9264,10 +9264,58 @@ impl App {
                 })
             })
             .collect();
+        let context_menu = target.context_menu.as_ref().and_then(|menu| {
+            let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(target)?;
+            let (_, ch) = self.menu_cell(target);
+            let row_h = ch + kettle_render::menu::ROW_PAD;
+            let sep_h = kettle_render::menu::SEP_H;
+            let mut row_y = ay;
+            let start = menu.scroll_offset.min(menu.items.len());
+            let rows: Vec<serde_json::Value> = menu
+                .items
+                .iter()
+                .enumerate()
+                .skip(start)
+                .map(|(idx, item)| {
+                    let separator = matches!(item, ContextMenuItem::Separator);
+                    let h = if separator { sep_h } else { row_h };
+                    let label = match item {
+                        ContextMenuItem::Item { label, .. } => *label,
+                        ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
+                        ContextMenuItem::LuaItem { label, .. } => label.as_str(),
+                        ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
+                        ContextMenuItem::Submenu { label, .. } => label.as_str(),
+                        ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
+                        ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
+                        ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
+                        ContextMenuItem::UrlItem { label, .. } => *label,
+                        ContextMenuItem::Info { label } => label.as_str(),
+                        ContextMenuItem::Separator => "",
+                    };
+                    let row = serde_json::json!({
+                        "index": idx,
+                        "label": label,
+                        "separator": separator,
+                        "dispatchable": item_is_dispatchable(item),
+                        "rect": rect_json((ax, row_y, panel_w, h)),
+                    });
+                    row_y += h;
+                    row
+                })
+                .collect();
+            Some(serde_json::json!({
+                "anchor": {"x": ax, "y": ay},
+                "rect": rect_json((ax, ay, panel_w, panel_h)),
+                "highlight": menu.highlight,
+                "scroll_offset": menu.scroll_offset,
+                "rows": rows,
+            }))
+        });
         serde_json::json!({
             "window": target.seq,
             "surface": {"width": surface.0, "height": surface.1},
             "content": rect_json(self.area(target)),
+            "context_menu": context_menu,
             "cursor": [target.cursor.x, target.cursor.y],
             "tab_drag_active": target.tab_drag_active,
             "tab_drag_armed": target.tab_drag_press.is_some(),
@@ -9459,6 +9507,10 @@ impl App {
         let pre = self.focus_key(ws);
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
+        if bcode == 2 {
+            self.open_context_menu(ws, px, py);
+            return true;
+        }
         if self.send_mouse(ws, bcode, true, false) {
             ws.mouse_btn = Some(bcode);
             return true;

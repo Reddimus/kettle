@@ -534,6 +534,10 @@ def capture_live_state(live: LiveKettle, out: Path, label: str) -> Dict[str, obj
     }
 
 
+def screen_text(screen: Dict[str, object]) -> str:
+    return str(screen.get("text", screen.get("screen", "")))
+
+
 def live_shell_command(live: LiveKettle, command: str, marker: str, timeout_ms: int = 10000) -> None:
     live.ctl("send_text", params={"text": command})
     live.ctl("send_keys", params={"keys": ["enter"]})
@@ -628,9 +632,137 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_interaction(kettle: str, root: Path) -> Path:
+    out = root / f"interaction-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "background = #090909",
+                "foreground = #f5f5f5",
+                "minimum-contrast = 0",
+                "window-width = 110",
+                "window-height = 34",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+    states: List[Dict[str, object]] = []
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        marker = "KETTLE_INTERACTION_BASELINE"
+        live_shell_command(live, command_with_marker("printf 'interaction-baseline\\n'" if platform.system() != "Windows" else "Write-Output interaction-baseline", marker), marker)
+        states.append(capture_live_state(live, out, "baseline"))
+
+        paste_marker = "KETTLE_INTERACTION_PASTE_DONE"
+        if platform.system() == "Windows":
+            paste_text = "Write-Output PASTE_LINE_ONE; Write-Output PASTE_LINE_TWO; Write-Output " + shell_quote(paste_marker)
+        else:
+            paste_text = "printf '%s\\n' PASTE_LINE_ONE PASTE_LINE_TWO " + shell_quote(paste_marker)
+        live.ctl("send_text", params={"text": paste_text})
+        live.ctl("send_keys", params={"keys": ["enter"]})
+        live.wait_for_text(paste_marker, timeout_ms=10000, quiet_ms=250)
+        paste_screen = live.json_ctl("read_screen")
+        if "PASTE_LINE_ONE" not in screen_text(paste_screen) or "PASTE_LINE_TWO" not in screen_text(paste_screen):
+            raise SystemExit("interaction smoke: multiline paste/send_text marker was not visible")
+        states.append(capture_live_state(live, out, "paste"))
+
+        scroll_marker = "KETTLE_INTERACTION_SCROLL_100"
+        if platform.system() == "Windows":
+            scroll_cmd = (
+                "1..140 | ForEach-Object { 'KETTLE_INTERACTION_SCROLL_{0:D3}' -f $_ }; "
+                "Write-Output KETTLE_INTERACTION_SCROLL_DONE"
+            )
+        else:
+            scroll_cmd = "for i in $(seq 1 140); do printf 'KETTLE_INTERACTION_SCROLL_%03d\\n' \"$i\"; done; printf 'KETTLE_INTERACTION_SCROLL_DONE\\n'"
+        live_shell_command(live, scroll_cmd, "KETTLE_INTERACTION_SCROLL_DONE", timeout_ms=12000)
+        live.screenshot(out / "scroll-bottom.png")
+        bottom = live.json_ctl("read_screen")
+        (out / "scroll-bottom.screen.json").write_text(json.dumps(bottom, indent=2) + "\n")
+        if int(bottom.get("display_offset", 0)) != 0:
+            raise SystemExit(f"interaction smoke: expected bottom display_offset 0, got {bottom.get('display_offset')}")
+        live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": 24})
+        time.sleep(0.15)
+        scrolled = live.json_ctl("read_screen")
+        (out / "scroll-up.screen.json").write_text(json.dumps(scrolled, indent=2) + "\n")
+        live.screenshot(out / "scroll-up.png")
+        if int(scrolled.get("display_offset", 0)) <= 0:
+            raise SystemExit("interaction smoke: mouse wheel did not move into scrollback")
+        if scroll_marker not in screen_text(scrolled):
+            raise SystemExit("interaction smoke: scrolled view did not reveal early scrollback marker")
+        live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": -240})
+        time.sleep(0.15)
+        returned = live.json_ctl("read_screen")
+        (out / "scroll-return.screen.json").write_text(json.dumps(returned, indent=2) + "\n")
+        if int(returned.get("display_offset", 0)) != 0:
+            raise SystemExit("interaction smoke: wheel down did not return to live bottom")
+        states.append(capture_live_state(live, out, "scroll-return"))
+
+        tabs_before = live.json_ctl("list_tabs")
+        geo = live.json_ctl("ui_geometry")
+        nx, ny = rect_center(geo["tab_bar"]["new_tab"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": nx, "y": ny, "button": "left"})
+        time.sleep(0.4)
+        tabs_after = live.json_ctl("list_tabs")
+        (out / "tabs-before.json").write_text(json.dumps(tabs_before, indent=2) + "\n")
+        (out / "tabs-after.json").write_text(json.dumps(tabs_after, indent=2) + "\n")
+        if len(tabs_after.get("tabs", [])) <= len(tabs_before.get("tabs", [])):
+            raise SystemExit("interaction smoke: tab-bar + button did not create a tab")
+        tab_marker = "KETTLE_INTERACTION_NEW_TAB"
+        live_shell_command(live, command_with_marker("printf 'new-tab-live\\n'" if platform.system() != "Windows" else "Write-Output new-tab-live", tab_marker), tab_marker)
+        states.append(capture_live_state(live, out, "new-tab"))
+
+        geo = live.json_ctl("ui_geometry")
+        content = geo["content"]  # type: ignore[index]
+        mx = float(content["x"]) + min(80.0, float(content["width"]) / 2.0)
+        my = float(content["y"]) + min(80.0, float(content["height"]) / 2.0)
+        live.screenshot(out / "menu-before.png")
+        live.ctl("send_mouse", params={"event": "click", "x": mx, "y": my, "button": "right"})
+        time.sleep(0.2)
+        menu_geo = live.json_ctl("ui_geometry")
+        (out / "menu-geometry.json").write_text(json.dumps(menu_geo, indent=2) + "\n")
+        live.screenshot(out / "menu-open.png")
+        menu_changes = len(changed_pixels(out / "menu-before.png", out / "menu-open.png", 0.0, float(geo["surface"]["height"])))  # type: ignore[index]
+        if menu_changes < 100:
+            raise SystemExit(f"interaction smoke: right-click menu produced too few changed pixels ({menu_changes})")
+        menu = menu_geo.get("context_menu")
+        if not menu:
+            raise SystemExit("interaction smoke: right-click did not expose context_menu geometry")
+        split_rows = [
+            row for row in menu.get("rows", [])  # type: ignore[union-attr]
+            if row.get("label") == "Split Right" and row.get("dispatchable")
+        ]
+        if len(split_rows) != 1:
+            raise SystemExit(f"interaction smoke: expected one Split Right row, got {split_rows}")
+        live.ctl("send_keys", params={"keys": ["escape"]}, timeout=8)
+
+    (out / "analysis.json").write_text(
+        json.dumps(
+            {
+                "states": states,
+                "menu_changed_pixels": menu_changes,
+                "scroll_offset": int(scrolled.get("display_offset", 0)),
+                "tabs_before": len(tabs_before.get("tabs", [])),
+                "tabs_after": len(tabs_after.get("tabs", [])),
+                "menu_split_right_rect": split_rows[0]["rect"],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=["tabbar", "underline", "agent-tui", "all"])
+    parser.add_argument("case", choices=["tabbar", "underline", "agent-tui", "interaction", "all"])
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
     args = parser.parse_args()
@@ -650,6 +782,9 @@ def main() -> int:
     if args.case in ("agent-tui", "all"):
         out = run_agent_tui(args.kettle, root)
         print(f"agent-tui smoke: OK artifacts={out}")
+    if args.case in ("interaction", "all"):
+        out = run_interaction(args.kettle, root)
+        print(f"interaction smoke: OK artifacts={out}")
     return 0
 
 

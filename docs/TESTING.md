@@ -245,6 +245,13 @@ These need a real display and are run by hand (or on real hardware):
     `kettle ctl`, then saves PNG, `read_screen`, `read_cells`, and
     `analysis.json` artifacts under `target/diagnostics/agent-tui-*`. It fails
     if a captured state is blank or lacks visible terminal cells.
+  - **Live interaction window**: `just interaction-smoke` opens a real
+    grid-renderer Kettle window and drives multiline text entry, scrollback
+    mouse wheel movement, tab-bar `+` tab creation, right-click context-menu
+    opening, and screenshots through `kettle ctl`. It writes PNG, `read_screen`,
+    `read_cells`, `ui_geometry`, and `analysis.json` artifacts under
+    `target/diagnostics/interaction-*`, and asserts default `read_screen`
+    follows the visible scrolled viewport.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
@@ -266,7 +273,7 @@ These need a real display and are run by hand (or on real hardware):
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
-    `just live-render-smoke`, `just tabbar-click-smoke`, and
+    `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`, and
     `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review. Tabbar runs write `analysis.json` with the
     old/new active tab rects and outside-rect pixel-change counts; underline

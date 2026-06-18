@@ -148,9 +148,9 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq) |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
-| `read_screen` | read-only | text + cursor + `cursor_visible` (DEC ?25) + history (params: `pane`, `scrollback_lines`) |
+| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
-| `ui_geometry` | read-only | live window geometry: surface/content rects, tab-bar segment/new-tab rects, cursor, and tab drag armed/visible state |
+| `ui_geometry` | read-only | live window geometry: surface/content rects, tab-bar segment/new-tab rects, open context-menu rect/rows, cursor, and tab drag armed/visible state |
 | `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
@@ -278,6 +278,18 @@ Neovim/AstroNvim marker buffers through `kettle ctl`. It saves PNG screenshots,
 `target/diagnostics/agent-tui-*`, and fails if a captured state is blank or lacks
 visible terminal cells. Missing optional CLIs are reported as skips; the shell
 state always runs.
+
+```sh
+just interaction-smoke
+```
+
+Starts a real grid-renderer Kettle window and drives broader UI states through
+`kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`
+creation, right-click context-menu opening, and screenshot capture. It saves
+PNG screenshots, `read_screen`, `read_cells`, `ui_geometry`, and `analysis.json`
+under `target/diagnostics/interaction-*`, and fails if scrollback text does not
+follow the visible viewport, if captures are blank, if the tab count does not
+increase, or if the context menu lacks a dispatchable `Split Right` row.
 
 ```sh
 just tabbar-click-smoke

@@ -65,7 +65,7 @@ pub fn tool_specs() -> Vec<Value> {
         json!({
             "name": "kettle_ui_geometry",
             "description": "Read live window UI geometry, including tab-bar segment rectangles, \
-                new-tab button bounds, and tab drag state. Works in read-only mode.",
+                new-tab button bounds, open context-menu rows, and tab drag state. Works in read-only mode.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

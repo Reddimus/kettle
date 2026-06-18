@@ -1893,13 +1893,15 @@ impl Terminal {
             .map(|st| st.exit_code())
     }
 
-    /// Cycle 921 (agent-first A1/A2): a plain-text snapshot of the grid — up to
-    /// `scrollback_lines` of history (newest history first in document order)
-    /// followed by the full active screen. One lock acquisition; per-line
-    /// trailing whitespace trimmed; `scrollback_lines` hard-capped at 10_000 so
-    /// a hostile/buggy caller can't ask for an unbounded join. Shared by the
-    /// control server's `read_screen`, `run_command` output slicing, and any
-    /// future scripting surface — the single sanctioned grid-scrape.
+    /// Cycle 921 (agent-first A1/A2): a plain-text snapshot of the grid.
+    /// Without extra scrollback, this is the visible viewport; with
+    /// `scrollback_lines`, it returns that many history rows (newest history
+    /// first in document order) followed by the active screen for command-output
+    /// capture. One lock acquisition; per-line trailing whitespace trimmed;
+    /// `scrollback_lines` hard-capped at 10_000 so a hostile/buggy caller can't
+    /// ask for an unbounded join. Shared by the control server's `read_screen`,
+    /// `run_command` output slicing, and any future scripting surface — the
+    /// single sanctioned grid-scrape.
     pub fn screen_text(&self, scrollback_lines: usize) -> Option<ScreenText> {
         let t = self.term.lock().ok()?;
         Some(screen_text_of(&t, scrollback_lines))
@@ -1918,10 +1920,11 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
     let take = scrollback_lines.min(history_size).min(MAX_SCROLLBACK_LINES);
     let mut text = String::with_capacity((take + rows) * (cols + 1));
     let mut line = String::with_capacity(cols);
+    let display_adjust = if take == 0 { display_offset as i32 } else { 0 };
     for r in -(take as i32)..rows as i32 {
         line.clear();
         for c in 0..cols {
-            line.push(grid[Point::new(Line(r), Column(c))].c);
+            line.push(grid[Point::new(Line(r - display_adjust), Column(c))].c);
         }
         text.push_str(line.trim_end());
         text.push('\n');
@@ -2769,6 +2772,7 @@ mod conformance {
     #[test]
     fn screen_text_returns_history_then_screen_with_geometry() {
         use crate::term::screen_text_of;
+        use alacritty_terminal::grid::Scroll;
         // 4 visible rows; feed 8 lines so 4 spill into scrollback.
         let (mut t, mut p) = harness(20, 4);
         feed(
@@ -2794,6 +2798,20 @@ mod conformance {
         // A partial request returns only the NEWEST history tail.
         let s = screen_text_of(&t, 2);
         assert_eq!(s.text, "h2\nh3\nv0\nv1\nv2\nv3\n");
+
+        // Default read_screen follows the visible viewport when the user or an
+        // agent scrolls back. This is distinct from explicit scrollback capture
+        // above, which remains active-screen based for run_command slicing.
+        t.scroll_display(Scroll::Delta(3));
+        let s = screen_text_of(&t, 0);
+        assert_eq!(s.display_offset, 3, "scrolled back three lines");
+        assert_eq!(s.text, "h1\nh2\nh3\nv0\n");
+
+        let s = screen_text_of(&t, 2);
+        assert_eq!(
+            s.text, "h2\nh3\nv0\nv1\nv2\nv3\n",
+            "explicit scrollback capture keeps history + active screen semantics"
+        );
     }
 
     /// Cycle 917 (#3, user-reported on native Ubuntu): hyperlink/URL detection

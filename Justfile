@@ -295,6 +295,16 @@ agent-tui-smoke:
 agent-tui-smoke:
     python scripts/check-live-ui-smoke.py agent-tui
 
+# Drive broader live UI interactions: multiline text entry, scrollback wheel,
+# tab creation, context menu geometry, and screenshots.
+[unix]
+interaction-smoke:
+    python3 scripts/check-live-ui-smoke.py interaction
+
+[windows]
+interaction-smoke:
+    python scripts/check-live-ui-smoke.py interaction
+
 # Reproduce and guard the multi-tab mouse-click visual state. Captures full
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
 [unix]

@@ -1457,14 +1457,18 @@ features list. What's left is genuinely-multi-week threads + polish.
       agent-tui-smoke` now adds a live grid-renderer window pass for a shell
       marker, optional Codex/Claude CLI version probes, and clean/configured
       Neovim marker buffers, with PNG, `read_screen`, `read_cells`, and
-      `analysis.json` artifacts that fail on blank captures. Remaining work is
-      deeper live-window validation: drive Codex CLI, Claude Code CLI,
-      AstroNvim, tmux, shell prompts, paste, scrollback, selection, resize,
-      split, tab, menu, notification, and screenshot states inside Kettle with
-      `text-renderer = grid`. Use `send_mouse`, `send_keys`, `ui_geometry`,
-      `read_cells`, and `screenshot` so the pass is reproducible instead of a
-      manual eyeball-only sweep, then compare captured frames for blank panes,
-      overlapping UI, stale text, and unintended blinking.
+      `analysis.json` artifacts that fail on blank captures. `just
+      interaction-smoke` now covers multiline text entry, scrollback wheel
+      movement, tab-bar `+` tab creation, right-click context-menu geometry, and
+      screenshots, and it pinned/fixed `read_screen` so default reads follow the
+      visible scrolled viewport. Remaining work is deeper live-window
+      validation: drive Codex CLI, Claude Code CLI, AstroNvim, tmux, shell
+      prompts, selection, resize, split dispatch, notification, and screenshot
+      states inside Kettle with `text-renderer = grid`. Use `send_mouse`,
+      `send_keys`, `ui_geometry`, `read_cells`, and `screenshot` so the pass is
+      reproducible instead of a manual eyeball-only sweep, then compare captured
+      frames for blank panes, overlapping UI, stale text, and unintended
+      blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained
       output, memory, and GPU/frame-time behavior. The Ubuntu same-machine
