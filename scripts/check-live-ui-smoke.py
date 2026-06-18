@@ -696,6 +696,18 @@ def command_with_marker(command: str, marker: str) -> str:
     return f"{command}; printf '%s\\n' {shell_quote(marker)}"
 
 
+def prompt_marker_command(marker: str) -> str:
+    split = max(1, len(marker) // 2)
+    left = marker[:split]
+    right = marker[split:]
+    if platform.system() == "Windows":
+        return (
+            "$arrow=[char]0x279c; "
+            f"Write-Output ($arrow + '  ~ ' + ({shell_quote(left)} + {shell_quote(right)}))"
+        )
+    return f"printf '\\342\\236\\234  ~ %s\\n' {shell_quote(left)}{shell_quote(right)}"
+
+
 def notification_command(title: str, body: str, marker: str) -> str:
     if platform.system() == "Windows":
         return (
@@ -758,6 +770,14 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         states.append(capture_live_state(live, out, "shell"))
         probes.append({"name": "shell", "status": "ok"})
 
+        prompt_marker = "KETTLE_AGENT_TUI_PROMPT_SHAPE"
+        live_shell_command(live, prompt_marker_command(prompt_marker), prompt_marker)
+        prompt_screen = live.json_ctl("read_screen")
+        if f"\u279c  ~ {prompt_marker}" not in screen_text(prompt_screen):
+            raise SystemExit("agent-tui smoke: prompt-shaped marker is not visible")
+        states.append(capture_live_state(live, out, "prompt-shape"))
+        probes.append({"name": "prompt-shape", "status": "ok"})
+
         for tool in ("codex", "claude"):
             if shutil.which(tool) is None:
                 probes.append({"name": tool, "status": "skipped", "reason": "not on PATH"})
@@ -766,6 +786,26 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             live_shell_command(live, command_with_marker(f"{tool} --version", marker), marker, timeout_ms=12000)
             states.append(capture_live_state(live, out, tool))
             probes.append({"name": tool, "status": "ok"})
+
+        if platform.system() == "Windows" or shutil.which("tmux") is None:
+            probes.append({"name": "tmux", "status": "skipped", "reason": "not on PATH"})
+        else:
+            tmux_socket = f"kettle-smoke-{live.pid}"
+            tmux_marker = "KETTLE_AGENT_TUI_TMUX_SMOKE"
+            live.ctl(
+                "send_text",
+                params={"text": f"tmux -L {tmux_socket} -f /dev/null new-session -A -s kettle_smoke"},
+            )
+            live.ctl("send_keys", params={"keys": ["enter"]})
+            time.sleep(1.0)
+            live.ctl("send_text", params={"text": f"printf '%s\\n' {shell_quote(tmux_marker)}"})
+            live.ctl("send_keys", params={"keys": ["enter"]})
+            live.wait_for_text(tmux_marker, timeout_ms=12000, quiet_ms=500)
+            states.append(capture_live_state(live, out, "tmux"))
+            live.ctl("send_text", params={"text": "exit"})
+            live.ctl("send_keys", params={"keys": ["enter"]})
+            run(["tmux", "-L", tmux_socket, "kill-server"], timeout=3, capture=True)
+            probes.append({"name": "tmux", "status": "ok"})
 
         if shutil.which("nvim") is None:
             probes.append({"name": "nvim-clean", "status": "skipped", "reason": "not on PATH"})
