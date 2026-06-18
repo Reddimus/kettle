@@ -103,11 +103,11 @@ fn build_params(args: &CtlArgs) -> Result<Value, String> {
         map.insert("pane".into(), p.into());
     }
     if let Some(text) = &args.text {
-        // `run_command` takes `command`; everything else takes `text`.
-        let key = if args.method == "run_command" {
-            "command"
-        } else {
-            "text"
+        // A few methods take a named string field; everything else takes `text`.
+        let key = match args.method.as_str() {
+            "run_command" => "command",
+            "perform_action" => "action",
+            _ => "text",
         };
         map.insert(key.into(), Value::String(text.clone()));
     }
@@ -210,6 +210,10 @@ fn pretty(method: &str, result: &Value) -> String {
             result["cursor"][1],
             result["window"],
             result["handled"]
+        ),
+        "perform_action" => format!(
+            "performed action {} on window {}\n",
+            result["action"], result["window"]
         ),
         "ui_geometry" | "read_cells" => {
             serde_json::to_string_pretty(result).unwrap_or_else(|_| format!("{result}\n")) + "\n"

@@ -169,6 +169,20 @@ pub fn tool_specs() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "kettle_perform_action",
+            "description": "Dispatch a named Kettle app action such as start_search, \
+                command_palette, or open_settings against the focused window. This drives \
+                terminal chrome rather than writing bytes to the pane. Requires the agent \
+                server in `full` mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "action name accepted by kettle keybinds, e.g. start_search"}
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
             "name": "kettle_wait_for",
             "description": "Wait until a kettle pane's screen matches a condition — replaces \
                 sleep-and-pray when driving interactive apps. Conditions (AND when combined): \
@@ -302,6 +316,14 @@ pub fn call_tool(params: &Value) -> Value {
                 p.insert("window".into(), window.clone());
             }
             ctl_call("resize_window", Value::Object(p))
+        }
+        "kettle_perform_action" => {
+            let Some(action) = args.get("action").and_then(|a| a.as_str()) else {
+                return error_result("kettle_perform_action requires an 'action' string");
+            };
+            let mut p = serde_json::Map::new();
+            p.insert("action".into(), json!(action));
+            ctl_call("perform_action", Value::Object(p))
         }
         "kettle_wait_for" => {
             let mut p = serde_json::Map::new();
@@ -454,6 +476,10 @@ mod tests {
 
         let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {"keys": []}}));
         assert_eq!(r["isError"], true);
+
+        let r = call_tool(&json!({"name": "kettle_perform_action", "arguments": {}}));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("action"));
 
         let r = call_tool(&json!({"name": "kettle_wait_for", "arguments": {"timeout_ms": 5}}));
         assert_eq!(r["isError"], true);

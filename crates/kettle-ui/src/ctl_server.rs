@@ -585,6 +585,7 @@ pub const MUTATING_METHODS: &[&str] = &[
     "send_keys",
     "send_mouse",
     "resize_window",
+    "perform_action",
     "run_command",
 ];
 

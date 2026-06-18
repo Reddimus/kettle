@@ -1184,6 +1184,20 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(f"interaction smoke: command palette changed too few pixels ({palette_changes})")
         states.append(capture_live_state(live, out, "command-palette"))
 
+        live.ctl("perform_action", params={"action": "start_search"})
+        time.sleep(0.3)
+        search_geo = live.json_ctl("ui_geometry")
+        (out / "search-open.geometry.json").write_text(json.dumps(search_geo, indent=2) + "\n")
+        live.screenshot(out / "search-open.png")
+        if not modal_open(search_geo, "search"):
+            raise SystemExit("interaction smoke: perform_action start_search did not open search")
+        if modal_open(search_geo, "palette"):
+            raise SystemExit("interaction smoke: search action did not close the command palette")
+        search_changes = len(changed_pixels(out / "palette-open.png", out / "search-open.png", 0.0, float(palette_geo["surface"]["height"])))  # type: ignore[index]
+        if search_changes < 250:
+            raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
+        states.append(capture_live_state(live, out, "search-open"))
+
     (out / "analysis.json").write_text(
         json.dumps(
             {
@@ -1191,6 +1205,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "menu_changed_pixels": menu_changes,
                 "settings_changed_pixels": settings_changes,
                 "palette_changed_pixels": palette_changes,
+                "search_changed_pixels": search_changes,
                 "selection_changed_pixels": selection_changes,
                 "scroll_offset": int(scrolled.get("display_offset", 0)),
                 "tabs_before": len(tabs_before.get("tabs", [])),
@@ -1215,6 +1230,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "settings_modal_after_open": settings_geo.get("modals"),
                 "settings_modal_after_close": settings_closed_geo.get("modals"),
                 "palette_modal_after_open": palette_geo.get("modals"),
+                "search_modal_after_open": search_geo.get("modals"),
                 "palette_row_rect": palette_row["rect"],
                 "menu_split_right_rect": split_rows[0]["rect"],
                 "notification_event": notification_event,

@@ -9072,6 +9072,8 @@ impl App {
                 .unwrap_or_else(|| self.ctl_send_mouse(ws, event_loop, req)),
             "resize_window" => require_full(req.id, "resize_window")
                 .unwrap_or_else(|| self.ctl_resize_window(ws, req)),
+            "perform_action" => require_full(req.id, "perform_action")
+                .unwrap_or_else(|| self.ctl_perform_action(ws, event_loop, req)),
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
@@ -9402,6 +9404,38 @@ impl App {
                 "segments": segments,
             },
         })
+    }
+
+    /// `perform_action`: dispatch a named kettle app action against the focused
+    /// window. This complements `send_keys`, which intentionally writes PTY
+    /// bytes to the pane instead of firing global shortcuts, so diagnostics can
+    /// open app chrome such as Search / Palette / Settings deterministically.
+    fn ctl_perform_action(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let Some(name) = req.params.get("action").and_then(|v| v.as_str()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing 'action' string");
+        };
+        let Some(action) = kettle_config::Action::from_name(name) else {
+            return Response::err(req.id, ec::BAD_PARAMS, format!("unknown action '{name}'"));
+        };
+        let resolved = format!("{action:?}");
+        self.handle_action(ws, action, event_loop);
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "action": resolved,
+                "requested": name,
+                "window": ws.seq,
+            }),
+        )
     }
 
     /// `resize_window`: request a live OS-window client-area resize. The real
