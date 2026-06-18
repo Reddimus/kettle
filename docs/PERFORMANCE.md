@@ -49,8 +49,8 @@ about **138.6 MiB** to **136.5 MiB**. Legacy mode measured the same shape
 at **136.1 MiB**, confirming the remaining gap is not grid-renderer-specific.
 Forced software Vulkan stayed materially worse at **160.2 MiB**. This closes the
 duplicated-font-bytes footgun, but Kettle still remains above Terminator on RSS,
-so byte-budget scrollback, atlas bounds, and GPU buffer residency are still the
-next memory levers.
+so the newly added byte-budget scrollback cap still needs a refreshed RSS pass;
+atlas bounds and GPU buffer residency remain the next memory levers after that.
 
 Reproduce and gate this Ubuntu peer comparison with:
 
@@ -183,7 +183,7 @@ to parse — so on a CPU-contended box the parser was starved. Stretching the pa
 budget to 30→20 fps during a flood (content is unreadable scrolling anyway; a
 brief burst and all keystroke echo stay at 60 fps) hands the lock and cores back
 to the reader. The post-flood working set rose (faster consumption accumulates
-scrollback sooner — the byte-budget-scrollback + atlas-bound follow-ups below
+scrollback sooner — the byte-budget-scrollback cap and atlas-bound follow-ups below
 address it); it still stays ~4.7× leaner than Windows Terminal under the same
 flood.
 
@@ -333,8 +333,11 @@ at the configured half-period deadline.
   remaining piece and the lever most likely to close the throughput gap.
 - Glyph-atlas growth under sustained unicode flood (the post-flood WS
   delta above) — bound with an LRU / size cap.
-- Byte-budget scrollback (`scrollback-bytes`, Ghostty model) to bound
-  worst-case memory deterministically (current cap is line-count only).
+- Byte-budget scrollback now has an initial `scrollback-bytes` cap: Kettle keeps
+  the legacy `scrollback` line-count key and derives the effective history line
+  limit from the byte budget, including the visible screen. Follow-up: rerun the
+  Linux peer RSS matrix and Windows/WSL checks with the default 10,000,000-byte
+  cap.
 - Bundled font duplicate-copy fixed after `13ffdda`: embedded faces are now
   registered with `fontdb::Source::Binary(Arc<&'static [u8]>)` instead of
   `.to_vec()` copies. Keep this as a regression invariant because reverting it

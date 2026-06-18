@@ -199,6 +199,7 @@ pub fn run_exec_with(
         // Modest scrollback — exec output streams out immediately, the grid is
         // only used for VT state + query answers.
         2000,
+        0,
         opts.cols as usize,
         opts.rows as usize,
         8,

@@ -278,6 +278,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["off", "visual flash", "attention", "visual + attention"],
                 ),
                 number("Scrollback lines", "scrollback", 0, 100_000, 1_000, ""),
+                number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB"),
+                number("Tab max width", "tab-max-width", 0, 800, 20, "px"),
                 toggle("Copy on select", "copy-on-select"),
                 toggle("Hide mouse while typing", "mouse-hide-while-typing"),
                 // Cycle 794: opt out of the in-app update checker.
@@ -625,6 +627,8 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         "background-opacity" => (cfg.background_opacity * 100.0).round() as i64,
         "window-padding-x" => cfg.padding_x.round() as i64,
         "scrollback" => cfg.scrollback as i64,
+        "scrollback-bytes" => (cfg.scrollback_bytes / 1_000_000) as i64,
+        "tab-max-width" => cfg.tab_max_width.round() as i64,
         _ => 0,
     }
 }
@@ -634,6 +638,7 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
 fn write_number(key: &str, value: i64, _suffix: &str) -> String {
     match key {
         "background-opacity" => format!("{:.2}", value as f64 / 100.0),
+        "scrollback-bytes" => format!("{}MB", value.max(0)),
         _ => value.to_string(),
     }
 }

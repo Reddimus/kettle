@@ -1450,7 +1450,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       switched the default horizontal tab layout to natural-width segments and
       made tab drag targeting use the rendered segment rects, so the active /
       pressed UI stays aligned to the visible clicked tab instead of filling a
-      huge equal-width slice of the strip; the smoke now fails if short tabs
+      huge equal-width slice of the strip. Cycle-961 added `tab-max-width`
+      (default 240 px, `0` disables) so even explicitly homogeneous tabs stay
+      visually bounded on wide monitors; the smoke now fails if short tabs
       inflate back into oversized homogeneous segments. `just underline-scroll-smoke`
       opens underlined sentinel text plus `git diff | delta`; when
       `svn`/`svnadmin` are installed it also creates a local SVN
@@ -1538,8 +1540,11 @@ features list. What's left is genuinely-multi-week threads + polish.
       font bytes by registering embedded faces with `fontdb::Source::Binary`
       over `Arc<&'static [u8]>`; on this Ubuntu/Iris Xe machine the ASCII-flood
       Kettle-only grid median moved from about 138.6 MiB to 136.5 MiB. The
-      larger memory work remains byte-budget scrollback, glyph-atlas bounds,
-      and GPU buffer residency.
+      first byte-budget scrollback cap (`scrollback-bytes`, default
+      10,000,000 bytes, `0` disables) is now implemented by deriving the
+      effective history line cap from the configured byte budget and visible
+      screen size. Remaining memory work: rerun RSS matrices with that default,
+      then continue glyph-atlas bounds and GPU buffer residency.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
       smokes, and CLI smokes, but the durable release gate still needs manual

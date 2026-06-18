@@ -582,12 +582,19 @@ fn compute_tab_segment_widths<'a>(
     cell_w: f32,
     tab_h: f32,
     homogeneous: bool,
+    max_width: f32,
 ) -> Vec<f32> {
     let titles: Vec<&str> = titles.collect();
     let n = titles.len().max(1);
     let strip = strip.max(1.0);
+    let max_width = if max_width.is_finite() && max_width > 0.0 {
+        Some(max_width.max(tab_h * 1.5))
+    } else {
+        None
+    };
+    let cap = |w: f32| max_width.map_or(w, |m| w.min(m));
     if homogeneous {
-        return vec![strip / n as f32; titles.len().max(1)];
+        return vec![cap(strip / n as f32); titles.len().max(1)];
     }
     let chrome = (tab_h * 0.5).max(4.0);
     let close_w = tab_h;
@@ -595,14 +602,15 @@ fn compute_tab_segment_widths<'a>(
         .iter()
         .map(|t| {
             let chars = t.chars().count().max(1) as f32;
-            (chars * cell_w + chrome * 2.0 + close_w).max(close_w * 1.5)
+            cap((chars * cell_w + chrome * 2.0 + close_w).max(close_w * 1.5))
         })
         .collect();
     let sum: f32 = natural.iter().sum();
     if sum > strip {
         // Doesn't fit naturally — fall back to homogeneous so
         // every tab stays visible (no truncation of the strip).
-        vec![strip / n as f32; titles.len().max(1)]
+        let w = strip / n as f32;
+        vec![w; titles.len().max(1)]
     } else {
         natural
     }
@@ -3339,6 +3347,7 @@ impl App {
             cell_w,
             height,
             self.cfg.homogeneous_tabbar,
+            self.cfg.tab_max_width,
         );
         let active = ws.mux.active;
         // Pre-compute x offsets from the cumulative widths so the
@@ -18524,7 +18533,7 @@ mod tests {
 
     /// Cycle 620 drift guard. `compute_tab_segment_widths` is the
     /// pure layout helper behind the tab bar. Verify:
-    ///   - homogeneous = true divides the strip evenly (kettle default)
+    ///   - homogeneous = true divides the strip evenly up to tab-max-width
     ///   - homogeneous = false sizes per title length when there's room
     ///   - sum > strip falls back to homogeneous (no truncation)
     ///   - empty title list yields one safe-width segment (no div/0)
@@ -18534,9 +18543,15 @@ mod tests {
         use super::compute_tab_segment_widths;
         let cell_w = 10.0;
         let tab_h = 24.0;
-        // Homogeneous: every width is strip/n.
-        let widths =
-            compute_tab_segment_widths(["a", "bb", "ccc"].into_iter(), 300.0, cell_w, tab_h, true);
+        // Homogeneous: every width is strip/n when that is below the cap.
+        let widths = compute_tab_segment_widths(
+            ["a", "bb", "ccc"].into_iter(),
+            300.0,
+            cell_w,
+            tab_h,
+            true,
+            240.0,
+        );
         assert_eq!(widths, vec![100.0, 100.0, 100.0]);
         // Non-homogeneous with plenty of room: each width is
         // chars*cell_w + 2*chrome + close_w (= 1*10 + 24 + 24 = 58
@@ -18547,6 +18562,7 @@ mod tests {
             cell_w,
             tab_h,
             false,
+            240.0,
         );
         assert_eq!(widths.len(), 3);
         // Wider title ⇒ wider segment.
@@ -18562,15 +18578,47 @@ mod tests {
             cell_w,
             tab_h,
             false,
+            240.0,
         );
         // All equal because we fell back to homogeneous.
         assert!(widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01));
         // Empty list ⇒ one safe segment (no div/0). The bar code
         // never actually sees this (renders nothing when there are
         // no tabs), but the helper still has to be panic-safe.
-        let widths: Vec<f32> =
-            compute_tab_segment_widths(std::iter::empty::<&str>(), 100.0, cell_w, tab_h, true);
+        let widths: Vec<f32> = compute_tab_segment_widths(
+            std::iter::empty::<&str>(),
+            100.0,
+            cell_w,
+            tab_h,
+            true,
+            240.0,
+        );
         assert_eq!(widths, vec![100.0]);
+    }
+
+    #[test]
+    fn compute_tab_segment_widths_caps_wide_tabs() {
+        use super::compute_tab_segment_widths;
+        let cell_w = 8.0;
+        let tab_h = 24.0;
+
+        let widths =
+            compute_tab_segment_widths(["~", "~"].into_iter(), 1800.0, cell_w, tab_h, true, 240.0);
+        assert_eq!(widths, vec![240.0, 240.0]);
+
+        let uncapped =
+            compute_tab_segment_widths(["~", "~"].into_iter(), 1800.0, cell_w, tab_h, true, 0.0);
+        assert_eq!(uncapped, vec![900.0, 900.0]);
+
+        let long = compute_tab_segment_widths(
+            ["a very long tab title that should not claim the monitor"].into_iter(),
+            1800.0,
+            cell_w,
+            tab_h,
+            false,
+            160.0,
+        );
+        assert_eq!(long, vec![160.0]);
     }
 
     /// Cycle 805 drift guard. `split_new_tab_button` splits the trailing

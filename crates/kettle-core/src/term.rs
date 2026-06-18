@@ -10,6 +10,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
 use anyhow::Result;
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
@@ -116,6 +117,9 @@ pub struct ProtocolNotification {
 
 pub struct Terminal {
     pub term: SharedTerm,
+    term_config: TermConfig,
+    scrollback_line_limit: usize,
+    scrollback_byte_limit: usize,
     // Cycle 742: `Option` so `Drop` can `.take()` and drop the master
     // (ClosePseudoConsole on Windows / close the master fd on Unix) WITHOUT
     // moving a non-`Option` field out of `&mut self`. Always `Some` during
@@ -791,6 +795,30 @@ fn push_prompt_mark(ring: &mut std::collections::VecDeque<i64>, abs: i64) {
     }
 }
 
+fn scrollback_line_bytes(columns: usize) -> usize {
+    const ROW_OVERHEAD_BYTES: usize = 64;
+    let columns = columns.max(1);
+    std::mem::size_of::<Cell>()
+        .saturating_mul(columns)
+        .saturating_add(ROW_OVERHEAD_BYTES)
+        .max(1)
+}
+
+fn effective_scrollback_lines(
+    configured_lines: usize,
+    configured_bytes: usize,
+    columns: usize,
+    screen_lines: usize,
+) -> usize {
+    if configured_bytes == 0 {
+        return configured_lines;
+    }
+    let line_bytes = scrollback_line_bytes(columns);
+    let visible_bytes = line_bytes.saturating_mul(screen_lines.max(1));
+    let byte_lines = configured_bytes.saturating_sub(visible_bytes) / line_bytes;
+    configured_lines.min(byte_lines)
+}
+
 impl Terminal {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -811,6 +839,7 @@ impl Terminal {
             argv,
             cwd,
             scrollback,
+            0,
             cols,
             rows,
             cell_w,
@@ -840,6 +869,7 @@ impl Terminal {
         argv: &[String],
         cwd: Option<&str>,
         scrollback: usize,
+        scrollback_bytes: usize,
         cols: usize,
         rows: usize,
         cell_w: u16,
@@ -857,6 +887,7 @@ impl Terminal {
             argv,
             cwd,
             scrollback,
+            scrollback_bytes,
             cols,
             rows,
             cell_w,
@@ -884,6 +915,7 @@ impl Terminal {
         argv: &[String],
         cwd: Option<&str>,
         scrollback: usize,
+        scrollback_bytes: usize,
         cols: usize,
         rows: usize,
         cell_w: u16,
@@ -1044,8 +1076,9 @@ impl Terminal {
             blinking: cursor_blink,
             shape: cursor_shape,
         };
+        let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
-            scrolling_history: scrollback,
+            scrolling_history: history_limit,
             // Cycle 798 (audit A2, critical): do NOT advertise the kitty
             // keyboard protocol. With this `true`, alacritty_terminal replies
             // to the `CSI ? u` progressive-enhancement query and honors
@@ -1074,7 +1107,7 @@ impl Terminal {
             tconf.semantic_escape_chars = wd.to_string();
         }
         let term = Term::new(
-            tconf,
+            tconf.clone(),
             &TermSize {
                 columns: cols,
                 screen_lines: rows,
@@ -1445,6 +1478,9 @@ impl Terminal {
 
         Ok(Terminal {
             term,
+            term_config: tconf,
+            scrollback_line_limit: scrollback,
+            scrollback_byte_limit: scrollback_bytes,
             master: Some(pair.master),
             writer: Arc::new(Mutex::new(writer)),
             child: Arc::new(Mutex::new(child)),
@@ -1852,6 +1888,13 @@ impl Terminal {
                 columns: cols,
                 screen_lines: rows,
             });
+            self.term_config.scrolling_history = effective_scrollback_lines(
+                self.scrollback_line_limit,
+                self.scrollback_byte_limit,
+                cols,
+                rows,
+            );
+            t.set_options(self.term_config.clone());
         }
     }
 
@@ -4176,6 +4219,33 @@ mod teardown_tests {
         assert_eq!(
             *ring.back().unwrap(),
             MAX_PROMPT_MARKS as i64 + 499 // newest kept
+        );
+    }
+
+    #[test]
+    fn scrollback_byte_budget_derives_history_lines() {
+        let line_bytes = scrollback_line_bytes(100);
+        assert!(line_bytes >= 100 * std::mem::size_of::<Cell>());
+
+        assert_eq!(
+            effective_scrollback_lines(10_000, 0, 100, 24),
+            10_000,
+            "0 byte cap preserves line-count-only behavior"
+        );
+        assert_eq!(
+            effective_scrollback_lines(10_000, line_bytes * 34, 100, 24),
+            10,
+            "byte cap includes visible rows, leftover becomes scrollback"
+        );
+        assert_eq!(
+            effective_scrollback_lines(10_000, line_bytes * 24, 100, 24),
+            0,
+            "visible screen is protected even when budget leaves no history"
+        );
+        assert_eq!(
+            effective_scrollback_lines(7, line_bytes * 1000, 100, 24),
+            7,
+            "line-count cap still wins when it is smaller"
         );
     }
 

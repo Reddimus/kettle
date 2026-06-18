@@ -40,7 +40,8 @@ keys). The file is **watched and reloaded live**.
 | `selection-background` / `selection-foreground` | color | from theme | |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
-| `scrollback` | int / `infinite` | `10000` | Lines of history; `0`, `infinite` or `unlimited` = effectively unbounded |
+| `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
+| `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `10000000` | Per-pane scrollback memory budget. Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. If only one dimension is set, the other uses Kettle's startup baseline (`100x36`). Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
@@ -52,7 +53,8 @@ keys). The file is **watched and reloaded live**.
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
-| `homogeneous-tabbar` | bool | `false` | When `false` (default), horizontal tabs use natural widths based on their labels so the active/pressed visual stays aligned to the visible tab. Set `true` for equal-width tabs that divide the whole strip |
+| `tab-max-width` | float 80–800 px, or `0` | `240` | Maximum width for horizontal tab segments. Prevents a selected short tab from stretching across a wide monitor; `0` disables the cap |
+| `homogeneous-tabbar` | bool | `false` | When `false` (default), horizontal tabs use natural widths based on their labels so the active/pressed visual stays aligned to the visible tab. Set `true` for equal-width tabs; `tab-max-width` still caps the visual width unless set to `0` |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |

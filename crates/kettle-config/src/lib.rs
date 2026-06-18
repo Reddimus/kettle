@@ -53,6 +53,11 @@ pub use theme::Theme;
 /// bounded while never realistically clipping history).
 pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 
+/// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
+/// line-count `scrollback` key as the only history limit.
+pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
+
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
 /// keep accidental huge/silly configs diagnostic instead of silently spawning
 /// an unusable window.
@@ -74,6 +79,38 @@ pub(crate) fn parse_bool(s: &str) -> Option<bool> {
         "false" | "no" | "off" | "0" | "disabled" | "disable" | "n" => Some(false),
         _ => None,
     }
+}
+
+pub(crate) fn parse_byte_size(s: &str) -> Option<usize> {
+    let value = s.trim().replace('_', "");
+    if value.is_empty() {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    let (digits, multiplier): (&str, u128) = if let Some(v) = lower.strip_suffix("kib") {
+        (v, 1024)
+    } else if let Some(v) = lower.strip_suffix("kb") {
+        (v, 1000)
+    } else if let Some(v) = lower.strip_suffix('k') {
+        (v, 1000)
+    } else if let Some(v) = lower.strip_suffix("mib") {
+        (v, 1024 * 1024)
+    } else if let Some(v) = lower.strip_suffix("mb") {
+        (v, 1000 * 1000)
+    } else if let Some(v) = lower.strip_suffix('m') {
+        (v, 1000 * 1000)
+    } else if let Some(v) = lower.strip_suffix("gib") {
+        (v, 1024 * 1024 * 1024)
+    } else if let Some(v) = lower.strip_suffix("gb") {
+        (v, 1000 * 1000 * 1000)
+    } else if let Some(v) = lower.strip_suffix('g') {
+        (v, 1000 * 1000 * 1000)
+    } else {
+        (lower.as_str(), 1)
+    };
+    let n = digits.parse::<u128>().ok()?;
+    let bytes = n.checked_mul(multiplier)?;
+    usize::try_from(bytes).ok()
 }
 
 /// Parse a `u32` written either as hex (`0x10de`, `10DE`) or decimal (`4318`).
@@ -944,6 +981,7 @@ pub struct Config {
     pub theme_name: String,
     pub theme: Theme,
     pub scrollback: usize,
+    pub scrollback_bytes: usize,
     pub padding_x: f32,
     pub padding_y: f32,
     pub background_opacity: f32,
@@ -1092,6 +1130,10 @@ pub struct Config {
     /// `homogeneous_tabbar`): equal-width tabs when true. Kettle defaults to
     /// natural-width tabs so the active-tab visual stays bound to the label.
     pub homogeneous_tabbar: bool,
+    /// Terminator parity (`tab_max_width`) + wide-monitor UX: cap horizontal
+    /// tab segments so a two-tab window does not turn one selected tab into a
+    /// half-screen highlight. `0` disables the cap.
+    pub tab_max_width: f32,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
@@ -1840,6 +1882,7 @@ impl Default for Config {
             theme_name: "Catppuccin Mocha".to_string(),
             theme: Theme::by_name("Catppuccin Mocha"),
             scrollback: 10_000,
+            scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
             padding_x: 8.0,
             padding_y: 8.0,
             background_opacity: 1.0,
@@ -1877,6 +1920,7 @@ impl Default for Config {
             title_at_bottom: false,
             scroll_tabbar: false,
             homogeneous_tabbar: false,
+            tab_max_width: 240.0,
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
@@ -2510,6 +2554,9 @@ impl Config {
                         || v.eq_ignore_ascii_case("unlimited")
                         || v.parse::<usize>().is_ok_and(|n| n <= INFINITE_SCROLLBACK)
                 }
+                "scrollback-bytes" | "scrollback-byte-limit" | "scrollback-memory" => {
+                    parse_byte_size(v).is_some_and(|n| n <= MAX_SCROLLBACK_BYTES)
+                }
                 // Same shape as the float-range checks above:
                 // parse_collect clamps to [50, 5000] (cycle X), so
                 // `cursor-blink-interval = 99999` silently becomes
@@ -2550,6 +2597,9 @@ impl Config {
                 "tab-bar-width" | "tab_bar_width" => {
                     v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
                 }
+                "tab-max-width" | "tab_max_width" => v
+                    .parse::<f32>()
+                    .is_ok_and(|n| n == 0.0 || (80.0..=800.0).contains(&n)),
                 "background-darkness" | "background_darkness" => {
                     v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
                 }
@@ -3135,6 +3185,11 @@ impl Config {
                         cfg.scrollback = n.min(INFINITE_SCROLLBACK);
                     }
                 }
+                "scrollback-bytes" | "scrollback-byte-limit" | "scrollback-memory" => {
+                    if let Some(n) = parse_byte_size(&e.value) {
+                        cfg.scrollback_bytes = n.min(MAX_SCROLLBACK_BYTES);
+                    }
+                }
                 // Cycle 862 (audit): accept the bare `padding-x`/`-y` spellings
                 // as aliases. The malformed-value diagnostic already listed them
                 // as valid keys, so without these aliases a bare `padding-x`
@@ -3432,6 +3487,13 @@ impl Config {
                 "homogeneous-tabbar" | "homogeneous_tabbar" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.homogeneous_tabbar = b;
+                    }
+                }
+                "tab-max-width" | "tab_max_width" => {
+                    if let Ok(v) = e.value.trim().parse::<f32>()
+                        && v.is_finite()
+                    {
+                        cfg.tab_max_width = if v <= 0.0 { 0.0 } else { v.clamp(80.0, 800.0) };
                     }
                 }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
@@ -4337,6 +4399,7 @@ window-position-x = -1920\n\
 window-position-y = 80\n\
 tab-bar-position = left\n\
 tab-bar-width = 200\n\
+tab-max-width = 240\n\
 ask-before-closing = multiple-terminals\n\
 cell-width = 1.1\n\
 cell-height = 1.2\n";
@@ -5968,6 +6031,11 @@ cell-height = 1.2\n";
         // available for users who prefer equal-width segments.
         assert!(Config::parse_text("homogeneous-tabbar = true").homogeneous_tabbar);
         assert!(!Config::parse_text("homogeneous-tabbar = false").homogeneous_tabbar);
+        assert!((d.tab_max_width - 240.0).abs() < f32::EPSILON);
+        assert!(
+            (Config::parse_text("tab-max-width = 320").tab_max_width - 320.0).abs() < f32::EPSILON
+        );
+        assert!((Config::parse_text("tab_max_width = 0").tab_max_width - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -6477,6 +6545,7 @@ cell-height = 1.2\n";
         for (good, bad) in [
             ("handle-size = 12", "handle-size = 9000"),
             ("tab-bar-width = 200", "tab-bar-width = 5"),
+            ("tab-max-width = 240", "tab-max-width = 20"),
             ("background-darkness = 0.4", "background-darkness = 2.0"),
             ("cell-height = 1.2", "cell-height = 9.0"),
             ("cell-width = 1.0", "cell-width = 0.1"),
@@ -6980,6 +7049,31 @@ cell-height = 1.2\n";
              scrollback = 10000\n",
         );
         assert!(ok.is_empty(), "documented forms still pass: {ok:?}");
+    }
+
+    #[test]
+    fn scrollback_bytes_parses_units_and_can_be_disabled() {
+        let c = Config::parse_text("scrollback-bytes = 25MB");
+        assert_eq!(c.scrollback_bytes, 25_000_000);
+
+        let c = Config::parse_text("scrollback-byte-limit = 8MiB");
+        assert_eq!(c.scrollback_bytes, 8 * 1024 * 1024);
+
+        let c = Config::parse_text("scrollback-memory = 0");
+        assert_eq!(c.scrollback_bytes, 0, "0 disables the byte cap");
+
+        let ok = Config::detect_malformed_values(
+            "scrollback-bytes = 10MB\n\
+             scrollback-byte-limit = 8MiB\n\
+             scrollback-memory = 0\n",
+        );
+        assert!(ok.is_empty(), "documented byte-budget forms pass: {ok:?}");
+
+        let bad = Config::detect_malformed_values(
+            "scrollback-bytes = lots\n\
+             scrollback-byte-limit = 999999999999999999999999999999999\n",
+        );
+        assert_eq!(bad.len(), 2, "bad byte budgets should flag: {bad:?}");
     }
 
     #[test]
@@ -7583,6 +7677,12 @@ cell-height = 1.2\n";
         // Garbage value leaves the default.
         let cfg = Config::parse_text("tab-bar-width = wide\n");
         assert!((cfg.tab_bar_width - 180.0).abs() < f32::EPSILON);
+
+        let bad = Config::detect_malformed_values(
+            "tab-max-width = 60\n\
+             tab_max_width = wide\n",
+        );
+        assert_eq!(bad.len(), 2, "bad tab max widths should flag: {bad:?}");
     }
 
     /// Cycle 670 drift guard. `sunrise_sunset_utc_secs` reproduces

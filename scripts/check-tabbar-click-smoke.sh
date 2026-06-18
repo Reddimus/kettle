@@ -30,6 +30,8 @@ cat > "$cfg" <<'CFG'
 agent-server = full
 tab-bar = always
 tab-bar-pos = top
+homogeneous-tabbar = true
+tab-max-width = 240
 status-bar = off
 restore-session = false
 update-check = false
@@ -119,6 +121,16 @@ if len(tabs) < 3:
 PY
 
 "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-before-press.json"
+python3 - "$out/geometry-before-press.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+widths = [float(seg["rect"]["width"]) for seg in data["tab_bar"]["segments"]]
+if widths and max(widths) > 260.0:
+    raise SystemExit(
+        "tabbar-click smoke: short tabs inflated into oversized homogeneous segments: "
+        f"widths={[round(w, 1) for w in widths]}"
+    )
+PY
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/before-press.png\"}" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_mouse --json "$(press_segment_center "$out/geometry-before-press.json" 1)" >/dev/null
 sleep 0.1

@@ -878,6 +878,7 @@ impl Mux {
             argv,
             cwd,
             cfg.scrollback,
+            cfg.scrollback_bytes,
             cols.max(1),
             rows.max(1),
             cw,

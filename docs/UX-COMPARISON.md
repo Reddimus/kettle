@@ -98,7 +98,9 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
   0.7, clamp 0.1–1.0.
 - **Tab bar buttons / position / width** — WezTerm `config/src/config.rs:496`
   `show_new_tab_button_in_tab_bar`, `:499` `show_close_tab_button_in_tabs`,
-  `:483` `tab_bar_at_bottom`, `:509` `tab_max_width`.
+  `:483` `tab_bar_at_bottom`, `:509` `tab_max_width`. kettle has trailing
+  new-tab / close buttons, top/bottom/left/right positions, and
+  `tab-max-width` for horizontal tabs.
 - **Scrollbar** — WezTerm `config/src/config.rs:516` `enable_scroll_bar`;
   Terminator `terminatorlib/config.py:238` `scrollbar_position = "right"`.
 - **Hollow unfocused cursor & copy-on-select & blink default** — Alacritty
@@ -362,9 +364,10 @@ v2.20.0 decision gate shipped, the rest are tracked.
 - **Row-level damage tracking + persistent GPU cell buffers** — the natural
   successor to v2.20.0's per-line shaping cache: persist last frame's quads
   per row, splice only dirty rows.
-- **Byte-budget scrollback** — `scrollback-limit` in bytes (Ghostty defaults
-  10MB, lazily allocated): a deterministic worst-case memory bound vs
-  kettle's line-count key.
+- **Byte-budget scrollback** — Ghostty's `scrollback-limit` is byte-based.
+  kettle now exposes `scrollback-bytes` as a separate per-pane memory cap while
+  keeping the existing `scrollback` / `scrollback-limit` line-count semantics
+  for compatibility.
 
 ### Full matrix — all 130 features
 
@@ -524,10 +527,9 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 Condensed from the seven per-area architecture notes — the ideas worth
 stealing (or explicitly avoiding) independent of any single feature pick:
 
-- **Byte-budget scrollback** — Ghostty's `scrollback-limit` is *bytes*
-  (default 10MB, lazily allocated to the cap): a deterministic worst-case
-  memory bound vs kettle's line-count `scrollback` key. Directly relevant to
-  the perf-hardening work.
+- **Byte-budget scrollback** — Ghostty's `scrollback-limit` is byte-based.
+  kettle now uses `scrollback-bytes` for the same deterministic worst-case
+  memory-bound goal and keeps `scrollback` as the line-count cap.
 - **Config-as-docs** — Ghostty's entire config reference site is generated
   from `Config.zig` doc comments. kettle already lives this philosophy for
   actions (`--list-actions` prints straight from the parser); extending it

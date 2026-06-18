@@ -424,6 +424,8 @@ def run_tabbar(kettle: str, root: Path) -> Path:
                 "agent-server = full",
                 "tab-bar = always",
                 "tab-bar-pos = top",
+                "homogeneous-tabbar = true",
+                "tab-max-width = 240",
                 "status-bar = off",
                 "restore-session = false",
                 "update-check = false",
