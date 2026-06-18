@@ -16,17 +16,17 @@ laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
 **Ubuntu local desktop smoke, current v2.25.1 main**
-(`kettle 2.25.1 (b02a37287585)`, `text-renderer = grid`,
-`gpu-power-preference = auto`, timing medians over 5 Hyperfine runs with 1
-warmup, RSS medians over 5 `/usr/bin/time -f %M` runs, real X11/Wayland
+(`kettle 2.25.1 (5596f3aabbb7)`, `text-renderer = grid`,
+`gpu-power-preference = auto`, timing medians over 3 Hyperfine runs with 1
+warmup, RSS medians over 3 `/usr/bin/time -f %M` runs, real X11/Wayland
 desktop):
 
 | workload | kettle | Terminator | Ghostty | Alacritty |
 |---|---:|---:|---:|---:|
-| launch terminal, run `/bin/true`, close | 198 ms | 309 ms | 489 ms | 188 ms |
-| launch terminal, print ~4 MiB ASCII, close | 325 ms | 477 ms | 609 ms | 337 ms |
-| launch terminal, print 35k SGR/underline lines, close | 362 ms | 647 ms | 637 ms | 339 ms |
-| max RSS while printing ~4 MiB ASCII | 144.0 MiB | 76.5 MiB | 174.1 MiB | 113.1 MiB |
+| launch terminal, run `/bin/true`, close | 167 ms | 324 ms | 481 ms | 148 ms |
+| launch terminal, print ~4 MiB ASCII, close | 282 ms | 394 ms | 562 ms | 257 ms |
+| launch terminal, print 35k SGR/underline lines, close | 311 ms | 482 ms | 580 ms | 274 ms |
+| max RSS while printing ~4 MiB ASCII | 140.7 MiB | 72.7 MiB | 168.3 MiB | 109.2 MiB |
 
 These are smoke numbers rather than a full latency suite, but they exercise the
 current release binary on the adapter the default policy chooses on this
@@ -34,7 +34,10 @@ machine. Kettle beats Terminator and Ghostty on startup, plain ASCII flood, and
 SGR/underline flood timing probes; it remains close to Alacritty for the flood
 paths. The RSS row is advisory evidence: Kettle is below Ghostty for this
 lifecycle and above Terminator/Alacritty, so memory work remains open. The JSON
-for this run is under `target/perf-results/linux-local-expanded/`.
+for this run is under `target/perf-results/linux-local-20260618-0025/`.
+The same run recorded Kettle-only live control-plane medians of 21.0 ms for
+resize settle, 33.0 ms for page-up scrollback navigation, and 33.9 ms for
+page-down scrollback navigation.
 
 Reproduce and gate this Ubuntu peer comparison with:
 
