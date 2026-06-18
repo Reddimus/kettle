@@ -280,10 +280,11 @@ click is only armed before movement and does not show the drag ghost/highlight.
 just underline-scroll-smoke
 ```
 
-Builds a temporary git fixture, opens `git diff --color=always | delta
---paging=always`, drives repeated `j`/`k` input, and saves PNG frames plus
-`read_cells` snapshots under `target/diagnostics/underline-scroll-*` for
-frame-by-frame underline analysis.
+Builds a temporary git fixture, opens an underlined sentinel block plus
+`git diff --color=always | delta --paging=never` inside `less -R`, drives
+repeated down/up `j`/`k` input, and saves PNG frames, `read_cells` snapshots,
+and `analysis.json` under
+`target/diagnostics/underline-scroll-*` for frame-by-frame underline analysis.
 
 ```sh
 just linux-perf

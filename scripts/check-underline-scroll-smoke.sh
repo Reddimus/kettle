@@ -2,9 +2,10 @@
 set -euo pipefail
 
 KETTLE="${KETTLE_BIN:-kettle}"
-FRAMES="${KETTLE_UNDERLINE_FRAMES:-2}"
+FRAMES="${KETTLE_UNDERLINE_FRAMES:-8}"
 TIMEOUT="${KETTLE_UNDERLINE_TIMEOUT:-25}"
-SCROLL_KEYS="${KETTLE_UNDERLINE_KEYS:-j,j,j,j,j,j}"
+SCROLL_DOWN_KEYS="${KETTLE_UNDERLINE_DOWN_KEYS:-j,j,j,j,j,j}"
+SCROLL_UP_KEYS="${KETTLE_UNDERLINE_UP_KEYS:-k,k,k,k,k,k}"
 
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   echo "underline-scroll smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)" >&2
@@ -103,8 +104,17 @@ cmd="cd '$repo' && { for i in \$(seq 1 120); do printf '\033[4mUNDERLINE_SENTINE
 for i in $(seq 1 "$FRAMES"); do
   "$KETTLE" ctl --pid "$pid" read_cells --raw >"$out/cells-$i.json"
   ctl_screenshot "$out/frame-$i.png"
-  if ! timeout 5 "$KETTLE" ctl --pid "$pid" send_keys --keys "$SCROLL_KEYS" >/dev/null; then
-    echo "underline-scroll smoke: send_keys timed out for keys '$SCROLL_KEYS'" >&2
+  if [ "$i" -lt "$FRAMES" ]; then
+    if [ "$i" -lt $((FRAMES / 2 + 1)) ]; then
+      keys="$SCROLL_DOWN_KEYS"
+    else
+      keys="$SCROLL_UP_KEYS"
+    fi
+  else
+    keys=""
+  fi
+  if [ -n "$keys" ] && ! timeout 5 "$KETTLE" ctl --pid "$pid" send_keys --keys "$keys" >/dev/null; then
+    echo "underline-scroll smoke: send_keys timed out for keys '$keys'" >&2
     echo "underline-scroll smoke: artifacts preserved at $out" >&2
     exit 1
   fi
@@ -113,23 +123,66 @@ done
 
 python3 - "$out" "$FRAMES" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
 out = Path(sys.argv[1])
 frames = int(sys.argv[2])
 underline_frames = 0
-row_sets = []
+top_sentinels = []
+analysis = []
 for i in range(1, frames + 1):
     data = json.loads((out / f"cells-{i}.json").read_text())
     cells = data.get("cells", [])
-    rows = sorted({c["row"] for c in cells if c.get("any_underline")})
-    if rows:
+    rows = {}
+    underline_rows = set()
+    for c in cells:
+        rows.setdefault(c["row"], []).append((c["col"], c.get("ch", "")))
+        if c.get("any_underline"):
+            underline_rows.add(c["row"])
+    if underline_rows:
         underline_frames += 1
-    row_sets.append(rows)
+    found = []
+    for row, row_cells in sorted(rows.items()):
+        text = "".join(ch for _, ch in sorted(row_cells))
+        match = re.search(r"UNDERLINE_SENTINEL_(\d+)", text)
+        if match:
+            found.append((row, int(match.group(1))))
+    if not found:
+        raise SystemExit(f"underline-scroll smoke: no sentinel text visible in cells-{i}.json")
+    top_sentinels.append(found[0][1])
+    analysis.append({
+        "frame": i,
+        "top_sentinel": found[0][1],
+        "underline_rows": sorted(underline_rows),
+        "sentinels": [{"row": row, "number": number} for row, number in found],
+    })
     if not (out / f"frame-{i}.png").exists():
         raise SystemExit(f"underline-scroll smoke: missing frame-{i}.png")
 if underline_frames == 0:
     raise SystemExit("underline-scroll smoke: no underlined cells observed in delta fixture")
-print(f"underline-scroll smoke: OK frames={frames} underline_frames={underline_frames} artifacts={out}")
+(out / "analysis.json").write_text(json.dumps({
+    "frames": frames,
+    "underline_frames": underline_frames,
+    "top_sentinels": top_sentinels,
+    "frames_detail": analysis,
+}, indent=2) + "\n")
+mid = frames // 2
+if frames >= 4:
+    if not top_sentinels[0] < top_sentinels[mid]:
+        raise SystemExit(
+            "underline-scroll smoke: down-scroll did not advance underlined text: "
+            f"{top_sentinels}"
+        )
+    if not top_sentinels[-1] < top_sentinels[mid]:
+        raise SystemExit(
+            "underline-scroll smoke: up-scroll did not move underlined text back: "
+            f"{top_sentinels}"
+        )
+print(
+    "underline-scroll smoke: OK "
+    f"frames={frames} underline_frames={underline_frames} "
+    f"top_sentinels={top_sentinels} artifacts={out}"
+)
 PY

@@ -1441,12 +1441,11 @@ features list. What's left is genuinely-multi-week threads + polish.
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag
       threshold. `just underline-scroll-smoke` opens `git diff | delta`, drives
-      bounded scroll input, and saves PNG + `read_cells` frames under
-      `target/diagnostics`. Remaining work: fix the longer live-scroll hang
-      observed when extending the fixture past the current bounded frame count,
-      turn underline lag analysis into a stricter pixel-level gate once enough
-      real traces identify the exact frame offset, then run both diagnostics on
-      Ubuntu, native Windows 11, and Windows 11 WSL.
+      repeated down/up scroll input, and saves PNG, `read_cells`, and
+      `analysis.json` frames under `target/diagnostics`. Remaining work: turn
+      underline lag analysis into a stricter pixel-level gate once enough real
+      traces identify the exact frame offset, then run both diagnostics on
+      native Windows 11 and Windows 11 WSL.
 - [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
       covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
       Neovim, and configured Neovim/AstroNvim command paths. Remaining work is
