@@ -905,6 +905,8 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         else:
             tmux_socket = f"kettle-smoke-{live.pid}"
             tmux_marker = "KETTLE_AGENT_TUI_TMUX_SMOKE"
+            tmux_left_marker = "KETTLE_AGENT_TUI_TMUX_SPLIT_LEFT"
+            tmux_right_marker = "KETTLE_AGENT_TUI_TMUX_SPLIT_RIGHT"
             live.ctl(
                 "send_text",
                 params={"text": f"tmux -L {tmux_socket} -f /dev/null new-session -A -s kettle_smoke"},
@@ -915,10 +917,32 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             live.ctl("send_keys", params={"keys": ["enter"]})
             live.wait_for_text(tmux_marker, timeout_ms=12000, quiet_ms=500)
             states.append(capture_live_state(live, out, "tmux"))
+            tmux_cmds = [
+                ["tmux", "-L", tmux_socket, "split-window", "-h", "-t", "kettle_smoke:0.0"],
+                ["tmux", "-L", tmux_socket, "send-keys", "-t", "kettle_smoke:0.0", f"printf '%s\\n' {shell_quote(tmux_left_marker)}", "C-m"],
+                ["tmux", "-L", tmux_socket, "send-keys", "-t", "kettle_smoke:0.1", f"printf '%s\\n' {shell_quote(tmux_right_marker)}", "C-m"],
+            ]
+            for cmd in tmux_cmds:
+                cp = run(cmd, timeout=5, capture=True)
+                if cp.returncode != 0:
+                    raise SystemExit(
+                        "agent-tui smoke: tmux split workflow failed:\n"
+                        + " ".join(cmd)
+                        + f"\nstdout={cp.stdout}\nstderr={cp.stderr}"
+                    )
+            live.wait_for_text(tmux_left_marker, timeout_ms=12000, quiet_ms=500)
+            live.wait_for_text(tmux_right_marker, timeout_ms=12000, quiet_ms=500)
+            tmux_split_screen = live.json_ctl("read_screen")
+            tmux_split_text = screen_text(tmux_split_screen)
+            (out / "tmux-split.screen.json").write_text(json.dumps(tmux_split_screen, indent=2) + "\n")
+            if tmux_left_marker not in tmux_split_text or tmux_right_marker not in tmux_split_text:
+                raise SystemExit("agent-tui smoke: tmux split markers are not both visible")
+            states.append(capture_live_state(live, out, "tmux-split"))
             live.ctl("send_text", params={"text": "exit"})
             live.ctl("send_keys", params={"keys": ["enter"]})
             run(["tmux", "-L", tmux_socket, "kill-server"], timeout=3, capture=True)
             probes.append({"name": "tmux", "status": "ok"})
+            probes.append({"name": "tmux-split", "status": "ok"})
 
         if shutil.which("nvim") is None:
             probes.append({"name": "nvim-clean", "status": "skipped", "reason": "not on PATH"})
