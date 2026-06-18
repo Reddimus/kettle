@@ -1481,13 +1481,16 @@ features list. What's left is genuinely-multi-week threads + polish.
       booleans so those app-chrome states are asserted without OCR, and
       `perform_action` lets the smoke dispatch named app actions such as
       `start_search` without pretending pane keystrokes are global shortcuts.
+      The same pass now captures SSH launcher, layout picker, quick-select hint
+      mode (with a visible URL fixture), and window/tab/pane title-edit overlays,
+      recording their active modal flags and pixel deltas in `analysis.json`.
       Remaining work is deeper live-window validation: drive authenticated
       Codex/Claude agent sessions, configured AstroNvim workflows beyond marker
-      buffers, full tmux workflows beyond attach/send, and deeper screenshot
-      states inside Kettle with `text-renderer = grid`. Use `send_mouse`,
-      `send_keys`, `perform_action`, `ui_geometry`, `read_cells`, and
-      `screenshot` so the pass is reproducible instead of a manual eyeball-only
-      sweep, then compare captured frames for blank panes, overlapping UI, stale text, and unintended
+      buffers, full tmux workflows beyond attach/send, Windows/WSL runs, and
+      richer screenshot-state comparisons inside Kettle with `text-renderer =
+      grid`. Use `send_mouse`, `send_keys`, `perform_action`, `ui_geometry`,
+      `read_cells`, and `screenshot` so the pass is reproducible instead of a
+      manual eyeball-only sweep, then compare captured frames for blank panes, overlapping UI, stale text, and unintended
       blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained

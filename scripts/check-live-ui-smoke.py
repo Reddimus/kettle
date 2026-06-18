@@ -1162,6 +1162,18 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "notification-event.json").write_text(json.dumps(notification_event, indent=2) + "\n")
         states.append(capture_live_state(live, out, "notification"))
 
+        hint_marker = "KETTLE_INTERACTION_HINT_URL_READY"
+        hint_url = "https://example.com/kettle-live-smoke"
+        if platform.system() == "Windows":
+            hint_cmd = f"Write-Output {shell_quote(hint_url)}"
+        else:
+            hint_cmd = f"printf '%s\\n' {shell_quote(hint_url)}"
+        live_shell_command(live, command_with_marker(hint_cmd, hint_marker), hint_marker)
+        hint_ready = live.json_ctl("read_screen")
+        (out / "hint-target.screen.json").write_text(json.dumps(hint_ready, indent=2) + "\n")
+        if hint_url not in screen_text(hint_ready):
+            raise SystemExit("interaction smoke: hint URL target is not visible before hint mode")
+
         palette_before = live.json_ctl("ui_geometry")
         menu_x, menu_y = rect_center(palette_before["tab_bar"]["new_tab_menu"])  # type: ignore[index]
         live.screenshot(out / "palette-before.png")
@@ -1198,6 +1210,38 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
         states.append(capture_live_state(live, out, "search-open"))
 
+        modal_sequence = [
+            ("ssh", "ssh_launcher", "ssh-launcher"),
+            ("open_layout_picker", "layout_picker", "layout-picker"),
+            ("hint_mode", "hint_mode", "hint-mode"),
+            ("edit_window_title", "title_edit", "title-edit-window"),
+            ("edit_tab_title", "title_edit", "title-edit-tab"),
+            ("edit_pane_title", "title_edit", "title-edit-pane"),
+        ]
+        modal_flags: Dict[str, object] = {}
+        previous_shot = out / "search-open.png"
+        previous_geo = search_geo
+        for action_name, modal_name, label in modal_sequence:
+            live.ctl("perform_action", params={"action": action_name})
+            time.sleep(0.3)
+            modal_geo = live.json_ctl("ui_geometry")
+            (out / f"{label}.geometry.json").write_text(json.dumps(modal_geo, indent=2) + "\n")
+            modal_shot = out / f"{label}.png"
+            live.screenshot(modal_shot)
+            if not modal_open(modal_geo, modal_name):
+                raise SystemExit(f"interaction smoke: perform_action {action_name} did not open {modal_name}")
+            changed = len(changed_pixels(previous_shot, modal_shot, 0.0, float(previous_geo["surface"]["height"])))  # type: ignore[index]
+            if changed < 100:
+                raise SystemExit(f"interaction smoke: {label} changed too few pixels ({changed})")
+            modal_flags[label] = {
+                "action": action_name,
+                "changed_pixels": changed,
+                "modals": modal_geo.get("modals"),
+            }
+            states.append(capture_live_state(live, out, label))
+            previous_shot = modal_shot
+            previous_geo = modal_geo
+
     (out / "analysis.json").write_text(
         json.dumps(
             {
@@ -1231,6 +1275,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "settings_modal_after_close": settings_closed_geo.get("modals"),
                 "palette_modal_after_open": palette_geo.get("modals"),
                 "search_modal_after_open": search_geo.get("modals"),
+                "extra_modal_states": modal_flags,
                 "palette_row_rect": palette_row["rect"],
                 "menu_split_right_rect": split_rows[0]["rect"],
                 "notification_event": notification_event,

@@ -257,10 +257,13 @@ These need a real display and are run by hand (or on real hardware):
     right-click context-menu opening, Settings modal open/close from that menu,
     context-menu `Split Right` dispatch, split-window resize, and Command
     palette opening from the new-tab dropdown through `kettle ctl`, plus Search
-    opening through `perform_action start_search`. It also emits OSC 777 from
-    inside the live pane and asserts the subscribed control event stream
-    receives a `protocol_notification` event with the expected title/body. It
-    writes PNG, `read_screen`, `read_cells`, `ui_geometry`,
+    opening through `perform_action start_search`. It also drives the SSH
+    launcher, layout picker, quick-select hint mode, and window/tab/pane
+    title-edit overlays through `perform_action`, with a visible URL fixture for
+    hint mode. It emits OSC 777 from inside the live pane and asserts the
+    subscribed control event stream receives a `protocol_notification` event
+    with the expected title/body. It writes PNG, `read_screen`, `read_cells`,
+    `ui_geometry`,
     `notification-events.jsonl`, and `analysis.json` artifacts under
     `target/diagnostics/interaction-*`, and asserts default `read_screen`
     follows the visible scrolled viewport, modal state is reported by
