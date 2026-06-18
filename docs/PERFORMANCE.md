@@ -39,6 +39,19 @@ The same run recorded Kettle-only live control-plane medians of 21.0 ms for
 resize settle, 33.0 ms for page-up scrollback navigation, and 33.9 ms for
 page-down scrollback navigation.
 
+**Memory follow-up, 2026-06-18 (`13ffdda` → local font-source patch).** The
+bundled JetBrains Mono Nerd Font faces are still embedded for out-of-box
+AstroNvim/Neovim icon coverage, but `fontdb` now receives the embedded
+`&'static [u8]` faces through `Source::Binary(Arc<...>)` instead of cloning each
+face into a fresh `Vec<u8>`. On this Ubuntu/Iris Xe machine, the same Kettle-only
+ASCII-flood lifecycle dropped grid-mode max-RSS from a pre-change median of
+about **138.6 MiB** to **136.5 MiB**. Legacy mode measured the same shape
+at **136.1 MiB**, confirming the remaining gap is not grid-renderer-specific.
+Forced software Vulkan stayed materially worse at **160.2 MiB**. This closes the
+duplicated-font-bytes footgun, but Kettle still remains above Terminator on RSS,
+so byte-budget scrollback, atlas bounds, and GPU buffer residency are still the
+next memory levers.
+
 Reproduce and gate this Ubuntu peer comparison with:
 
 ```sh
@@ -322,8 +335,11 @@ at the configured half-period deadline.
   delta above) — bound with an LRU / size cap.
 - Byte-budget scrollback (`scrollback-bytes`, Ghostty model) to bound
   worst-case memory deterministically (current cap is line-count only).
-- Font faces are `include_bytes!`-embedded then `.to_vec()`-copied into the font
-  system (resident twice); borrow the `&'static` bytes to reclaim ~10–15 MB.
+- Bundled font duplicate-copy fixed after `13ffdda`: embedded faces are now
+  registered with `fontdb::Source::Binary(Arc<&'static [u8]>)` instead of
+  `.to_vec()` copies. Keep this as a regression invariant because reverting it
+  quietly adds resident heap copies for Regular at startup and Bold / Italic /
+  Bold Italic when styled text first appears.
 
 ---
 

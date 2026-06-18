@@ -1530,8 +1530,16 @@ features list. What's left is genuinely-multi-week threads + polish.
       equivalent Terminator/Ghostty automation. Remaining work: include Windows
       11 and Windows 11 WSL where possible, broaden the local peer suite to
       resize, scrollback navigation, and GPU/frame-time probes, and prioritize
-      row-level damage tracking, persistent GPU cell buffers, and memory
-      reduction if grid-mode frame cost or RSS remains above target.
+      row-level damage tracking, persistent GPU cell buffers, and continued
+      memory reduction if grid-mode frame cost or RSS remains above target.
+      The first post-`13ffdda` memory pass confirmed grid and legacy modes have
+      effectively the same Kettle-only RSS, so the RSS gap is not caused by the
+      new grid renderer. It also removed the duplicated heap copy of bundled
+      font bytes by registering embedded faces with `fontdb::Source::Binary`
+      over `Arc<&'static [u8]>`; on this Ubuntu/Iris Xe machine the ASCII-flood
+      Kettle-only grid median moved from about 138.6 MiB to 136.5 MiB. The
+      larger memory work remains byte-budget scrollback, glyph-atlas bounds,
+      and GPU buffer residency.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
       smokes, and CLI smokes, but the durable release gate still needs manual

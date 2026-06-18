@@ -56,7 +56,9 @@ use std::sync::Arc;
 
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
-use glyphon::cosmic_text::{AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap};
+use glyphon::cosmic_text::{
+    AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap, fontdb,
+};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
@@ -71,6 +73,12 @@ pub use color::{
 };
 use glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
 use quad::{QuadInstance, QuadPipeline};
+
+fn load_bundled_font(font_system: &mut FontSystem, face: &'static [u8]) {
+    font_system
+        .db_mut()
+        .load_font_source(fontdb::Source::Binary(Arc::new(face)));
+}
 
 /// A search match in a pane's viewport (grid coords, pre-scrolled).
 #[derive(Clone, Copy)]
@@ -981,9 +989,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let mut font_system = FontSystem::new();
-        font_system
-            .db_mut()
-            .load_font_data(kettle_config::font::REGULAR.to_vec());
+        load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
 
         let swash = SwashCache::new();
         let cache = Cache::new(&device);
@@ -1287,7 +1293,7 @@ impl Renderer {
             kettle_config::font::ITALIC,
             kettle_config::font::BOLD_ITALIC,
         ] {
-            self.font_system.db_mut().load_font_data(face.to_vec());
+            load_bundled_font(&mut self.font_system, face);
         }
         self.bundled_style_faces_loaded = true;
         self.pane_style_keys.fill(0);
@@ -5807,7 +5813,7 @@ pub fn capture_png_with_annotation(
 
         let mut font_system = FontSystem::new();
         for face in kettle_config::font::all() {
-            font_system.db_mut().load_font_data(face.to_vec());
+            load_bundled_font(&mut font_system, face);
         }
         let swash_cache = Cache::new(&device);
         let mut atlas = TextAtlas::new(&device, &queue, &swash_cache, format);
@@ -6642,7 +6648,7 @@ mod gpu_tests {
             let family = cfg.font_family.clone();
             let mut font_system = FontSystem::new();
             for face in kettle_config::font::all() {
-                font_system.db_mut().load_font_data(face.to_vec());
+                load_bundled_font(&mut font_system, face);
             }
             let mut swash = SwashCache::new();
             let mut glyph_pipe = GlyphPipeline::new(&device, format);
@@ -7299,7 +7305,7 @@ mod hidpi_scale_tests {
     fn measured_cell_doubles_at_2x() {
         let mut fs = FontSystem::new();
         for face in kettle_config::font::all() {
-            fs.db_mut().load_font_data(face.to_vec());
+            crate::load_bundled_font(&mut fs, face);
         }
         let fam = "JetBrains Mono";
         let m1 = metrics_for(16.0, 1.0);
@@ -7327,7 +7333,7 @@ mod hidpi_scale_tests {
     fn measured_cell_does_not_wrap_at_large_font_highdpi() {
         let mut fs = FontSystem::new();
         for face in kettle_config::font::all() {
-            fs.db_mut().load_font_data(face.to_vec());
+            crate::load_bundled_font(&mut fs, face);
         }
         let fam = "JetBrains Mono";
         let m1 = metrics_for(72.0, 1.0);
@@ -7407,8 +7413,13 @@ mod pane_buffer_lifecycle_tests {
             "Renderer must track whether optional bundled style faces loaded"
         );
         assert!(
-            src.contains("load_font_data(kettle_config::font::REGULAR.to_vec())"),
+            src.contains("load_bundled_font(&mut font_system, kettle_config::font::REGULAR)"),
             "Renderer::new should eagerly load only the regular bundled face"
+        );
+        let old_loader = concat!("load_font", "_data(");
+        assert!(
+            src.contains("fontdb::Source::Binary(Arc::new(face))") && !src.contains(old_loader),
+            "bundled fonts must be registered from embedded static bytes, not copied into Vecs"
         );
         assert!(
             src.contains("kettle_config::font::BOLD")
