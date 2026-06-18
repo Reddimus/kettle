@@ -285,6 +285,9 @@ Builds a temporary git fixture, opens an underlined sentinel block plus
 repeated down/up `j`/`k` input, and saves PNG frames, `read_cells` snapshots,
 and `analysis.json` under
 `target/diagnostics/underline-scroll-*` for frame-by-frame underline analysis.
+The smoke parses the PNGs with Python stdlib and records per-row underline pixel
+hit counts for underlined rows and neighboring plain rows, so a delayed underline
+draw fails as an alignment/leak error, not just as a missing terminal attribute.
 
 ```sh
 just linux-perf

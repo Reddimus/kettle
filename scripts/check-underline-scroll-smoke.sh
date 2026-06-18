@@ -67,6 +67,10 @@ update-check = false
 background = #080808
 foreground = #f8f8f8
 minimum-contrast = 0
+window-padding-x = 0
+window-padding-y = 0
+window-width = 100
+window-height = 32
 CFG
 
 "$KETTLE" --config "$cfg" --agent-server full >"$out/kettle.log" 2>&1 &
@@ -96,7 +100,7 @@ ctl_screenshot() {
   fi
 }
 
-cmd="cd '$repo' && { for i in \$(seq 1 120); do printf '\033[4mUNDERLINE_SENTINEL_%03d\033[24m link https://example.invalid/%03d\n' \"\$i\" \"\$i\"; done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
+cmd="cd '$repo' && { for i in \$(seq 1 120); do if [ \$((i % 2)) -eq 1 ]; then printf '\033[4mUNDERLINE_SENTINEL_%03d\033[24m link https://example.invalid/%03d\n' \"\$i\" \"\$i\"; else printf 'PLAIN_SENTINEL_%03d link https://example.invalid/%03d\n' \"\$i\" \"\$i\"; fi; done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
 "$KETTLE" ctl --pid "$pid" send_text --text "$cmd" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
 "$KETTLE" ctl --pid "$pid" wait_for --text "UNDERLINE_SENTINEL" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null
@@ -124,8 +128,82 @@ done
 python3 - "$out" "$FRAMES" <<'PY'
 import json
 import re
+import struct
 import sys
+import zlib
 from pathlib import Path
+
+def read_rgba_png(path):
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit(f"{path}: not a PNG")
+    pos = 8
+    width = height = None
+    raw = b""
+    while pos < len(data):
+        n = struct.unpack(">I", data[pos : pos + 4])[0]
+        pos += 4
+        typ = data[pos : pos + 4]
+        pos += 4
+        chunk = data[pos : pos + n]
+        pos += n + 4
+        if typ == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
+                ">IIBBBBB", chunk
+            )
+            if (bit_depth, color_type, interlace) != (8, 6, 0):
+                raise SystemExit(f"{path}: expected non-interlaced 8-bit RGBA PNG")
+        elif typ == b"IDAT":
+            raw += chunk
+        elif typ == b"IEND":
+            break
+    if width is None or height is None:
+        raise SystemExit(f"{path}: missing IHDR")
+    decoded = zlib.decompress(raw)
+    bpp = 4
+    stride = width * bpp
+    rows = []
+    prev = [0] * stride
+    i = 0
+    for _ in range(height):
+        filt = decoded[i]
+        i += 1
+        cur = list(decoded[i : i + stride])
+        i += stride
+        recon = [0] * stride
+        for x, value in enumerate(cur):
+            left = recon[x - bpp] if x >= bpp else 0
+            up = prev[x]
+            up_left = prev[x - bpp] if x >= bpp else 0
+            if filt == 0:
+                out = value
+            elif filt == 1:
+                out = value + left
+            elif filt == 2:
+                out = value + up
+            elif filt == 3:
+                out = value + ((left + up) // 2)
+            elif filt == 4:
+                p = left + up - up_left
+                pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
+                predictor = left if pa <= pb and pa <= pc else (up if pb <= pc else up_left)
+                out = value + predictor
+            else:
+                raise SystemExit(f"{path}: unsupported PNG filter {filt}")
+            recon[x] = out & 0xFF
+        rows.append(bytes(recon))
+        prev = recon
+    return width, height, rows
+
+def bright_at(rgba_rows, x, y):
+    if y < 0 or y >= len(rgba_rows) or x < 0:
+        return False
+    row = rgba_rows[y]
+    if x * 4 + 3 >= len(row):
+        return False
+    off = x * 4
+    r, g, b, a = row[off : off + 4]
+    return a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000
 
 out = Path(sys.argv[1])
 frames = int(sys.argv[2])
@@ -135,31 +213,107 @@ analysis = []
 for i in range(1, frames + 1):
     data = json.loads((out / f"cells-{i}.json").read_text())
     cells = data.get("cells", [])
+    cols = max(1, int(data.get("cols", 1)))
+    screen_rows = max(1, int(data.get("rows", 1)))
     rows = {}
     underline_rows = set()
+    underline_cols = {}
     for c in cells:
         rows.setdefault(c["row"], []).append((c["col"], c.get("ch", "")))
         if c.get("any_underline"):
             underline_rows.add(c["row"])
+            underline_cols.setdefault(c["row"], []).append(c["col"])
     if underline_rows:
         underline_frames += 1
     found = []
+    plain_found = []
     for row, row_cells in sorted(rows.items()):
         text = "".join(ch for _, ch in sorted(row_cells))
         match = re.search(r"UNDERLINE_SENTINEL_(\d+)", text)
         if match:
             found.append((row, int(match.group(1))))
+        plain_match = re.search(r"PLAIN_SENTINEL_(\d+)", text)
+        if plain_match:
+            plain_found.append((row, int(plain_match.group(1))))
     if not found:
         raise SystemExit(f"underline-scroll smoke: no sentinel text visible in cells-{i}.json")
     top_sentinels.append(found[0][1])
+    png_path = out / f"frame-{i}.png"
+    if not png_path.exists():
+        raise SystemExit(f"underline-scroll smoke: missing frame-{i}.png")
+    width, height, rgba_rows = read_rgba_png(png_path)
+    cell_w = width / cols
+    cell_h = height / screen_rows
+    pixel_rows = []
+    for row, number in found[:8]:
+        cols_for_row = sorted(underline_cols.get(row, []))
+        if not cols_for_row:
+            raise SystemExit(f"underline-scroll smoke: sentinel row {row} has no underline attrs")
+        sample_cols = cols_for_row[: min(22, len(cols_for_row))]
+        baseline = int(round((row + 1) * cell_h - 2.0))
+        best = 0
+        best_y = baseline
+        for y in range(baseline - 2, baseline + 3):
+            hits = 0
+            for col in sample_cols:
+                x = int((col + 0.5) * cell_w)
+                if bright_at(rgba_rows, x, y):
+                    hits += 1
+            if hits > best:
+                best = hits
+                best_y = y
+        min_hits = max(8, int(len(sample_cols) * 0.60))
+        if best < min_hits:
+            raise SystemExit(
+                "underline-scroll smoke: rendered underline is not aligned with "
+                f"frame={i} row={row} sentinel={number} hits={best}/{len(sample_cols)} "
+                f"baseline={baseline}"
+            )
+        pixel_rows.append({
+            "row": row,
+            "sentinel": number,
+            "underline_pixel_hits": best,
+            "sampled_columns": len(sample_cols),
+            "pixel_y": best_y,
+        })
+    plain_pixel_rows = []
+    for row, number in plain_found[:8]:
+        sample_cols = list(range(0, 18))
+        baseline = int(round((row + 1) * cell_h - 2.0))
+        best = 0
+        best_y = baseline
+        for y in range(baseline - 2, baseline + 3):
+            hits = 0
+            for col in sample_cols:
+                x = int((col + 0.5) * cell_w)
+                if bright_at(rgba_rows, x, y):
+                    hits += 1
+            if hits > best:
+                best = hits
+                best_y = y
+        max_hits = max(6, int(len(sample_cols) * 0.45))
+        if best > max_hits:
+            raise SystemExit(
+                "underline-scroll smoke: rendered underline leaked onto plain row: "
+                f"frame={i} row={row} sentinel={number} hits={best}/{len(sample_cols)} "
+                f"baseline={baseline}"
+            )
+        plain_pixel_rows.append({
+            "row": row,
+            "sentinel": number,
+            "baseline_pixel_hits": best,
+            "sampled_columns": len(sample_cols),
+            "pixel_y": best_y,
+        })
     analysis.append({
         "frame": i,
         "top_sentinel": found[0][1],
         "underline_rows": sorted(underline_rows),
         "sentinels": [{"row": row, "number": number} for row, number in found],
+        "plain_sentinels": [{"row": row, "number": number} for row, number in plain_found],
+        "pixel_rows": pixel_rows,
+        "plain_pixel_rows": plain_pixel_rows,
     })
-    if not (out / f"frame-{i}.png").exists():
-        raise SystemExit(f"underline-scroll smoke: missing frame-{i}.png")
 if underline_frames == 0:
     raise SystemExit("underline-scroll smoke: no underlined cells observed in delta fixture")
 (out / "analysis.json").write_text(json.dumps({

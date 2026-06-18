@@ -263,8 +263,9 @@ These need a real display and are run by hand (or on real hardware):
     `just live-render-smoke`, `just tabbar-click-smoke`, and
     `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review; underline runs also write `analysis.json` with
-    the visible underlined sentinel sequence across down/up scrolling. Repeat
-    the same flows manually on Windows 11 and Windows 11 WSL with
+    the visible underlined sentinel sequence across down/up scrolling plus
+    per-row underline/plain-row pixel hit counts from the PNG frames. Repeat the
+    same flows manually on Windows 11 and Windows 11 WSL with
     `kettle ctl ui_geometry/read_cells/send_mouse/screenshot` before changing
     renderer defaults or tab/underline interaction code.
 

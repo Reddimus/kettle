@@ -1442,10 +1442,11 @@ features list. What's left is genuinely-multi-week threads + polish.
       not show the drag ghost/highlight before movement crosses the drag
       threshold. `just underline-scroll-smoke` opens `git diff | delta`, drives
       repeated down/up scroll input, and saves PNG, `read_cells`, and
-      `analysis.json` frames under `target/diagnostics`. Remaining work: turn
-      underline lag analysis into a stricter pixel-level gate once enough real
-      traces identify the exact frame offset, then run both diagnostics on
-      native Windows 11 and Windows 11 WSL.
+      `analysis.json` frames under `target/diagnostics`. The underline smoke
+      now also parses each PNG and asserts rendered underline pixels are present
+      on the same rows as the `read_cells` underlined sentinel text and absent
+      from neighboring plain sentinel rows. Remaining work: run both diagnostics
+      on native Windows 11 and Windows 11 WSL.
 - [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
       covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
       Neovim, and configured Neovim/AstroNvim command paths. Remaining work is
