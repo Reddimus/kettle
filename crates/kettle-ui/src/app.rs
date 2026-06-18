@@ -4109,6 +4109,26 @@ impl App {
         }
     }
 
+    fn apply_window_resize(&mut self, ws: &mut WindowState, width: u32, height: u32) {
+        if let Some(r) = ws.renderer.as_mut() {
+            r.resize(width, height);
+        }
+        self.resize_all(ws);
+        let show_chip = match self.cfg.resize_overlay {
+            kettle_config::ResizeOverlayMode::Never => false,
+            kettle_config::ResizeOverlayMode::Always => true,
+            kettle_config::ResizeOverlayMode::AfterFirst => {
+                ws.seen_first_resize
+                    && ws.spawned_at.elapsed() > std::time::Duration::from_millis(1500)
+            }
+        };
+        ws.seen_first_resize = true;
+        if show_chip {
+            let (cols, rows) = self.grid_of(ws, self.area(ws));
+            ws.resize_overlay = Some((cols as u16, rows as u16, std::time::Instant::now()));
+        }
+    }
+
     fn drain_events(&mut self, ws: &mut WindowState) {
         let mut bell = false;
         // Cycle 246: pane ids that fired `TermEvent::Bell` this drain
@@ -9050,6 +9070,8 @@ impl App {
                 .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
             "send_mouse" => require_full(req.id, "send_mouse")
                 .unwrap_or_else(|| self.ctl_send_mouse(ws, event_loop, req)),
+            "resize_window" => require_full(req.id, "resize_window")
+                .unwrap_or_else(|| self.ctl_resize_window(ws, req)),
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
@@ -9349,6 +9371,10 @@ impl App {
             "surface": {"width": surface.0, "height": surface.1},
             "content": rect_json(self.area(target)),
             "context_menu": context_menu,
+            "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
+                "cols": cols,
+                "rows": rows,
+            })),
             "cursor": [target.cursor.x, target.cursor.y],
             "tab_drag_active": target.tab_drag_active,
             "tab_drag_armed": target.tab_drag_press.is_some(),
@@ -9363,6 +9389,73 @@ impl App {
                 "segments": segments,
             },
         })
+    }
+
+    /// `resize_window`: request a live OS-window client-area resize. The real
+    /// `WindowEvent::Resized` path applies renderer/surface/PTY grid changes.
+    fn ctl_resize_window(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let target_seq = req
+            .params
+            .get("window")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(ws.seq);
+        let Some(width) = req.params.get("width").and_then(|v| v.as_u64()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing integer 'width'");
+        };
+        let Some(height) = req.params.get("height").and_then(|v| v.as_u64()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing integer 'height'");
+        };
+        if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "'width' and 'height' must be in 1..=u32::MAX",
+            );
+        }
+        if target_seq == ws.seq {
+            return self.ctl_resize_window_for_target(ws, req.id, width as u32, height as u32);
+        }
+        let Some(mut target) = self.windows.remove(&target_seq) else {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                format!("no window with id {target_seq}"),
+            );
+        };
+        let resp =
+            self.ctl_resize_window_for_target(&mut target, req.id, width as u32, height as u32);
+        self.windows.insert(target_seq, target);
+        resp
+    }
+
+    fn ctl_resize_window_for_target(
+        &mut self,
+        target: &mut WindowState,
+        request_id: u64,
+        width: u32,
+        height: u32,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let Some(window) = target.window.clone() else {
+            return Response::err(request_id, ec::INTERNAL, "window is not available");
+        };
+        let requested = winit::dpi::PhysicalSize::new(width, height);
+        let applied = window.request_inner_size(requested).unwrap_or(requested);
+        self.apply_window_resize(target, applied.width, applied.height);
+        window.request_redraw();
+        Response::ok(
+            request_id,
+            serde_json::json!({
+                "window": target.seq,
+                "requested": {"width": width, "height": height},
+                "applied": {"width": applied.width, "height": applied.height},
+            }),
+        )
     }
 
     /// `send_mouse`: deterministic local-user mouse input for diagnostics and
@@ -13587,31 +13680,7 @@ impl App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.resize(size.width, size.height);
-                }
-                self.resize_all(ws);
-                // v2.20.0 (Ghostty `resize-overlay` parity): arm the
-                // transient size chip. `after-first` (default) skips the
-                // initial placement resize that fires at window creation.
-                let show_chip = match self.cfg.resize_overlay {
-                    kettle_config::ResizeOverlayMode::Never => false,
-                    kettle_config::ResizeOverlayMode::Always => true,
-                    // Review fix: placement events arrive as a short STORM
-                    // at window birth (session restore re-positions,
-                    // `window-state = maximised` applies post-create, a
-                    // tear-off window materializes mid-drag) — swallow the
-                    // whole birth window, not just the literal first event.
-                    kettle_config::ResizeOverlayMode::AfterFirst => {
-                        ws.seen_first_resize
-                            && ws.spawned_at.elapsed() > std::time::Duration::from_millis(1500)
-                    }
-                };
-                ws.seen_first_resize = true;
-                if show_chip {
-                    let (cols, rows) = self.grid_of(ws, self.area(ws));
-                    ws.resize_overlay = Some((cols as u16, rows as u16, std::time::Instant::now()));
-                }
+                self.apply_window_resize(ws, size.width, size.height);
                 // Cycle 875: record the new grid size into the asciicast trace.
                 #[cfg(feature = "dev-record")]
                 if self.recorder.is_some() {

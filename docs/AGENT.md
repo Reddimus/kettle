@@ -132,6 +132,7 @@ kettle ctl send_text --text "ls -la"                   # type into the focused p
 kettle ctl send_keys --keys "enter"                    # …then press Enter
 kettle ctl send_keys --keys "escape,:,w,q,enter"       # press keys/chords (v2.20)
 kettle ctl send_mouse --json '{"event":"click","x":20,"y":10,"button":"left"}'
+kettle ctl resize_window --json '{"width":900,"height":560}'
 kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
@@ -150,13 +151,14 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
-| `ui_geometry` | read-only | live window geometry: surface/content rects, tab-bar segment/new-tab rects, open context-menu rect/rows, cursor, and tab drag armed/visible state |
+| `ui_geometry` | read-only | live window geometry: surface/content rects, resize-overlay grid, tab-bar segment/new-tab rects, open context-menu rect/rows, cursor, and tab drag armed/visible state |
 | `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`) |
+| `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
@@ -226,7 +228,7 @@ Or a project-scoped `.mcp.json`:
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
 `kettle_list_panes`, `kettle_read_screen`, `kettle_read_cells`,
 `kettle_ui_geometry`, `kettle_screenshot`, `kettle_send_text`,
-`kettle_send_keys`, `kettle_send_mouse`, `kettle_wait_for`,
+`kettle_send_keys`, `kettle_send_mouse`, `kettle_resize_window`, `kettle_wait_for`,
 `kettle_run_command` (these drive a running kettle, so start it with
 `kettle --agent-server full`). When no server is found, the control-backed
 tools return an actionable error pointing at `--agent-server`.
@@ -287,13 +289,15 @@ Starts a real grid-renderer Kettle window and drives broader UI states through
 `kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`
 creation, local selection drag, right-click context-menu opening, and screenshot
 capture. It also clicks the `Split Right` context-menu row and verifies a new
-pane. It saves
+pane, then resizes the split window and verifies the focused pane grid changes.
+It saves
 PNG screenshots, `read_screen`, `read_cells`, `ui_geometry`, and `analysis.json`
 under `target/diagnostics/interaction-*`, and fails if scrollback text does not
 follow the visible viewport, if captures are blank, if the tab count does not
 increase, if selection drag does not visibly change content pixels, if the
 context menu lacks a dispatchable `Split Right` row, or if that row does not
-create a split pane.
+create a split pane, or if resize does not update the surface/grid and
+resize-overlay geometry.
 
 ```sh
 just tabbar-click-smoke

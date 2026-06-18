@@ -249,10 +249,11 @@ These need a real display and are run by hand (or on real hardware):
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, tab-bar `+` tab creation,
     right-click context-menu opening, context-menu `Split Right` dispatch, and
-    screenshots through `kettle ctl`. It writes PNG, `read_screen`,
+    split-window resize through `kettle ctl`. It writes PNG, `read_screen`,
     `read_cells`, `ui_geometry`, and `analysis.json` artifacts under
     `target/diagnostics/interaction-*`, and asserts default `read_screen`
-    follows the visible scrolled viewport.
+    follows the visible scrolled viewport and resize updates the focused pane
+    grid.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

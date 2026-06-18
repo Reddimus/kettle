@@ -580,7 +580,13 @@ fn wait_for_poll(
 /// server dispatches is classified here, and that `handle_ctl_request` gates
 /// the mutating ones on `agent-server = full`. (Used by the drift-guard tests.)
 #[cfg_attr(not(test), allow(dead_code))]
-pub const MUTATING_METHODS: &[&str] = &["send_text", "send_keys", "send_mouse", "run_command"];
+pub const MUTATING_METHODS: &[&str] = &[
+    "send_text",
+    "send_keys",
+    "send_mouse",
+    "resize_window",
+    "run_command",
+];
 
 /// The read-only methods (allowed in `read-only` mode).
 #[cfg_attr(not(test), allow(dead_code))]

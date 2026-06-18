@@ -154,6 +154,21 @@ pub fn tool_specs() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "kettle_resize_window",
+            "description": "Request a live Kettle window client-area resize and let the normal \
+                renderer/PTY resize path process it. Use for resize-overlay and split/grid \
+                diagnostics. Requires the agent server in `full` mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "window": {"type": "integer", "description": "window seq (default: focused window)"},
+                    "width": {"type": "integer", "description": "requested client-area width in physical pixels"},
+                    "height": {"type": "integer", "description": "requested client-area height in physical pixels"}
+                },
+                "required": ["width", "height"]
+            }
+        }),
+        json!({
             "name": "kettle_wait_for",
             "description": "Wait until a kettle pane's screen matches a condition — replaces \
                 sleep-and-pray when driving interactive apps. Conditions (AND when combined): \
@@ -272,6 +287,21 @@ pub fn call_tool(params: &Value) -> Value {
                 }
             }
             ctl_call("send_mouse", Value::Object(p))
+        }
+        "kettle_resize_window" => {
+            let Some(width) = args.get("width") else {
+                return error_result("kettle_resize_window requires a 'width' integer");
+            };
+            let Some(height) = args.get("height") else {
+                return error_result("kettle_resize_window requires a 'height' integer");
+            };
+            let mut p = serde_json::Map::new();
+            p.insert("width".into(), width.clone());
+            p.insert("height".into(), height.clone());
+            if let Some(window) = args.get("window") {
+                p.insert("window".into(), window.clone());
+            }
+            ctl_call("resize_window", Value::Object(p))
         }
         "kettle_wait_for" => {
             let mut p = serde_json::Map::new();

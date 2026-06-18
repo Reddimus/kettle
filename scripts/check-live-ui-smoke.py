@@ -266,6 +266,44 @@ def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -
     raise SystemExit("interaction smoke: could not find a visible text row for selection drag")
 
 
+def wait_for_resize(
+    live: LiveKettle,
+    before_width: int,
+    before_height: int,
+    before_cols: int,
+    before_rows: int,
+    timeout_s: float = 8.0,
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    deadline = time.monotonic() + timeout_s
+    last_geo: Dict[str, object] = {}
+    last_cells: Dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last_geo = live.json_ctl("ui_geometry")
+        last_cells = live.json_ctl("read_cells")
+        surface = last_geo.get("surface", {})
+        width = int(surface.get("width", 0))
+        height = int(surface.get("height", 0))
+        cols = int(last_cells.get("cols", 0))
+        rows = int(last_cells.get("rows", 0))
+        if (
+            (width, height) != (before_width, before_height)
+            and (cols, rows) != (before_cols, before_rows)
+            and last_geo.get("resize_overlay")
+            and cols > 0
+            and rows > 0
+        ):
+            return last_geo, last_cells
+        time.sleep(0.1)
+    raise SystemExit(
+        "interaction smoke: resize did not settle: "
+        f"before_surface=({before_width},{before_height}) "
+        f"last_surface={last_geo.get('surface')} "
+        f"before_cells=({before_cols},{before_rows}) "
+        f"last_cells=({last_cells.get('cols')},{last_cells.get('rows')}) "
+        f"resize_overlay={last_geo.get('resize_overlay')}"
+    )
+
+
 def active_rect(geometry: Dict[str, object]) -> Tuple[Dict[str, float], int]:
     tab_bar = geometry["tab_bar"]  # type: ignore[index]
     active = [s for s in tab_bar["segments"] if s.get("active")]  # type: ignore[index]
@@ -795,6 +833,23 @@ def run_interaction(kettle: str, root: Path) -> Path:
         live_shell_command(live, command_with_marker("printf 'split-right-live\\n'" if platform.system() != "Windows" else "Write-Output split-right-live", split_marker), split_marker)
         states.append(capture_live_state(live, out, "split-right"))
 
+        before_resize_geo = live.json_ctl("ui_geometry")
+        before_resize_cells = live.json_ctl("read_cells")
+        (out / "resize-before.geometry.json").write_text(json.dumps(before_resize_geo, indent=2) + "\n")
+        (out / "resize-before.cells.json").write_text(json.dumps(before_resize_cells, indent=2) + "\n")
+        surface = before_resize_geo["surface"]  # type: ignore[index]
+        before_w = int(surface["width"])  # type: ignore[index]
+        before_h = int(surface["height"])  # type: ignore[index]
+        before_cols = int(before_resize_cells.get("cols", 0))
+        before_rows = int(before_resize_cells.get("rows", 0))
+        target_w = before_w + 120
+        target_h = before_h + 72
+        live.ctl("resize_window", params={"width": target_w, "height": target_h})
+        resized_geo, resized_cells = wait_for_resize(live, before_w, before_h, before_cols, before_rows)
+        (out / "resize-after.geometry.json").write_text(json.dumps(resized_geo, indent=2) + "\n")
+        (out / "resize-after.cells.json").write_text(json.dumps(resized_cells, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "resize-after"))
+
     (out / "analysis.json").write_text(
         json.dumps(
             {
@@ -806,6 +861,21 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "tabs_after": len(tabs_after.get("tabs", [])),
                 "panes_before_split": len(panes_before_split.get("panes", [])),
                 "panes_after_split": len(panes_after_split.get("panes", [])),
+                "resize_before_surface": before_resize_geo["surface"],
+                "resize_after_surface": resized_geo["surface"],
+                "resize_before_cells": {
+                    "cols": before_resize_cells.get("cols"),
+                    "rows": before_resize_cells.get("rows"),
+                },
+                "resize_requested_surface": {
+                    "width": target_w,
+                    "height": target_h,
+                },
+                "resize_after_cells": {
+                    "cols": resized_cells.get("cols"),
+                    "rows": resized_cells.get("rows"),
+                },
+                "resize_overlay": resized_geo.get("resize_overlay"),
                 "menu_split_right_rect": split_rows[0]["rect"],
             },
             indent=2,
