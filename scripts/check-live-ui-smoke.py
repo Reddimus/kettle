@@ -449,6 +449,13 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         before = live.json_ctl("ui_geometry")
         (out / "geometry-before-press.json").write_text(json.dumps(before, indent=2) + "\n")
         live.screenshot(out / "before-press.png")
+        segments = before["tab_bar"]["segments"]  # type: ignore[index]
+        widths = [float(seg["rect"]["width"]) for seg in segments]  # type: ignore[index]
+        if widths and max(widths) > 260.0:
+            raise SystemExit(
+                "tabbar smoke: short tabs inflated into oversized homogeneous segments: "
+                f"widths={[round(w, 1) for w in widths]}"
+            )
         seg = before["tab_bar"]["segments"][1]["rect"]  # type: ignore[index]
         x, y = rect_center(seg)
         live.ctl("send_mouse", params={"event": "press", "x": x, "y": y, "button": "left"})

@@ -300,10 +300,12 @@ These need a real display and are run by hand (or on real hardware):
     `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review. Tabbar runs write `analysis.json` with the
     old/new active tab rects and outside-rect pixel-change counts; underline
-    runs write `analysis.json` with the visible underlined sentinel sequence
-    across down/up scrolling plus per-row underline/plain-row pixel hit counts
-    from the PNG frames, and `delta_fixtures` records whether the git and SVN
-    `diff | delta` fixtures were active. Interaction runs include
+    runs also assert short tab labels stay in natural-width rects instead of
+    inflating into full-strip homogeneous segments. Underline runs write
+    `analysis.json` with the visible underlined sentinel sequence across down/up
+    scrolling plus per-row underline/plain-row pixel hit counts from the PNG
+    frames, and `delta_fixtures` records whether the git and SVN `diff | delta`
+    fixtures were active. Interaction runs include
     `notification-events.jsonl` and `notification-event.json` for the OSC 777
     event-feed assertion. Native
     Windows runs the tabbar/underline recipes through

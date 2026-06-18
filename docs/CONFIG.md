@@ -52,6 +52,7 @@ keys). The file is **watched and reloaded live**.
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
+| `homogeneous-tabbar` | bool | `false` | When `false` (default), horizontal tabs use natural widths based on their labels so the active/pressed visual stays aligned to the visible tab. Set `true` for equal-width tabs that divide the whole strip |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
@@ -224,7 +225,6 @@ Terminator's. Each key falls into one of three buckets:
 
 | Key | Why it's a "no-op" but works |
 |---|---|
-| `homogeneous-tabbar` | Terminator: a toggle for equal-width tab segments. kettle: tab bar ALWAYS tiles segments equally (single-source-of-truth: `app.rs::tab_bar::seg_w = strip / n`). Setting the toggle has no effect because there's no inhomogeneous mode to disable |
 | `sticky` (X11 _NET_WM_STATE_STICKY) | **macOS is fully wired** — `sticky = true` calls `app.rs::set_visible_on_all_spaces`, which sets `NSWindowCollectionBehavior::CanJoinAllSpaces \| Stationary` on the underlying NSWindow, pinning the window to every Space. **X11 / Wayland are not wired** — winit 0.30 exposes no portable "stick to all workspaces" API (the X11 `_NET_WM_STATE_STICKY` hint has no winit binding and Wayland has no equivalent), so on those platforms the key is logged (not silently dropped) and `always-on-top` is the closest available cross-platform substitute |
 | `inactive-color-offset` | Kettle's `unfocused-split-opacity` is the implemented variant. The exact math differs (Terminator: two separate fg + bg offsets; kettle: single opacity blend), but the user-visible effect — dim unfocused panes — is equivalent |
 

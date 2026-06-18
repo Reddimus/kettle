@@ -1189,13 +1189,13 @@
       falls back to the configured shell. Palette entries; no default
       keybinds. v1.3.0.
 - [x] **Mouse-drag tab reorder** (kitty / iTerm2 / Ghostty parity).
-      Pure `tab_drag_target_index(cursor_x, n, strip_w) -> usize`
-      helper + a tiny `tab_drag_active: bool` flag on App. Press in a
-      tab segment (not ✕, not +) arms the drag; `CursorMoved` events
-      compute the target index and call `Mux::move_active_tab`;
-      release disarms. No ghost-render of the dragged segment — kept
-      out of scope; bar snaps to the new order at each boundary
-      crossing. v1.3.0.
+      Pure `tab_drag_target_index(cursor_x, segments)` helper + a tiny
+      `tab_drag_active: bool` flag on App. Press in a tab segment (not ✕, not
+      +) arms the drag; `CursorMoved` events compute the target index from the
+      same rendered segment rects used for painting/hit-testing and call
+      `Mux::move_active_tab`; release disarms. v1.3.0, updated in cycle-956
+      when natural-width tabs became the default so drag targeting could not
+      drift from the visible tab geometry.
 
 - [x] **Coordinated-disclosure policy + supply-chain automation.**
       `SECURITY.md` points security reports at GitHub's private
@@ -1444,9 +1444,14 @@ features list. What's left is genuinely-multi-week threads + polish.
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag
       threshold. It also diffs tab-bar screenshots and requires all press-time
-      pixel changes to stay inside the old/new active tab rectangles. `just
-      underline-scroll-smoke` opens underlined sentinel text plus `git diff |
-      delta`; when `svn`/`svnadmin` are installed it also creates a local SVN
+      pixel changes to stay inside the old/new active tab rectangles. Cycle-956
+      switched the default horizontal tab layout to natural-width segments and
+      made tab drag targeting use the rendered segment rects, so the active /
+      pressed UI stays aligned to the visible clicked tab instead of filling a
+      huge equal-width slice of the strip; the smoke now fails if short tabs
+      inflate back into oversized homogeneous segments. `just underline-scroll-smoke`
+      opens underlined sentinel text plus `git diff | delta`; when
+      `svn`/`svnadmin` are installed it also creates a local SVN
       repository and includes `svn diff | delta` in the same `less -R` stream.
       It drives repeated down/up scroll input and saves PNG, `read_cells`, and
       `analysis.json` frames under `target/diagnostics`; `analysis.json` records

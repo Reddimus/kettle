@@ -1088,8 +1088,9 @@ pub struct Config {
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
     /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
     pub scroll_tabbar: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:83
-    /// `homogeneous_tabbar`): equal-width tabs.
+    /// Cycle 337/956 (Terminator parity, terminatorlib/config.py:83
+    /// `homogeneous_tabbar`): equal-width tabs when true. Kettle defaults to
+    /// natural-width tabs so the active-tab visual stays bound to the label.
     pub homogeneous_tabbar: bool,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
@@ -1875,7 +1876,7 @@ impl Default for Config {
             new_tab_after_current_tab: false,
             title_at_bottom: false,
             scroll_tabbar: false,
-            homogeneous_tabbar: true,
+            homogeneous_tabbar: false,
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
@@ -5942,7 +5943,7 @@ cell-height = 1.2\n";
         assert!(!d.new_tab_after_current_tab);
         assert!(!d.title_at_bottom);
         assert!(!d.scroll_tabbar);
-        assert!(d.homogeneous_tabbar);
+        assert!(!d.homogeneous_tabbar);
         assert!(!d.hide_on_lose_focus);
         assert!(!d.sticky);
         assert!(!d.hide_from_taskbar);
@@ -5963,8 +5964,9 @@ cell-height = 1.2\n";
         // sticky is single-form (no underscore variant — it's
         // already a single word).
         assert!(Config::parse_text("sticky = true").sticky);
-        // homogeneous-tabbar default true, parse_text confirms it
-        // accepts override to false.
+        // Natural-width tabs are the default; homogeneous-tabbar remains
+        // available for users who prefer equal-width segments.
+        assert!(Config::parse_text("homogeneous-tabbar = true").homogeneous_tabbar);
         assert!(!Config::parse_text("homogeneous-tabbar = false").homogeneous_tabbar);
     }
 

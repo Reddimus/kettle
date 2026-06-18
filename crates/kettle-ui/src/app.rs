@@ -563,10 +563,10 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
 /// Cycle 620 (Terminator parity, terminatorlib/config.py:88
 /// `homogeneous_tabbar`): per-tab widths for the tab-bar strip.
 ///
-/// `homogeneous = true` (kettle + Terminator default) divides the
-/// strip evenly across all tabs — `strip / n` per tab.
+/// `homogeneous = true` divides the strip evenly across all tabs —
+/// `strip / n` per tab.
 ///
-/// `homogeneous = false` sizes each tab by its title length: a
+/// `homogeneous = false` (kettle default) sizes each tab by its title length: a
 /// natural width of `title_chars * cell_w + chrome_w * 2 + close_btn_w`
 /// where `chrome_w` is half the tab height (matching kettle's
 /// existing inner padding) and `close_btn_w` is one tab-height
@@ -1781,19 +1781,22 @@ pub(crate) struct ContextMenuState {
 }
 
 /// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
-/// given `n` segments tiling a strip of width `strip_w`. Used by the
-/// cycle-249 drag-to-reorder handler — the user grabs a tab, drags,
-/// and the bar reorders to keep the dragged segment under the cursor.
-/// Clamped to `[0, n-1]` so a cursor that overshoots either edge of
-/// the strip still produces a valid target. Returns 0 for an empty
-/// or zero-width bar (the no-op case).
-fn tab_drag_target_index(cursor_x: f32, n: usize, strip_w: f32) -> usize {
-    if n == 0 || strip_w <= 0.0 {
+/// using the same rendered segment rects that hit-testing and painting use.
+/// Used by the cycle-249 drag-to-reorder handler — the user grabs a tab,
+/// drags, and the bar reorders to keep the dragged segment under the cursor.
+/// Clamped to the first/last rendered segment so a cursor that overshoots
+/// either edge still produces a valid target. Returns 0 for an empty bar.
+fn tab_drag_target_index(cursor_x: f32, segments: &[kettle_render::TabSeg]) -> usize {
+    if segments.is_empty() {
         return 0;
     }
-    let seg_w = strip_w / n as f32;
-    let raw = (cursor_x / seg_w).floor() as isize;
-    raw.clamp(0, n as isize - 1) as usize
+    for seg in segments {
+        let (x, _, w, _) = seg.rect;
+        if cursor_x < x + w {
+            return seg.idx;
+        }
+    }
+    segments.last().map(|seg| seg.idx).unwrap_or(0)
 }
 
 /// v2.19.0 (tear-off UX): Euclidean distance from a point to the nearest
@@ -3317,10 +3320,10 @@ impl App {
             .max(1.0);
         // Cycle 620 (Terminator parity, terminatorlib/config.py:88
         // `homogeneous_tabbar`): per-tab widths from a pure helper.
-        // `homogeneous = true` (kettle default) keeps the equal-width
-        // strip; `false` sizes each tab to its title length so a
-        // short tab like "fish" isn't padded out as wide as a long
-        // tab like "vim ~/Projects/some-long-path".
+        // `homogeneous = false` (kettle default) sizes each tab to its title
+        // length so a short tab like "fish" isn't padded out as wide as a long
+        // tab like "vim ~/Projects/some-long-path"; `true` preserves the
+        // equal-width Terminator-style strip for users who want it.
         let widths = compute_tab_segment_widths(
             titles.iter().map(|s| s.as_str()),
             strip,
@@ -9791,18 +9794,7 @@ impl App {
         if bar.height <= 0.0 || bar.segments.is_empty() {
             return;
         }
-        let (_, _, nw, _) = bar.new_tab;
-        let (_, _, aw, _) = bar.new_tab_menu;
-        let (sw, _) = ws
-            .renderer
-            .as_ref()
-            .map(|r| {
-                let (w, h) = r.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
-        let strip_w = tab_segment_strip_width(sw, nw, aw);
-        let target = tab_drag_target_index(ws.cursor.x as f32, bar.segments.len(), strip_w);
+        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
         let delta = target as i32 - ws.mux.active as i32;
         if delta != 0 && ws.mux.move_active_tab(delta) {
             ws.mux.touch_active_tab_seen();
@@ -14026,27 +14018,11 @@ impl App {
                 {
                     let bar = self.tab_bar(ws);
                     if bar.height > 0.0 && !bar.segments.is_empty() {
-                        let (_, _, nw, _) = bar.new_tab;
-                        // Cycle 821 (audit): the trailing button area is the
-                        // cycle-805 `▾ +` PAIR, not just `+`. Subtract both so
-                        // the drag strip matches the width `tab_bar()` actually
-                        // tiles segments across (`(sw - plus_w - arrow_w)
-                        // .max(plus_w)`); using `sw - plus_w` left the strip one
-                        // button too wide, so the reorder target lagged the
-                        // cursor near the right edge (`arrow_w` is 0 when the
-                        // dropdown is absent, so this is still correct there).
-                        let (_, _, aw, _) = bar.new_tab_menu;
-                        let (sw, _) = ws
-                            .renderer
-                            .as_ref()
-                            .map(|r| {
-                                let (w, h) = r.surface_size();
-                                (w as f32, h as f32)
-                            })
-                            .unwrap_or((800.0, 600.0));
-                        let strip_w = tab_segment_strip_width(sw, nw, aw);
-                        let target =
-                            tab_drag_target_index(ws.cursor.x as f32, bar.segments.len(), strip_w);
+                        // Cycle 821/956: use the same rendered segment rects
+                        // that click hit-testing and painting use. This keeps
+                        // drag targeting correct for both homogeneous and
+                        // natural-width tab bars.
+                        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
                         let delta = target as i32 - ws.mux.active as i32;
                         if delta != 0 && ws.mux.move_active_tab(delta) {
                             ws.mux.touch_active_tab_seen();
@@ -17432,24 +17408,43 @@ mod tests {
     }
 
     #[test]
-    fn tab_drag_target_index_clamps_to_strip() {
+    fn tab_drag_target_index_uses_rendered_segment_rects() {
         use super::tab_drag_target_index;
-        // 3 tabs, 300-px strip → 100 px per segment. Cursor at 50 →
-        // tab 0; 150 → tab 1; 250 → tab 2.
-        assert_eq!(tab_drag_target_index(50.0, 3, 300.0), 0);
-        assert_eq!(tab_drag_target_index(150.0, 3, 300.0), 1);
-        assert_eq!(tab_drag_target_index(250.0, 3, 300.0), 2);
+        let seg = |idx, x, w| kettle_render::TabSeg {
+            idx,
+            rect: (x, 0.0, w, 24.0),
+            close: (x + w - 24.0, 0.0, 24.0, 24.0),
+            title: format!("tab-{idx}"),
+            active: idx == 0,
+            activity: kettle_render::TabActivity::Normal,
+        };
+        // 3 equal tabs, 300-px strip → 100 px per segment. Cursor at
+        // 50 → tab 0; 150 → tab 1; 250 → tab 2.
+        let equal = [
+            seg(0, 0.0, 100.0),
+            seg(1, 100.0, 100.0),
+            seg(2, 200.0, 100.0),
+        ];
+        assert_eq!(tab_drag_target_index(50.0, &equal), 0);
+        assert_eq!(tab_drag_target_index(150.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(250.0, &equal), 2);
         // Right at the boundary: 100 → tab 1 (floor); 200 → tab 2.
-        assert_eq!(tab_drag_target_index(100.0, 3, 300.0), 1);
-        assert_eq!(tab_drag_target_index(200.0, 3, 300.0), 2);
+        assert_eq!(tab_drag_target_index(100.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(200.0, &equal), 2);
+        // Natural-width tabs: targeting follows the rendered rects,
+        // not a hidden strip/n assumption.
+        let natural = [seg(0, 0.0, 72.0), seg(1, 72.0, 144.0), seg(2, 216.0, 88.0)];
+        assert_eq!(tab_drag_target_index(71.0, &natural), 0);
+        assert_eq!(tab_drag_target_index(72.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(215.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(216.0, &natural), 2);
         // Negative cursor (past the left edge) → clamps to 0.
-        assert_eq!(tab_drag_target_index(-50.0, 3, 300.0), 0);
+        assert_eq!(tab_drag_target_index(-50.0, &natural), 0);
         // Past the right edge → clamps to last segment, not n.
-        assert_eq!(tab_drag_target_index(900.0, 3, 300.0), 2);
-        assert_eq!(tab_drag_target_index(f32::MAX, 3, 300.0), 2);
-        // Empty bar or zero strip → 0 (defensive no-op).
-        assert_eq!(tab_drag_target_index(50.0, 0, 300.0), 0);
-        assert_eq!(tab_drag_target_index(50.0, 3, 0.0), 0);
+        assert_eq!(tab_drag_target_index(900.0, &natural), 2);
+        assert_eq!(tab_drag_target_index(f32::MAX, &natural), 2);
+        // Empty bar → 0 (defensive no-op).
+        assert_eq!(tab_drag_target_index(50.0, &[]), 0);
     }
 
     /// v2.19.0 (tear-off UX): the tear decision is uniform hysteresis in
