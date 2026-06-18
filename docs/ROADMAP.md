@@ -1474,15 +1474,19 @@ features list. What's left is genuinely-multi-week threads + polish.
       screenshots, and it pinned/fixed `read_screen` so default reads follow the
       visible scrolled viewport. The live interaction smoke now includes local
       selection drag, context-menu `Split Right` dispatch, split-window resize
-      probes through `send_mouse` / `resize_window`, and an OSC 777 protocol
+      probes through `send_mouse` / `resize_window`, an OSC 777 protocol
       notification probe observed through the subscribed `kettle ctl events`
-      stream. Remaining work is deeper live-window validation: drive authenticated
-      Codex/Claude agent sessions, configured AstroNvim workflows beyond marker
-      buffers, full tmux workflows beyond attach/send, and deeper screenshot
-      states inside Kettle with `text-renderer = grid`. Use
-      `send_mouse`, `send_keys`, `ui_geometry`, `read_cells`, and `screenshot`
-      so the pass is reproducible instead of a manual eyeball-only sweep, then
-      compare captured frames for blank panes, overlapping UI, stale text, and unintended
+      stream, Settings modal open/close from the context menu, and Command
+      palette opening from the new-tab dropdown. `ui_geometry` now reports modal
+      booleans so those app-chrome states are asserted without OCR. Remaining
+      work is deeper live-window validation: drive authenticated Codex/Claude
+      agent sessions, configured AstroNvim workflows beyond marker buffers, full
+      tmux workflows beyond attach/send, keyboard-shortcut app modal driving
+      such as search (`Ctrl+Shift+F`), and deeper screenshot states inside
+      Kettle with `text-renderer = grid`. Use `send_mouse`, `send_keys`,
+      `ui_geometry`, `read_cells`, and `screenshot` so the pass is reproducible
+      instead of a manual eyeball-only sweep, then compare captured frames for
+      blank panes, overlapping UI, stale text, and unintended
       blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained

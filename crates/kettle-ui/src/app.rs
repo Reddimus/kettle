@@ -9370,6 +9370,19 @@ impl App {
             "window": target.seq,
             "surface": {"width": surface.0, "height": surface.1},
             "content": rect_json(self.area(target)),
+            "modals": {
+                "search": target.mux.search.open,
+                "palette": target.palette_input.is_some(),
+                "settings": target.settings_nav.is_some(),
+                "settings_text_edit": target.settings_text_edit.is_some(),
+                "layout_picker": target.layout_picker_input.is_some(),
+                "hint_mode": target.hint_state.is_some(),
+                "ssh_launcher": target.ssh_input.is_some(),
+                "context_menu": target.context_menu.is_some(),
+                "title_edit": target.editing_title.is_some(),
+                "confirm_dialog": target.confirm_dialog.is_some(),
+                "vi_mode": target.vi_mode.is_some(),
+            },
             "context_menu": context_menu,
             "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
                 "cols": cols,
@@ -9604,9 +9617,21 @@ impl App {
             ws.context_menu = None;
             return true;
         }
+        if ws.settings_nav.is_some()
+            && (bcode == 0 || bcode == 2)
+            && self.settings_mouse(ws, if bcode == 2 { -1 } else { 1 }, true)
+        {
+            return true;
+        }
+        if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+            return true;
+        }
         if bar.height > 0.0 && py >= bar.y && py < bar.y + bar.height && (bcode == 0 || bcode == 1)
         {
-            if bcode == 0 && rect_contains(bar.new_tab, px, py) {
+            if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
+                let (ax, ay, _, ah) = bar.new_tab_menu;
+                self.open_new_tab_menu(ws, ax, ay + ah);
+            } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
                 let area = self.area(ws);
                 let (cols, rows) = self.grid_of(ws, area);
                 let (cw, ch) = self.cell_px(ws);
@@ -15581,6 +15606,38 @@ mod tests {
         // Defensive: even if both were somehow set, the context-menu
         // exclusion wins (its dedicated handling ran first).
         assert!(!modal_swallows_pointer(true, true));
+    }
+
+    /// Agent/control-plane mouse presses must stay in lock-step with the real
+    /// winit mouse path for app chrome. The live interaction smoke drives these
+    /// branches through `kettle ctl send_mouse`; this source guard prevents a
+    /// future refactor from dropping the modal gate or turning the new-tab
+    /// dropdown arrow back into a plain `+` click.
+    #[test]
+    fn ctl_mouse_press_handles_app_chrome_before_panes() {
+        let src = include_str!("app.rs").replace('\r', "");
+        let body = src
+            .split("fn ctl_mouse_press(")
+            .nth(1)
+            .and_then(|s| s.split("fn ctl_mouse_release").next())
+            .expect("ctl_mouse_press body present");
+        assert!(
+            body.contains("&& self.settings_mouse(ws, if bcode == 2 { -1 } else { 1 }, true)"),
+            "ctl_mouse_press must route Settings modal clicks through settings_mouse"
+        );
+        assert!(
+            body.contains(
+                "if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some())"
+            ),
+            "ctl_mouse_press must swallow pane/tab clicks behind non-menu modals"
+        );
+        assert!(
+            body.contains("rect_contains(bar.new_tab_menu, px, py)")
+                && body.contains("self.open_new_tab_menu(ws, ax, ay + ah);")
+                && body.find("rect_contains(bar.new_tab_menu, px, py)")
+                    < body.find("rect_contains(bar.new_tab, px, py)"),
+            "ctl_mouse_press must check the new-tab dropdown arrow before the + button"
+        );
     }
 
     /// Cycle 904 (audit) drift guard. Mouse drag-to-resize of split dividers is

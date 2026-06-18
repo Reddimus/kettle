@@ -349,6 +349,24 @@ def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -
     raise SystemExit("interaction smoke: could not find a visible text row for selection drag")
 
 
+def visible_context_row(geometry: Dict[str, object], label: str) -> Dict[str, object]:
+    menu = geometry.get("context_menu")
+    if not isinstance(menu, dict):
+        raise SystemExit(f"interaction smoke: no context menu while looking for {label!r}")
+    rows = [
+        row for row in menu.get("rows", [])  # type: ignore[union-attr]
+        if row.get("label") == label and row.get("dispatchable")
+    ]
+    if len(rows) != 1:
+        raise SystemExit(f"interaction smoke: expected one dispatchable {label!r} row, got {rows}")
+    return rows[0]
+
+
+def modal_open(geometry: Dict[str, object], name: str) -> bool:
+    modals = geometry.get("modals", {})
+    return isinstance(modals, dict) and bool(modals.get(name))
+
+
 def wait_for_resize(
     live: LiveKettle,
     before_width: int,
@@ -1063,12 +1081,35 @@ def run_interaction(kettle: str, root: Path) -> Path:
         menu = menu_geo.get("context_menu")
         if not menu:
             raise SystemExit("interaction smoke: right-click did not expose context_menu geometry")
-        split_rows = [
-            row for row in menu.get("rows", [])  # type: ignore[union-attr]
-            if row.get("label") == "Split Right" and row.get("dispatchable")
-        ]
-        if len(split_rows) != 1:
-            raise SystemExit(f"interaction smoke: expected one Split Right row, got {split_rows}")
+        settings_row = visible_context_row(menu_geo, "Settings…")
+        settings_x, settings_y = rect_center(settings_row["rect"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": settings_x, "y": settings_y, "button": "left"})
+        time.sleep(0.3)
+        settings_geo = live.json_ctl("ui_geometry")
+        (out / "settings-open.geometry.json").write_text(json.dumps(settings_geo, indent=2) + "\n")
+        live.screenshot(out / "settings-open.png")
+        if not modal_open(settings_geo, "settings"):
+            raise SystemExit("interaction smoke: Settings row did not open the settings modal")
+        settings_changes = len(changed_pixels(out / "menu-before.png", out / "settings-open.png", 0.0, float(geo["surface"]["height"])))  # type: ignore[index]
+        if settings_changes < 500:
+            raise SystemExit(f"interaction smoke: settings overlay changed too few pixels ({settings_changes})")
+        settings_surface = settings_geo["surface"]  # type: ignore[index]
+        close_x = float(settings_surface["width"]) - 2.0  # type: ignore[index]
+        close_y = float(settings_surface["height"]) - 2.0  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "move", "x": close_x, "y": close_y})
+        live.ctl("send_mouse", params={"event": "press", "x": close_x, "y": close_y, "button": "left"})
+        live.ctl("send_mouse", params={"event": "release", "x": close_x, "y": close_y, "button": "left"})
+        time.sleep(0.2)
+        settings_closed_geo = live.json_ctl("ui_geometry")
+        (out / "settings-closed.geometry.json").write_text(json.dumps(settings_closed_geo, indent=2) + "\n")
+        if modal_open(settings_closed_geo, "settings"):
+            raise SystemExit("interaction smoke: click outside settings did not close the modal")
+
+        live.ctl("send_mouse", params={"event": "click", "x": mx, "y": my, "button": "right"})
+        time.sleep(0.2)
+        menu_geo = live.json_ctl("ui_geometry")
+        (out / "menu-reopened.geometry.json").write_text(json.dumps(menu_geo, indent=2) + "\n")
+        split_rows = [visible_context_row(menu_geo, "Split Right")]
         panes_before_split = live.json_ctl("list_panes")
         (out / "panes-before-split.json").write_text(json.dumps(panes_before_split, indent=2) + "\n")
         split_x, split_y = rect_center(split_rows[0]["rect"])  # type: ignore[index]
@@ -1121,11 +1162,35 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "notification-event.json").write_text(json.dumps(notification_event, indent=2) + "\n")
         states.append(capture_live_state(live, out, "notification"))
 
+        palette_before = live.json_ctl("ui_geometry")
+        menu_x, menu_y = rect_center(palette_before["tab_bar"]["new_tab_menu"])  # type: ignore[index]
+        live.screenshot(out / "palette-before.png")
+        live.ctl("send_mouse", params={"event": "click", "x": menu_x, "y": menu_y, "button": "left"})
+        time.sleep(0.2)
+        new_tab_menu_geo = live.json_ctl("ui_geometry")
+        (out / "new-tab-menu.geometry.json").write_text(json.dumps(new_tab_menu_geo, indent=2) + "\n")
+        live.screenshot(out / "new-tab-menu.png")
+        palette_row = visible_context_row(new_tab_menu_geo, "Command palette")
+        palette_x, palette_y = rect_center(palette_row["rect"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": palette_x, "y": palette_y, "button": "left"})
+        time.sleep(0.3)
+        palette_geo = live.json_ctl("ui_geometry")
+        (out / "palette-open.geometry.json").write_text(json.dumps(palette_geo, indent=2) + "\n")
+        live.screenshot(out / "palette-open.png")
+        if not modal_open(palette_geo, "palette"):
+            raise SystemExit("interaction smoke: Command palette row did not open the palette modal")
+        palette_changes = len(changed_pixels(out / "palette-before.png", out / "palette-open.png", 0.0, float(palette_before["surface"]["height"])))  # type: ignore[index]
+        if palette_changes < 250:
+            raise SystemExit(f"interaction smoke: command palette changed too few pixels ({palette_changes})")
+        states.append(capture_live_state(live, out, "command-palette"))
+
     (out / "analysis.json").write_text(
         json.dumps(
             {
                 "states": states,
                 "menu_changed_pixels": menu_changes,
+                "settings_changed_pixels": settings_changes,
+                "palette_changed_pixels": palette_changes,
                 "selection_changed_pixels": selection_changes,
                 "scroll_offset": int(scrolled.get("display_offset", 0)),
                 "tabs_before": len(tabs_before.get("tabs", [])),
@@ -1147,6 +1212,10 @@ def run_interaction(kettle: str, root: Path) -> Path:
                     "rows": resized_cells.get("rows"),
                 },
                 "resize_overlay": resized_geo.get("resize_overlay"),
+                "settings_modal_after_open": settings_geo.get("modals"),
+                "settings_modal_after_close": settings_closed_geo.get("modals"),
+                "palette_modal_after_open": palette_geo.get("modals"),
+                "palette_row_rect": palette_row["rect"],
                 "menu_split_right_rect": split_rows[0]["rect"],
                 "notification_event": notification_event,
             },

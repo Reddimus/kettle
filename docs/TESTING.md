@@ -254,14 +254,16 @@ These need a real display and are run by hand (or on real hardware):
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, tab-bar `+` tab creation,
-    right-click context-menu opening, context-menu `Split Right` dispatch, and
-    split-window resize through `kettle ctl`. It also emits OSC 777 from inside
-    the live pane and asserts the subscribed control event stream receives a
-    `protocol_notification` event with the expected title/body. It writes PNG,
-    `read_screen`, `read_cells`, `ui_geometry`, `notification-events.jsonl`, and
-    `analysis.json` artifacts under `target/diagnostics/interaction-*`, and
-    asserts default `read_screen` follows the visible scrolled viewport and
-    resize updates the focused pane grid.
+    right-click context-menu opening, Settings modal open/close from that menu,
+    context-menu `Split Right` dispatch, split-window resize, and Command
+    palette opening from the new-tab dropdown through `kettle ctl`. It also
+    emits OSC 777 from inside the live pane and asserts the subscribed control
+    event stream receives a `protocol_notification` event with the expected
+    title/body. It writes PNG, `read_screen`, `read_cells`, `ui_geometry`,
+    `notification-events.jsonl`, and `analysis.json` artifacts under
+    `target/diagnostics/interaction-*`, and asserts default `read_screen`
+    follows the visible scrolled viewport, modal state is reported by
+    `ui_geometry`, and resize updates the focused pane grid.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
