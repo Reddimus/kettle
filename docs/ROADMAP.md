@@ -1499,11 +1499,18 @@ features list. What's left is genuinely-multi-week threads + polish.
       startup, ASCII-flood, and SGR/underline-flood rows in
       `docs/PERFORMANCE.md` are refreshed for current `main` and pass the
       Terminator/Ghostty timing gate; the Linux gate also records advisory
-      max-RSS samples for the ASCII flood lifecycle. Remaining work: include
-      Windows 11 and Windows 11 WSL where possible, broaden the local peer suite
-      to resize, scrollback navigation, and GPU/frame-time probes, and prioritize row-level damage tracking,
-      persistent GPU cell buffers, and memory reduction if grid-mode frame cost
-      or RSS remains above target.
+      max-RSS samples for the ASCII flood lifecycle. `linux-compare.sh` now
+      also runs `scripts/perf/kettle-live-probes.py`: a real grid-renderer
+      Kettle window is driven through `kettle ctl`, `resize_window` is timed
+      until `ui_geometry` settles, underlined scrollback text is generated, and
+      `perform_action scroll_page_up/down` is timed with `read_screen`
+      verification. Those live timings are Kettle-only advisory regression
+      evidence because they include control-plane overhead and do not yet have
+      equivalent Terminator/Ghostty automation. Remaining work: include Windows
+      11 and Windows 11 WSL where possible, broaden the local peer suite to
+      resize, scrollback navigation, and GPU/frame-time probes, and prioritize
+      row-level damage tracking, persistent GPU cell buffers, and memory
+      reduction if grid-mode frame cost or RSS remains above target.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
       smokes, and CLI smokes, but the durable release gate still needs manual

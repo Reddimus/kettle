@@ -20,13 +20,16 @@ Runs Linux desktop probes:
   - ascii-flood: launch a terminal, print ~4 MiB ASCII, close
   - ansi-underline-flood: launch a terminal, print 35k SGR/underline lines, close
   - rss-flood: max RSS while running the same ascii-flood lifecycle
+  - kettle-live: Kettle control-plane resize + scrollback-navigation probes
 
 Required peers: terminator, ghostty.
 Optional context peer: alacritty.
 
 The score gate fails if Kettle is slower than Terminator or more than 10% slower
 than Ghostty on each required timing workload. RSS is recorded as advisory
-evidence in OUT_DIR/linux-rss-flood.json and summarized in linux-score.json.
+evidence in OUT_DIR/linux-rss-flood.json. Kettle-only live resize/scrollback
+probe medians are recorded in OUT_DIR/linux-kettle-live.json. Both are
+summarized in linux-score.json.
 EOF
 }
 
@@ -191,6 +194,7 @@ startup_json="$out_dir/linux-startup.json"
 flood_json="$out_dir/linux-ascii-flood.json"
 ansi_json="$out_dir/linux-ansi-underline-flood.json"
 rss_json="$out_dir/linux-rss-flood.json"
+live_json="$out_dir/linux-kettle-live.json"
 score_json="$out_dir/linux-score.json"
 rss_tsv="$tmp_dir/rss-flood.tsv"
 
@@ -225,12 +229,19 @@ for name in "${terminal_names[@]}"; do
   done
 done
 
-python3 - "$startup_json" "$flood_json" "$ansi_json" "$rss_tsv" "$rss_json" "$score_json" <<'PY'
+echo ""
+echo "==> kettle-live: resize and scrollback navigation through kettle ctl"
+python3 scripts/perf/kettle-live-probes.py \
+  --kettle "$kettle_bin" \
+  --config "$kettle_config" \
+  --out "$live_json"
+
+python3 - "$startup_json" "$flood_json" "$ansi_json" "$rss_tsv" "$rss_json" "$live_json" "$score_json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-startup_path, flood_path, ansi_path, rss_tsv_path, rss_path, score_path = map(Path, sys.argv[1:7])
+startup_path, flood_path, ansi_path, rss_tsv_path, rss_path, live_path, score_path = map(Path, sys.argv[1:8])
 
 def load_medians(path):
     with path.open("r", encoding="utf-8") as f:
@@ -284,12 +295,15 @@ summary = {
     "ascii_flood_json": str(flood_path),
     "ansi_underline_flood_json": str(ansi_path),
     "rss_flood_json": str(rss_path),
+    "kettle_live_json": str(live_path),
     "workloads": {},
     "memory": {},
+    "kettle_live": {},
     "rules": {
         "beats_terminator": "kettle median <= terminator median",
         "close_to_ghostty": "kettle median <= ghostty median * 1.10",
         "rss_flood": "recorded as advisory max-RSS evidence, not a pass/fail gate",
+        "kettle_live": "recorded as Kettle-only resize/scrollback medians; failures in the probe fail this run",
     },
 }
 
@@ -334,6 +348,19 @@ else:
         "advisory": True,
     }
 
+try:
+    live_doc = json.loads(live_path.read_text(encoding="utf-8"))
+    summary["kettle_live"] = {
+        "resize_median_ms": live_doc["resize"]["median_ms"],
+        "resize_p95_ms": live_doc["resize"]["p95_ms"],
+        "scroll_page_up_median_ms": live_doc["scrollback_navigation"]["page_up_median_ms"],
+        "scroll_page_down_median_ms": live_doc["scrollback_navigation"]["page_down_median_ms"],
+        "max_observed_display_offset": live_doc["scrollback_navigation"]["max_observed_display_offset"],
+        "advisory": True,
+    }
+except Exception as exc:
+    failures.append(f"kettle_live: failed to read {live_path}: {exc}")
+
 summary["passed"] = not failures
 summary["failures"] = failures
 score_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -370,6 +397,13 @@ if "rss_flood" in summary["memory"]:
         f"kettle/ghostty={summary['memory']['rss_flood']['kettle_vs_ghostty']:.3f} "
         "(advisory)"
     )
+if summary["kettle_live"]:
+    live = summary["kettle_live"]
+    print("")
+    print("Kettle live control-plane medians (advisory)")
+    print(f"resize              {live['resize_median_ms']:8.1f} ms  p95={live['resize_p95_ms']:.1f} ms")
+    print(f"scroll page up      {live['scroll_page_up_median_ms']:8.1f} ms")
+    print(f"scroll page down    {live['scroll_page_down_median_ms']:8.1f} ms")
 
 if failures:
     print("")
@@ -388,4 +422,5 @@ echo "  $startup_json"
 echo "  $flood_json"
 echo "  $ansi_json"
 echo "  $rss_json"
+echo "  $live_json"
 echo "  $score_json"

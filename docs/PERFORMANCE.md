@@ -45,10 +45,16 @@ scripts/perf/linux-compare.sh --runs 7 --out-dir target/perf-results/linux-v2.25
 ```
 
 The script writes Hyperfine JSON for startup, ASCII flood, and SGR/underline
-flood timing probes, advisory `linux-rss-flood.json`, and `linux-score.json`.
-It fails if Kettle is slower than Terminator or more than 10% slower than
-Ghostty on any timing workload. It is desktop-local by design because it needs
-installed GUI terminal peers and a real X11/Wayland session.
+flood timing probes, advisory `linux-rss-flood.json`, advisory
+`linux-kettle-live.json`, and `linux-score.json`. It fails if Kettle is slower
+than Terminator or more than 10% slower than Ghostty on any cross-terminal
+timing workload. The Kettle-live probe launches a real grid-renderer window,
+times `resize_window` until `ui_geometry` settles, generates underlined
+scrollback content, and times `scroll_page_up/down` viewport movement. Those
+live medians include `kettle ctl` round-trip overhead and are Kettle-only
+regression evidence until a reliable peer-terminal GUI driver is added. The
+whole Linux suite is desktop-local by design because it needs installed GUI
+terminal peers and a real X11/Wayland session.
 
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
@@ -258,7 +264,10 @@ Linux desktop performance work should also run `just linux-perf` when Terminator
 and Ghostty are installed. That gate is intentionally narrower than the Windows
 suite, but it directly protects the Ubuntu requirement that Kettle beat
 Terminator and stay close to Ghostty on launch, ASCII-flood, and SGR/underline
-flood probes.
+flood probes. The same run now records Kettle-only live resize and underlined
+scrollback-navigation medians; these fail the run if the UI state does not move
+correctly, but remain advisory for speed until equivalent Terminator/Ghostty
+automation exists.
 
 ### v2.21.0 — startup 2.2× faster, damage-aware idle, corrected root causes
 
