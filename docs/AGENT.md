@@ -41,7 +41,7 @@ flowchart LR
         app --> panes
     end
     cc -->|kettle_run| exec
-    cc -->|"list_panes / read_screen / screenshot<br/>send_text / send_keys<br/>wait_for / run_command"| mcp["kettle mcp"]
+    cc -->|"list_panes / read_screen / screenshot<br/>send_text / send_keys<br/>perform_action / wait_for / run_command"| mcp["kettle mcp"]
     mcp -->|spawn| exec
     mcp -->|"kettle-ctl client"| ipc["local IPC<br/>Unix socket / Windows named pipe"]
     ctl["kettle ctl"] -->|kettle-ctl client| ipc
@@ -133,6 +133,7 @@ kettle ctl send_keys --keys "enter"                    # …then press Enter
 kettle ctl send_keys --keys "escape,:,w,q,enter"       # press keys/chords (v2.20)
 kettle ctl send_mouse --json '{"event":"click","x":20,"y":10,"button":"left"}'
 kettle ctl resize_window --json '{"width":900,"height":560}'
+kettle ctl perform_action --text "start_search"        # dispatch app chrome actions
 kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
@@ -159,6 +160,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
+| `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
@@ -228,10 +230,11 @@ Or a project-scoped `.mcp.json`:
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
 `kettle_list_panes`, `kettle_read_screen`, `kettle_read_cells`,
 `kettle_ui_geometry`, `kettle_screenshot`, `kettle_send_text`,
-`kettle_send_keys`, `kettle_send_mouse`, `kettle_resize_window`, `kettle_wait_for`,
-`kettle_run_command` (these drive a running kettle, so start it with
-`kettle --agent-server full`). When no server is found, the control-backed
-tools return an actionable error pointing at `--agent-server`.
+`kettle_send_keys`, `kettle_send_mouse`, `kettle_resize_window`,
+`kettle_perform_action`, `kettle_wait_for`, `kettle_run_command` (these drive a
+running kettle, so start it with `kettle --agent-server full`). When no server
+is found, the control-backed tools return an actionable error pointing at
+`--agent-server`.
 
 The control surface also exposes `screenshot`, which saves a live PNG using the
 same renderer readback path as the UI screenshot action. It works in
@@ -277,8 +280,8 @@ Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, tmux
 attach/send/capture when `tmux` is installed, and clean/configured
-Neovim/AstroNvim marker buffers plus a clean Neovim vertical-split workflow
-state through `kettle ctl`. It saves PNG screenshots, `read_screen`, `read_cells`, and
+Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
+workflow states through `kettle ctl`. It saves PNG screenshots, `read_screen`, `read_cells`, and
 `analysis.json` under
 `target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
 lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;

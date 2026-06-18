@@ -245,13 +245,14 @@ These need a real display and are run by hand (or on real hardware):
     marker, optional Codex/Claude CLI version probes plus `codex exec --help` /
     `claude --print --help` output captures, tmux attach/send/capture and a
     tmux-managed horizontal split workflow when `tmux` is installed,
-    clean/configured Neovim marker buffers, and a clean Neovim vertical-split
-    workflow state through `kettle ctl`, then saves PNG, `read_screen`,
-    `read_cells`, and
+    clean/configured Neovim marker buffers, and clean/configured
+    Neovim/AstroNvim vertical-split workflow states through `kettle ctl`, then
+    saves PNG, `read_screen`, `read_cells`, and
     `analysis.json` artifacts under `target/diagnostics/agent-tui-*`. It fails
     if a captured state is blank or lacks visible terminal cells. When tmux is
     present, the run includes `tmux.png`, `tmux-split.png`, matching screen
-    JSON, and matching cells JSON.
+    JSON, and matching cells JSON. When Neovim is present, it includes both
+    `nvim-split-clean` and `nvim-split-configured` states.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, tab-bar `+` tab creation,
