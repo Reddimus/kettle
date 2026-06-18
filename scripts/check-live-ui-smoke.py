@@ -12,10 +12,12 @@ import argparse
 import json
 import os
 import platform
+import queue
 import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -210,6 +212,87 @@ class LiveKettle:
         )
         if not result.get("matched"):
             raise SystemExit(f"live-ui smoke: timed out waiting for {text!r}: {result}")
+
+
+class EventStream:
+    def __init__(self, live: LiveKettle, path: Path):
+        self.path = path
+        self.proc = subprocess.Popen(
+            [live.kettle, "ctl", "--pid", str(live.pid), "events"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.lines: List[str] = []
+        self.stderr_lines: List[str] = []
+        self._events: "queue.Queue[Dict[str, object]]" = queue.Queue()
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+    def _read_stdout(self) -> None:
+        if self.proc.stdout is None:
+            return
+        for line in self.proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            self.lines.append(line)
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(ev, dict):
+                self._events.put(ev)
+
+    def _read_stderr(self) -> None:
+        if self.proc.stderr is None:
+            return
+        for line in self.proc.stderr:
+            self.stderr_lines.append(line.rstrip("\n"))
+
+    def wait_for(
+        self,
+        event_name: str,
+        expected_data: Dict[str, object],
+        timeout_s: float = 8.0,
+    ) -> Dict[str, object]:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None and self._events.empty():
+                break
+            try:
+                ev = self._events.get(timeout=min(0.1, max(0.01, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            if ev.get("event") != event_name:
+                continue
+            data = ev.get("data")
+            if not isinstance(data, dict):
+                continue
+            if all(data.get(k) == v for k, v in expected_data.items()):
+                return ev
+        self.close()
+        raise SystemExit(
+            f"live-ui smoke: did not observe {event_name} event with {expected_data}; "
+            f"events={self.lines} stderr={self.stderr_lines}"
+        )
+
+    def close(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=3)
+        self._stdout_thread.join(timeout=1)
+        self._stderr_thread.join(timeout=1)
+        self.path.write_text(("\n".join(self.lines) + "\n") if self.lines else "")
+        if self.stderr_lines:
+            self.path.with_suffix(".stderr.txt").write_text("\n".join(self.stderr_lines) + "\n")
 
 
 def rect_center(rect: Dict[str, float]) -> Tuple[float, float]:
@@ -613,6 +696,20 @@ def command_with_marker(command: str, marker: str) -> str:
     return f"{command}; printf '%s\\n' {shell_quote(marker)}"
 
 
+def notification_command(title: str, body: str, marker: str) -> str:
+    if platform.system() == "Windows":
+        return (
+            "$esc=[char]27; $bel=[char]7; "
+            f"[Console]::Write($esc + ']777;notify;' + {shell_quote(title)} + ';' + {shell_quote(body)} + $bel); "
+            f"Write-Output {shell_quote(marker)}"
+        )
+    return (
+        "printf '\\033]777;notify;%s;%s\\007' "
+        f"{shell_quote(title)} {shell_quote(body)}; "
+        f"printf '%s\\n' {shell_quote(marker)}"
+    )
+
+
 def nvim_marker_command(marker: str, configured: bool) -> str:
     base = "nvim -n" if configured else "nvim --clean -n"
     return (
@@ -850,6 +947,28 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "resize-after.cells.json").write_text(json.dumps(resized_cells, indent=2) + "\n")
         states.append(capture_live_state(live, out, "resize-after"))
 
+        notify_title = "KETTLE_NOTIFY_TITLE"
+        notify_body = "KETTLE_NOTIFY_BODY"
+        notify_marker = "KETTLE_INTERACTION_NOTIFY_DONE"
+        events = EventStream(live, out / "notification-events.jsonl")
+        try:
+            time.sleep(0.3)
+            live_shell_command(
+                live,
+                notification_command(notify_title, notify_body, notify_marker),
+                notify_marker,
+                timeout_ms=10000,
+            )
+            notification_event = events.wait_for(
+                "protocol_notification",
+                {"title": notify_title, "body": notify_body},
+                timeout_s=8.0,
+            )
+        finally:
+            events.close()
+        (out / "notification-event.json").write_text(json.dumps(notification_event, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "notification"))
+
     (out / "analysis.json").write_text(
         json.dumps(
             {
@@ -877,6 +996,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 },
                 "resize_overlay": resized_geo.get("resize_overlay"),
                 "menu_split_right_rect": split_rows[0]["rect"],
+                "notification_event": notification_event,
             },
             indent=2,
         )

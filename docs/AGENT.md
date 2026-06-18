@@ -289,15 +289,17 @@ Starts a real grid-renderer Kettle window and drives broader UI states through
 `kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`
 creation, local selection drag, right-click context-menu opening, and screenshot
 capture. It also clicks the `Split Right` context-menu row and verifies a new
-pane, then resizes the split window and verifies the focused pane grid changes.
-It saves
+pane, resizes the split window and verifies the focused pane grid changes, then
+emits OSC 777 from the live pane and verifies the subscribed `kettle ctl events`
+stream receives a `protocol_notification` event with the expected title/body. It saves
 PNG screenshots, `read_screen`, `read_cells`, `ui_geometry`, and `analysis.json`
-under `target/diagnostics/interaction-*`, and fails if scrollback text does not
-follow the visible viewport, if captures are blank, if the tab count does not
-increase, if selection drag does not visibly change content pixels, if the
-context menu lacks a dispatchable `Split Right` row, or if that row does not
-create a split pane, or if resize does not update the surface/grid and
-resize-overlay geometry.
+plus `notification-events.jsonl` under `target/diagnostics/interaction-*`, and
+fails if scrollback text does not follow the visible viewport, if captures are
+blank, if the tab count does not increase, if selection drag does not visibly
+change content pixels, if the context menu lacks a dispatchable `Split Right`
+row, if that row does not create a split pane, if resize does not update the
+surface/grid and resize-overlay geometry, or if the OSC notification is not
+broadcast on the event stream.
 
 ```sh
 just tabbar-click-smoke

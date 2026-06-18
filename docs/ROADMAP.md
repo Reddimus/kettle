@@ -1461,12 +1461,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       interaction-smoke` now covers multiline text entry, scrollback wheel
       movement, tab-bar `+` tab creation, right-click context-menu geometry, and
       screenshots, and it pinned/fixed `read_screen` so default reads follow the
-      visible scrolled viewport. Remaining work is deeper live-window
-      validation: drive Codex CLI, Claude Code CLI, AstroNvim, tmux, shell
-      prompts, notification, and deeper screenshot states inside Kettle with
-      `text-renderer = grid`. The live interaction smoke now includes local
-      selection drag, context-menu `Split Right` dispatch, and split-window
-      resize probes through `send_mouse` / `resize_window`. Use
+      visible scrolled viewport. The live interaction smoke now includes local
+      selection drag, context-menu `Split Right` dispatch, split-window resize
+      probes through `send_mouse` / `resize_window`, and an OSC 777 protocol
+      notification probe observed through the subscribed `kettle ctl events`
+      stream. Remaining work is deeper live-window validation: drive Codex CLI,
+      Claude Code CLI, AstroNvim, tmux, shell prompts, and deeper screenshot
+      states inside Kettle with `text-renderer = grid`. Use
       `send_mouse`, `send_keys`, `ui_geometry`, `read_cells`, and `screenshot`
       so the pass is reproducible instead of a manual eyeball-only sweep, then
       compare captured frames for blank panes, overlapping UI, stale text, and unintended
