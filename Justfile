@@ -292,8 +292,7 @@ tabbar-click-smoke:
 
 [windows]
 tabbar-click-smoke:
-    @echo "tabbar-click-smoke is currently a Unix desktop helper."
-    @echo "Use kettle ctl ui_geometry/send_mouse/screenshot manually on Windows."
+    python scripts/check-live-ui-smoke.py tabbar
 
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
@@ -303,8 +302,7 @@ underline-scroll-smoke:
 
 [windows]
 underline-scroll-smoke:
-    @echo "underline-scroll-smoke is currently a Unix desktop helper."
-    @echo "Use kettle ctl read_cells/send_keys/screenshot manually on Windows."
+    python scripts/check-live-ui-smoke.py underline
 
 # Clean every build artifact — `cargo clean` plus any temp PNGs
 # the screenshot / menu / bench recipes may have left in the OS

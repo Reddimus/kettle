@@ -100,7 +100,7 @@ ctl_screenshot() {
   fi
 }
 
-cmd="cd '$repo' && { for i in \$(seq 1 120); do if [ \$((i % 2)) -eq 1 ]; then printf '\033[4mUNDERLINE_SENTINEL_%03d\033[24m link https://example.invalid/%03d\n' \"\$i\" \"\$i\"; else printf 'PLAIN_SENTINEL_%03d link https://example.invalid/%03d\n' \"\$i\" \"\$i\"; fi; done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
+cmd="cd '$repo' && { for i in \$(seq 1 120); do if [ \$((i % 2)) -eq 1 ]; then printf '\033[4mUNDERLINE_%s_%03d\033[24m link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\n' SENTINEL \"\$i\" \"\$i\"; fi; done; git diff --color=always | delta --paging=never --line-numbers; } | less -R"
 "$KETTLE" ctl --pid "$pid" send_text --text "$cmd" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
 "$KETTLE" ctl --pid "$pid" wait_for --text "UNDERLINE_SENTINEL" --json '{"timeout_ms":8000,"quiet_ms":250}' >/dev/null

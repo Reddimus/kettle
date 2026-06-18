@@ -291,6 +291,9 @@ and `analysis.json` under
 The smoke parses the PNGs with Python stdlib and records per-row underline pixel
 hit counts for underlined rows and neighboring plain rows, so a delayed underline
 draw fails as an alignment/leak error, not just as a missing terminal attribute.
+On native Windows, `just tabbar-click-smoke` and `just underline-scroll-smoke`
+delegate to `scripts/check-live-ui-smoke.py`; on WSL they use the Unix shell
+scripts above.
 
 ```sh
 just linux-perf

@@ -1447,8 +1447,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       `target/diagnostics`. The underline smoke now also parses each PNG and
       asserts rendered underline pixels are present on the same rows as the
       `read_cells` underlined sentinel text and absent from neighboring plain
-      sentinel rows. Remaining work: run both diagnostics on native Windows 11
-      and Windows 11 WSL.
+      sentinel rows. Native Windows recipes now run the Python stdlib driver
+      (`scripts/check-live-ui-smoke.py`); WSL uses the Unix shell scripts.
+      Remaining work: run both diagnostics on native Windows 11 and Windows 11
+      WSL hardware.
 - [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
       covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
       Neovim, and configured Neovim/AstroNvim command paths. Remaining work is
