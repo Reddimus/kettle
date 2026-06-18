@@ -99,8 +99,9 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 - **Tab bar buttons / position / width** — WezTerm `config/src/config.rs:496`
   `show_new_tab_button_in_tab_bar`, `:499` `show_close_tab_button_in_tabs`,
   `:483` `tab_bar_at_bottom`, `:509` `tab_max_width`. kettle has trailing
-  new-tab / close buttons, top/bottom/left/right positions, and
-  `tab-max-width` for horizontal tabs.
+  new-tab / close buttons plus top/bottom/left/right positions; horizontal
+  tabs always divide the available strip evenly and use the full segment for
+  active fill, hit testing, dragging, and title budget.
 - **Scrollbar** — WezTerm `config/src/config.rs:516` `enable_scroll_bar`;
   Terminator `terminatorlib/config.py:238` `scrollbar_position = "right"`.
 - **Hollow unfocused cursor & copy-on-select & blink default** — Alacritty
@@ -111,7 +112,8 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
   `pub is_zoomed: bool`. kettle: `Tab.zoomed` + `Mux::toggle_zoom`,
   `Ctrl+Shift+X`.
 - **Tab title eliding** — WezTerm `tab_max_width`; kettle reuses its own
-  `truncate()` helper in `kettle-render/src/lib.rs`.
+  `truncate()` helper in `kettle-render/src/lib.rs` instead of exposing a
+  horizontal tab-width cap.
 - **Broadcast / group input** — Terminator `terminatorlib/terminator.py`
   `broadcast_all` group action (origin of the "send keystrokes to every
   pane in this tab" affordance); kitty `multi-input.py` extension. kettle's

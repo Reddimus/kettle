@@ -122,8 +122,7 @@ nicely unit-testable; the renderer paths get snapshot coverage).
 ## What WON'T ship in v1
 
 - **Per-tab vertical width**. v1 uses fixed strip width
-  (`tab-bar-width = 180`). Per-tab natural-width layout (akin to
-  cycle-620 `homogeneous_tabbar = false`) is a follow-up.
+  (`tab-bar-width = 180`). Horizontal tabs always use equal-width segments.
 - **Vertical-text titles**. Titles render left-to-right in the
   vertical strip (Firefox-style sidebar, not rotated). Truncation
   with ellipsis kicks in past strip width.
