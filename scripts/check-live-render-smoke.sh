@@ -65,7 +65,7 @@ while ! "$KETTLE" ctl --pid "$pid" list_panes --raw >"$tmp/panes.json" 2>/dev/nu
   sleep 0.1
 done
 
-"$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_SMOKE'" >/dev/null
+"$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_%s' SMOKE" >/dev/null
 "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
 "$KETTLE" ctl --pid "$pid" wait_for --text "KETTLE_LIVE_RENDER_SMOKE" \
   --json '{"timeout_ms":5000,"quiet_ms":150}' >/dev/null

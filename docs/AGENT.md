@@ -126,9 +126,12 @@ kettle ctl get_state                                   # version, theme, pid, mo
 kettle ctl list_panes                                  # id / tab / cwd / size / focus
 kettle ctl read_screen                                 # focused pane's visible text
 kettle ctl read_screen --pane 3 --json '{"scrollback_lines":200}'
+kettle ctl read_cells --raw                            # text cells + underline/strikeout attrs
+kettle ctl ui_geometry --raw                           # window/tab geometry for UI diagnostics
 kettle ctl send_text --text "ls -la"                   # type into the focused pane
 kettle ctl send_keys --keys "enter"                    # …then press Enter
 kettle ctl send_keys --keys "escape,:,w,q,enter"       # press keys/chords (v2.20)
+kettle ctl send_mouse --json '{"event":"click","x":20,"y":10,"button":"left"}'
 kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
@@ -146,10 +149,14 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | text + cursor + `cursor_visible` (DEC ?25) + history (params: `pane`, `scrollback_lines`) |
+| `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
+| `ui_geometry` | read-only | live window geometry: surface/content rects, tab-bar segment/new-tab rects, cursor, and tab drag armed/visible state |
+| `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
+| `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`) |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
@@ -217,8 +224,9 @@ Or a project-scoped `.mcp.json`:
 ```
 
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
-`kettle_list_panes`, `kettle_read_screen`, `kettle_screenshot`,
-`kettle_send_text`, `kettle_send_keys`, `kettle_wait_for`,
+`kettle_list_panes`, `kettle_read_screen`, `kettle_read_cells`,
+`kettle_ui_geometry`, `kettle_screenshot`, `kettle_send_text`,
+`kettle_send_keys`, `kettle_send_mouse`, `kettle_wait_for`,
 `kettle_run_command` (these drive a running kettle, so start it with
 `kettle --agent-server full`). When no server is found, the control-backed
 tools return an actionable error pointing at `--agent-server`.
@@ -258,6 +266,24 @@ prompt-shaped `➜  ~ KETTLE_LIVE_RENDER_SMOKE` marker and rejects blank or
 mostly-empty screenshot frames, so the rendered PNGs must prove that normal
 prompt glyphs remain visible across blink phases. This needs a visible
 X11/Wayland desktop session.
+
+```sh
+just tabbar-click-smoke
+```
+
+Starts a real Kettle window, creates three tabs by clicking the `+` button via
+`send_mouse`, presses a tab, and captures full-window PNGs plus `ui_geometry`
+JSON under `target/diagnostics/tabbar-click-*`. The guard asserts a plain tab
+click is only armed before movement and does not show the drag ghost/highlight.
+
+```sh
+just underline-scroll-smoke
+```
+
+Builds a temporary git fixture, opens `git diff --color=always | delta
+--paging=always`, drives repeated `j`/`k` input, and saves PNG frames plus
+`read_cells` snapshots under `target/diagnostics/underline-scroll-*` for
+frame-by-frame underline analysis.
 
 ```sh
 just linux-perf

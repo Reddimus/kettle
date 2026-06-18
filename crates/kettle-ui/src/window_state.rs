@@ -149,6 +149,11 @@ pub(crate) struct WindowState {
     /// Cycle 249: drag-to-reorder tab state. `Some(_)` while a left-
     /// mouse-button press in the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
+    /// Surface position where the in-window tab reorder gesture was armed.
+    /// A click stays visually a click until movement crosses the drag-distance
+    /// threshold; this prevents the drag ghost from flashing under a normal
+    /// tab switch.
+    pub(crate) tab_drag_press: Option<(f32, f32)>,
     /// Cycle 402: tab tear-off drag FSM state. Distinct from the in-window
     /// `tab_drag_active` reorder (cycle 249); both fire from the same
     /// mouse-down on the tab bar. Wired live in C6 of the multi-window
@@ -291,6 +296,7 @@ impl WindowState {
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,
+            tab_drag_press: None,
             detach_drag: crate::detach::DragState::default(),
             drag_press: None,
             dock_preview: None,

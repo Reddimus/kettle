@@ -443,8 +443,9 @@ struct McpArgs {
 #[derive(clap::Args, Debug)]
 struct CtlArgs {
     /// The method to call (`get_state`, `list_tabs`, `list_panes`,
-    /// `read_screen`, `screenshot`, `send_text`, `send_keys`, `wait_for`, `run_command`),
-    /// or `events` to stream the event feed.
+    /// `read_screen`, `read_cells`, `ui_geometry`, `screenshot`, `send_text`,
+    /// `send_keys`, `send_mouse`, `wait_for`, `run_command`), or `events` to
+    /// stream the event feed.
     method: String,
     /// Target a specific pane id (else the focused pane).
     #[arg(long)]

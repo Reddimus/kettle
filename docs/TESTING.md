@@ -245,9 +245,11 @@ These need a real display and are run by hand (or on real hardware):
     `printf 'ok\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'`.
   - **Control server + `kettle ctl`**: launch `kettle --agent-server full`, then
     cross-process `kettle ctl get_state` / `list_panes` / `send_text` /
-    `read_screen`. On Windows the GUI first-paint can take a few seconds — poll
-    the discovery registry until the entry appears before issuing `ctl`, and
-    capture `kettle ctl` output via a programmatic spawn (the GUI-subsystem
+    `read_screen`. For UI regressions, also use `ui_geometry`, `read_cells`,
+    `send_mouse`, and `screenshot` to drive/capture deterministic tab and
+    underline states. On Windows the GUI first-paint can take a few seconds —
+    poll the discovery registry until the entry appears before issuing `ctl`,
+    and capture `kettle ctl` output via a programmatic spawn (the GUI-subsystem
     binary auto-detaches stdout from an interactive shell, so a piped invocation
     from the same console shows nothing).
   - **`kettle mcp`**: `kettle mcp --self-test` (in-process handshake +
@@ -257,6 +259,12 @@ These need a real display and are run by hand (or on real hardware):
     Claude Code / Codex use when the server is registered as an MCP.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
+  - **Live renderer/UI diagnostics**: on a Linux desktop run
+    `just live-render-smoke`, `just tabbar-click-smoke`, and
+    `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+    for frame-by-frame review. Repeat the same flows manually on Windows 11 and
+    Windows 11 WSL with `kettle ctl ui_geometry/read_cells/send_mouse/screenshot`
+    before changing renderer defaults or tab/underline interaction code.
 
 ## Pattern: audit-driven cycles
 

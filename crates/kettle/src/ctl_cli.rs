@@ -203,6 +203,17 @@ fn pretty(method: &str, result: &Value) -> String {
             "sent {} keys ({} bytes) to pane {}\n",
             result["keys"], result["bytes"], result["pane"]
         ),
+        "send_mouse" => format!(
+            "sent mouse {} at [{}, {}] to window {} (handled: {})\n",
+            result["event"],
+            result["cursor"][0],
+            result["cursor"][1],
+            result["window"],
+            result["handled"]
+        ),
+        "ui_geometry" | "read_cells" => {
+            serde_json::to_string_pretty(result).unwrap_or_else(|_| format!("{result}\n")) + "\n"
+        }
         "wait_for" => {
             if result.get("matched").and_then(|m| m.as_bool()) == Some(true) {
                 format!("matched after {} ms\n", result["elapsed_ms"])

@@ -1,10 +1,9 @@
 //! Cycle 932 (agent-first A3): the MCP tool registry.
 //!
 //! `kettle_run` runs a command headlessly via the A1 exec engine in-process.
-//! The other tools (`kettle_list_panes`, `kettle_read_screen`, `kettle_screenshot`,
-//! `kettle_send_text`, `kettle_run_command`) drive a running kettle via the A2 control client; when
-//! no server is discoverable they return an `isError` result with actionable
-//! text (start `kettle --agent-server full`).
+//! The other tools drive a running kettle via the A2 control client; when no
+//! server is discoverable they return an `isError` result with actionable text
+//! (start `kettle --agent-server full`).
 
 use serde_json::{Value, json};
 
@@ -49,6 +48,28 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "pane": {"type": "integer", "description": "pane id (default: focused)"},
                     "scrollback_lines": {"type": "integer", "description": "extra history lines to include"}
+                }
+            }
+        }),
+        json!({
+            "name": "kettle_read_cells",
+            "description": "Read the visible cell grid plus selected attributes such as underline \
+                and strikeout. Use for renderer diagnostics without OCR. Works in read-only mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane": {"type": "integer", "description": "pane id (default: focused)"}
+                }
+            }
+        }),
+        json!({
+            "name": "kettle_ui_geometry",
+            "description": "Read live window UI geometry, including tab-bar segment rectangles, \
+                new-tab button bounds, and tab drag state. Works in read-only mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "window": {"type": "integer", "description": "window seq (default: focused window)"}
                 }
             }
         }),
@@ -115,6 +136,24 @@ pub fn tool_specs() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "kettle_send_mouse",
+            "description": "Send deterministic mouse input to a running kettle window for \
+                interactive UI/TUI diagnostics. Coordinates are physical pixels from the \
+                window's client-area top-left. Requires the agent server in `full` mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "window": {"type": "integer", "description": "window seq (default: focused window)"},
+                    "event": {"type": "string", "enum": ["move", "press", "release", "click", "wheel"]},
+                    "x": {"type": "number", "description": "x coordinate for move/press/release/click, or optional wheel cursor position"},
+                    "y": {"type": "number", "description": "y coordinate for move/press/release/click, or optional wheel cursor position"},
+                    "button": {"type": "string", "enum": ["left", "middle", "right", "back", "forward"], "description": "default left"},
+                    "wheel_lines": {"type": "integer", "description": "signed terminal-scroll lines for wheel events"}
+                },
+                "required": ["event"]
+            }
+        }),
+        json!({
             "name": "kettle_wait_for",
             "description": "Wait until a kettle pane's screen matches a condition — replaces \
                 sleep-and-pray when driving interactive apps. Conditions (AND when combined): \
@@ -157,6 +196,20 @@ pub fn call_tool(params: &Value) -> Value {
                 p.insert("scrollback_lines".into(), sb.clone());
             }
             ctl_call("read_screen", Value::Object(p))
+        }
+        "kettle_read_cells" => {
+            let mut p = serde_json::Map::new();
+            if let Some(pane) = args.get("pane") {
+                p.insert("pane".into(), pane.clone());
+            }
+            ctl_call("read_cells", Value::Object(p))
+        }
+        "kettle_ui_geometry" => {
+            let mut p = serde_json::Map::new();
+            if let Some(window) = args.get("window") {
+                p.insert("window".into(), window.clone());
+            }
+            ctl_call("ui_geometry", Value::Object(p))
         }
         "kettle_screenshot" => {
             let mut p = serde_json::Map::new();
@@ -206,6 +259,19 @@ pub fn call_tool(params: &Value) -> Value {
                 p.insert("pane".into(), pane.clone());
             }
             ctl_call("send_keys", Value::Object(p))
+        }
+        "kettle_send_mouse" => {
+            let Some(event) = args.get("event").and_then(|e| e.as_str()) else {
+                return error_result("kettle_send_mouse requires an 'event' string");
+            };
+            let mut p = serde_json::Map::new();
+            p.insert("event".into(), json!(event));
+            for k in ["window", "x", "y", "button", "wheel_lines"] {
+                if let Some(v) = args.get(k) {
+                    p.insert(k.into(), v.clone());
+                }
+            }
+            ctl_call("send_mouse", Value::Object(p))
         }
         "kettle_wait_for" => {
             let mut p = serde_json::Map::new();

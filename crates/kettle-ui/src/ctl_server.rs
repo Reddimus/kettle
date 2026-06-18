@@ -580,7 +580,7 @@ fn wait_for_poll(
 /// server dispatches is classified here, and that `handle_ctl_request` gates
 /// the mutating ones on `agent-server = full`. (Used by the drift-guard tests.)
 #[cfg_attr(not(test), allow(dead_code))]
-pub const MUTATING_METHODS: &[&str] = &["send_text", "send_keys", "run_command"];
+pub const MUTATING_METHODS: &[&str] = &["send_text", "send_keys", "send_mouse", "run_command"];
 
 /// The read-only methods (allowed in `read-only` mode).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -589,6 +589,8 @@ pub const READ_ONLY_METHODS: &[&str] = &[
     "list_tabs",
     "list_panes",
     "read_screen",
+    "read_cells",
+    "ui_geometry",
     "screenshot",
     "subscribe",
 ];
@@ -660,7 +662,7 @@ mod tests {
         let start = src
             .find("let resp = match req.method.as_str() {")
             .expect("dispatch block present");
-        let block = &src[start..start + 2600];
+        let block = &src[start..start + 3600];
         for m in READ_ONLY_METHODS.iter().chain(MUTATING_METHODS) {
             assert!(
                 block.contains(&format!("\"{m}\"")),

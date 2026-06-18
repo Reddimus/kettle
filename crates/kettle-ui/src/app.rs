@@ -56,6 +56,17 @@ struct PendingRun {
 /// Cycle 904 (audit): grab tolerance (px) for the thin split divider line, so
 /// it's easy to hit with the mouse without pixel-perfect aim.
 const SPLIT_SEAM_TOL: f32 = 5.0;
+const CELL_FLAG_UNDERLINE: u16 = 0b0000_0000_0000_1000;
+const CELL_FLAG_STRIKEOUT: u16 = 0b0000_0010_0000_0000;
+const CELL_FLAG_DOUBLE_UNDERLINE: u16 = 0b0000_1000_0000_0000;
+const CELL_FLAG_UNDERCURL: u16 = 0b0001_0000_0000_0000;
+const CELL_FLAG_DOTTED_UNDERLINE: u16 = 0b0010_0000_0000_0000;
+const CELL_FLAG_DASHED_UNDERLINE: u16 = 0b0100_0000_0000_0000;
+const CELL_FLAG_ALL_UNDERLINES: u16 = CELL_FLAG_UNDERLINE
+    | CELL_FLAG_DOUBLE_UNDERLINE
+    | CELL_FLAG_UNDERCURL
+    | CELL_FLAG_DOTTED_UNDERLINE
+    | CELL_FLAG_DASHED_UNDERLINE;
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
@@ -145,6 +156,37 @@ fn wheel_lines(delta: &winit::event::MouseScrollDelta, multiplier: f32) -> i32 {
         winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
     };
     (raw * m).round() as i32
+}
+
+fn rect_contains(rect: kettle_render::Rect4, x: f32, y: f32) -> bool {
+    x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
+}
+
+fn rect_json(rect: kettle_render::Rect4) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.0,
+        "y": rect.1,
+        "width": rect.2,
+        "height": rect.3,
+    })
+}
+
+fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, String> {
+    let button = params
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left")
+        .to_ascii_lowercase();
+    match button.as_str() {
+        "left" => Ok(0),
+        "middle" => Ok(1),
+        "right" => Ok(2),
+        "back" => Ok(8),
+        "forward" => Ok(9),
+        other => Err(format!(
+            "unknown button '{other}' (expected left, middle, right, back, or forward)"
+        )),
+    }
 }
 
 /// Cycle 609 (Terminator parity, `terminal.py:real_copy_clipboard` +
@@ -3356,7 +3398,7 @@ impl App {
             // ghost of the dragged segment under the cursor — gives
             // the cycle-249 reorder a "I'm picking this tab up"
             // affordance instead of the bare snap behavior.
-            drag_cursor_x: if ws.tab_drag_active {
+            drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
                 Some(ws.cursor.x as f32)
             } else {
                 None
@@ -3439,7 +3481,7 @@ impl App {
             hovered_close_idx: ws.hovered_close_idx,
             // Drag-cursor preview is x-only in v1; vertical drag
             // reorder is sub-cycle 6 of the design.
-            drag_cursor_x: if ws.tab_drag_active {
+            drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
                 Some(ws.cursor.x as f32)
             } else {
                 None
@@ -8956,6 +8998,8 @@ impl App {
             "list_tabs" => Response::ok(req.id, self.ctl_list_tabs(ws)),
             "list_panes" => Response::ok(req.id, self.ctl_list_panes(ws)),
             "read_screen" => self.ctl_read_screen(ws, req),
+            "read_cells" => self.ctl_read_cells(ws, req),
+            "ui_geometry" => Response::ok(req.id, self.ctl_ui_geometry(ws, req)),
             "screenshot" => {
                 self.ctl_screenshot(ws, req, reply);
                 return;
@@ -8970,6 +9014,9 @@ impl App {
                 .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
             "send_keys" => require_full(req.id, "send_keys")
                 .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
+            "send_mouse" => {
+                require_full(req.id, "send_mouse").unwrap_or_else(|| self.ctl_send_mouse(ws, req))
+            }
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
@@ -9121,6 +9168,379 @@ impl App {
                 }),
             ),
             None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
+        }
+    }
+
+    /// `read_cells`: visible cell snapshot with selected render attributes.
+    /// Intended for deterministic renderer/UI diagnostics without OCR.
+    fn ctl_read_cells(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let pane = match self.ctl_resolve_pane(ws, &req.params) {
+            Ok(p) => p,
+            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+        };
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
+            return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
+        };
+        let Ok(t) = p.term.term.lock() else {
+            return Response::err(req.id, ec::INTERNAL, "could not read the grid");
+        };
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&t);
+        drop(t);
+
+        let mut cells = Vec::with_capacity(snap.cells.len());
+        let display_off = snap.display_offset as i32;
+        for sc in &snap.cells {
+            let row = sc.line + display_off;
+            if row < 0 || row >= snap.screen_lines as i32 {
+                continue;
+            }
+            let flags = sc.flags.bits();
+            cells.push(serde_json::json!({
+                "row": row,
+                "col": sc.col,
+                "ch": sc.c.to_string(),
+                "underline": flags & CELL_FLAG_UNDERLINE != 0,
+                "double_underline": flags & CELL_FLAG_DOUBLE_UNDERLINE != 0,
+                "undercurl": flags & CELL_FLAG_UNDERCURL != 0,
+                "dotted_underline": flags & CELL_FLAG_DOTTED_UNDERLINE != 0,
+                "dashed_underline": flags & CELL_FLAG_DASHED_UNDERLINE != 0,
+                "any_underline": flags & CELL_FLAG_ALL_UNDERLINES != 0,
+                "strikeout": flags & CELL_FLAG_STRIKEOUT != 0,
+                "underline_color": sc.underline_color.is_some(),
+            }));
+        }
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "pane": pane,
+                "cols": snap.columns,
+                "rows": snap.screen_lines,
+                "history_size": snap.history_size,
+                "display_offset": snap.display_offset,
+                "cursor": [snap.cursor.point.line.0, snap.cursor.point.column.0],
+                "cells": cells,
+            }),
+        )
+    }
+
+    /// `ui_geometry`: read-only live geometry for chrome diagnostics.
+    fn ctl_ui_geometry(
+        &self,
+        ws: &WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> serde_json::Value {
+        let want_window = req.params.get("window").and_then(|v| v.as_u64());
+        let target = want_window
+            .and_then(|seq| {
+                if seq == ws.seq {
+                    Some(ws)
+                } else {
+                    self.windows.get(&seq)
+                }
+            })
+            .unwrap_or(ws);
+        let surface = target
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let bar = self.tab_bar(target);
+        let segments: Vec<serde_json::Value> = bar
+            .segments
+            .iter()
+            .map(|seg| {
+                serde_json::json!({
+                    "index": seg.idx,
+                    "title": seg.title,
+                    "active": seg.active,
+                    "rect": rect_json(seg.rect),
+                    "close": rect_json(seg.close),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "window": target.seq,
+            "surface": {"width": surface.0, "height": surface.1},
+            "content": rect_json(self.area(target)),
+            "cursor": [target.cursor.x, target.cursor.y],
+            "tab_drag_active": target.tab_drag_active,
+            "tab_drag_armed": target.tab_drag_press.is_some(),
+            "tab_drag_visible": target.tab_drag_active && target.tab_drag_press.is_none(),
+            "tab_bar": {
+                "height": bar.height,
+                "y": bar.y,
+                "new_tab": rect_json(bar.new_tab),
+                "new_tab_menu": rect_json(bar.new_tab_menu),
+                "drag_cursor_x": bar.drag_cursor_x,
+                "insert_marker": bar.insert_marker,
+                "segments": segments,
+            },
+        })
+    }
+
+    /// `send_mouse`: deterministic local-user mouse input for diagnostics and
+    /// end-to-end agent/TUI tests. Coordinates are physical pixels relative to
+    /// the target kettle window's client area.
+    fn ctl_send_mouse(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let target_seq = req
+            .params
+            .get("window")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(ws.seq);
+        if target_seq == ws.seq {
+            return self.ctl_send_mouse_for_window(ws, req);
+        }
+        let Some(mut target) = self.windows.remove(&target_seq) else {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                format!("no window with id {target_seq}"),
+            );
+        };
+        let resp = self.ctl_send_mouse_for_window(&mut target, req);
+        self.windows.insert(target_seq, target);
+        resp
+    }
+
+    fn ctl_send_mouse_for_window(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let Some(event) = req.params.get("event").and_then(|v| v.as_str()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing 'event' string");
+        };
+        let event = event.to_ascii_lowercase();
+        let x = req.params.get("x").and_then(|v| v.as_f64());
+        let y = req.params.get("y").and_then(|v| v.as_f64());
+        if !matches!(event.as_str(), "wheel") || x.is_some() || y.is_some() {
+            let Some(x) = x else {
+                return Response::err(req.id, ec::BAD_PARAMS, "missing numeric 'x'");
+            };
+            let Some(y) = y else {
+                return Response::err(req.id, ec::BAD_PARAMS, "missing numeric 'y'");
+            };
+            if !x.is_finite() || !y.is_finite() {
+                return Response::err(req.id, ec::BAD_PARAMS, "'x' and 'y' must be finite");
+            }
+            ws.cursor = winit::dpi::PhysicalPosition::new(x, y);
+        }
+
+        let mut handled = true;
+        match event.as_str() {
+            "move" => {
+                self.ctl_mouse_move(ws);
+            }
+            "press" => {
+                let bcode = match ctl_mouse_button(&req.params) {
+                    Ok(b) => b,
+                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+                };
+                handled = self.ctl_mouse_press(ws, bcode);
+            }
+            "release" => {
+                let bcode = match ctl_mouse_button(&req.params) {
+                    Ok(b) => b,
+                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+                };
+                handled = self.ctl_mouse_release(ws, bcode);
+            }
+            "click" => {
+                let bcode = match ctl_mouse_button(&req.params) {
+                    Ok(b) => b,
+                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+                };
+                let pressed = self.ctl_mouse_press(ws, bcode);
+                let released = self.ctl_mouse_release(ws, bcode);
+                handled = pressed || released;
+            }
+            "wheel" => {
+                let Some(lines) = req.params.get("wheel_lines").and_then(|v| v.as_i64()) else {
+                    return Response::err(req.id, ec::BAD_PARAMS, "missing 'wheel_lines' integer");
+                };
+                let lines = lines.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                handled = self.ctl_mouse_wheel(ws, lines);
+            }
+            _ => {
+                return Response::err(
+                    req.id,
+                    ec::BAD_PARAMS,
+                    "event must be move, press, release, click, or wheel",
+                );
+            }
+        }
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "window": ws.seq,
+                "event": event,
+                "cursor": [ws.cursor.x, ws.cursor.y],
+                "handled": handled,
+            }),
+        )
+    }
+
+    fn ctl_mouse_move(&mut self, ws: &mut WindowState) {
+        self.promote_tab_drag_if_needed(ws);
+        if ws.tab_drag_active && ws.tab_drag_press.is_none() && !self.cfg.tab_bar_pos.is_vertical()
+        {
+            self.reorder_active_tab_for_cursor(ws);
+        }
+        if let Some(btn) = ws.mouse_btn {
+            let _ = self.send_mouse(ws, btn, true, true);
+        }
+    }
+
+    fn ctl_mouse_press(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        let bar = self.tab_bar(ws);
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if bar.height > 0.0 && py >= bar.y && py < bar.y + bar.height && (bcode == 0 || bcode == 1)
+        {
+            if bcode == 0 && rect_contains(bar.new_tab, px, py) {
+                let area = self.area(ws);
+                let (cols, rows) = self.grid_of(ws, area);
+                let (cw, ch) = self.cell_px(ws);
+                if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                    log::warn!("could not open a new tab (agent send_mouse): {e}");
+                }
+            } else if let Some(seg) = bar
+                .segments
+                .iter()
+                .find(|seg| rect_contains(seg.rect, px, py))
+            {
+                let close = bcode == 1 || rect_contains(seg.close, px, py);
+                if close {
+                    let pre = self.focus_key(ws);
+                    let closing_idx = seg.idx;
+                    if ws.mux.close_tab_at(seg.idx) {
+                        self.fire_tab_close_event(closing_idx);
+                        self.save_session(ws);
+                        self.pending_window_close = true;
+                    } else {
+                        self.fire_tab_close_event(closing_idx);
+                        self.note_focus_change(ws, pre);
+                    }
+                } else {
+                    let pre = self.focus_key(ws);
+                    ws.mux.active = seg.idx;
+                    ws.mux.touch_active_tab_seen();
+                    self.note_focus_change(ws, pre);
+                    if bcode == 0 {
+                        ws.tab_drag_active = true;
+                        ws.tab_drag_press = Some((px, py));
+                        if self.cfg.detachable_tabs {
+                            ws.detach_drag =
+                                crate::detach::DragState::on_mouse_down_on_tab(seg.idx);
+                            ws.drag_press = Some((px, py));
+                        }
+                    }
+                }
+            }
+            self.resize_all(ws);
+            return true;
+        }
+
+        let area = self.area(ws);
+        let pre = self.focus_key(ws);
+        ws.mux.focus_at(area, px, py);
+        self.note_focus_change(ws, pre);
+        if self.send_mouse(ws, bcode, true, false) {
+            ws.mouse_btn = Some(bcode);
+            return true;
+        }
+        false
+    }
+
+    fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        let mut handled = false;
+        if ws.mouse_btn == Some(bcode) {
+            ws.mouse_btn = None;
+            handled = self.send_mouse(ws, bcode, false, false);
+        }
+        if bcode == 0 {
+            ws.selecting = false;
+            ws.dragging_scrollbar = false;
+            ws.dragging_split = None;
+            ws.tab_drag_active = false;
+            ws.tab_drag_press = None;
+            ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
+            ws.drag_press = None;
+            handled = true;
+        }
+        handled
+    }
+
+    fn ctl_mouse_wheel(&mut self, ws: &mut WindowState, lines: i32) -> bool {
+        if lines == 0 {
+            return false;
+        }
+        if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
+            if lines > 0 {
+                ws.mux.prev_tab();
+            } else {
+                ws.mux.next_tab();
+            }
+            return true;
+        }
+        let (track, _) = input::mouse_tracking(self.focused_mode(ws));
+        if track != input::MouseTracking::Off && !ws.mods.shift_key() {
+            let btn = if lines > 0 { 64 } else { 65 };
+            for _ in 0..lines.abs().min(8) {
+                self.send_mouse(ws, btn, true, false);
+            }
+        } else if let Some(pane) = ws.mux.focused()
+            && let Ok(mut t) = pane.term.term.lock()
+        {
+            t.scroll_display(Scroll::Delta(lines));
+        }
+        true
+    }
+
+    fn promote_tab_drag_if_needed(&mut self, ws: &mut WindowState) {
+        if let Some((ox, oy)) = ws.tab_drag_press {
+            let dx = ws.cursor.x as f32 - ox;
+            let dy = ws.cursor.y as f32 - oy;
+            if (dx * dx + dy * dy).sqrt() > crate::detach::DragState::DRAG_DISTANCE_THRESHOLD_PX {
+                ws.tab_drag_press = None;
+            }
+        }
+    }
+
+    fn reorder_active_tab_for_cursor(&mut self, ws: &mut WindowState) {
+        let bar = self.tab_bar(ws);
+        if bar.height <= 0.0 || bar.segments.is_empty() {
+            return;
+        }
+        let (_, _, nw, _) = bar.new_tab;
+        let (_, _, aw, _) = bar.new_tab_menu;
+        let (sw, _) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let strip_w = tab_segment_strip_width(sw, nw, aw);
+        let target = tab_drag_target_index(ws.cursor.x as f32, bar.segments.len(), strip_w);
+        let delta = target as i32 - ws.mux.active as i32;
+        if delta != 0 && ws.mux.move_active_tab(delta) {
+            ws.mux.touch_active_tab_seen();
         }
     }
 
@@ -11861,6 +12281,7 @@ impl App {
         // window merges back into a sibling.
         if ws.mux.tabs.len() <= 1 {
             ws.tab_drag_active = false;
+            ws.tab_drag_press = None;
             ws.detach_drag = crate::detach::DragState::default();
             ws.drag_press = None;
             // Frame-relative grab = where the pointer is right now
@@ -11976,6 +12397,7 @@ impl App {
         };
         // The gesture leaves this window no matter how open_window goes.
         ws.tab_drag_active = false;
+        ws.tab_drag_press = None;
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
@@ -13348,7 +13770,19 @@ impl App {
                 // where mapping cursor.x onto a vertically stacked strip
                 // produced silent bogus shuffles during any tab drag
                 // (vertical drag-reorder remains the deferred sub-cycle 6).
-                if ws.tab_drag_active && !self.cfg.tab_bar_pos.is_vertical() {
+                if let Some((ox, oy)) = ws.tab_drag_press {
+                    let dx = ws.cursor.x as f32 - ox;
+                    let dy = ws.cursor.y as f32 - oy;
+                    if (dx * dx + dy * dy).sqrt()
+                        > crate::detach::DragState::DRAG_DISTANCE_THRESHOLD_PX
+                    {
+                        ws.tab_drag_press = None;
+                    }
+                }
+                if ws.tab_drag_active
+                    && ws.tab_drag_press.is_none()
+                    && !self.cfg.tab_bar_pos.is_vertical()
+                {
                     let bar = self.tab_bar(ws);
                     if bar.height > 0.0 && !bar.segments.is_empty() {
                         let (_, _, nw, _) = bar.new_tab;
@@ -13687,6 +14121,7 @@ impl App {
                             // == left, not middle / close).
                             if bcode == 0 {
                                 ws.tab_drag_active = true;
+                                ws.tab_drag_press = Some((px, py));
                                 // C6 (tear-off): arm the detach FSM alongside
                                 // the in-window reorder. v2.19.0: armed for a
                                 // LONE tab too — dragging it past the band
@@ -13976,6 +14411,7 @@ impl App {
                     // during the drag are already committed; this just
                     // disarms the CursorMoved handler.
                     ws.tab_drag_active = false;
+                    ws.tab_drag_press = None;
                     // C6 (tear-off), WAYLAND ONLY since v2.19.0: a release
                     // while the detach FSM is OUTSIDE the window tears the
                     // dragged tab off into a new window. Everywhere else
@@ -14228,6 +14664,7 @@ impl App {
                     ws.selecting = false;
                     ws.dragging_scrollbar = false;
                     ws.tab_drag_active = false;
+                    ws.tab_drag_press = None;
                     // Cycle 904: a focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
                     ws.mouse_btn = None;
@@ -14343,6 +14780,7 @@ impl App {
                     ws.detach_drag = next;
                     ws.drag_press = None;
                     ws.tab_drag_active = false;
+                    ws.tab_drag_press = None;
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15131,7 +15569,7 @@ mod tests {
         assert!(
             src.contains("if ws.selecting && self.cfg.copy_on_select {")
                 && src.contains("ws.selecting = false;")
-                && src.contains("ws.tab_drag_active = false;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.

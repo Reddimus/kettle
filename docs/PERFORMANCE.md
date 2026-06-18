@@ -15,19 +15,21 @@ only adapter without pretending a discrete GPU was selected, while hybrid
 laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
-**Ubuntu 24.04 integrated-GPU smoke, final v2.25.1 build** (Intel Iris Xe,
-Vulkan/Mesa, `text-renderer = grid`, `gpu-power-preference = auto`, Xvfb,
-hyperfine medians/means over 7-10 runs):
+**Ubuntu local desktop smoke, current v2.25.1 working tree**
+(`kettle 2.25.1 (4f9f36117b12+dirty)`, `text-renderer = grid`,
+`gpu-power-preference = auto`, Hyperfine medians over 3 runs, 1 warmup, real
+X11/Wayland desktop):
 
 | workload | kettle | Terminator | Ghostty | Alacritty |
 |---|---:|---:|---:|---:|
-| launch terminal, run `/bin/true`, close | 206 ms | 252 ms | 440 ms | 147 ms |
-| launch terminal, print ~4 MiB ASCII, close | 195 ms | 261 ms | 495 ms | 235 ms |
+| launch terminal, run `/bin/true`, close | 168 ms | 315 ms | 523 ms | 137 ms |
+| launch terminal, print ~4 MiB ASCII, close | 338 ms | 468 ms | 596 ms | 307 ms |
 
 These are smoke numbers rather than a full latency suite, but they exercise the
-final installed binary on the integrated adapter the default policy chooses on
-this machine. Kettle beats Terminator and Ghostty on both probes and remains in
-the same practical class as Alacritty for the flood path.
+current release binary on the adapter the default policy chooses on this
+machine. Kettle beats Terminator and Ghostty on both probes and remains close to
+Alacritty for the flood path. The JSON for this run is under
+`target/perf-results/linux-local/`.
 
 Reproduce and gate this Ubuntu peer comparison with:
 

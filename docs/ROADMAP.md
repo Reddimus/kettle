@@ -1430,18 +1430,32 @@ features list. What's left is genuinely-multi-week threads + polish.
 - [ ] **Renderer visual-regression hardening after v2.25.1.** Treat any pane
       text disappearing/reappearing outside the cursor cell as a bug, not an
       intentional blink. Keep `text-renderer = legacy` only as a user rollback,
-      not the product fix. Remaining work: expand grid-renderer regression
-      coverage for prompt-like rows (`➜  ~`, block cursor nearby, blink toggled),
-      add screenshot/pixel checks that non-cursor cells remain stable across
-      consecutive frames, and run those checks on Ubuntu plus the Windows 11 /
-      Windows 11 WSL paths before changing renderer defaults again.
+      not the product fix. Current coverage includes `just live-render-smoke`,
+      which renders a prompt-like `➜  ~` row in a live grid-renderer window and
+      asserts cursor blink only changes a cursor-sized pixel region. Remaining
+      work: add CI-safe grid-render unit coverage for the same invariant, expand
+      the fixture set beyond the zsh prompt marker, and run the live smoke on
+      Ubuntu plus the Windows 11 / Windows 11 WSL paths before changing renderer
+      defaults again.
+- [ ] **Tab click and underline-scroll diagnostics.** `just tabbar-click-smoke`
+      now reproduces the multi-tab click state and asserts a plain click does
+      not show the drag ghost/highlight before movement crosses the drag
+      threshold. `just underline-scroll-smoke` opens `git diff | delta`, drives
+      bounded scroll input, and saves PNG + `read_cells` frames under
+      `target/diagnostics`. Remaining work: fix the longer live-scroll hang
+      observed when extending the fixture past the current bounded frame count,
+      turn underline lag analysis into a stricter pixel-level gate once enough
+      real traces identify the exact frame offset, then run both diagnostics on
+      Ubuntu, native Windows 11, and Windows 11 WSL.
 - [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
       covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
       Neovim, and configured Neovim/AstroNvim command paths. Remaining work is
       live-window validation: drive Codex CLI, Claude Code CLI, AstroNvim,
       tmux, shell prompts, paste, scrollback, selection, resize, split, tab,
       menu, notification, and screenshot states inside Kettle with
-      `text-renderer = grid`, then compare captured frames for blank panes,
+      `text-renderer = grid`. Use `send_mouse`, `send_keys`, `ui_geometry`,
+      `read_cells`, and `screenshot` so the pass is reproducible instead of a
+      manual eyeball-only sweep, then compare captured frames for blank panes,
       overlapping UI, stale text, and unintended blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained

@@ -284,6 +284,28 @@ live-render-smoke:
     @echo "manual Windows live screenshot smoke can use 'kettle --agent-server full'"
     @echo "plus 'kettle ctl screenshot'."
 
+# Reproduce and guard the multi-tab mouse-click visual state. Captures full
+# window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
+[unix]
+tabbar-click-smoke:
+    ./scripts/check-tabbar-click-smoke.sh
+
+[windows]
+tabbar-click-smoke:
+    @echo "tabbar-click-smoke is currently a Unix desktop helper."
+    @echo "Use kettle ctl ui_geometry/send_mouse/screenshot manually on Windows."
+
+# Reproduce underline scrolling with git diff | delta under repeated j/k input.
+# Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
+[unix]
+underline-scroll-smoke:
+    ./scripts/check-underline-scroll-smoke.sh
+
+[windows]
+underline-scroll-smoke:
+    @echo "underline-scroll-smoke is currently a Unix desktop helper."
+    @echo "Use kettle ctl read_cells/send_keys/screenshot manually on Windows."
+
 # Clean every build artifact — `cargo clean` plus any temp PNGs
 # the screenshot / menu / bench recipes may have left in the OS
 # temp dir.
