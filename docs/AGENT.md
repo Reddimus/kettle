@@ -275,6 +275,9 @@ Starts a real Kettle window, creates three tabs by clicking the `+` button via
 `send_mouse`, presses a tab, and captures full-window PNGs plus `ui_geometry`
 JSON under `target/diagnostics/tabbar-click-*`. The guard asserts a plain tab
 click is only armed before movement and does not show the drag ghost/highlight.
+It also diffs the tab-bar pixels and fails if the press changes pixels outside
+the old/new active tab rectangles, catching the misaligned rectangle artifact
+directly.
 
 ```sh
 just underline-scroll-smoke
