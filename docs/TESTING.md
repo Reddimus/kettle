@@ -247,11 +247,11 @@ These need a real display and are run by hand (or on real hardware):
     if a captured state is blank or lacks visible terminal cells.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
-    mouse wheel movement, tab-bar `+` tab creation, right-click context-menu
-    opening, and screenshots through `kettle ctl`. It writes PNG, `read_screen`,
-    `read_cells`, `ui_geometry`, and `analysis.json` artifacts under
-    `target/diagnostics/interaction-*`, and asserts default `read_screen`
-    follows the visible scrolled viewport.
+    mouse wheel movement, local selection drag, tab-bar `+` tab creation,
+    right-click context-menu opening, and screenshots through `kettle ctl`. It
+    writes PNG, `read_screen`, `read_cells`, `ui_geometry`, and `analysis.json`
+    artifacts under `target/diagnostics/interaction-*`, and asserts default
+    `read_screen` follows the visible scrolled viewport.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

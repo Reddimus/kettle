@@ -241,6 +241,31 @@ def changed_pixels(a_path: Path, b_path: Path, y0: float, y1: float) -> List[Tup
     return changed
 
 
+def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -> Tuple[float, float, float, float]:
+    rows = max(1, int(cells.get("rows", 1)))
+    cols = max(1, int(cells.get("cols", 1)))
+    cell_w = float(content["width"]) / cols
+    cell_h = float(content["height"]) / rows
+    by_row: Dict[int, List[int]] = {}
+    for cell in cells.get("cells", []):  # type: ignore[assignment]
+        ch = str(cell.get("ch", ""))
+        if ch.strip():
+            by_row.setdefault(int(cell["row"]), []).append(int(cell["col"]))
+    candidates = [(len(cols_for_row), row, sorted(cols_for_row)) for row, cols_for_row in by_row.items()]
+    candidates.sort(reverse=True)
+    for count, row, cols_for_row in candidates:
+        if count < 8:
+            break
+        left = max(0, cols_for_row[0])
+        right = min(cols - 1, max(cols_for_row[-1], left + 6))
+        if right > left:
+            y = float(content["y"]) + (row + 0.5) * cell_h
+            x0 = float(content["x"]) + (left + 0.25) * cell_w
+            x1 = float(content["x"]) + (right + 0.75) * cell_w
+            return x0, y, x1, y
+    raise SystemExit("interaction smoke: could not find a visible text row for selection drag")
+
+
 def active_rect(geometry: Dict[str, object]) -> Tuple[Dict[str, float], int]:
     tab_bar = geometry["tab_bar"]  # type: ignore[index]
     active = [s for s in tab_bar["segments"] if s.get("active")]  # type: ignore[index]
@@ -705,6 +730,22 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit("interaction smoke: wheel down did not return to live bottom")
         states.append(capture_live_state(live, out, "scroll-return"))
 
+        geo = live.json_ctl("ui_geometry")
+        content = geo["content"]  # type: ignore[index]
+        selection_cells = live.json_ctl("read_cells")
+        (out / "selection-target.cells.json").write_text(json.dumps(selection_cells, indent=2) + "\n")
+        sx0, sy0, sx1, sy1 = selection_drag_points(selection_cells, content)  # type: ignore[arg-type]
+        live.screenshot(out / "selection-before.png")
+        live.ctl("send_mouse", params={"event": "press", "x": sx0, "y": sy0, "button": "left"})
+        time.sleep(0.05)
+        live.ctl("send_mouse", params={"event": "move", "x": sx1, "y": sy1})
+        time.sleep(0.15)
+        live.screenshot(out / "selection-drag.png")
+        live.ctl("send_mouse", params={"event": "release", "x": sx1, "y": sy1, "button": "left"})
+        selection_changes = len(changed_pixels(out / "selection-before.png", out / "selection-drag.png", float(content["y"]), float(content["y"]) + float(content["height"])))  # type: ignore[index]
+        if selection_changes < 50:
+            raise SystemExit(f"interaction smoke: selection drag changed too few pixels ({selection_changes})")
+
         tabs_before = live.json_ctl("list_tabs")
         geo = live.json_ctl("ui_geometry")
         nx, ny = rect_center(geo["tab_bar"]["new_tab"])  # type: ignore[index]
@@ -748,6 +789,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
             {
                 "states": states,
                 "menu_changed_pixels": menu_changes,
+                "selection_changed_pixels": selection_changes,
                 "scroll_offset": int(scrolled.get("display_offset", 0)),
                 "tabs_before": len(tabs_before.get("tabs", [])),
                 "tabs_after": len(tabs_after.get("tabs", [])),

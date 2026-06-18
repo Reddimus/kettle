@@ -4021,6 +4021,39 @@ impl App {
         }
     }
 
+    fn begin_or_extend_mouse_selection(&mut self, ws: &mut WindowState, area: Rect) {
+        if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area) {
+            return;
+        }
+        let cell = self.cursor_cell(ws);
+        let clicks = cell.map(|(r, c)| self.click_count(ws, r, c)).unwrap_or(1);
+        let kind = selection_kind(clicks, ws.mods.alt_key());
+        let mut smart_selected = false;
+        if clicks == 2
+            && !ws.mods.alt_key()
+            && let Some((row, col)) = cell
+            && let Some((start, end)) = self
+                .line_text_for_smart_select(ws, row)
+                .as_deref()
+                .and_then(|line| smart_selection_at(line, col))
+            && self.apply_smart_selection(ws, area, row, start, end)
+        {
+            smart_selected = true;
+        }
+        if !smart_selected {
+            self.begin_selection(ws, area, kind);
+        }
+        if self.cfg.copy_on_select
+            && (smart_selected
+                || matches!(
+                    kind,
+                    kettle_core::SelectionType::Semantic | kettle_core::SelectionType::Lines
+                ))
+        {
+            self.copy_selection(ws);
+        }
+    }
+
     /// Extend the existing selection to the cursor point (Shift+Click).
     /// Returns `true` when a selection was present *and* extended — the
     /// caller falls back to a fresh `begin_selection` when no selection
@@ -9452,6 +9485,10 @@ impl App {
         if let Some(btn) = ws.mouse_btn {
             let _ = self.send_mouse(ws, btn, true, true);
         }
+        if ws.selecting {
+            let area = self.area(ws);
+            self.update_selection(ws, area);
+        }
     }
 
     fn ctl_mouse_press(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
@@ -9515,6 +9552,10 @@ impl App {
             ws.mouse_btn = Some(bcode);
             return true;
         }
+        if bcode == 0 {
+            self.begin_or_extend_mouse_selection(ws, area);
+            return true;
+        }
         false
     }
 
@@ -9525,6 +9566,9 @@ impl App {
             handled = self.send_mouse(ws, bcode, false, false);
         }
         if bcode == 0 {
+            if ws.selecting && self.cfg.copy_on_select {
+                self.copy_selection(ws);
+            }
             ws.selecting = false;
             ws.dragging_scrollbar = false;
             ws.dragging_split = None;
@@ -14327,61 +14371,7 @@ impl App {
                     return;
                 }
                 if bcode == 0 {
-                    // Shift+left-click extends an existing selection to the
-                    // click point (xterm / Alacritty / iTerm2 / WezTerm
-                    // parity). Alt still takes precedence for block-select
-                    // so Shift+Alt remains block. If there's no selection
-                    // to extend, fall through to the normal new-selection
-                    // path so Shift+Click on empty space "just works."
-                    if ws.mods.shift_key()
-                        && !ws.mods.alt_key()
-                        && self.extend_selection_to_cursor(ws, area)
-                    {
-                        if let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
-                        return;
-                    }
-                    let cell = self.cursor_cell(ws);
-                    let clicks = cell.map(|(r, c)| self.click_count(ws, r, c)).unwrap_or(1);
-                    let kind = selection_kind(clicks, ws.mods.alt_key());
-                    // Cycle 288 smart selection (iTerm2 parity): on a
-                    // double-click that lands inside a hint match
-                    // (URL / path / IPv4 / git SHA), select the whole
-                    // match as a Simple range instead of the alacritty
-                    // Semantic word, which usually under- or over-shoots
-                    // structured tokens. Falls through to begin_selection
-                    // when no hint matches, preserving existing behavior.
-                    let mut smart_selected = false;
-                    if clicks == 2
-                        && !ws.mods.alt_key()
-                        && let Some((row, col)) = cell
-                        && let Some((start, end)) = self
-                            .line_text_for_smart_select(ws, row)
-                            .as_deref()
-                            .and_then(|line| smart_selection_at(line, col))
-                        && self.apply_smart_selection(ws, area, row, start, end)
-                    {
-                        smart_selected = true;
-                    }
-                    if !smart_selected {
-                        self.begin_selection(ws, area, kind);
-                    }
-                    // Word/line selections resolve on press; copy them now.
-                    // Simple/Block are drags — copied on button release.
-                    // Cycle 288: smart-selected count as resolved-on-press
-                    // for copy_on_select purposes too — the whole match
-                    // is the selection, no drag follow-up expected.
-                    if self.cfg.copy_on_select
-                        && (smart_selected
-                            || matches!(
-                                kind,
-                                kettle_core::SelectionType::Semantic
-                                    | kettle_core::SelectionType::Lines
-                            ))
-                    {
-                        self.copy_selection(ws);
-                    }
+                    self.begin_or_extend_mouse_selection(ws, area);
                 }
                 if let Some(w) = &ws.window {
                     w.request_redraw();

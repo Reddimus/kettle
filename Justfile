@@ -296,7 +296,7 @@ agent-tui-smoke:
     python scripts/check-live-ui-smoke.py agent-tui
 
 # Drive broader live UI interactions: multiline text entry, scrollback wheel,
-# tab creation, context menu geometry, and screenshots.
+# selection drag, tab creation, context menu geometry, and screenshots.
 [unix]
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py interaction
