@@ -1538,6 +1538,18 @@ features list. What's left is genuinely-multi-week threads + polish.
       Windows 11 and Windows 11 WSL interactive passes on real desktops,
       including integrated-GPU default selection (`gpu-power-preference = auto`)
       and multi-shell launch behavior.
+      Ubuntu release-gate evidence was refreshed on 2026-06-18 against
+      `kettle 2.25.1 (09cab88fc36d)`: `just gauntlet` passed (fmt, clippy,
+      build-all-targets, workspace tests, and rustdoc), `cargo deny check`
+      passed with advisories/bans/licenses/sources OK, `cargo machete` found no
+      unused dependencies, package-template checks matched the published
+      v2.25.1 hashes, Linux direct and online installer smokes passed,
+      `actionlint -color` passed, offscreen screenshot/menu PNG smokes passed,
+      and `desktop-file-validate packaging/linux/kettle.desktop` passed. On
+      this machine `--gpu-info` reports only Intel Iris Xe integrated graphics,
+      and the default automatic GPU policy selects that integrated Vulkan
+      adapter for both `target/release/kettle` and the installed
+      `/home/kevim/.local/bin/kettle`.
 - [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
       Keybinds category lists each action's current chord; Enter captures a new
       chord, binds it live, and appends a `keybind` line (via
