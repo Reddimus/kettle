@@ -1469,11 +1469,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       close to Ghostty for startup, scrollback ingestion, resize, sustained
       output, memory, and GPU/frame-time behavior. The Ubuntu same-machine
       startup/ASCII-flood rows in `docs/PERFORMANCE.md` are refreshed for
-      current `main` and still pass the Terminator/Ghostty gate. Remaining work:
-      include Windows 11 and Windows 11 WSL where possible, broaden the local
-      peer suite to memory, resize, scrollback, and GPU/frame-time probes, and
-      prioritize row-level damage tracking plus persistent GPU cell buffers if
-      grid-mode frame cost remains above target.
+      current `main` and still pass the Terminator/Ghostty timing gate; the
+      Linux gate now also records advisory max-RSS samples for the same flood
+      lifecycle. Remaining work: include Windows 11 and Windows 11 WSL where
+      possible, broaden the local peer suite to resize, scrollback, and
+      GPU/frame-time probes, and prioritize row-level damage tracking,
+      persistent GPU cell buffers, and memory reduction if grid-mode frame cost
+      or RSS remains above target.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
       smokes, and CLI smokes, but the durable release gate still needs manual

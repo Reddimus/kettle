@@ -16,19 +16,23 @@ laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
 **Ubuntu local desktop smoke, current v2.25.1 main**
-(`kettle 2.25.1 (4d6f613beefb)`, `text-renderer = grid`,
-`gpu-power-preference = auto`, Hyperfine medians over 5 runs, 1 warmup, real
-X11/Wayland desktop):
+(`kettle 2.25.1 (0c0988779186)`, `text-renderer = grid`,
+`gpu-power-preference = auto`, timing medians over 5 Hyperfine runs with 1
+warmup, RSS medians over 5 `/usr/bin/time -f %M` runs, real X11/Wayland
+desktop):
 
 | workload | kettle | Terminator | Ghostty | Alacritty |
 |---|---:|---:|---:|---:|
-| launch terminal, run `/bin/true`, close | 198 ms | 320 ms | 500 ms | 190 ms |
-| launch terminal, print ~4 MiB ASCII, close | 317 ms | 452 ms | 622 ms | 335 ms |
+| launch terminal, run `/bin/true`, close | 161 ms | 306 ms | 574 ms | 172 ms |
+| launch terminal, print ~4 MiB ASCII, close | 319 ms | 439 ms | 611 ms | 335 ms |
+| max RSS while printing ~4 MiB ASCII | 145.2 MiB | 76.6 MiB | 180.6 MiB | 113.7 MiB |
 
 These are smoke numbers rather than a full latency suite, but they exercise the
 current release binary on the adapter the default policy chooses on this
-machine. Kettle beats Terminator and Ghostty on both probes and remains close to
-Alacritty for the flood path. The JSON for this run is under
+machine. Kettle beats Terminator and Ghostty on both timing probes and remains
+close to Alacritty for the flood path. The RSS row is advisory evidence: Kettle
+is below Ghostty for this lifecycle and above Terminator/Alacritty, so memory
+work remains open. The JSON for this run is under
 `target/perf-results/linux-local/`.
 
 Reproduce and gate this Ubuntu peer comparison with:
@@ -39,10 +43,11 @@ just linux-perf
 scripts/perf/linux-compare.sh --runs 7 --out-dir target/perf-results/linux-v2.25.1
 ```
 
-The script writes Hyperfine JSON for both probes plus `linux-score.json`, and it
-fails if Kettle is slower than Terminator or more than 10% slower than Ghostty on
-either workload. It is desktop-local by design because it needs installed GUI
-terminal peers and a real X11/Wayland session.
+The script writes Hyperfine JSON for both timing probes, advisory
+`linux-rss-flood.json`, and `linux-score.json`. It fails if Kettle is slower
+than Terminator or more than 10% slower than Ghostty on either timing workload.
+It is desktop-local by design because it needs installed GUI terminal peers and
+a real X11/Wayland session.
 
 ## v2.25.0 — cell-locked glyph rendering: no hot-path regression
 
