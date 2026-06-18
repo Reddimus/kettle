@@ -8914,7 +8914,7 @@ impl App {
     /// dispatch each message on the main thread (the only place `ws.mux` is
     /// touched). Mirrors `drain_remote_commands` but with per-connection
     /// replies + a connection table.
-    fn drain_ctl(&mut self, ws: &mut WindowState) {
+    fn drain_ctl(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         use crate::ctl_server::CtlServerMsg;
         // Pull all pending messages first so we don't hold a `&self.ctl` borrow
         // while calling `&mut self` handlers.
@@ -8955,7 +8955,7 @@ impl App {
                     if !internal_probe {
                         needs_redraw = true;
                     }
-                    self.handle_ctl_request(ws, conn_id, &req, reply, internal_probe);
+                    self.handle_ctl_request(ws, event_loop, conn_id, &req, reply, internal_probe);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -8993,6 +8993,7 @@ impl App {
     fn handle_ctl_request(
         &mut self,
         ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
         reply: crate::ctl_server::ReplyTx,
@@ -9047,9 +9048,8 @@ impl App {
                 .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
             "send_keys" => require_full(req.id, "send_keys")
                 .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
-            "send_mouse" => {
-                require_full(req.id, "send_mouse").unwrap_or_else(|| self.ctl_send_mouse(ws, req))
-            }
+            "send_mouse" => require_full(req.id, "send_mouse")
+                .unwrap_or_else(|| self.ctl_send_mouse(ws, event_loop, req)),
             "run_command" => {
                 if let Some(deny) = require_full(req.id, "run_command") {
                     deny
@@ -9371,6 +9371,7 @@ impl App {
     fn ctl_send_mouse(
         &mut self,
         ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
@@ -9380,7 +9381,7 @@ impl App {
             .and_then(|v| v.as_u64())
             .unwrap_or(ws.seq);
         if target_seq == ws.seq {
-            return self.ctl_send_mouse_for_window(ws, req);
+            return self.ctl_send_mouse_for_window(ws, event_loop, req);
         }
         let Some(mut target) = self.windows.remove(&target_seq) else {
             return Response::err(
@@ -9389,7 +9390,7 @@ impl App {
                 format!("no window with id {target_seq}"),
             );
         };
-        let resp = self.ctl_send_mouse_for_window(&mut target, req);
+        let resp = self.ctl_send_mouse_for_window(&mut target, event_loop, req);
         self.windows.insert(target_seq, target);
         resp
     }
@@ -9397,6 +9398,7 @@ impl App {
     fn ctl_send_mouse_for_window(
         &mut self,
         ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
@@ -9429,7 +9431,7 @@ impl App {
                     Ok(b) => b,
                     Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
                 };
-                handled = self.ctl_mouse_press(ws, bcode);
+                handled = self.ctl_mouse_press(ws, event_loop, bcode);
             }
             "release" => {
                 let bcode = match ctl_mouse_button(&req.params) {
@@ -9443,7 +9445,7 @@ impl App {
                     Ok(b) => b,
                     Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
                 };
-                let pressed = self.ctl_mouse_press(ws, bcode);
+                let pressed = self.ctl_mouse_press(ws, event_loop, bcode);
                 let released = self.ctl_mouse_release(ws, bcode);
                 handled = pressed || released;
             }
@@ -9491,9 +9493,24 @@ impl App {
         }
     }
 
-    fn ctl_mouse_press(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+    fn ctl_mouse_press(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        bcode: u8,
+    ) -> bool {
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if ws.context_menu.is_some()
+            && let Some(click) = self.context_menu_click_action(ws, bcode)
+        {
+            self.dispatch_context_menu_click(ws, click, event_loop);
+            return true;
+        }
+        if ws.context_menu.is_some() && bcode == 0 {
+            ws.context_menu = None;
+            return true;
+        }
         if bar.height > 0.0 && py >= bar.y && py < bar.y + bar.height && (bcode == 0 || bcode == 1)
         {
             if bcode == 0 && rect_contains(bar.new_tab, px, py) {
@@ -13502,7 +13519,7 @@ impl App {
             }
             UserEvent::ReloadConfig => self.reload_config(ws),
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
-            UserEvent::Ctl => self.drain_ctl(ws),
+            UserEvent::Ctl => self.drain_ctl(ws, _el),
             UserEvent::UpdateAvailable { tag, url } => {
                 // Cycle 794: a newer release exists. Show the dismissable
                 // bottom-bar banner, fire one desktop toast, and nudge the

@@ -782,7 +782,18 @@ def run_interaction(kettle: str, root: Path) -> Path:
         ]
         if len(split_rows) != 1:
             raise SystemExit(f"interaction smoke: expected one Split Right row, got {split_rows}")
-        live.ctl("send_keys", params={"keys": ["escape"]}, timeout=8)
+        panes_before_split = live.json_ctl("list_panes")
+        (out / "panes-before-split.json").write_text(json.dumps(panes_before_split, indent=2) + "\n")
+        split_x, split_y = rect_center(split_rows[0]["rect"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": split_x, "y": split_y, "button": "left"})
+        time.sleep(0.8)
+        panes_after_split = live.json_ctl("list_panes")
+        (out / "panes-after-split.json").write_text(json.dumps(panes_after_split, indent=2) + "\n")
+        if len(panes_after_split.get("panes", [])) <= len(panes_before_split.get("panes", [])):
+            raise SystemExit("interaction smoke: Split Right context-menu row did not create a pane")
+        split_marker = "KETTLE_INTERACTION_SPLIT_RIGHT"
+        live_shell_command(live, command_with_marker("printf 'split-right-live\\n'" if platform.system() != "Windows" else "Write-Output split-right-live", split_marker), split_marker)
+        states.append(capture_live_state(live, out, "split-right"))
 
     (out / "analysis.json").write_text(
         json.dumps(
@@ -793,6 +804,8 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "scroll_offset": int(scrolled.get("display_offset", 0)),
                 "tabs_before": len(tabs_before.get("tabs", [])),
                 "tabs_after": len(tabs_after.get("tabs", [])),
+                "panes_before_split": len(panes_before_split.get("panes", [])),
+                "panes_after_split": len(panes_after_split.get("panes", [])),
                 "menu_split_right_rect": split_rows[0]["rect"],
             },
             indent=2,

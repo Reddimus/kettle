@@ -286,12 +286,14 @@ just interaction-smoke
 Starts a real grid-renderer Kettle window and drives broader UI states through
 `kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`
 creation, local selection drag, right-click context-menu opening, and screenshot
-capture. It saves
+capture. It also clicks the `Split Right` context-menu row and verifies a new
+pane. It saves
 PNG screenshots, `read_screen`, `read_cells`, `ui_geometry`, and `analysis.json`
 under `target/diagnostics/interaction-*`, and fails if scrollback text does not
 follow the visible viewport, if captures are blank, if the tab count does not
-increase, if selection drag does not visibly change content pixels, or if the
-context menu lacks a dispatchable `Split Right` row.
+increase, if selection drag does not visibly change content pixels, if the
+context menu lacks a dispatchable `Split Right` row, or if that row does not
+create a split pane.
 
 ```sh
 just tabbar-click-smoke

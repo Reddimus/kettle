@@ -1463,9 +1463,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       screenshots, and it pinned/fixed `read_screen` so default reads follow the
       visible scrolled viewport. Remaining work is deeper live-window
       validation: drive Codex CLI, Claude Code CLI, AstroNvim, tmux, shell
-      prompts, resize, split dispatch, notification, and deeper screenshot
-      states inside Kettle with `text-renderer = grid`. The live interaction
-      smoke now includes a local selection drag probe through `send_mouse`. Use
+      prompts, resize, notification, and deeper screenshot states inside Kettle
+      with `text-renderer = grid`. The live interaction smoke now includes local
+      selection drag and context-menu `Split Right` dispatch probes through
+      `send_mouse`. Use
       `send_mouse`, `send_keys`, `ui_geometry`, `read_cells`, and `screenshot`
       so the pass is reproducible instead of a manual eyeball-only sweep, then
       compare captured frames for blank panes, overlapping UI, stale text, and unintended
