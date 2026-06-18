@@ -1436,10 +1436,12 @@ features list. What's left is genuinely-multi-week threads + polish.
       CI-safe offscreen renderer guard now exercises zsh-style, POSIX,
       lambda/starship-style, git-status, and PowerShell-style prompt fixtures
       through the cell-locked grid pipeline and asserts all non-cursor prompt
-      pixels survive a block-cursor blink. Remaining work: run the live smoke on
-      Ubuntu plus the Windows 11 / Windows 11 WSL paths before changing renderer
-      defaults again, and keep adding fixtures when a new prompt shape exposes a
-      renderer edge case.
+      pixels survive a block-cursor blink. The Ubuntu live smoke passed on
+      2026-06-18 against `kettle 2.25.1 (5596f3aabbb7)`: 6 frames, worst
+      blink pair changed 128 pixels in an 8x16 cursor-sized box, and frame ink
+      stayed nonblank. Remaining work: run the live smoke on the Windows 11 /
+      Windows 11 WSL paths before changing renderer defaults again, and keep
+      adding fixtures when a new prompt shape exposes a renderer edge case.
 - [ ] **Tab click and underline-scroll diagnostics.** `just tabbar-click-smoke`
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag
@@ -1498,8 +1500,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       recording their active modal flags and pixel deltas in `analysis.json`.
       On the Ubuntu machine used for this sweep, the auth-smoke path proved
       Codex CLI authentication and recorded Claude Code as `auth_failed`
-      because the installed CLI returned a 401 from its provider. Remaining
-      work is deeper live-window validation: restore/prove Claude credentials,
+      because the installed CLI returned a 401 from its provider. This was
+      refreshed on 2026-06-18 in
+      `target/diagnostics/agent-tui-20260618-002429`: shell, prompt-shape,
+      Codex version/help/auth, Claude version/help, tmux attach/split, clean
+      Neovim marker/split, and configured Neovim/AstroNvim marker/split all
+      passed; only the real Claude provider call remained `auth_failed`.
+      Remaining work is deeper live-window validation: restore/prove Claude credentials,
       configured AstroNvim workflows beyond marker and split buffers, tmux
       workflows beyond attach/send/split, Windows/WSL runs, and richer
       screenshot-state comparisons inside Kettle with `text-renderer = grid`.
