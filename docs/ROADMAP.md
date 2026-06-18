@@ -1459,9 +1459,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       Neovim, and configured Neovim/AstroNvim command paths. `just
       agent-tui-smoke` now adds a live grid-renderer window pass for a shell
       marker, a prompt-shaped `➜  ~` marker, optional Codex/Claude CLI version
-      probes, tmux attach/send/capture when tmux is installed, and
-      clean/configured Neovim marker buffers, with PNG, `read_screen`,
-      `read_cells`, and `analysis.json` artifacts that fail on blank captures.
+      probes, `codex exec --help` / `claude --print --help` output captures,
+      tmux attach/send/capture when tmux is installed, and clean/configured
+      Neovim marker buffers, with PNG, `read_screen`, `read_cells`, and
+      `analysis.json` artifacts that fail on blank captures.
       The tmux 3.4 branch has passed on Ubuntu with a real `tmux.png` capture.
       `just
       interaction-smoke` now covers multiline text entry, scrollback wheel
@@ -1471,9 +1472,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       selection drag, context-menu `Split Right` dispatch, split-window resize
       probes through `send_mouse` / `resize_window`, and an OSC 777 protocol
       notification probe observed through the subscribed `kettle ctl events`
-      stream. Remaining work is deeper live-window validation: drive Codex CLI,
-      Claude Code CLI, AstroNvim, full tmux workflows beyond attach/send, and
-      deeper screenshot states inside Kettle with `text-renderer = grid`. Use
+      stream. Remaining work is deeper live-window validation: drive authenticated
+      Codex/Claude agent sessions, AstroNvim workflows beyond marker buffers,
+      full tmux workflows beyond attach/send, and deeper screenshot states
+      inside Kettle with `text-renderer = grid`. Use
       `send_mouse`, `send_keys`, `ui_geometry`, `read_cells`, and `screenshot`
       so the pass is reproducible instead of a manual eyeball-only sweep, then
       compare captured frames for blank panes, overlapping UI, stale text, and unintended

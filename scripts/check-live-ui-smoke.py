@@ -696,6 +696,12 @@ def command_with_marker(command: str, marker: str) -> str:
     return f"{command}; printf '%s\\n' {shell_quote(marker)}"
 
 
+def first_lines_command(command: str, lines: int = 22) -> str:
+    if platform.system() == "Windows":
+        return f"{command} | Select-Object -First {lines}"
+    return f"{command} | sed -n '1,{lines}p'"
+
+
 def prompt_marker_command(marker: str) -> str:
     split = max(1, len(marker) // 2)
     left = marker[:split]
@@ -786,6 +792,27 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             live_shell_command(live, command_with_marker(f"{tool} --version", marker), marker, timeout_ms=12000)
             states.append(capture_live_state(live, out, tool))
             probes.append({"name": tool, "status": "ok"})
+            if tool == "codex":
+                help_label = "codex-exec-help"
+                help_marker = "KETTLE_AGENT_TUI_CODEX_EXEC_HELP"
+                expected = "Run Codex non-interactively"
+                help_command = first_lines_command("codex exec --help")
+            else:
+                help_label = "claude-print-help"
+                help_marker = "KETTLE_AGENT_TUI_CLAUDE_PRINT_HELP"
+                expected = "non-interactive output"
+                help_command = first_lines_command("claude --print --help")
+            live_shell_command(
+                live,
+                command_with_marker(help_command, help_marker),
+                help_marker,
+                timeout_ms=12000,
+            )
+            help_screen = live.json_ctl("read_screen")
+            if expected not in screen_text(help_screen):
+                raise SystemExit(f"agent-tui smoke: {help_label} did not render expected help text")
+            states.append(capture_live_state(live, out, help_label))
+            probes.append({"name": help_label, "status": "ok"})
 
         if platform.system() == "Windows" or shutil.which("tmux") is None:
             probes.append({"name": "tmux", "status": "skipped", "reason": "not on PATH"})

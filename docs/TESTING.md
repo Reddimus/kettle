@@ -242,8 +242,9 @@ These need a real display and are run by hand (or on real hardware):
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
     grid-renderer Kettle window, drives a shell marker, a prompt-shaped `➜  ~`
-    marker, optional Codex/Claude CLI version probes, tmux attach/send/capture
-    when `tmux` is installed, and clean/configured Neovim marker buffers through
+    marker, optional Codex/Claude CLI version probes plus `codex exec --help` /
+    `claude --print --help` output captures, tmux attach/send/capture when
+    `tmux` is installed, and clean/configured Neovim marker buffers through
     `kettle ctl`, then saves PNG, `read_screen`, `read_cells`, and
     `analysis.json` artifacts under `target/diagnostics/agent-tui-*`. It fails
     if a captured state is blank or lacks visible terminal cells. When tmux is

@@ -274,8 +274,9 @@ just agent-tui-smoke
 ```
 
 Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
-CLI and Claude Code CLI `--version` probes, a prompt-shaped `➜  ~` marker,
-tmux attach/send/capture when `tmux` is installed, and clean/configured
+CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
+`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, tmux
+attach/send/capture when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers through `kettle ctl`. It saves PNG screenshots,
 `read_screen`, `read_cells`, and `analysis.json` under
 `target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
