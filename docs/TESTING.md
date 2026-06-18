@@ -253,6 +253,11 @@ These need a real display and are run by hand (or on real hardware):
     present, the run includes `tmux.png`, `tmux-split.png`, matching screen
     JSON, and matching cells JSON. When Neovim is present, it includes both
     `nvim-split-clean` and `nvim-split-configured` states.
+    `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
+    authenticated `codex exec` / `claude --print` marker prompts inside the
+    Kettle pane and records `*-auth-session` probes. External auth failures are
+    captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
+    credentials should fail the run.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, tab-bar `+` tab creation,

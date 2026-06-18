@@ -281,7 +281,11 @@ CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, tmux
 attach/send/capture when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
-workflow states through `kettle ctl`. It saves PNG screenshots, `read_screen`, `read_cells`, and
+workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
+run real authenticated `codex exec` / `claude --print` marker prompts inside
+the Kettle pane; use `KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired
+external credentials should fail the run. It saves PNG screenshots,
+`read_screen`, `read_cells`, and
 `analysis.json` under
 `target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
 lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;

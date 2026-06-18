@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import queue
+import shlex
 import shutil
 import struct
 import subprocess
@@ -801,6 +802,75 @@ def notification_command(title: str, body: str, marker: str) -> str:
     )
 
 
+def env_flag(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
+def env_strict(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("required", "strict", "fail")
+
+
+def agent_auth_command(tool: str, marker: str, done_marker: str) -> str:
+    prompt = f"Reply exactly {marker} and nothing else."
+    if tool == "codex":
+        argv = [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            prompt,
+        ]
+    elif tool == "claude":
+        argv = [
+            "claude",
+            "--print",
+            "--output-format",
+            "text",
+            "--max-budget-usd",
+            "0.05",
+            prompt,
+        ]
+    else:
+        raise ValueError(f"unsupported agent auth tool: {tool}")
+
+    if platform.system() == "Windows":
+        ps_argv = " ".join(shell_quote(part) for part in argv)
+        done = shell_quote(done_marker)
+        return (
+            "$tmp=New-TemporaryFile; "
+            f"& {ps_argv} *> $tmp; "
+            "$rc=$LASTEXITCODE; "
+            "Get-Content $tmp; "
+            "Remove-Item $tmp -ErrorAction SilentlyContinue; "
+            f"Write-Output ({done} + ':' + $rc)"
+        )
+    sh_argv = " ".join(shlex.quote(part) for part in argv)
+    return (
+        "tmp=$(mktemp); "
+        f"{sh_argv} >\"$tmp\" 2>&1; "
+        "rc=$?; "
+        "cat \"$tmp\"; "
+        "rm -f \"$tmp\"; "
+        f"printf '\\n%s:%s\\n' {shlex.quote(done_marker)} \"$rc\""
+    )
+
+
+def done_marker_status(text: str, done_marker: str) -> Optional[int]:
+    prefix = f"{done_marker}:"
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            try:
+                return int(line[len(prefix) :].strip())
+            except ValueError:
+                return None
+    return None
+
+
 def nvim_marker_command(marker: str, configured: bool) -> str:
     base = "nvim -n" if configured else "nvim --clean -n"
     return (
@@ -856,6 +926,8 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
     extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
     states: List[Dict[str, object]] = []
     probes: List[Dict[str, object]] = []
+    run_auth_smoke = env_flag("KETTLE_AGENT_AUTH_SMOKE")
+    require_auth_smoke = env_strict("KETTLE_AGENT_AUTH_SMOKE")
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         marker = "KETTLE_AGENT_TUI_SHELL_SMOKE"
         live_shell_command(live, command_with_marker("printf 'shell-live-ok\\n'" if platform.system() != "Windows" else "Write-Output shell-live-ok", marker), marker)
@@ -899,6 +971,38 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 raise SystemExit(f"agent-tui smoke: {help_label} did not render expected help text")
             states.append(capture_live_state(live, out, help_label))
             probes.append({"name": help_label, "status": "ok"})
+            if run_auth_smoke:
+                auth_label = f"{tool}-auth-session"
+                auth_marker = f"KETTLE_AGENT_TUI_{tool.upper()}_AUTH_SESSION"
+                done_marker = f"KETTLE_AGENT_TUI_{tool.upper()}_AUTH_DONE"
+                live.ctl(
+                    "send_text",
+                    params={"text": agent_auth_command(tool, auth_marker, done_marker)},
+                    timeout=8,
+                )
+                live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+                live.wait_for_text(done_marker, timeout_ms=180000, quiet_ms=500)
+                auth_screen = live.json_ctl("read_screen", params={"scrollback_lines": 240})
+                auth_text = screen_text(auth_screen)
+                rc = done_marker_status(auth_text, done_marker)
+                status = "ok" if rc == 0 and auth_marker in auth_text else "auth_failed"
+                reason = None
+                if rc is None:
+                    status = "marker_missing"
+                    reason = "done marker exit status was not visible in read_screen"
+                elif rc != 0:
+                    reason = f"{tool} exited {rc}; likely missing/expired external authentication"
+                elif auth_marker not in auth_text:
+                    status = "marker_missing"
+                    reason = f"{tool} exited 0 but expected auth marker was not visible"
+                state = capture_live_state(live, out, auth_label)
+                states.append(state)
+                probe = {"name": auth_label, "status": status, "exit_code": rc}
+                if reason is not None:
+                    probe["reason"] = reason
+                probes.append(probe)
+                if status != "ok" and require_auth_smoke:
+                    raise SystemExit(f"agent-tui smoke: {auth_label} failed: {reason}")
 
         if platform.system() == "Windows" or shutil.which("tmux") is None:
             probes.append({"name": "tmux", "status": "skipped", "reason": "not on PATH"})

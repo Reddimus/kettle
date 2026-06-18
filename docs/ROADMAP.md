@@ -1463,6 +1463,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       agent-tui-smoke` now adds a live grid-renderer window pass for a shell
       marker, a prompt-shaped `➜  ~` marker, optional Codex/Claude CLI version
       probes, `codex exec --help` / `claude --print --help` output captures,
+      opt-in real authenticated `codex exec` / `claude --print` marker prompts
+      through `KETTLE_AGENT_AUTH_SMOKE=1`, with external credential failures
+      recorded as `auth_failed` unless strict mode is requested,
       tmux attach/send/capture plus a tmux-managed horizontal split workflow
       when tmux is installed, and clean/configured Neovim marker buffers plus
       clean/configured Neovim/AstroNvim vertical-split workflows, with PNG,
@@ -1486,14 +1489,17 @@ features list. What's left is genuinely-multi-week threads + polish.
       The same pass now captures SSH launcher, layout picker, quick-select hint
       mode (with a visible URL fixture), and window/tab/pane title-edit overlays,
       recording their active modal flags and pixel deltas in `analysis.json`.
-      Remaining work is deeper live-window validation: drive authenticated
-      Codex/Claude agent sessions, configured AstroNvim workflows beyond marker
-      and split buffers, tmux workflows beyond attach/send/split, Windows/WSL
-      runs, and richer screenshot-state comparisons inside Kettle with
-      `text-renderer = grid`. Use `send_mouse`, `send_keys`, `perform_action`,
-      `ui_geometry`, `read_cells`, and `screenshot` so the pass is reproducible
-      instead of a manual eyeball-only sweep, then compare captured frames for
-      blank panes, overlapping UI, stale text, and unintended blinking.
+      On the Ubuntu machine used for this sweep, the auth-smoke path proved
+      Codex CLI authentication and recorded Claude Code as `auth_failed`
+      because the installed CLI returned a 401 from its provider. Remaining
+      work is deeper live-window validation: restore/prove Claude credentials,
+      configured AstroNvim workflows beyond marker and split buffers, tmux
+      workflows beyond attach/send/split, Windows/WSL runs, and richer
+      screenshot-state comparisons inside Kettle with `text-renderer = grid`.
+      Use `send_mouse`, `send_keys`, `perform_action`, `ui_geometry`,
+      `read_cells`, and `screenshot` so the pass is reproducible instead of a
+      manual eyeball-only sweep, then compare captured frames for blank panes,
+      overlapping UI, stale text, and unintended blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained
       output, memory, and GPU/frame-time behavior. The Ubuntu same-machine

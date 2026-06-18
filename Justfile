@@ -287,7 +287,8 @@ live-render-smoke:
 
 # Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
 # tmux, and clean/configured Neovim marker + split states. Captures
-# PNG/readback artifacts under target/diagnostics/agent-tui-*.
+# PNG/readback artifacts under target/diagnostics/agent-tui-*. Set
+# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
 [unix]
 agent-tui-smoke:
     python3 scripts/check-live-ui-smoke.py agent-tui
