@@ -275,12 +275,13 @@ just agent-tui-smoke
 
 Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes, a prompt-shaped `➜  ~` marker,
-optional tmux attach/send/capture, and clean/configured Neovim/AstroNvim marker
-buffers through `kettle ctl`. It saves PNG screenshots, `read_screen`,
-`read_cells`, and `analysis.json` under `target/diagnostics/agent-tui-*`, and
-fails if a captured state is blank or lacks visible terminal cells. Missing
-optional CLIs/tools are reported as skips; the shell and prompt-shaped states
-always run.
+tmux attach/send/capture when `tmux` is installed, and clean/configured
+Neovim/AstroNvim marker buffers through `kettle ctl`. It saves PNG screenshots,
+`read_screen`, `read_cells`, and `analysis.json` under
+`target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
+lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
+the shell and prompt-shaped states always run. When tmux is available, the run
+also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`.
 
 ```sh
 just interaction-smoke
