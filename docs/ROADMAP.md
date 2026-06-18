@@ -1467,11 +1467,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       overlapping UI, stale text, and unintended blinking.
 - [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
       close to Ghostty for startup, scrollback ingestion, resize, sustained
-      output, memory, and GPU/frame-time behavior. Remaining work: refresh the
-      same-machine benchmark rows in `docs/PERFORMANCE.md`, include Ubuntu,
-      Windows 11, and Windows 11 WSL where possible, and prioritize row-level
-      damage tracking plus persistent GPU cell buffers if grid-mode frame cost
-      remains above target.
+      output, memory, and GPU/frame-time behavior. The Ubuntu same-machine
+      startup/ASCII-flood rows in `docs/PERFORMANCE.md` are refreshed for
+      current `main` and still pass the Terminator/Ghostty gate. Remaining work:
+      include Windows 11 and Windows 11 WSL where possible, broaden the local
+      peer suite to memory, resize, scrollback, and GPU/frame-time probes, and
+      prioritize row-level damage tracking plus persistent GPU cell buffers if
+      grid-mode frame cost remains above target.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
       smokes, and CLI smokes, but the durable release gate still needs manual

@@ -15,15 +15,15 @@ only adapter without pretending a discrete GPU was selected, while hybrid
 laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
-**Ubuntu local desktop smoke, current v2.25.1 working tree**
-(`kettle 2.25.1 (4f9f36117b12+dirty)`, `text-renderer = grid`,
-`gpu-power-preference = auto`, Hyperfine medians over 3 runs, 1 warmup, real
+**Ubuntu local desktop smoke, current v2.25.1 main**
+(`kettle 2.25.1 (4d6f613beefb)`, `text-renderer = grid`,
+`gpu-power-preference = auto`, Hyperfine medians over 5 runs, 1 warmup, real
 X11/Wayland desktop):
 
 | workload | kettle | Terminator | Ghostty | Alacritty |
 |---|---:|---:|---:|---:|
-| launch terminal, run `/bin/true`, close | 168 ms | 315 ms | 523 ms | 137 ms |
-| launch terminal, print ~4 MiB ASCII, close | 338 ms | 468 ms | 596 ms | 307 ms |
+| launch terminal, run `/bin/true`, close | 198 ms | 320 ms | 500 ms | 190 ms |
+| launch terminal, print ~4 MiB ASCII, close | 317 ms | 452 ms | 622 ms | 335 ms |
 
 These are smoke numbers rather than a full latency suite, but they exercise the
 current release binary on the adapter the default policy chooses on this
