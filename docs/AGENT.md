@@ -268,6 +268,18 @@ prompt glyphs remain visible across blink phases. This needs a visible
 X11/Wayland desktop session.
 
 ```sh
+just agent-tui-smoke
+```
+
+Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
+CLI and Claude Code CLI `--version` probes, and clean/configured
+Neovim/AstroNvim marker buffers through `kettle ctl`. It saves PNG screenshots,
+`read_screen`, `read_cells`, and `analysis.json` under
+`target/diagnostics/agent-tui-*`, and fails if a captured state is blank or lacks
+visible terminal cells. Missing optional CLIs are reported as skips; the shell
+state always runs.
+
+```sh
 just tabbar-click-smoke
 ```
 

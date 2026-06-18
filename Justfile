@@ -284,6 +284,17 @@ live-render-smoke:
     @echo "manual Windows live screenshot smoke can use 'kettle --agent-server full'"
     @echo "plus 'kettle ctl screenshot'."
 
+# Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
+# and clean/configured Neovim states. Captures PNG/readback artifacts under
+# target/diagnostics/agent-tui-*.
+[unix]
+agent-tui-smoke:
+    python3 scripts/check-live-ui-smoke.py agent-tui
+
+[windows]
+agent-tui-smoke:
+    python scripts/check-live-ui-smoke.py agent-tui
+
 # Reproduce and guard the multi-tab mouse-click visual state. Captures full
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
 [unix]

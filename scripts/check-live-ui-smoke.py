@@ -115,6 +115,22 @@ def bright_at(rgba_rows: List[bytes], x: int, y: int) -> bool:
     return a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000
 
 
+def bright_pixel_count(rgba_rows: List[bytes]) -> int:
+    total = 0
+    for row in rgba_rows:
+        for off in range(0, len(row), 4):
+            r, g, b, a = row[off : off + 4]
+            if a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000:
+                total += 1
+    return total
+
+
+def shell_quote(text: str) -> str:
+    if platform.system() == "Windows":
+        return "'" + text.replace("'", "''") + "'"
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
 class LiveKettle:
     def __init__(self, kettle: str, cfg: Path, log: Path, extra_args: Optional[List[str]] = None):
         self.kettle = kettle
@@ -183,6 +199,18 @@ class LiveKettle:
     def screenshot(self, path: Path) -> None:
         self.ctl("screenshot", params={"full_window": True, "path": str(path)}, timeout=12)
 
+    def wait_for_text(self, text: str, timeout_ms: int = 8000, quiet_ms: int = 200) -> None:
+        result = json.loads(
+            self.ctl(
+                "wait_for",
+                params={"text": text, "timeout_ms": timeout_ms, "quiet_ms": quiet_ms},
+                raw=True,
+                timeout=(timeout_ms / 1000.0) + 5.0,
+            ).stdout
+        )
+        if not result.get("matched"):
+            raise SystemExit(f"live-ui smoke: timed out waiting for {text!r}: {result}")
+
 
 def rect_center(rect: Dict[str, float]) -> Tuple[float, float]:
     return rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2
@@ -229,7 +257,7 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
-                "tab-bar = on",
+                "tab-bar = always",
                 "tab-bar-pos = top",
                 "status-bar = off",
                 "restore-session = false",
@@ -478,9 +506,131 @@ def run_underline(kettle: str, root: Path) -> Path:
     return out
 
 
+def capture_live_state(live: LiveKettle, out: Path, label: str) -> Dict[str, object]:
+    cells = live.json_ctl("read_cells")
+    (out / f"{label}.cells.json").write_text(json.dumps(cells, indent=2) + "\n")
+    screen = live.json_ctl("read_screen")
+    (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
+    shot = out / f"{label}.png"
+    live.screenshot(shot)
+
+    width, height, rgba_rows = read_rgba_png(shot)
+    non_space = 0
+    for cell in cells.get("cells", []):
+        if str(cell.get("ch", "")).strip():
+            non_space += 1
+    bright = bright_pixel_count(rgba_rows)
+    if non_space < 12:
+        raise SystemExit(f"agent-tui smoke: {label} has too few non-space cells ({non_space})")
+    if bright < 250:
+        raise SystemExit(f"agent-tui smoke: {label} screenshot looks blank ({bright} bright pixels)")
+    return {
+        "label": label,
+        "screenshot": str(shot),
+        "width": width,
+        "height": height,
+        "non_space_cells": non_space,
+        "bright_pixels": bright,
+    }
+
+
+def live_shell_command(live: LiveKettle, command: str, marker: str, timeout_ms: int = 10000) -> None:
+    live.ctl("send_text", params={"text": command})
+    live.ctl("send_keys", params={"keys": ["enter"]})
+    live.wait_for_text(marker, timeout_ms=timeout_ms, quiet_ms=250)
+
+
+def command_with_marker(command: str, marker: str) -> str:
+    if platform.system() == "Windows":
+        return f"{command}; Write-Output {shell_quote(marker)}"
+    return f"{command}; printf '%s\\n' {shell_quote(marker)}"
+
+
+def nvim_marker_command(marker: str, configured: bool) -> str:
+    base = "nvim -n" if configured else "nvim --clean -n"
+    return (
+        f'{base} "+set termguicolors" '
+        f'"+call setline(1, {shell_quote(marker)})" '
+        '"+normal! gg"'
+    )
+
+
+def exit_nvim(live: LiveKettle) -> None:
+    live.ctl(
+        "send_keys",
+        params={"keys": ["escape", ":", "q", "a", "l", "l", "!", "enter"]},
+        timeout=8,
+    )
+
+
+def run_agent_tui(kettle: str, root: Path) -> Path:
+    out = root / f"agent-tui-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "background = #090909",
+                "foreground = #f5f5f5",
+                "minimum-contrast = 0",
+                "window-width = 120",
+                "window-height = 36",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+    states: List[Dict[str, object]] = []
+    probes: List[Dict[str, object]] = []
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        marker = "KETTLE_AGENT_TUI_SHELL_SMOKE"
+        live_shell_command(live, command_with_marker("printf 'shell-live-ok\\n'" if platform.system() != "Windows" else "Write-Output shell-live-ok", marker), marker)
+        states.append(capture_live_state(live, out, "shell"))
+        probes.append({"name": "shell", "status": "ok"})
+
+        for tool in ("codex", "claude"):
+            if shutil.which(tool) is None:
+                probes.append({"name": tool, "status": "skipped", "reason": "not on PATH"})
+                continue
+            marker = f"KETTLE_AGENT_TUI_{tool.upper()}_SMOKE"
+            live_shell_command(live, command_with_marker(f"{tool} --version", marker), marker, timeout_ms=12000)
+            states.append(capture_live_state(live, out, tool))
+            probes.append({"name": tool, "status": "ok"})
+
+        if shutil.which("nvim") is None:
+            probes.append({"name": "nvim-clean", "status": "skipped", "reason": "not on PATH"})
+            probes.append({"name": "nvim-configured", "status": "skipped", "reason": "not on PATH"})
+        else:
+            for label, configured in (("nvim-clean", False), ("nvim-configured", True)):
+                marker = f"KETTLE_AGENT_TUI_{label.replace('-', '_').upper()}_SMOKE"
+                live.ctl("send_text", params={"text": nvim_marker_command(marker, configured)})
+                live.ctl("send_keys", params={"keys": ["enter"]})
+                live.wait_for_text(marker, timeout_ms=18000, quiet_ms=500)
+                states.append(capture_live_state(live, out, label))
+                exit_nvim(live)
+                time.sleep(0.6)
+                shell_marker = f"{marker}_EXITED"
+                live_shell_command(live, command_with_marker("printf 'nvim-exited\\n'" if platform.system() != "Windows" else "Write-Output nvim-exited", shell_marker), shell_marker)
+                probes.append({"name": label, "status": "ok"})
+
+    ok = [p for p in probes if p.get("status") == "ok"]
+    if not ok:
+        raise SystemExit("agent-tui smoke: no probes ran")
+    (out / "analysis.json").write_text(
+        json.dumps({"probes": probes, "states": states}, indent=2) + "\n"
+    )
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=["tabbar", "underline", "all"])
+    parser.add_argument("case", choices=["tabbar", "underline", "agent-tui", "all"])
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
     args = parser.parse_args()
@@ -497,6 +647,9 @@ def main() -> int:
     if args.case in ("underline", "all"):
         out = run_underline(args.kettle, root)
         print(f"underline-scroll smoke: OK artifacts={out}")
+    if args.case in ("agent-tui", "all"):
+        out = run_agent_tui(args.kettle, root)
+        print(f"agent-tui smoke: OK artifacts={out}")
     return 0
 
 

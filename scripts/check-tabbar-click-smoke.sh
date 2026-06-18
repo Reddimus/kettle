@@ -28,7 +28,7 @@ trap cleanup EXIT
 cfg="$out/config"
 cat > "$cfg" <<'CFG'
 agent-server = full
-tab-bar = on
+tab-bar = always
 tab-bar-pos = top
 status-bar = off
 restore-session = false

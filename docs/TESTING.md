@@ -239,6 +239,12 @@ These need a real display and are run by hand (or on real hardware):
     `kettle exec --json` output events, and `kettle mcp --self-test`. Missing
     optional tools are reported as skips, so this is a real-machine smoke rather
     than a portable CI gate.
+  - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
+    grid-renderer Kettle window, drives a shell marker, optional Codex/Claude
+    CLI version probes, and clean/configured Neovim marker buffers through
+    `kettle ctl`, then saves PNG, `read_screen`, `read_cells`, and
+    `analysis.json` artifacts under `target/diagnostics/agent-tui-*`. It fails
+    if a captured state is blank or lacks visible terminal cells.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
