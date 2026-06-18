@@ -1550,6 +1550,14 @@ features list. What's left is genuinely-multi-week threads + polish.
       and the default automatic GPU policy selects that integrated Vulkan
       adapter for both `target/release/kettle` and the installed
       `/home/kevim/.local/bin/kettle`.
+      Remote CI for commit `b001025a56344` also completed successfully on
+      2026-06-18 (run `27743855490`): Windows, macOS, Ubuntu, MSRV 1.89,
+      nightly early-warning, and aarch64 early-warning all passed. The Windows
+      leg included release-profile build + piped `--version` CLI smoke and
+      `scripts/check-windows-installer.ps1`; macOS and Ubuntu included their
+      platform build/test/package-smoke paths. This is CI evidence only; it
+      still does not replace manual Windows 11 / Windows 11 WSL interactive
+      desktop validation.
 - [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
       Keybinds category lists each action's current chord; Enter captures a new
       chord, binds it live, and appends a `keybind` line (via
