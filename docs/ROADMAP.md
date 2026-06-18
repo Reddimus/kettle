@@ -1464,8 +1464,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       marker, a prompt-shaped `➜  ~` marker, optional Codex/Claude CLI version
       probes, `codex exec --help` / `claude --print --help` output captures,
       tmux attach/send/capture when tmux is installed, and clean/configured
-      Neovim marker buffers, with PNG, `read_screen`, `read_cells`, and
-      `analysis.json` artifacts that fail on blank captures.
+      Neovim marker buffers plus a clean Neovim vertical-split workflow, with
+      PNG, `read_screen`, `read_cells`, and `analysis.json` artifacts that fail
+      on blank captures.
       The tmux 3.4 branch has passed on Ubuntu with a real `tmux.png` capture.
       `just
       interaction-smoke` now covers multiline text entry, scrollback wheel
@@ -1476,9 +1477,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       probes through `send_mouse` / `resize_window`, and an OSC 777 protocol
       notification probe observed through the subscribed `kettle ctl events`
       stream. Remaining work is deeper live-window validation: drive authenticated
-      Codex/Claude agent sessions, AstroNvim workflows beyond marker buffers,
-      full tmux workflows beyond attach/send, and deeper screenshot states
-      inside Kettle with `text-renderer = grid`. Use
+      Codex/Claude agent sessions, configured AstroNvim workflows beyond marker
+      buffers, full tmux workflows beyond attach/send, and deeper screenshot
+      states inside Kettle with `text-renderer = grid`. Use
       `send_mouse`, `send_keys`, `ui_geometry`, `read_cells`, and `screenshot`
       so the pass is reproducible instead of a manual eyeball-only sweep, then
       compare captured frames for blank panes, overlapping UI, stale text, and unintended

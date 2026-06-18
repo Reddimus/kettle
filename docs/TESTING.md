@@ -244,8 +244,9 @@ These need a real display and are run by hand (or on real hardware):
     grid-renderer Kettle window, drives a shell marker, a prompt-shaped `➜  ~`
     marker, optional Codex/Claude CLI version probes plus `codex exec --help` /
     `claude --print --help` output captures, tmux attach/send/capture when
-    `tmux` is installed, and clean/configured Neovim marker buffers through
-    `kettle ctl`, then saves PNG, `read_screen`, `read_cells`, and
+    `tmux` is installed, clean/configured Neovim marker buffers, and a clean
+    Neovim vertical-split workflow state through `kettle ctl`, then saves PNG,
+    `read_screen`, `read_cells`, and
     `analysis.json` artifacts under `target/diagnostics/agent-tui-*`. It fails
     if a captured state is blank or lacks visible terminal cells. When tmux is
     present, the run includes `tmux.png`, `tmux.screen.json`, and

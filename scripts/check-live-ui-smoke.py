@@ -792,6 +792,19 @@ def nvim_marker_command(marker: str, configured: bool) -> str:
     )
 
 
+def nvim_split_command(left_marker: str, right_marker: str, configured: bool) -> str:
+    base = "nvim -n" if configured else "nvim --clean -n"
+    return (
+        f'{base} "+set termguicolors cursorline laststatus=2" '
+        f'"+call setline(1, [{shell_quote(left_marker)}, {shell_quote(left_marker + "_LINE_2")}])" '
+        '"+vsplit" '
+        '"+wincmd l" '
+        '"+enew" '
+        f'"+call setline(1, [{shell_quote(right_marker)}, {shell_quote(right_marker + "_LINE_2")}])" '
+        '"+wincmd h"'
+    )
+
+
 def exit_nvim(live: LiveKettle) -> None:
     live.ctl(
         "send_keys",
@@ -892,6 +905,7 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         if shutil.which("nvim") is None:
             probes.append({"name": "nvim-clean", "status": "skipped", "reason": "not on PATH"})
             probes.append({"name": "nvim-configured", "status": "skipped", "reason": "not on PATH"})
+            probes.append({"name": "nvim-split-clean", "status": "skipped", "reason": "not on PATH"})
         else:
             for label, configured in (("nvim-clean", False), ("nvim-configured", True)):
                 marker = f"KETTLE_AGENT_TUI_{label.replace('-', '_').upper()}_SMOKE"
@@ -904,6 +918,22 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 shell_marker = f"{marker}_EXITED"
                 live_shell_command(live, command_with_marker("printf 'nvim-exited\\n'" if platform.system() != "Windows" else "Write-Output nvim-exited", shell_marker), shell_marker)
                 probes.append({"name": label, "status": "ok"})
+            left_marker = "KETTLE_AGENT_TUI_NVIM_SPLIT_CLEAN_LEFT"
+            right_marker = "KETTLE_AGENT_TUI_NVIM_SPLIT_CLEAN_RIGHT"
+            live.ctl("send_text", params={"text": nvim_split_command(left_marker, right_marker, False)})
+            live.ctl("send_keys", params={"keys": ["enter"]})
+            live.wait_for_text(left_marker, timeout_ms=24000, quiet_ms=500)
+            live.wait_for_text(right_marker, timeout_ms=24000, quiet_ms=500)
+            split_screen = live.json_ctl("read_screen")
+            split_text = screen_text(split_screen)
+            if left_marker not in split_text or right_marker not in split_text:
+                raise SystemExit("agent-tui smoke: nvim-split-clean split markers are not both visible")
+            states.append(capture_live_state(live, out, "nvim-split-clean"))
+            exit_nvim(live)
+            time.sleep(0.6)
+            shell_marker = "KETTLE_AGENT_TUI_NVIM_SPLIT_CLEAN_EXITED"
+            live_shell_command(live, command_with_marker("printf 'nvim-split-exited\\n'" if platform.system() != "Windows" else "Write-Output nvim-split-exited", shell_marker), shell_marker)
+            probes.append({"name": "nvim-split-clean", "status": "ok"})
 
     ok = [p for p in probes if p.get("status") == "ok"]
     if not ok:
