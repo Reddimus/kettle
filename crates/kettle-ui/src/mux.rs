@@ -2285,18 +2285,18 @@ fn resolve_tab_label(
     if pane_title.is_empty() || pane_title == "kettle" {
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             let full = abbreviate_home(cwd, home);
-            if let Some(name) = std::path::Path::new(cwd)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .filter(|s| !s.is_empty())
-            {
+            // Platform-independent leaf: a cwd's separator style follows the
+            // shell, not the build target, so split on BOTH `/` and `\` on every
+            // OS. (`std::path::file_name` treats `\` as an ordinary char on Unix,
+            // which mis-set the label to the whole `C:\…` string for Windows-style
+            // cwds on Linux/macOS.) Matches the renderer's fit_tab_path leaf logic.
+            if let Some(name) = cwd.rsplit(['/', '\\']).find(|s| !s.is_empty()) {
                 return TabLabel {
                     text: name.to_string(),
                     path: Some(full),
                 };
             }
-            // Root-ish path with no file-name component (e.g. "/" or "C:\\") —
-            // show the (abbreviated) full path and still allow tiering on it.
+            // Only separators (e.g. "/") — show the (abbreviated) full path.
             return TabLabel {
                 text: full.clone(),
                 path: Some(full),
