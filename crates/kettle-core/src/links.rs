@@ -105,15 +105,9 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
 
         // Autodetected URLs (skip cells already covered by an OSC 8 link on
         // THIS row).
-        text.clear();
-        col_of_byte.clear();
-        for col in 0..cols {
-            let ch = grid[Point::new(Line(gl), Column(col))].c;
-            for _ in 0..ch.len_utf8() {
-                col_of_byte.push(col);
-            }
-            text.push(ch);
-        }
+        // Spacer-aware text + byte→column map via the shared helper (v2.26.0)
+        // so an IRI/path with wide chars isn't truncated at the first CJK glyph.
+        crate::grid_text::row_text_into(grid, gl, cols, &mut text, &mut col_of_byte);
         for m in url_re().find_iter(&text) {
             let matched = trim_trailing(m.as_str());
             if matched.is_empty() {

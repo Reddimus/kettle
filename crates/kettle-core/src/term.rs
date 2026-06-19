@@ -8,7 +8,6 @@ use std::thread::JoinHandle;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
@@ -1966,9 +1965,9 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
     let display_adjust = if take == 0 { display_offset as i32 } else { 0 };
     for r in -(take as i32)..rows as i32 {
         line.clear();
-        for c in 0..cols {
-            line.push(grid[Point::new(Line(r - display_adjust), Column(c))].c);
-        }
+        // Spacer-aware so the agent screen-scrape doesn't inject a space after
+        // every wide (CJK/emoji) glyph (v2.26.0, shared helper).
+        crate::grid_text::append_row_text(grid, r - display_adjust, cols, &mut line);
         text.push_str(line.trim_end());
         text.push('\n');
     }

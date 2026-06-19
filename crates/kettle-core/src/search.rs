@@ -3,7 +3,6 @@
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
 use regex::Regex;
 
 use crate::event::EventProxy;
@@ -82,18 +81,9 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
     let mut text = String::with_capacity(cols);
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
     for line in top..=bottom {
-        // Reconstruct the line text, tracking the byte->column mapping.
-        text.clear();
-        col_of_byte.clear();
-        for c in 0..cols {
-            let cell = &grid[Point::new(Line(line), Column(c))];
-            let ch = cell.c;
-            for b in 0..ch.len_utf8() {
-                let _ = b;
-                col_of_byte.push(c);
-            }
-            text.push(ch);
-        }
+        // Reconstruct the line text (spacer-aware) + byte→column map via the
+        // shared helper, so the wide-char-spacer fix can't drift (v2.26.0).
+        crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
         for m in re.find_iter(&text) {
             // Cycle 865 (audit): skip zero-width matches. A user pattern that can
             // match empty (`a*`, `^`, `\b`) yields a zero-length match at every

@@ -37,7 +37,6 @@ pub mod iterm;
 pub mod kitty;
 pub mod placeholder;
 pub mod sixel;
-pub mod tmux_cc;
 
 pub use extract::{Chunk, Extractor, Progress, PromptKind};
 pub use image::{ImageData, Placed};

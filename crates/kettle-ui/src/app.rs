@@ -560,16 +560,77 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
     }
 }
 
-/// Cycle 620/964: equal-width tab segments for the tab-bar strip.
-/// Pure — no `&self`, no renderer, no winit. Tests can hand it any title slice
-/// + strip width.
-fn compute_tab_segment_widths<'a>(
-    titles: impl ExactSizeIterator<Item = &'a str>,
+/// v2.26.0: horizontal tab-bar layout. Tabs divide `strip` evenly, clamped to
+/// `[min_w, max_w]` so two tabs never balloon to half the screen. When `scroll`
+/// is on and tabs would shrink below `min_w`, the bar overflows: tabs stay at
+/// `min_w`, `‹ ›` arrow buttons (each `arrow_w` wide) reserve the strip ends, and
+/// only whole tabs that fit between them are shown — chosen so the active tab is
+/// visible (pinned to the trailing edge once it scrolls past the first page).
+/// Pure — no `&self`, no renderer, no winit — so it is unit-testable.
+struct TabStripLayout {
+    /// Uniform per-tab width.
+    width: f32,
+    /// On-screen left x per tab, or `None` when scrolled out of view.
+    xs: Vec<Option<f32>>,
+    /// Left x of the `‹` / `›` scroll buttons when the bar overflows.
+    arrow_left: Option<f32>,
+    arrow_right: Option<f32>,
+}
+
+fn tab_strip_layout(
+    n: usize,
+    active: usize,
     strip: f32,
-) -> Vec<f32> {
-    let n = titles.len().max(1);
+    arrow_w: f32,
+    min_w: f32,
+    max_w: f32,
+    scroll: bool,
+) -> TabStripLayout {
+    let n = n.max(1);
     let strip = strip.max(1.0);
-    vec![strip / n as f32; titles.len().max(1)]
+    let min_w = min_w.max(1.0);
+    let max_w = max_w.max(min_w);
+    let even = strip / n as f32;
+    if !scroll || even >= min_w {
+        // Fits, or scrolling disabled: even width capped at `max_w`, left-packed.
+        // (Capping at max keeps a 2-tab window from giving each half the screen;
+        // with scrolling off and many tabs, width may fall below min_w.)
+        let width = even.min(max_w);
+        let xs = (0..n).map(|i| Some(i as f32 * width)).collect();
+        return TabStripLayout {
+            width,
+            xs,
+            arrow_left: None,
+            arrow_right: None,
+        };
+    }
+    // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only.
+    let width = min_w;
+    let arrow_w = arrow_w.clamp(1.0, strip / 2.0);
+    let visible_w = (strip - 2.0 * arrow_w).max(width);
+    let count = ((visible_w / width).floor() as usize).clamp(1, n);
+    // Pin the active tab to the trailing edge once it scrolls past page one.
+    let first = if active < count {
+        0
+    } else {
+        (active + 1 - count).min(n - count)
+    };
+    let x0 = arrow_w;
+    let xs = (0..n)
+        .map(|i| {
+            if i >= first && i < first + count {
+                Some(x0 + (i - first) as f32 * width)
+            } else {
+                None
+            }
+        })
+        .collect();
+    TabStripLayout {
+        width,
+        xs,
+        arrow_left: Some(0.0),
+        arrow_right: Some(strip - arrow_w),
+    }
 }
 
 /// Cycle 805: split the trailing new-tab button into `(arrow_left, plus_right)`
@@ -3257,8 +3318,8 @@ impl App {
             TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
             TabBarPos::Bottom => sh - height,
         };
-        let titles = ws.mux.tab_titles();
-        let n = titles.len().max(1);
+        let labels = ws.mux.tab_labels();
+        let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
         // each `height` wide. Cycle 805: the strip must reserve the WHOLE
         // button (arrow + plus), not just `plus_w`, or the last tab segment
@@ -3279,31 +3340,34 @@ impl App {
         let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
-        // Cycle 620/964: top/bottom tabs always divide the available strip
-        // evenly. The full segment is both the hit target and text budget.
-        let widths = compute_tab_segment_widths(titles.iter().map(|s| s.as_str()), strip);
+        // v2.26.0: tabs share the strip but never balloon past `tab_max_width`
+        // (so a 2-tab window doesn't make each half the screen) nor shrink below
+        // `tab_min_width`; past that the bar overflows and — when `scroll_tabbar`
+        // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
+        // view). See `tab_strip_layout`. Scroll arrows are `height`-wide squares.
         let active = ws.mux.active;
-        // Pre-compute x offsets from the cumulative widths so the
-        // closure stays a stateless map. (Slight allocation, but
-        // n is small — tab counts cap in the dozens.)
-        let mut x_offsets: Vec<f32> = Vec::with_capacity(n + 1);
-        x_offsets.push(0.0);
-        for w in &widths {
-            let last = *x_offsets.last().unwrap();
-            x_offsets.push(last + w);
-        }
-        let segments = titles
+        let layout = tab_strip_layout(
+            n,
+            active,
+            strip,
+            height,
+            self.cfg.tab_min_width,
+            self.cfg.tab_max_width,
+            self.cfg.scroll_tabbar,
+        );
+        // Tabs scrolled out of view are parked off-screen (kept in the segment
+        // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
+        const OFFSCREEN_X: f32 = -100_000.0;
+        let seg_w = layout.width;
+        let now = std::time::Instant::now();
+        let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
+        let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
-            .map(|(i, t)| {
-                let x = x_offsets[i];
-                let seg_w = widths[i];
-                // Cycle 246: pull per-tab activity into the segment so
-                // the renderer can draw the indicator dot. Active tabs
-                // short-circuit to Normal (the focused-tab accent
-                // already signals "you are here").
-                let now = std::time::Instant::now();
-                let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
+            .map(|(i, label)| {
+                let x = layout.xs.get(i).copied().flatten().unwrap_or(OFFSCREEN_X);
+                // Cycle 246: per-tab activity dot. Active tabs short-circuit to
+                // Normal (the focused-tab accent already signals "you are here").
                 let activity = ws
                     .mux
                     .tabs
@@ -3329,12 +3393,14 @@ impl App {
                     rect: (x, y, seg_w, height),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close: (x + seg_w - height, y, height, height),
-                    title: t.clone(),
+                    title: label.text.clone(),
+                    path: label.path.clone(),
                     active: i == active,
                     activity,
                 }
             })
             .collect();
+        let to_btn = |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x, y, height, height));
         TabBar {
             height,
             y,
@@ -3349,20 +3415,28 @@ impl App {
             hovered_close_idx: ws.hovered_close_idx,
             // Cycle 255: while a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
-            // ghost of the dragged segment under the cursor — gives
-            // the cycle-249 reorder a "I'm picking this tab up"
-            // affordance instead of the bare snap behavior.
+            // ghost of the dragged segment under the cursor.
             drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
                 Some(ws.cursor.x as f32)
             } else {
                 None
             },
-            // v2.19.0 (re-dock): vertical 2-px insertion line at the
-            // docked tab's landing slot, full bar height.
+            // v2.19.0 (re-dock): vertical 2-px insertion line at the docked tab's
+            // landing slot. v2.26.0: anchor to the target tab's on-screen x when
+            // visible (overflow scrolling), else the leftmost visible edge.
             insert_marker: ws.dock_preview.map(|idx| {
-                let x = x_offsets[idx.min(n)].min(strip - 2.0).max(0.0);
+                let x = layout
+                    .xs
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .or_else(|| layout.xs.iter().copied().flatten().next())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, strip - 2.0);
                 (x, y, 2.0, height)
             }),
+            scroll_left: to_btn(layout.arrow_left),
+            scroll_right: to_btn(layout.arrow_right),
         }
     }
 
@@ -3377,14 +3451,14 @@ impl App {
             TabBarPos::Right => sw - strip_w,
             _ => 0.0, // unreachable in this branch
         };
-        let titles = ws.mux.tab_titles();
+        let labels = ws.mux.tab_labels();
         let active = ws.mux.active;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
-        let segments: Vec<TabSeg> = titles
+        let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
-            .map(|(i, t)| {
+            .map(|(i, label)| {
                 let seg_y = i as f32 * height;
                 let activity = ws
                     .mux
@@ -3412,14 +3486,15 @@ impl App {
                     // ✕ hit zone = the trailing-right square of the
                     // segment (same axis convention as horizontal).
                     close: (strip_x + strip_w - height, seg_y, height, height),
-                    title: t.clone(),
+                    title: label.text.clone(),
+                    path: label.path.clone(),
                     active: i == active,
                     activity,
                 }
             })
             .collect();
         // `+` button at the bottom of the strip.
-        let plus_y = (titles.len() as f32 * height).min(sh - height);
+        let plus_y = (labels.len() as f32 * height).min(sh - height);
         TabBar {
             height,
             // `y` is the *band start* (top of the strip) for the
@@ -3443,11 +3518,14 @@ impl App {
             // v2.19.0 (re-dock): horizontal 2-px insertion line across
             // the strip at the docked tab's landing slot.
             insert_marker: ws.dock_preview.map(|idx| {
-                let iy = (idx.min(titles.len()) as f32 * height)
+                let iy = (idx.min(labels.len()) as f32 * height)
                     .min(sh - 2.0)
                     .max(0.0);
                 (strip_x, iy, strip_w, 2.0)
             }),
+            // v2.26.0: vertical bars don't overflow-scroll (yet) — no arrows.
+            scroll_left: (0.0, 0.0, 0.0, 0.0),
+            scroll_right: (0.0, 0.0, 0.0, 0.0),
         }
     }
 
@@ -3520,7 +3598,10 @@ impl App {
         let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
             return false;
         };
-        if require_zone && (px < rx + rw - 8.0 || px > rx + rw || py < ry || py > ry + rh) {
+        // v2.26.0: the grab zone matches the painted bar width, floored at 10 px
+        // so even a thin configured bar stays easy to hit with the mouse.
+        let zone = self.cfg.scrollbar_width.clamp(2.0, 40.0).max(10.0);
+        if require_zone && (px < rx + rw - zone || px > rx + rw || py < ry || py > ry + rh) {
             return false;
         }
         let Some(p) = ws.mux.focused() else {
@@ -3532,8 +3613,10 @@ impl App {
         use kettle_core::Dimensions;
         let g = t.grid();
         let (rows, hist, off) = (g.screen_lines(), g.history_size(), g.display_offset());
-        let visible = self.cfg.scrollbar == kettle_config::ScrollbarMode::Always || off > 0;
-        if !visible || rows + hist <= rows {
+        // Interactable whenever there is something to scroll. `Auto` now paints
+        // the bar with history present (not only while scrolled back), so a
+        // click anywhere on the gutter jumps the viewport.
+        if rows + hist <= rows {
             return false;
         }
         let target = kettle_core::scrollbar::target_offset(py - ry, rh, rows, hist);
@@ -3542,6 +3625,21 @@ impl App {
             t.scroll_display(kettle_core::Scroll::Delta(delta));
         }
         true
+    }
+
+    /// v2.26.0: whether `(px, py)` is within the focused pane's scrollbar grab
+    /// zone (right edge, `scrollbar_width` px floored at 10). Pure geometry — no
+    /// term lock — so it is cheap to call on every `CursorMoved` to drive the
+    /// overlay scrollbar's hover-brighten without affecting the scroll state.
+    fn scrollbar_zone_contains(&self, ws: &WindowState, area: Rect, px: f32, py: f32) -> bool {
+        if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
+            return false;
+        }
+        let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
+            return false;
+        };
+        let zone = self.cfg.scrollbar_width.clamp(2.0, 40.0).max(10.0);
+        px >= rx + rw - zone && px <= rx + rw && py >= ry && py <= ry + rh
     }
 
     fn px_to_point(
@@ -4835,6 +4933,10 @@ impl App {
         };
 
         let window_focused = ws.window_focused;
+        // v2.26.0: brighten the focused pane's scrollbar while the pointer is on
+        // the gutter or the thumb is being dragged (overlay-scrollbar feel). The
+        // scrolled-back case is decided per-pane in the renderer from the snapshot.
+        let scrollbar_active = ws.scrollbar_hover || ws.dragging_scrollbar;
         // Cursor blink is the *intersection* of the user config and the
         // running app's wishes — programs flip it via DEC private mode 12
         // (`CSI ?12 h/l`), which the engine tracks per-pane on its
@@ -4964,6 +5066,7 @@ impl App {
                 edit_title,
                 hint_labels,
                 window_focused,
+                scrollbar_active,
                 cursor_visible,
                 bell,
                 resize_overlay,
@@ -5006,6 +5109,7 @@ impl App {
             edit_title,
             hint_labels,
             window_focused,
+            scrollbar_active,
             cursor_visible,
             bell,
             resize_overlay,
@@ -9490,7 +9594,25 @@ impl App {
             );
         };
         let resp = self.ctl_send_mouse_for_window(&mut target, event_loop, req);
-        self.windows.insert(target_seq, target);
+        // Audit (v2.26.0): if the inner handler closed the target's last tab it
+        // set the App-global `pending_window_close`. That flag is normally
+        // consumed by `finish_window_dispatch` against the CHECKED-OUT (focused)
+        // window — which here would close the WRONG window and orphan this
+        // emptied target. Handle the target's close locally: drop it (its panes'
+        // PTYs die with the Mux) instead of re-inserting it.
+        if self.pending_window_close {
+            self.pending_window_close = false;
+            if self
+                .torn_drag
+                .as_ref()
+                .is_some_and(|t| t.seq == target_seq || t.carrier == target_seq)
+            {
+                self.abandon_torn_drag(None);
+            }
+            drop(target);
+        } else {
+            self.windows.insert(target_seq, target);
+        }
         resp
     }
 
@@ -9628,9 +9750,22 @@ impl App {
                 let area = self.area(ws);
                 let (cols, rows) = self.grid_of(ws, area);
                 let (cw, ch) = self.cell_px(ws);
-                if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
-                    log::warn!("could not open a new tab (agent send_mouse): {e}");
+                match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                    // v2.26.0 (audit): fire TabAdd so Lua / dev-record see tabs
+                    // opened via the agent `+` click, like every other new-tab path.
+                    Ok(()) => self.fire_tab_add_event(ws),
+                    Err(e) => log::warn!("could not open a new tab (agent send_mouse): {e}"),
                 }
+            } else if bcode == 0
+                && bar.scroll_left.2 > 0.0
+                && rect_contains(bar.scroll_left, px, py)
+            {
+                ws.mux.prev_tab();
+            } else if bcode == 0
+                && bar.scroll_right.2 > 0.0
+                && rect_contains(bar.scroll_right, px, py)
+            {
+                ws.mux.next_tab();
             } else if let Some(seg) = bar
                 .segments
                 .iter()
@@ -13784,6 +13919,9 @@ impl App {
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_leave_window();
+                // v2.26.0: pointer left the window → drop the scrollbar hover so
+                // the overlay bar relaxes to its dim state.
+                ws.scrollbar_hover = false;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -14040,6 +14178,20 @@ impl App {
                     }
                     return;
                 }
+                // v2.26.0: overlay-scrollbar hover-brighten. Update the focused
+                // pane's hover flag and repaint only on the enter/leave edge so it
+                // costs nothing while the pointer is elsewhere.
+                {
+                    let area = self.area(ws);
+                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    let hover = self.scrollbar_zone_contains(ws, area, px, py);
+                    if hover != ws.scrollbar_hover {
+                        ws.scrollbar_hover = hover;
+                        if let Some(w) = &ws.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
                 if ws.selecting {
                     let area = self.area(ws);
                     self.update_selection(ws, area);
@@ -14251,11 +14403,25 @@ impl App {
                         let (cols, rows) = self.grid_of(ws, area);
                         let (cw, ch) = self.cell_px(ws);
                         // Cycle 802 (audit): log a `+`-button new-tab spawn
-                        // failure rather than swallowing it.
-                        if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker())
-                        {
-                            log::warn!("could not open a new tab (+ button): {e}");
+                        // failure rather than swallowing it. v2.26.0 (audit):
+                        // also fire TabAdd on success (the `+` click previously
+                        // skipped it, so Lua `TabAdd` / dev-record missed it).
+                        match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                            Ok(()) => self.fire_tab_add_event(ws),
+                            Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
                         }
+                    } else if bcode == 0
+                        && bar.scroll_left.2 > 0.0
+                        && in_bar(bar.scroll_left, px, py)
+                    {
+                        // v2.26.0: `‹` overflow arrow — step to an earlier tab
+                        // (scrolls it into view via tab_strip_layout).
+                        ws.mux.prev_tab();
+                    } else if bcode == 0
+                        && bar.scroll_right.2 > 0.0
+                        && in_bar(bar.scroll_right, px, py)
+                    {
+                        ws.mux.next_tab();
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
@@ -14788,6 +14954,7 @@ impl App {
                     }
                     ws.selecting = false;
                     ws.dragging_scrollbar = false;
+                    ws.scrollbar_hover = false;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;
@@ -17344,6 +17511,7 @@ mod tests {
                 rect: (0.0, 0.0, 100.0, 24.0),
                 close: (76.0, 0.0, 24.0, 24.0),
                 title: "one".into(),
+                path: None,
                 active: true,
                 activity: kettle_render::TabActivity::Normal,
             },
@@ -17352,6 +17520,7 @@ mod tests {
                 rect: (100.0, 0.0, 100.0, 24.0),
                 close: (176.0, 0.0, 24.0, 24.0),
                 title: "two".into(),
+                path: None,
                 active: false,
                 activity: kettle_render::TabActivity::Normal,
             },
@@ -17379,6 +17548,7 @@ mod tests {
             rect: (x, 0.0, w, 24.0),
             close: (x + w - 24.0, 0.0, 24.0, 24.0),
             title: format!("tab-{idx}"),
+            path: None,
             active: idx == 0,
             activity: kettle_render::TabActivity::Normal,
         };
@@ -18459,26 +18629,47 @@ mod tests {
         assert!(cache_dir_from_env(|_| None).is_none());
     }
 
-    /// Cycle 620/964 drift guard. `compute_tab_segment_widths` is the pure
-    /// layout helper behind the tab bar. Verify:
-    ///   - all titles divide the strip evenly
-    ///   - title length does not affect segment width
-    ///   - empty title list yields one safe-width segment (no div/0)
+    /// v2.26.0 drift guard for `tab_strip_layout` (replaces the old equal-width
+    /// helper): max-cap, even division, min-floor + overflow, and active-tab
+    /// visibility.
     #[test]
-    fn compute_tab_segment_widths_equal_width_only() {
-        use super::compute_tab_segment_widths;
-        let widths = compute_tab_segment_widths(["a", "bb", "ccc"].into_iter(), 300.0);
-        assert_eq!(widths, vec![100.0, 100.0, 100.0]);
-        let widths = compute_tab_segment_widths(
-            ["a", "very-long-title-that-has-room", "ccc"].into_iter(),
-            900.0,
+    fn tab_strip_layout_caps_and_overflows() {
+        use super::tab_strip_layout;
+        // Few tabs on a wide strip: capped at max (240), left-packed, no arrows —
+        // a 2-tab window must NOT give each tab half the screen.
+        let l = tab_strip_layout(2, 0, 1920.0, 24.0, 120.0, 240.0, true);
+        assert_eq!(l.width, 240.0);
+        assert_eq!(l.xs, vec![Some(0.0), Some(240.0)]);
+        assert!(l.arrow_left.is_none() && l.arrow_right.is_none());
+        // Even division when it lands within [min, max].
+        assert_eq!(
+            tab_strip_layout(4, 0, 800.0, 24.0, 120.0, 240.0, true).width,
+            200.0
         );
-        assert_eq!(widths, vec![300.0, 300.0, 300.0]);
-        // Empty list ⇒ one safe segment (no div/0). The bar code
-        // never actually sees this (renders nothing when there are
-        // no tabs), but the helper still has to be panic-safe.
-        let widths: Vec<f32> = compute_tab_segment_widths(std::iter::empty::<&str>(), 100.0);
-        assert_eq!(widths, vec![100.0]);
+        // Many tabs: overflow → min width, arrows, only whole tabs shown.
+        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, 240.0, true);
+        assert_eq!(l.width, 120.0);
+        assert!(l.arrow_left.is_some() && l.arrow_right.is_some());
+        let visible = l.xs.iter().filter(|x| x.is_some()).count();
+        assert!(
+            (1..20).contains(&visible),
+            "some tabs scroll off: {visible}"
+        );
+        assert_eq!(l.xs[0], Some(24.0), "active tab 0 visible at the left");
+        // Active near the end is pinned into view; early tabs scroll off.
+        let l = tab_strip_layout(20, 19, 800.0, 24.0, 120.0, 240.0, true);
+        assert!(l.xs[19].is_some(), "active tab 19 must be visible");
+        assert!(l.xs[0].is_none(), "early tabs scrolled off");
+        // Scrolling disabled: no arrows; width may fall below min.
+        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, 240.0, false);
+        assert!(l.arrow_left.is_none() && l.arrow_right.is_none() && l.width < 120.0);
+        // Degenerate (no tabs): panic-safe, one slot.
+        assert_eq!(
+            tab_strip_layout(0, 0, 100.0, 24.0, 120.0, 240.0, true)
+                .xs
+                .len(),
+            1
+        );
     }
 
     /// Link/path overlay underlines must follow focused output immediately.

@@ -30,6 +30,7 @@
 //!   and `target_offset` thumb math.
 
 pub mod event;
+pub mod grid_text;
 pub mod hints;
 pub mod images;
 pub mod links;

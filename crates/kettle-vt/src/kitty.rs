@@ -292,9 +292,26 @@ impl KittyState {
 
         // Control-only ops are never chunked.
         if action == "d" {
-            self.in_flight.clear();
-            self.frame_in_flight = None;
             let target = kv.get("d").map(|s| s.as_str()).unwrap_or("a");
+            // Audit (v2.26.0): only a delete-ALL drops every image, so only it
+            // may abort every in-flight (chunked) transmission. A *targeted*
+            // delete (`d=i` / `d=f`) interleaved between another image's chunks
+            // must discard only THIS id's accumulators — the old unconditional
+            // `in_flight.clear()` silently corrupted the unrelated transmit.
+            let delete_all = !target.eq_ignore_ascii_case("i") && !target.eq_ignore_ascii_case("f");
+            if delete_all {
+                self.in_flight.clear();
+                self.frame_in_flight = None;
+            } else if id != 0 {
+                self.in_flight.remove(&id);
+                if self
+                    .frame_in_flight
+                    .as_ref()
+                    .is_some_and(|(fid, _)| *fid == id)
+                {
+                    self.frame_in_flight = None;
+                }
+            }
             // `d=f|F`: delete only the animation frames/state, keep the image.
             if target.eq_ignore_ascii_case("f") {
                 if id != 0 {

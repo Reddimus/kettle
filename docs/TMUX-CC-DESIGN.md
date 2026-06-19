@@ -1,8 +1,9 @@
 # tmux `-CC` control-mode integration — design
 
-> Status: parser foundation (cycle 327) shipped. End-to-end integration is a
-> multi-cycle thread; this doc is the design + sub-cycle roadmap so a future
-> contributor (or future-me) can pick it up without re-deriving the protocol.
+> Status: **NOT IMPLEMENTED.** The parser scaffold (cycle 327) was never wired to
+> a live consumer and was removed in v2.26.0 rather than carried as dead code.
+> This doc is retained as a design *proposal* so a future contributor (or
+> future-me) can pick the protocol up without re-deriving it.
 
 ## What "tmux control mode" is
 
@@ -30,7 +31,7 @@ Every message is one line, `\n`-terminated, starting with `%`:
 
 | # | Cycle | What ships | Status |
 |---|------|------|--------|
-| 1 | 327 | Pure-parser foundation (`kettle_vt::tmux_cc::TmuxControlParser`). Feed bytes, get `TmuxEvent`s. 11 unit tests pin every variant + edge cases (CRLF, partial lines, overflow). No App integration. | ✅ shipped |
+| 1 | 327 | Pure-parser foundation (`kettle_vt::tmux_cc::TmuxControlParser`). Feed bytes, get `TmuxEvent`s. 11 unit tests pin every variant + edge cases (CRLF, partial lines, overflow). No App integration. | ❌ removed v2.26.0 (dead code) |
 | 2 | 328 | This doc. Roadmap so the remaining sub-cycles aren't lost to context decay. | ✅ shipped |
 | 3 | next | `Pane.tmux_control: Option<TmuxControlState>` flag. When set, the pane's PTY reader routes output through the parser before forwarding to alacritty_terminal. Pane gets a method `enter_tmux_control()` that flips the flag. | pending |
 | 4 | next+1 | Map tmux windows → kettle tabs. On `%window-add`, kettle synthesizes a new tab in the same window where the controller is running. On `%output`, the controlled-pane's bytes go to the corresponding kettle tab's first pane. On `%window-close`, close the kettle tab. | pending |

@@ -523,7 +523,8 @@ have ⛔. Source-of-origin is cited:
 - Inline images (sixel, kitty graphics, iTerm2) — protocol-defined; cycles X+Y+Z.
 - WCAG `minimum-contrast` — **WezTerm** origin.
 - Lua scripting (`--lua-script`) — **WezTerm** origin, cycles 324-326.
-- tmux `-CC` parser (`kettle_vt::tmux_cc`) — **iTerm2** parity, cycles 327-328.
+- tmux `-CC` parser — **iTerm2** parity, cycles 327-328; the unwired
+  `kettle_vt::tmux_cc` scaffold was **removed in v2.26.0** (see TMUX-CC-DESIGN.md).
 
 ## Sub-cycle execution plan
 

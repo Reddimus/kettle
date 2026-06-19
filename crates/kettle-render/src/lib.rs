@@ -243,6 +243,12 @@ pub struct Overlay {
     pub edit_title: Option<(String, String, Option<f32>)>,
     /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
     pub window_focused: bool,
+    /// v2.26.0: the focused pane's scrollbar should paint in its bright
+    /// (interacting) state — the pointer is hovering the scrollbar gutter or the
+    /// thumb is being dragged. At rest the bar is drawn dim; being scrolled back
+    /// (`display_offset > 0`) also brightens it, decided per-pane in the renderer
+    /// from the snapshot, so this only needs to carry the hover/drag signal.
+    pub scrollbar_active: bool,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
     /// Visual-bell intensity, 0.0 (none) .. 1.0 (just rang).
@@ -367,6 +373,11 @@ pub struct TabSeg {
     /// Close-button (✕) hit rect within the segment.
     pub close: Rect4,
     pub title: String,
+    /// v2.26.0: home-abbreviated full cwd path when the label is directory-
+    /// derived, enabling width-aware tiering (full path → leaf dir name → tail).
+    /// `None` for explicit/override and shell-set (OSC 2) titles, which are
+    /// fitted with the older `fit_tab_title` middle-ellipsis path.
+    pub path: Option<String>,
     pub active: bool,
     /// Inactive-tab activity (cycle 246). Always `Normal` on the
     /// active segment so the focused-tab accent isn't doubled-up by
@@ -445,6 +456,13 @@ pub struct TabBar {
     /// per `tab-bar-pos`) so the renderer stays geometry-free, same
     /// contract as `hovered_close_idx`.
     pub insert_marker: Option<Rect4>,
+    /// v2.26.0: `‹` scroll-left button rect, present (non-zero) only when the
+    /// horizontal tab bar overflows (more tabs than fit at `tab_min_width`).
+    /// Clicking it reveals tabs scrolled off the left. `(0,0,0,0)` when the bar
+    /// fits or for vertical bars.
+    pub scroll_left: Rect4,
+    /// v2.26.0: `›` scroll-right button rect (see `scroll_left`).
+    pub scroll_right: Rect4,
 }
 
 impl TabBar {
@@ -459,6 +477,8 @@ impl TabBar {
             hovered_close_idx: None,
             drag_cursor_x: None,
             insert_marker: None,
+            scroll_left: (0.0, 0.0, 0.0, 0.0),
+            scroll_right: (0.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -692,6 +712,10 @@ pub struct Renderer {
     tab_close_text: String,
     tabbar_text: String,
     new_tab_arrow_text: String,
+    /// v2.26.0: last text shaped into the `‹` / `›` overflow scroll-arrow
+    /// buffers (constant glyphs → the gate holds after frame 1).
+    scroll_left_text: String,
+    scroll_right_text: String,
     status_bar_text: String,
     /// v2.20.0 (Ghostty parity): the transient resize chip's text buffer +
     /// its P1b equality gate (re-shaped only when the grid size changes).
@@ -725,6 +749,11 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
+    /// v2.26.0: `‹` / `›` tab-bar overflow scroll-arrow glyphs, each in its own
+    /// buffer (constant glyph, shaped once). Drawn only when the horizontal tab
+    /// bar overflows (more tabs than fit at `tab_min_width`).
+    scroll_left_buffer: TextBuffer,
+    scroll_right_buffer: TextBuffer,
     /// Single shared `✕` glyph buffer reused for every tab's close
     /// button. Rendered separately from the title text so we can:
     /// 1. Color it independently (dim at rest, bright red on hover).
@@ -1014,6 +1043,8 @@ impl Renderer {
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
+        let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
+        let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let search_buffer = TextBuffer::new(&mut font_system, metrics);
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -1082,6 +1113,8 @@ impl Renderer {
             tab_close_text: String::new(),
             tabbar_text: String::new(),
             new_tab_arrow_text: String::new(),
+            scroll_left_text: String::new(),
+            scroll_right_text: String::new(),
             status_bar_text: String::new(),
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
@@ -1093,6 +1126,8 @@ impl Renderer {
             settings_buffers: Vec::new(),
             tabbar_buffer,
             new_tab_arrow_buffer,
+            scroll_left_buffer,
+            scroll_right_buffer,
             tab_close_buffer,
             search_buffer,
             status_bar_buffer,
@@ -2277,10 +2312,26 @@ impl Renderer {
             if cfg.scrollbar != ScrollbarMode::Never {
                 let s = pv.snap;
                 let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
-                let show = cfg.scrollbar == ScrollbarMode::Always
-                    || (cfg.scrollbar == ScrollbarMode::Auto && off > 0);
-                if show && let Some((ty, th)) = kettle_core::scrollbar::thumb(rows, hist, off, rh) {
-                    over.push(rect(rx + rw - 4.0, ry + ty, 3.0, th, theme.palette[8], 0.8));
+                let has_scroll = hist > 0 && rows + hist > rows;
+                // v2.26.0: pronounced overlay scrollbar (Terminator-like). `Auto`
+                // (default) shows whenever there is scrollback history — not only
+                // while scrolled — so a mouse user always sees the position
+                // indicator; `Always` additionally draws the empty gutter so the
+                // right edge has a permanent channel. Opacity is a two-state step
+                // (no fade timer → zero idle wakeups): dim at rest, bright while
+                // the view is scrolled back (`off > 0`) or the focused pane's bar
+                // is being hovered/dragged.
+                if has_scroll || cfg.scrollbar == ScrollbarMode::Always {
+                    let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0);
+                    let bx = rx + rw - bar_w;
+                    let active = off > 0 || (pv.focused && overlay.scrollbar_active);
+                    let (track_a, thumb_a) = if active { (0.22, 0.92) } else { (0.10, 0.34) };
+                    // Track gutter (drawn full-height behind the thumb).
+                    over.push(rect(bx, ry, bar_w, rh, theme.palette[8], track_a));
+                    // Thumb — only when there is actually something to scroll.
+                    if let Some((ty, th)) = kettle_core::scrollbar::thumb(rows, hist, off, rh) {
+                        over.push(rect(bx, ry + ty, bar_w, th, theme.palette[8], thumb_a));
+                    }
                 }
             }
         }
@@ -2576,11 +2627,14 @@ impl Renderer {
                 );
                 let fixed_w = display_width(&fixed_label);
                 let maxc = avail.saturating_sub(fixed_w).max(3);
-                // Tab labels get path-tail truncation: if a wide equal-width
-                // segment has room, show the title unchanged; once it doesn't,
-                // preserve the rightmost path tail because that is usually the
-                // project/directory the user is trying to distinguish.
-                let title = fit_tab_title(&s.title, maxc);
+                // v2.26.0: directory-derived labels (carry a `path`) get the
+                // 3-tier fit (full path → leaf dir name → truncated tail) so a
+                // wide tab shows the whole path and narrows gracefully. Explicit
+                // / shell-set titles keep the older middle-ellipsis behavior.
+                let title = match &s.path {
+                    Some(p) => fit_tab_path(p, maxc),
+                    None => fit_tab_title(&s.title, maxc),
+                };
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
                 // Title only — the ✕ is rendered separately below so we
@@ -2668,6 +2722,51 @@ impl Renderer {
                     self.new_tab_arrow_text = " ▾".into();
                 }
                 self.new_tab_arrow_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
+            // v2.26.0: overflow scroll-arrow glyphs `‹` / `›`, each shaped in its
+            // own buffer and sized to its button rect. Present only when the
+            // horizontal tab bar overflows.
+            if tabbar.scroll_left.2 > 0.0 {
+                self.scroll_left_buffer
+                    .set_metrics(&mut self.font_system, metrics);
+                self.scroll_left_buffer.set_size(
+                    &mut self.font_system,
+                    Some(tabbar.scroll_left.2),
+                    Some(tabbar.height),
+                );
+                if self.scroll_left_text != " ‹" {
+                    self.scroll_left_buffer.set_text(
+                        &mut self.font_system,
+                        " ‹",
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.scroll_left_text = " ‹".into();
+                }
+                self.scroll_left_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
+            if tabbar.scroll_right.2 > 0.0 {
+                self.scroll_right_buffer
+                    .set_metrics(&mut self.font_system, metrics);
+                self.scroll_right_buffer.set_size(
+                    &mut self.font_system,
+                    Some(tabbar.scroll_right.2),
+                    Some(tabbar.height),
+                );
+                if self.scroll_right_text != " ›" {
+                    self.scroll_right_buffer.set_text(
+                        &mut self.font_system,
+                        " ›",
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.scroll_right_text = " ›".into();
+                }
+                self.scroll_right_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -3074,6 +3173,41 @@ impl Renderer {
                 let (ax, _, aw, _) = tabbar.new_tab_menu;
                 areas.push(TextArea {
                     buffer: &self.new_tab_arrow_buffer,
+                    left: ax + 4.0,
+                    top: tabbar.y + 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: ty,
+                        right: (ax + aw) as i32,
+                        bottom: tb,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
+            // v2.26.0: overflow scroll-arrow glyphs `‹` / `›` at the strip edges.
+            if tabbar.scroll_left.2 > 0.0 {
+                let (ax, _, aw, _) = tabbar.scroll_left;
+                areas.push(TextArea {
+                    buffer: &self.scroll_left_buffer,
+                    left: ax + 4.0,
+                    top: tabbar.y + 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: ty,
+                        right: (ax + aw) as i32,
+                        bottom: tb,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
+            if tabbar.scroll_right.2 > 0.0 {
+                let (ax, _, aw, _) = tabbar.scroll_right;
+                areas.push(TextArea {
+                    buffer: &self.scroll_right_buffer,
                     left: ax + 4.0,
                     top: tabbar.y + 4.0,
                     scale: 1.0,
@@ -5253,6 +5387,34 @@ fn fit_tab_title(s: &str, n: usize) -> String {
         return take_cols_back(s, n);
     }
     format!("...{}", take_cols_back(s, n - 3))
+}
+
+/// v2.26.0: fit a directory-derived tab label into `n` columns by progressively
+/// shedding detail (the user-requested tiering): tier 1 the full (home-
+/// abbreviated) path; tier 2 the leaf directory name alone; tier 3 the tail of
+/// the leaf with a leading `…` once even the name doesn't fit. The rightmost
+/// part (the project / current directory) is the most identifying, so it is kept
+/// to the end — mirroring `fit_pane_title`'s progressive-shed shape.
+fn fit_tab_path(full: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    // Tier 1: the whole path.
+    if display_width(full) <= n {
+        return full.to_string();
+    }
+    // Tier 2: the leaf directory name (segment after the last separator).
+    let leaf_start = full.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
+    let leaf = &full[leaf_start..];
+    if !leaf.is_empty() && display_width(leaf) <= n {
+        return leaf.to_string();
+    }
+    // Tier 3: the tail of the leaf, with a leading `…` marking the cut.
+    let tail_src = if leaf.is_empty() { full } else { leaf };
+    if n == 1 {
+        return "…".to_string();
+    }
+    format!("…{}", take_cols_back(tail_src, n - 1))
 }
 
 /// Build a per-pane titlebar label that fits `budget` display columns, shedding
@@ -7937,7 +8099,7 @@ mod pane_buffer_lifecycle_tests {
 
 #[cfg(test)]
 mod title_fit_tests {
-    use super::{display_width, fit_pane_title, fit_tab_title, middle_ellipsis};
+    use super::{display_width, fit_pane_title, fit_tab_path, fit_tab_title, middle_ellipsis};
 
     #[test]
     fn middle_ellipsis_fits_and_keeps_both_ends() {
@@ -8022,6 +8184,27 @@ mod title_fit_tests {
         assert!(cut.starts_with('a'), "front kept: {cut}");
         assert!(cut.ends_with('z'), "back kept: {cut}");
         assert!(display_width(&cut) <= 11);
+    }
+
+    #[test]
+    fn fit_tab_path_tiers_full_then_leaf_then_tail() {
+        let path = "~/Repos/kettle/crates/kettle-ui";
+        // Tier 1: the whole path when it fits.
+        assert_eq!(fit_tab_path(path, display_width(path)), path);
+        assert_eq!(fit_tab_path(path, display_width(path) + 5), path);
+        // Tier 2: the leaf dir name alone when the full path doesn't fit.
+        assert_eq!(fit_tab_path(path, 12), "kettle-ui");
+        // Tier 3: the tail of the leaf with a leading ellipsis when even the leaf
+        // overflows.
+        let cut = fit_tab_path(path, 6);
+        assert!(cut.starts_with('…'), "tail marked: {cut}");
+        assert!(cut.ends_with("ui"), "tail kept: {cut}");
+        assert!(display_width(&cut) <= 6);
+        // Degenerate widths.
+        assert_eq!(fit_tab_path(path, 1), "…");
+        assert_eq!(fit_tab_path(path, 0), "");
+        // Backslash separators tier the same way.
+        assert_eq!(fit_tab_path("~\\Repos\\kettle", 8), "kettle");
     }
 
     #[test]
