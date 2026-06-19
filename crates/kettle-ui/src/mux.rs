@@ -116,6 +116,14 @@ pub struct Pane {
     /// fires LuaEvent::Output(pane_id, bytes).
     pub output_rx: Option<Receiver<Vec<u8>>>,
     pub title: String,
+    /// v2.29.0: whether `title` is still the generated seed (no genuine OSC 2
+    /// title has arrived). Tab/window/pane labels treat a placeholder title as
+    /// "show the cwd instead". Crucially this lets us IGNORE the bogus full-exe
+    /// path that conhost/ConPTY injects as the startup OSC 2 title for a native
+    /// Windows shell (it would otherwise outrank the cwd). Set `false` the
+    /// instant any real OSC 2 title is stored, so a program-set title is never
+    /// suppressed. Seeded `true` only for generic-shell panes (see `spawn_pane`).
+    pub title_is_placeholder: bool,
     /// Cycle 406 (Terminator parity, named broadcast groups
     /// foundation): per-pane group name. When set, the pane is
     /// part of a named broadcast group; keyboard input to any
@@ -896,6 +904,10 @@ impl Mux {
         )?;
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let initial_title = initial_pane_title(argv);
+        // Only generic-shell panes ("kettle" seed) are eligible for conhost
+        // startup-title suppression + cwd labelling; a `-e htop`/`ssh` pane keeps
+        // its real seed and is never treated as a placeholder.
+        let title_is_placeholder = initial_title == "kettle";
         let output_rx = if self.lua_output_subscribed {
             Some(out_rx)
         } else {
@@ -908,6 +920,7 @@ impl Mux {
                 rx,
                 output_rx,
                 title: initial_title,
+                title_is_placeholder,
                 group_name: None,
                 closed: false,
                 held: false,
@@ -2198,7 +2211,7 @@ impl Mux {
             .map(|(i, t)| {
                 let pane = self.panes.get(&t.focus);
                 let title = pane.map(|p| p.title.as_str()).unwrap_or("");
-                let cwd = pane.and_then(|p| p.term.current_dir());
+                let cwd = pane.and_then(|p| p.term.current_dir_or_native());
                 resolve_tab_title(t.title_override.as_deref(), title, cwd.as_deref(), i)
             })
             .collect()
@@ -2216,7 +2229,7 @@ impl Mux {
             .map(|(i, t)| {
                 let pane = self.panes.get(&t.focus);
                 let title = pane.map(|p| p.title.as_str()).unwrap_or("");
-                let cwd = pane.and_then(|p| p.term.current_dir());
+                let cwd = pane.and_then(|p| p.term.current_dir_or_native());
                 resolve_tab_label(
                     t.title_override.as_deref(),
                     title,
@@ -2420,7 +2433,12 @@ fn usable_cwd(dir: Option<String>) -> Option<String> {
 /// Cycle 887: is this argv launching WSL (`wsl` / `wsl.exe`, by argv[0]
 /// basename)? Used to route the cloned cwd through `wsl --cd` instead of the
 /// Windows spawn cwd. Mirrors `kettle_core`'s private `is_wsl_launcher`.
-fn argv_is_wsl(argv: &[String]) -> bool {
+///
+/// v2.29.0: also consulted by the native-cwd poll — wsl.exe is a relay whose
+/// own Windows cwd is its launch dir and never tracks the in-distro `cd`, so the
+/// native read must be skipped for WSL (OSC 7 from inside the distro is the only
+/// correct source there).
+pub(crate) fn argv_is_wsl(argv: &[String]) -> bool {
     argv.first()
         .map(|p| {
             let last = p.rsplit(['/', '\\']).next().unwrap_or(p);

@@ -122,7 +122,13 @@ pub trait ProcessTree {
 impl ProcessTree for sysinfo::System {
     fn refresh(&mut self) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-        let refresh_kind = ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always);
+        // v2.29.0: also request cwd so `cwd_of` is populated — powers the
+        // native cwd fallback for tab/window labels when a shell emits no
+        // OSC 7/9;9 (stock Windows pwsh/cmd). On Windows sysinfo reads it from
+        // the process PEB; it degrades to None for elevated/cross-arch targets.
+        let refresh_kind = ProcessRefreshKind::new()
+            .with_cmd(sysinfo::UpdateKind::Always)
+            .with_cwd(sysinfo::UpdateKind::Always);
         self.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
     }
 
@@ -245,6 +251,20 @@ impl RemoteScanner {
     /// pane's original launch command. `None` for a plain pane.
     pub fn foreground_shell(&self, child_pid: u32) -> Option<ShellLaunch> {
         find_foreground_shell_in_index(child_pid, &self.sys, &self.index)
+    }
+
+    /// v2.29.0: the cwd of the pane's foreground process — the DEEPEST live
+    /// descendant of `child_pid` (e.g. `pwsh → git status`), or `child_pid`
+    /// itself when it has no children (a shell idling at a prompt; its own
+    /// process cwd tracks builtin `cd`). Backs the native cwd fallback used to
+    /// label a pane whose shell emits no OSC 7/9;9. Unlike
+    /// [`foreground_shell`](Self::foreground_shell) the descendant need NOT be a
+    /// known interactive shell — any foreground program inherits the shell's cwd,
+    /// so the deepest one is "where the user is". `None` if the cwd can't be read
+    /// (elevated / cross-arch / WSL-relay target — sysinfo returns None).
+    pub fn foreground_cwd(&self, child_pid: u32) -> Option<String> {
+        let pid = deepest_descendant_in_index(child_pid, &self.index).unwrap_or(child_pid);
+        self.sys.cwd_of(pid)
     }
 }
 
@@ -535,6 +555,44 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
         cwd: tree.cwd_of(pid),
         argv,
     })
+}
+
+/// v2.29.0: the deepest live descendant pid of `root` (BFS by depth; a
+/// same-depth tie resolves to the first-popped node, and sibling lists are
+/// pre-sorted ascending so the walk is deterministic run-to-run). `None` when
+/// `root` has no descendants — the caller then reads `root`'s own cwd. Used by
+/// [`RemoteScanner::foreground_cwd`] to find the foreground process whose cwd is
+/// "where the user is". Unlike [`find_foreground_shell_in_index`] it does not
+/// filter to known shells — any descendant inherits the shell's cwd.
+fn deepest_descendant_in_index(
+    root: u32,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+) -> Option<u32> {
+    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    if let Some(initial) = children_by_parent.get(&root) {
+        for &pid in initial {
+            if visited.insert(pid) {
+                queue.push_back((pid, 1));
+            }
+        }
+    }
+    let mut best: Option<(u32, u32)> = None; // (depth, pid)
+    while let Some((pid, depth)) = queue.pop_front() {
+        // Strictly-deeper wins; equal depth keeps the first-popped (lowest-pid
+        // branch, siblings pre-sorted) so the result is stable across ticks.
+        if best.map(|(d, _)| depth > d).unwrap_or(true) {
+            best = Some((depth, pid));
+        }
+        if let Some(grand) = children_by_parent.get(&pid) {
+            for &gpid in grand {
+                if visited.insert(gpid) {
+                    queue.push_back((gpid, depth + 1));
+                }
+            }
+        }
+    }
+    best.map(|(_, pid)| pid)
 }
 
 /// Cycle 888: one-shot [`find_foreground_shell_in_index`] over a fresh snapshot
@@ -1357,6 +1415,36 @@ mod tests {
                 cwd: Some("C:\\Users\\me\\Repos\\proj".to_string()),
             })
         );
+    }
+
+    /// v2.29.0: the native-cwd foreground walk picks the DEEPEST descendant
+    /// (where the user is) regardless of whether it's a known shell — `pwsh →
+    /// git status` tracks git's pid (which inherits the shell's cwd); a bare
+    /// shell with no children returns None so the caller reads the shell's own
+    /// process cwd. (Contrast with `find_foreground_shell`, which filters to
+    /// interactive shells.)
+    #[test]
+    fn deepest_descendant_tracks_foreground_for_native_cwd() {
+        // pwsh → git (an external command, NOT a shell): deepest = git's pid.
+        let mut tree = MockProcessTree::new();
+        tree.add_cwd(1, None, &["pwsh.exe"], "C:\\proj");
+        tree.add_cwd(2, Some(1), &["git", "status"], "C:\\proj");
+        let idx = build_children_index(&tree);
+        assert_eq!(deepest_descendant_in_index(1, &idx), Some(2));
+
+        // Deeper chain wins: pwsh → wsl → bash.
+        let mut tree = MockProcessTree::new();
+        tree.add(10, None, &["pwsh.exe"]);
+        tree.add(11, Some(10), &["wsl.exe"]);
+        tree.add(12, Some(11), &["bash"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(deepest_descendant_in_index(10, &idx), Some(12));
+
+        // No descendants → None (caller reads the root's own cwd).
+        let mut tree = MockProcessTree::new();
+        tree.add(20, None, &["pwsh.exe"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(deepest_descendant_in_index(20, &idx), None);
     }
 
     /// Cycle 888: the DEEPEST shell wins (most-nested ≈ current foreground), and

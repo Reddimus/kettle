@@ -17,7 +17,7 @@ A fast, GPU-accelerated terminal emulator written in Rust — combining
 the best ideas of **Ghostty**, **Terminator**, **kitty**, **Alacritty**
 and **WezTerm** into one tool.
 
-![kettle — Catppuccin Mocha, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
+![kettle — TokyoNight Night, two-pane split with the redesigned tab bar](docs/images/kettle-hero.png)
 
 <!-- Hero regenerated with the real renderer (no mockups), same offscreen path as
      the UX showcase:  kettle --screenshot docs/images/kettle-hero.png --cols 120 --rows 32
@@ -68,7 +68,7 @@ and **WezTerm** into one tool.
   (version + git hash, update status). `Ctrl+Shift+1..9` opens the Nth
   entry; menu rows show right-aligned hints from your live keybind map.
 - **Every Ghostty theme bundled** (500+, from iTerm2-Color-Schemes), default
-  **Catppuccin Mocha**. Ghostty-compatible `key = value` config with live
+  **TokyoNight Night**. Ghostty-compatible `key = value` config with live
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
   setup.
@@ -205,7 +205,7 @@ three platforms.
 ## First launch
 
 1. **Run `kettle`** (or launch it from your app menu / Start menu). It
-   opens with the **Catppuccin Mocha** theme and the bundled JetBrains
+   opens with the **TokyoNight Night** theme and the bundled JetBrains
    Mono Nerd Font — zero setup. On Windows it starts **PowerShell 7+**.
 2. **Right-click any pane → Preferences ▸** to toggle the scrollbar,
    cursor blink, bell, copy-on-select and font size — changes persist
@@ -288,7 +288,7 @@ tear-off while keeping tab switching and in-window reordering.
 kettle reads `$XDG_CONFIG_HOME/kettle/config` (Ghostty syntax). Example:
 
 ```ini
-theme = Catppuccin Mocha
+theme = TokyoNight Night
 font-family = JetBrainsMono Nerd Font
 font-size = 13
 background-opacity = 1.0

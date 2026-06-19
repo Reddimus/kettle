@@ -37,10 +37,10 @@ LINUX = ROOT / "packaging" / "linux"
 ICONSET = ROOT / "packaging" / "macos" / "kettle.iconset"
 ICO = ROOT / "packaging" / "windows" / "kettle.ico"
 
-# Catppuccin Mocha, matching the SVG.
-BASE = (0x1E, 0x1E, 0x2E, 255)  # window fill
-MAUVE = (0xCB, 0xA6, 0xF7, 255)  # signature accent (border + caret)
-TEXT = (0xCD, 0xD6, 0xF4, 255)  # prompt chevron
+# TokyoNight Night, matching the SVG (kettle's default theme since v2.28.0).
+BASE = (0x1A, 0x1B, 0x26, 255)  # window fill (theme background)
+ACCENT = (0x7A, 0xA2, 0xF7, 255)  # signature blue accent (border + caret)
+TEXT = (0xC0, 0xCA, 0xF5, 255)  # prompt chevron (theme foreground)
 
 S = 4  # supersample factor over the 512 viewBox → 2048 px canvas
 
@@ -50,11 +50,11 @@ def render_master() -> Image.Image:
     img = Image.new("RGBA", (512 * S, 512 * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # Outer window: rect x/y=32 w/h=448 rx=64, stroke #cba6f7 width 20.
+    # Outer window: rect x/y=32 w/h=448 rx=64, stroke #7aa2f7 width 20.
     # Emulate the centered SVG stroke with two rounded rects: the stroke's
-    # outer extent filled mauve, then the inner fill on top.
+    # outer extent filled with the blue accent, then the inner fill on top.
     d.rounded_rectangle(
-        [22 * S, 22 * S, 490 * S, 490 * S], radius=74 * S, fill=MAUVE
+        [22 * S, 22 * S, 490 * S, 490 * S], radius=74 * S, fill=ACCENT
     )
     d.rounded_rectangle(
         [42 * S, 42 * S, 470 * S, 470 * S], radius=54 * S, fill=BASE
@@ -68,9 +68,9 @@ def render_master() -> Image.Image:
     for (x, y) in pts:
         d.ellipse([x - w // 2, y - w // 2, x + w // 2, y + w // 2], fill=TEXT)
 
-    # Underscore caret `_`: rect x=296 y=326 w=120 h=28 rx=8, mauve.
+    # Underscore caret `_`: rect x=296 y=326 w=120 h=28 rx=8, blue accent.
     d.rounded_rectangle(
-        [296 * S, 326 * S, 416 * S, 354 * S], radius=8 * S, fill=MAUVE
+        [296 * S, 326 * S, 416 * S, 354 * S], radius=8 * S, fill=ACCENT
     )
     return img
 

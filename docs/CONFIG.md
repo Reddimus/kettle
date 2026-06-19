@@ -28,7 +28,7 @@ keys). The file is **watched and reloaded live**.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `theme` | string | `Catppuccin Mocha` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the Settings picker, the right-click Theme submenu, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
+| `theme` | string | `TokyoNight Night` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the Settings picker, the right-click Theme submenu, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
