@@ -898,6 +898,7 @@ impl Mux {
             &cfg.colorterm,
             &cfg.env,
             cfg.login_shell,
+            cfg.shell_integration,
             tx,
             waker,
             output_tx,

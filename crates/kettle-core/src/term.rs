@@ -174,6 +174,11 @@ pub struct Terminal {
     /// escape-sequence cwd; consulted only as a fallback by `current_dir_or_native`.
     /// Never set for WSL/SSH panes (the relay's OS cwd is meaningless there).
     pub native_cwd: Arc<Mutex<Option<String>>>,
+    /// v2.29.1: set once the shell actually reported a cwd via OSC 7/9;9. Until
+    /// then `cwd` holds only the pre-seeded launch directory, so
+    /// [`current_dir_or_native`](Self::current_dir_or_native) prefers the live
+    /// native poll; after a real report the reported cwd becomes authoritative.
+    pub osc_cwd_seen: Arc<std::sync::atomic::AtomicBool>,
     /// Cycle 745: latest OSC 9;4 progress state (drives the OS taskbar
     /// indicator); `None` until the program reports progress / after clear.
     pub progress: Arc<Mutex<Option<Progress>>>,
@@ -784,6 +789,101 @@ fn default_prog() -> CommandBuilder {
     CommandBuilder::new_default_prog()
 }
 
+/// v2.29.1: the default-shell `CommandBuilder`, optionally auto-injecting
+/// kettle's shell integration so the shell reports its working directory
+/// (OSC 7) + prompt marks (OSC 133) with zero `$PROFILE` setup. This is what
+/// lets the tab track `cd` for a stock PowerShell — whose `Set-Location` does
+/// NOT update the OS process cwd, so it is unreadable from outside the process.
+///
+/// On Windows, pwsh/powershell are launched `-NoExit -EncodedCommand
+/// <base64(kettle.ps1)>`: the user's `$PROFILE` still loads FIRST, then kettle's
+/// hook wraps the resulting prompt (preserving oh-my-posh / posh-git / starship).
+/// cmd.exe is left untouched — its process cwd already tracks `cd` (read by the
+/// native poll). `inject = false` (config `shell-integration = off`) reproduces
+/// the bare [`default_prog`]. Unix-shell rc-hook injection is a follow-up; on
+/// non-Windows this currently defers to [`default_prog`].
+fn default_prog_with_integration(inject: bool) -> CommandBuilder {
+    #[cfg(windows)]
+    if inject
+        && let Some(path) = pick_windows_default_shell(find_on_path)
+        && is_powershell(&path)
+    {
+        return powershell_integration_command(&path);
+    }
+    #[cfg(not(windows))]
+    let _ = inject;
+    default_prog()
+}
+
+/// v2.29.1: the kettle PowerShell shell-integration body, embedded so the
+/// spawned pwsh can be launched already wired (no `$PROFILE` edit needed).
+#[cfg(windows)]
+const POWERSHELL_INTEGRATION: &str = include_str!("../../../shell-integration/kettle.ps1");
+
+/// v2.29.1: is `path` a PowerShell (pwsh / powershell) executable, by basename?
+#[cfg(windows)]
+fn is_powershell(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            matches!(
+                s.to_ascii_lowercase().as_str(),
+                "pwsh.exe" | "powershell.exe" | "pwsh" | "powershell"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// v2.29.1: launch PowerShell with kettle's integration auto-loaded via
+/// `-NoExit -EncodedCommand <base64(UTF-16LE kettle.ps1)>`. `-EncodedCommand`
+/// (vs `-Command`) sidesteps all quoting of the multi-line script; the user's
+/// `$PROFILE` still loads BEFORE it (no `-NoProfile`), so kettle's hook wraps
+/// their existing prompt rather than replacing it. `-NoExit` keeps the session
+/// interactive after the hook installs.
+#[cfg(windows)]
+fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
+    let mut c = CommandBuilder::new(path);
+    c.arg("-NoExit");
+    c.arg("-EncodedCommand");
+    c.arg(encode_utf16le_base64(POWERSHELL_INTEGRATION));
+    c
+}
+
+/// Base64 of the UTF-16LE encoding of `s` — the form PowerShell's
+/// `-EncodedCommand` expects.
+#[cfg(windows)]
+fn encode_utf16le_base64(s: &str) -> String {
+    let utf16: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    base64_standard(&utf16)
+}
+
+/// Minimal standard-alphabet base64 encoder (padded). Self-contained so
+/// kettle-core takes no base64 dependency for this one-shot spawn-time encode.
+#[cfg(windows)]
+fn base64_standard(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Cycle 902 (audit): cap on the OSC 133 prompt-mark ring. A long-lived shell
 /// session emits one mark per prompt; without a cap the Vec grew unbounded.
 const MAX_PROMPT_MARKS: usize = 2048;
@@ -907,6 +1007,9 @@ impl Terminal {
             colorterm_env,
             &[],
             login_shell,
+            // Legacy shim (no in-tree live callers; tests pass explicit argv) —
+            // never auto-inject; the Mux spawn path passes the real config.
+            false,
             event_tx,
             waker,
             None,
@@ -935,6 +1038,7 @@ impl Terminal {
         colorterm_env: &str,
         extra_env: &[(String, String)],
         login_shell: bool,
+        shell_integration: bool,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
         output_tx: Option<crossbeam_channel::Sender<Vec<u8>>>,
@@ -972,7 +1076,7 @@ impl Terminal {
                 c
             }
             None => {
-                let mut c = default_prog();
+                let mut c = default_prog_with_integration(shell_integration);
                 // Cycle 822 (audit): `-l` is the POSIX login-shell switch. On
                 // Windows `default_prog()` resolves to pwsh/powershell/cmd, none
                 // of which accept it (powershell.exe errors on an unknown arg,
@@ -1144,6 +1248,15 @@ impl Terminal {
         // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
         // for native shells with no OSC 7/9;9). Starts empty.
         let native_cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // v2.29.1: set true once the shell actually REPORTS a cwd via OSC 7/9;9.
+        // `cwd_cell` is pre-seeded with the launch directory (above), so without
+        // this flag `current_dir_or_native` would always prefer that frozen seed
+        // and never fall through to the live native poll — leaving the tab stuck
+        // at the launch dir for a stock shell that emits no OSC 7. Only a real
+        // report flips this and makes the OSC cwd authoritative.
+        let osc_cwd_seen: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let osc_cwd_seen_for_struct = osc_cwd_seen.clone();
         // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
         // The reader thread writes it; the App polls the focused pane's value
         // each frame and drives the OS taskbar indicator (pwsh 7 parity).
@@ -1183,6 +1296,7 @@ impl Terminal {
             let command_finished = command_finished.clone();
             let protocol_notifications = protocol_notifications.clone();
             let cwd_cell = cwd_cell.clone();
+            let osc_cwd_seen = osc_cwd_seen.clone();
             let progress_cell = progress_cell.clone();
             let cell_px = cell_px.clone();
             let log_file = log_file.clone();
@@ -1454,6 +1568,10 @@ impl Terminal {
                                             if let Ok(mut c) = cwd_cell.lock() {
                                                 *c = Some(path);
                                             }
+                                            // v2.29.1: a real shell-reported cwd —
+                                            // the OSC cwd now outranks the native poll.
+                                            osc_cwd_seen
+                                                .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         // Cycle 745: OSC 9;4 taskbar progress.
                                         // Record the latest; the App polls it
@@ -1509,6 +1627,7 @@ impl Terminal {
             protocol_notifications,
             cwd: cwd_cell,
             native_cwd: native_cwd_cell,
+            osc_cwd_seen: osc_cwd_seen_for_struct,
             progress: progress_cell,
             argv: argv.to_vec(),
             log_file: log_file_for_struct,
@@ -1590,14 +1709,26 @@ impl Terminal {
         }
     }
 
-    /// v2.29.0: the cwd to display in tab/window/pane labels — the authoritative
-    /// OSC 7/9;9 [`current_dir`](Self::current_dir) when the shell reported one,
-    /// else the OS-derived [`native_cwd`](Self::native_cwd) fallback. The
-    /// escape-sequence cwd always wins, so a shell that volunteers its directory
+    /// v2.29.0: the cwd to display in tab/window/pane labels.
+    ///
+    /// If the shell has actually REPORTED a cwd via OSC 7/9;9 (`osc_cwd_seen`),
+    /// that is authoritative — return it, so a shell that volunteers its directory
     /// (including WSL, where the native Windows read is meaningless) is unaffected.
+    ///
+    /// Otherwise the only value in `cwd` is the pre-seeded *launch* directory,
+    /// which never tracks `cd`; prefer the live OS-derived `native_cwd` poll
+    /// (which does), falling back to that launch seed until the first poll lands.
+    /// (v2.29.1 fix: previously this always preferred `cwd`, so the seeded launch
+    /// dir shadowed the native poll and a stock Windows shell's tab stayed frozen.)
     pub fn current_dir_or_native(&self) -> Option<String> {
-        self.current_dir()
-            .or_else(|| self.native_cwd.lock().ok().and_then(|c| c.clone()))
+        if self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.current_dir();
+        }
+        self.native_cwd
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+            .or_else(|| self.current_dir())
     }
 
     /// Cycle 745: latest OSC 9;4 taskbar-progress state reported by this pane
@@ -4356,6 +4487,103 @@ mod teardown_tests {
         );
     }
 
+    /// v2.29.1: end-to-end — spawn the DEFAULT shell with auto shell-integration
+    /// in a REAL ConPTY, `Set-Location` into a known dir, and confirm the injected
+    /// pwsh reports it via OSC 7 so `current_dir()` updates (the whole point of
+    /// the feature: a stock PowerShell whose `Set-Location` doesn't move the
+    /// process cwd still tracks `cd` in the tab). `#[ignore]`d — spawns a real
+    /// pwsh, Windows-only, timing-dependent. Run:
+    /// `cargo test -p kettle-core -- --ignored shell_integration_injects_osc7`.
+    #[test]
+    #[ignore = "spawns a real pwsh in a ConPTY; Windows-only end-to-end shell-integration check"]
+    #[cfg(windows)]
+    fn shell_integration_injects_osc7_cwd_for_default_pwsh() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (otx, orx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        // Empty argv → default shell (pwsh); shell_integration = true → inject.
+        // Spawn with cwd = None so `current_dir()` starts None — it can ONLY
+        // become Some via a parsed OSC 7 from the injected integration's prompt.
+        // That proves the whole pipeline end-to-end: inject `-EncodedCommand
+        // kettle.ps1` -> the prompt emits OSC 7 -> kettle parses + accepts it
+        // (host validation passes). No typed input, so there's no PSReadLine
+        // input-timing race. (cd tracking uses the very same per-prompt OSC 7.)
+        let term = match Terminal::new_with_env_and_output(
+            &[],
+            None,
+            2000,
+            0,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            "xterm-256color",
+            "truecolor",
+            &[],
+            false,
+            true, // shell_integration → inject for pwsh
+            tx,
+            waker,
+            Some(otx),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping shell_integration test: no PTY ({e})");
+                return;
+            }
+        };
+        // Poll until the first prompt's OSC 7 lands (generous — the user's
+        // $PROFILE still loads first). Drain raw output for diagnostics.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut got = None;
+        let mut raw: Vec<u8> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            // Pump device-status replies (DSR/DA) back to the PTY exactly like the
+            // App does — without this, PSReadLine blocks on its startup `ESC[6n`
+            // cursor query and the shell never reaches a prompt.
+            while let Ok(ev) = rx.try_recv() {
+                if let TermEvent::PtyWrite(s) = ev {
+                    term.write(s.as_bytes());
+                }
+            }
+            while let Ok(chunk) = orx.try_recv() {
+                raw.extend_from_slice(&chunk);
+            }
+            if let Some(d) = term.current_dir() {
+                got = Some(d);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        term.write(b"exit\r");
+        if got.is_none() {
+            let text = String::from_utf8_lossy(&raw);
+            eprintln!("=== DIAG raw_len={} ===", raw.len());
+            eprintln!("has ']7;' (OSC7): {}", text.contains("]7;"));
+            eprintln!(
+                "has PowerShell: {}",
+                text.contains("PowerShell") || text.contains("PS ")
+            );
+            if let Some(i) = text.find("]7;") {
+                let end = (i + 90).min(text.len());
+                eprintln!("OSC7 ctx: {:?}", &text[i..end]);
+            }
+            eprintln!("HEAD: {:?}", &text[..text.len().min(300)]);
+        }
+        assert!(
+            got.as_deref().is_some_and(|d| !d.is_empty()),
+            "injected pwsh's prompt should report its cwd via OSC 7 (current_dir() \
+             None ⇒ OSC 7 never arrived or was rejected); got {got:?}"
+        );
+        assert!(
+            term.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
+            "osc_cwd_seen must be set once a real OSC 7 is parsed"
+        );
+    }
+
     /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose
     /// child is alive and whose PTY reader is parked in a blocking `read()`
     /// must return PROMPTLY. Pre-742 `Drop` `join()`ed the reader while the
@@ -4499,11 +4727,57 @@ mod login_flag_tests {
 
 #[cfg(all(test, windows))]
 mod default_shell_tests {
-    use super::pick_windows_default_shell;
-    use std::path::PathBuf;
+    use super::{
+        POWERSHELL_INTEGRATION, base64_standard, encode_utf16le_base64, is_powershell,
+        pick_windows_default_shell,
+    };
+    use std::path::{Path, PathBuf};
 
     const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
     const WPS: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    /// v2.29.1: the self-contained base64 encoder matches known vectors (RFC 4648).
+    #[test]
+    fn base64_standard_matches_known_vectors() {
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(base64_standard(b"f"), "Zg==");
+        assert_eq!(base64_standard(b"fo"), "Zm8=");
+        assert_eq!(base64_standard(b"foo"), "Zm9v");
+        assert_eq!(base64_standard(b"Man"), "TWFu");
+        assert_eq!(base64_standard(b"hi"), "aGk=");
+    }
+
+    /// v2.29.1: `-EncodedCommand` wants base64 of UTF-16LE — `"A"` → bytes
+    /// `[0x41,0x00]` → `"QQA="`.
+    #[test]
+    fn encode_utf16le_base64_is_powershell_encodedcommand_form() {
+        assert_eq!(encode_utf16le_base64("A"), "QQA=");
+        // Non-empty + decodable round-shape: the embedded integration encodes to
+        // a non-empty, padded base64 string (length a multiple of 4).
+        let enc = encode_utf16le_base64(POWERSHELL_INTEGRATION);
+        assert!(!enc.is_empty());
+        assert_eq!(
+            enc.len() % 4,
+            0,
+            "base64 output is padded to a multiple of 4"
+        );
+        assert!(
+            enc.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
+            "only the standard base64 alphabet"
+        );
+    }
+
+    /// v2.29.1: PowerShell executables are recognized by basename; cmd / bash are not.
+    #[test]
+    fn is_powershell_recognizes_pwsh_and_powershell_only() {
+        assert!(is_powershell(Path::new(PWSH)));
+        assert!(is_powershell(Path::new(WPS)));
+        assert!(is_powershell(Path::new("pwsh")));
+        assert!(is_powershell(Path::new(r"D:\tools\PowerShell.EXE")));
+        assert!(!is_powershell(Path::new(r"C:\Windows\System32\cmd.exe")));
+        assert!(!is_powershell(Path::new("/usr/bin/bash")));
+    }
 
     /// Cycle 743: pwsh 7 wins when both it and Windows PowerShell are present
     /// (matches Windows Terminal's default).

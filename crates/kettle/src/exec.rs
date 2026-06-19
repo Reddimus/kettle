@@ -211,6 +211,9 @@ pub fn run_exec_with(
         "truecolor",
         &[],
         false,
+        // No shell-integration injection — `kettle exec` runs a one-shot
+        // non-interactive command, not an interactive shell.
+        false,
         tx,
         waker,
         Some(otx),

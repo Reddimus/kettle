@@ -1447,6 +1447,39 @@ mod tests {
         assert_eq!(deepest_descendant_in_index(20, &idx), None);
     }
 
+    /// v2.29.1: end-to-end check that the sysinfo-backed native cwd read actually
+    /// works on this Windows host — spawns a real `pwsh`, `Set-Location`s it to a
+    /// known dir, and reads that dir back via `RemoteScanner::foreground_cwd`.
+    /// `#[ignore]`d (spawns a process + is Windows-only); run explicitly:
+    /// `cargo test -p kettle-remote -- --ignored foreground_cwd_reads_real_pwsh`.
+    #[test]
+    #[ignore = "spawns a real pwsh; Windows-only manual verification of the sysinfo PEB cwd read"]
+    #[cfg(windows)]
+    fn foreground_cwd_reads_real_pwsh_cwd() {
+        use std::process::Command;
+        let mut child = Command::new("pwsh")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Set-Location C:\\Windows; Start-Sleep 6",
+            ])
+            .spawn()
+            .expect("spawn pwsh");
+        let pid = child.id();
+        // Give pwsh a moment to start + run Set-Location before reading its cwd.
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let mut sc = RemoteScanner::new();
+        sc.refresh();
+        let cwd = sc.foreground_cwd(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            cwd.as_deref(),
+            Some("C:\\Windows"),
+            "sysinfo should read the live pwsh process cwd (got {cwd:?})"
+        );
+    }
+
     /// Cycle 888: the DEEPEST shell wins (most-nested ≈ current foreground), and
     /// a non-shell foreground (e.g. vim) is never cloned.
     #[test]
