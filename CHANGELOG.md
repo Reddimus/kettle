@@ -4,6 +4,23 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.27.0] — 2026-06-19
+
+  ### Fixed
+  - **X11 PRIMARY selection is now written on copy.** Copying a selection (and
+    copy-on-select) also sets the X11 PRIMARY selection on Linux, completing the
+    canonical select → middle-click-paste loop (`paste_primary` already read
+    PRIMARY, but copy only ever set the CLIPBOARD). No PRIMARY on
+    Wayland/macOS/Windows — those stay clipboard-only. (Audit finding.)
+  - **`kettle exec --json` no longer drops a trailing partial UTF-8 sequence.** A
+    stream that ends mid-codepoint now flushes the carry lossily in a final
+    output event before `exit`, instead of silently dropping those bytes.
+  - **Control-plane client no longer prunes a live server on a transient connect
+    failure (Unix).** `transport::connect` retries briefly on `ConnectionRefused`
+    (server mid-accept / socket swap), matching the Windows named-pipe retry,
+    while still bailing immediately on `NotFound` so a truly-dead entry is pruned
+    promptly.
+
 ## [2.26.0] — 2026-06-19
 
   ### Added
