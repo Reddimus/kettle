@@ -68,6 +68,11 @@ pub(crate) struct WindowState {
     pub(crate) selecting: bool,
     /// Dragging the focused pane's scrollbar thumb.
     pub(crate) dragging_scrollbar: bool,
+    /// v2.26.0: the pointer is hovering the focused pane's scrollbar gutter.
+    /// Drives the overlay scrollbar's bright (vs dim-at-rest) opacity with no
+    /// fade timer, so it costs zero idle wakeups — just a single repaint on the
+    /// hover-enter / hover-leave transition.
+    pub(crate) scrollbar_hover: bool,
     /// Cycle 904 (audit): in-progress mouse drag of a split divider. `Some`
     /// while the left button is held after a press landed on a divider seam;
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
@@ -271,6 +276,7 @@ impl WindowState {
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
             dragging_scrollbar: false,
+            scrollbar_hover: false,
             dragging_split: None,
             search_revealed: None,
             search_scan_key: None,

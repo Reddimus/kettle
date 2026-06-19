@@ -1409,35 +1409,7 @@ impl Mux {
             return false;
         };
         let focus = tab.focus;
-        fn walk(node: &mut Node, target: u64, clockwise: bool) -> bool {
-            if let Node::Split { dir, a, b, .. } = node {
-                let a_has = a.contains(target);
-                let b_has = b.contains(target);
-                if (a_has || b_has)
-                    && (matches!(**a, Node::Leaf(_)) || matches!(**b, Node::Leaf(_)))
-                {
-                    // This Split is the focused leaf's immediate
-                    // parent. Flip direction + swap children for the
-                    // clockwise rotation per Terminator semantics.
-                    *dir = match *dir {
-                        Dir::Horizontal => Dir::Vertical,
-                        Dir::Vertical => Dir::Horizontal,
-                    };
-                    if clockwise {
-                        std::mem::swap(a, b);
-                    }
-                    return true;
-                }
-                if a_has && walk(a, target, clockwise) {
-                    return true;
-                }
-                if b_has && walk(b, target, clockwise) {
-                    return true;
-                }
-            }
-            false
-        }
-        walk(&mut tab.root, focus, clockwise)
+        rotate_node(&mut tab.root, focus, clockwise)
     }
 
     /// Cycle 345: 0-based index of the focused pane within its tab's
@@ -2231,6 +2203,30 @@ impl Mux {
             })
             .collect()
     }
+
+    /// v2.26.0: like [`tab_titles`](Self::tab_titles) but also returns, for tabs
+    /// whose label comes from the working directory, the home-abbreviated full
+    /// path so the renderer can tier the label (full path → leaf dir name →
+    /// truncated tail) to the available tab width.
+    pub fn tab_labels(&self) -> Vec<TabLabel> {
+        let home = home_dir_string();
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let pane = self.panes.get(&t.focus);
+                let title = pane.map(|p| p.title.as_str()).unwrap_or("");
+                let cwd = pane.and_then(|p| p.term.current_dir());
+                resolve_tab_label(
+                    t.title_override.as_deref(),
+                    title,
+                    cwd.as_deref(),
+                    home.as_deref(),
+                    i,
+                )
+            })
+            .collect()
+    }
 }
 
 /// Display title for one tab, in priority order: an explicit `title_override`
@@ -2252,23 +2248,127 @@ fn resolve_tab_title(
     cwd: Option<&str>,
     idx: usize,
 ) -> String {
+    resolve_tab_label(title_override, pane_title, cwd, None, idx).text
+}
+
+/// v2.26.0: a resolved tab label. `text` is the compact display string (used by
+/// non-render consumers and as the fallback); `path` carries the home-abbreviated
+/// full working-directory path when the label is derived from the cwd, so the
+/// renderer can tier it (full path → leaf dir name → truncated tail) to the
+/// available tab width. `path` is `None` for explicit/override and shell-set
+/// (OSC 2) titles, which are shown verbatim (middle-ellipsized only if they
+/// overflow the segment).
+pub(crate) struct TabLabel {
+    pub(crate) text: String,
+    pub(crate) path: Option<String>,
+}
+
+/// The pure core of tab-label resolution (precedence: override → real pane title
+/// → cwd → `tab N`), additionally surfacing the cwd path for the renderer's
+/// width-aware tiering. `home`, when given, collapses a leading `$HOME` to `~` in
+/// the surfaced path.
+fn resolve_tab_label(
+    title_override: Option<&str>,
+    pane_title: &str,
+    cwd: Option<&str>,
+    home: Option<&str>,
+    idx: usize,
+) -> TabLabel {
     if let Some(ov) = title_override
         && !ov.is_empty()
     {
-        return ov.to_string();
+        return TabLabel {
+            text: ov.to_string(),
+            path: None,
+        };
     }
     if pane_title.is_empty() || pane_title == "kettle" {
-        if let Some(cwd) = cwd
-            && let Some(name) = std::path::Path::new(cwd)
+        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+            let full = abbreviate_home(cwd, home);
+            if let Some(name) = std::path::Path::new(cwd)
                 .file_name()
                 .and_then(|s| s.to_str())
-            && !name.is_empty()
-        {
-            return name.to_string();
+                .filter(|s| !s.is_empty())
+            {
+                return TabLabel {
+                    text: name.to_string(),
+                    path: Some(full),
+                };
+            }
+            // Root-ish path with no file-name component (e.g. "/" or "C:\\") —
+            // show the (abbreviated) full path and still allow tiering on it.
+            return TabLabel {
+                text: full.clone(),
+                path: Some(full),
+            };
         }
-        return format!("tab {}", idx + 1);
+        return TabLabel {
+            text: format!("tab {}", idx + 1),
+            path: None,
+        };
     }
-    pane_title.to_string()
+    TabLabel {
+        text: pane_title.to_string(),
+        path: None,
+    }
+}
+
+/// v2.26.0: collapse a leading `$HOME` in `path` to `~` (e.g.
+/// `C:\Users\me\Repos\kettle` → `~\Repos\kettle`), preserving the original
+/// separator style. Best-effort — a path whose prefix doesn't match `home`
+/// (different separator convention, MSYS `/c/...` vs `C:\...`, etc.) is returned
+/// unchanged. Pure → unit-tested.
+fn abbreviate_home(path: &str, home: Option<&str>) -> String {
+    if let Some(home) = home.filter(|h| !h.is_empty()) {
+        if path == home {
+            return "~".to_string();
+        }
+        for sep in ['/', '\\'] {
+            let prefix = format!("{home}{sep}");
+            if let Some(rest) = path.strip_prefix(prefix.as_str()) {
+                return format!("~{sep}{rest}");
+            }
+        }
+    }
+    path.to_string()
+}
+
+/// The user's home directory (`USERPROFILE` on Windows, else `HOME`), used to
+/// abbreviate cwd-derived tab labels. `None` when unset/empty.
+fn home_dir_string() -> Option<String> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// Rotate the split that is the *immediate parent* of pane `target` (the split
+/// with `target` as a direct leaf child): flip its axis and, for a clockwise
+/// rotation, swap its children. Recurses to find that parent; returns whether a
+/// rotation happened. Extracted from `rotate_focused_split` as a free fn so the
+/// nested-tree behavior is unit-testable without standing up a Mux (audit,
+/// v2.26.0: the old guard fired for any ancestor split that merely had some leaf
+/// child, rotating the wrong split in nested trees).
+fn rotate_node(node: &mut Node, target: u64, clockwise: bool) -> bool {
+    if let Node::Split { dir, a, b, .. } = node {
+        if matches!(**a, Node::Leaf(x) if x == target)
+            || matches!(**b, Node::Leaf(x) if x == target)
+        {
+            *dir = match *dir {
+                Dir::Horizontal => Dir::Vertical,
+                Dir::Vertical => Dir::Horizontal,
+            };
+            if clockwise {
+                std::mem::swap(a, b);
+            }
+            return true;
+        }
+        if a.contains(target) && rotate_node(a, target, clockwise) {
+            return true;
+        }
+        if b.contains(target) && rotate_node(b, target, clockwise) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Apply the *post-spawn* tree mutation for a split: graft the new pane id
@@ -2825,6 +2925,114 @@ mod node_tests {
         // Placeholder + no cwd → "tab N" (1-based).
         assert_eq!(resolve_tab_title(None, "kettle", None, 3), "tab 4");
         assert_eq!(resolve_tab_title(None, "", None, 0), "tab 1");
+    }
+
+    #[test]
+    fn resolve_tab_label_surfaces_cwd_path() {
+        use super::resolve_tab_label;
+        // cwd fallback: compact text is the leaf, but the full (abbreviated) path
+        // is surfaced for the renderer to tier.
+        let l = resolve_tab_label(
+            None,
+            "kettle",
+            Some("/home/u/Repos/kettle"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "kettle");
+        assert_eq!(l.path.as_deref(), Some("~/Repos/kettle"));
+        // No home match → full path unabbreviated.
+        let l = resolve_tab_label(None, "kettle", Some("/srv/app"), Some("/home/u"), 0);
+        assert_eq!(l.text, "app");
+        assert_eq!(l.path.as_deref(), Some("/srv/app"));
+        // Override / real title / no-cwd carry no path (shown verbatim).
+        assert!(
+            resolve_tab_label(Some("deploy"), "bash", Some("/x/y"), None, 0)
+                .path
+                .is_none()
+        );
+        assert!(
+            resolve_tab_label(None, "vim - main.rs", None, None, 0)
+                .path
+                .is_none()
+        );
+        assert!(
+            resolve_tab_label(None, "kettle", None, None, 3)
+                .path
+                .is_none()
+        );
+        // Windows-style separators abbreviate too.
+        let l = resolve_tab_label(
+            None,
+            "kettle",
+            Some("C:\\Users\\me\\Repos\\kettle"),
+            Some("C:\\Users\\me"),
+            0,
+        );
+        assert_eq!(l.text, "kettle");
+        assert_eq!(l.path.as_deref(), Some("~\\Repos\\kettle"));
+    }
+
+    #[test]
+    fn abbreviate_home_rules() {
+        use super::abbreviate_home;
+        assert_eq!(abbreviate_home("/home/u/proj", Some("/home/u")), "~/proj");
+        assert_eq!(abbreviate_home("/home/u", Some("/home/u")), "~");
+        // Not under home → unchanged.
+        assert_eq!(abbreviate_home("/etc/hosts", Some("/home/u")), "/etc/hosts");
+        // No home → unchanged.
+        assert_eq!(abbreviate_home("/home/u/proj", None), "/home/u/proj");
+        // A non-boundary prefix must NOT match (/home/user vs home /home/u).
+        assert_eq!(
+            abbreviate_home("/home/user/x", Some("/home/u")),
+            "/home/user/x"
+        );
+        assert_eq!(
+            abbreviate_home("C:\\Users\\me\\p", Some("C:\\Users\\me")),
+            "~\\p"
+        );
+    }
+
+    #[test]
+    fn rotate_node_targets_the_immediate_parent_in_nested_trees() {
+        use super::{Dir, Node, rotate_node};
+        // Split1{ a: Split2{L1,L2} (Horizontal), b: L3 } (Vertical), focus L1.
+        // L1's immediate parent is Split2 — rotating must flip Split2, NOT the
+        // outer Split1 (the audited bug rotated Split1 because its child L3 is a
+        // leaf).
+        let mut root = Node::Split {
+            dir: Dir::Vertical,
+            ratio: 0.5,
+            a: Box::new(Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            }),
+            b: Box::new(Node::Leaf(3)),
+        };
+        assert!(rotate_node(&mut root, 1, false));
+        match &root {
+            Node::Split { dir: outer, a, .. } => {
+                assert!(
+                    matches!(outer, Dir::Vertical),
+                    "outer split must NOT rotate"
+                );
+                assert!(
+                    matches!(
+                        a.as_ref(),
+                        Node::Split {
+                            dir: Dir::Vertical,
+                            ..
+                        }
+                    ),
+                    "inner split (L1's parent) flips H->V"
+                );
+            }
+            _ => panic!("root should still be a split"),
+        }
+        // Unknown target → no-op.
+        assert!(!rotate_node(&mut root, 999, false));
     }
 
     #[test]

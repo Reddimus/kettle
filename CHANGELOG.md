@@ -4,6 +4,66 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.26.0] — 2026-06-19
+
+  ### Added
+  - **Pronounced, overlay-style scrollbar.** The per-pane scrollback scrollbar is
+    now a configurable-width bar (`scrollbar-width`, default `14` px, up from the
+    old 3 px hairline) with a faint track gutter behind the thumb. It is **dim at
+    rest and brighter** while the view is scrolled back or while the pointer
+    hovers / drags it (a two-state step, so no fade timer and zero idle cost). The
+    `auto` mode now shows the bar whenever a pane has scrollback history (not only
+    while scrolled), and the click/drag grab zone matches the painted width
+    (floored at 10 px) so it's easy to grab with the mouse — Terminator-like.
+  - **Tiered tab labels (full path → directory name → tail).** A tab whose label
+    comes from the working directory now shows, by available width: the whole
+    (home-abbreviated) path, else the current directory name, else the tail of the
+    name with a leading `…`. Explicit / shell-set (OSC 2) titles are unchanged.
+  - **Tab-bar width caps + overflow scrolling.** New `tab-min-width` /
+    `tab-max-width` keep tabs readable: a 2-tab window no longer gives each tab
+    half the screen, and many tabs stop shrinking at the minimum. Past that the
+    bar overflows and scrolls — `scroll-tabbar` (now wired and default-on) shows
+    `‹ ›` arrow buttons and lets the mouse wheel reach hidden tabs, keeping the
+    active tab in view.
+
+  ### Fixed
+  - **Wide-character search / link / agent-scrape corruption.** Reconstructing a
+    grid row's text injected a literal space after every wide (CJK / emoji) glyph
+    (the cell spacer), so `世界` became `世 界` and search, autodetected links, and
+    the agent screen-scrape never matched across wide text. A single spacer-aware
+    `kettle_core::grid_text` helper now backs all those sites so the fix can't
+    drift.
+  - **Agent `send_mouse` could close the wrong window.** Closing the last tab of a
+    non-focused window via the control plane consumed an app-global close flag
+    against the *focused* window, destroying it and orphaning the emptied target.
+    The target window is now closed locally.
+  - **`rotate_focused_split` rotated the wrong split in nested layouts.** It now
+    rotates the split that is the focused pane's *immediate* parent, not any
+    ancestor that merely has a leaf child (extracted to a unit-tested `rotate_node`).
+  - **kitty `a=d` delete aborted unrelated in-flight image transmissions.** A
+    targeted delete interleaved between another image's chunks no longer discards
+    that image's accumulator — only a delete-all clears every in-flight transmit.
+  - **`+` new-tab button now fires the `TabAdd` event** (Lua / dev-record) like
+    every other new-tab path, on both the GUI and the agent control paths.
+
+  ### Changed
+  - **`word_chars` / `word-chars` config keys are no longer accepted.** They are
+    VTE/Terminator's *inverse* of kettle's `word-delimiters` (word constituents vs.
+    word separators); aliasing them produced exactly-inverted double-click
+    selection, so they now surface as unknown keys instead of silently doing the
+    opposite. Use `word-delimiters` / `selection-word-chars`.
+
+  ### Removed
+  - **tmux control-mode (`-CC`) parser scaffold.** The `kettle-vt` `tmux_cc`
+    module was an unwired parser foundation, dead across many releases; removed
+    rather than left as latent surface. (Design notes retained as a proposal.)
+
+  ### Audit
+  - This release also lands the high-severity findings of a workspace-wide
+    multi-agent audit (per-subsystem review → adversarial verification → feature
+    debate). Lower-severity findings and larger feature redesigns are tracked for
+    follow-up releases.
+
 ## [2.25.1] — 2026-06-15
 
   ### Added

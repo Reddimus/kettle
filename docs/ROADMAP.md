@@ -1318,14 +1318,13 @@ deliverables table. Highlights:
       `lua-sandbox = safe|trusted` config knob nils unsafe stdlib APIs
       by default. ALL 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles
       shipped.
-- [x] **tmux `-CC` passthrough parser** (iTerm2 parity, cycles 327-328).
-      Pure `TmuxControlParser` in `kettle_vt::tmux_cc` covering every
-      `%begin/%end/%output/%window-*/%session-*/%layout-change/%client-
-      detached/%exit` variant with 11 unit tests pinning edge cases
-      (CRLF, partial lines, 64KB overflow recovery, `\nnn` octal decode).
-      `docs/TMUX-CC-DESIGN.md` lays out the remaining 5 integration
-      sub-cycles (pane state plumbing, window-tab synthesis, input
-      routing, layout-change, detach cleanup).
+- [ ] **tmux `-CC` passthrough** (iTerm2 parity). A pure-parser foundation
+      (`kettle_vt::tmux_cc`) existed (cycles 327-328) but was never wired to a
+      live consumer and was **removed in v2.26.0** rather than carried as dead
+      code. `docs/TMUX-CC-DESIGN.md` (retained as a proposal) lays out the
+      protocol design and the integration sub-cycles a future implementation
+      would need (pane state plumbing, window-tab synthesis, input routing,
+      layout-change, detach cleanup).
 - [x] **Detachable tabs cross-window drag** (Terminator parity, cycles
       397-410). All 11 sub-cycles from `docs/TERMINATOR-DETACHABLE-TABS-
       DESIGN.md` shipped: serialize_tab, extract/insert APIs, SCM_RIGHTS

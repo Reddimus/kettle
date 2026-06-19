@@ -53,6 +53,9 @@ keys). The file is **watched and reloaded live**.
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
+| `tab-min-width` | float 40–600 px | `120` | Minimum width of a horizontal tab segment. When tabs would shrink below this the bar overflows and (with `scroll-tabbar`) scrolls. Clamped `[40, 600]` |
+| `tab-max-width` | float 80–1200 px | `260` | Maximum width of a horizontal tab segment, so a 2-tab window doesn't give each tab half the screen. Clamped `[80, 1200]`, floored at `tab-min-width` |
+| `scroll-tabbar` | bool | `true` | When horizontal tabs overflow the bar, keep them at `tab-min-width` and scroll with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). `false` shrinks tabs to fit instead (still capped at `tab-max-width`) |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
@@ -64,7 +67,8 @@ keys). The file is **watched and reloaded live**.
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS window title template — placeholders `{title}` (active pane title), `{cwd}` (active pane cwd), `{tab}` (1-based tab index); `{{`/`}}` escape literal braces |
 | `tab-format` (`tab-title-format`) | string | `{n}: {title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). The trailing `✕` close button is appended by the renderer |
-| `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane scrollback scrollbar (`auto` = only while scrolled) |
+| `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane overlay scrollbar. `auto` shows it whenever the pane has scrollback history — dim at rest, brighter while scrolled back or while the pointer hovers/drags it; `always` also draws the empty gutter with no history. Click or drag the thumb to scroll |
+| `scrollbar-width` | float 2–40 px | `14` | Width of the scrollbar track + thumb. The grab zone matches it (min 10 px). Wider = easier to grab with the mouse (Terminator-like) |
 | `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
 | `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent. While **broadcast mode** is on (`Super+G`), this is temporarily overridden by theme `palette[3]` (yellow) to signal the active state; the configured color is restored when broadcast turns off |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
@@ -246,7 +250,6 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 | `autoclean-groups` | Auto-remove empty broadcast groups | Needs named broadcast groups (Bucket D) |
 | `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
-| `scroll-tabbar` | Horizontal-scroll across many tab segments | Needs scrollable tab-bar UI for many-tab cases |
 | `split-to-group` | New splits join the parent's broadcast group | Needs named broadcast groups (Bucket D) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 

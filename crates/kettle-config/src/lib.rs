@@ -879,8 +879,14 @@ impl AskBeforeClosing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
     Never,
-    /// Only while scrolled back into history.
+    /// v2.26.0: visible whenever the pane has scrollback history (not only
+    /// while scrolled back). Drawn dim at rest and brighter while the pointer
+    /// hovers the bar, the view is scrolled back, or the thumb is being
+    /// dragged — an overlay-scrollbar look that stays out of the way but is
+    /// always grabbable with the mouse.
     Auto,
+    /// Like `Auto`, but the track gutter is drawn even when there is no
+    /// scrollback yet (a permanent right-edge channel).
     Always,
 }
 
@@ -1126,6 +1132,14 @@ pub struct Config {
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
     /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
     pub scroll_tabbar: bool,
+    /// v2.26.0: min / max width (logical px) of a horizontal tab segment. Tabs
+    /// divide the bar evenly but never shrink below `tab_min_width` (past which
+    /// the bar overflows and — when `scroll_tabbar`, the default — scrolls with
+    /// `‹ ›` arrows + the mouse wheel) nor grow past `tab_max_width` (so a 2-tab
+    /// window doesn't make each tab half the screen). Clamped at parse;
+    /// `tab_max_width` is floored at `tab_min_width` where used.
+    pub tab_min_width: f32,
+    pub tab_max_width: f32,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
@@ -1412,6 +1426,11 @@ pub struct Config {
     /// `{n}` (1-based tab index), `{title}` (focused pane's title).
     pub tab_format: String,
     pub scrollbar: ScrollbarMode,
+    /// v2.26.0: width in logical px of the scrollbar track + thumb. The thumb
+    /// fills this width; the track gutter is the same width at a lower opacity.
+    /// Clamped to `[2, 40]`. Default `14` (Terminator-like — wide enough to grab
+    /// with the mouse, unlike the old 3 px hairline).
+    pub scrollbar_width: f32,
     /// v2.20.0 (Ghostty parity): when to show the transient `cols×rows`
     /// chip during a live window resize. Default `after-first` (every
     /// resize except the initial window placement).
@@ -1910,7 +1929,9 @@ impl Default for Config {
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
             title_at_bottom: false,
-            scroll_tabbar: false,
+            scroll_tabbar: true,
+            tab_min_width: 120.0,
+            tab_max_width: 260.0,
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
@@ -1986,6 +2007,7 @@ impl Default for Config {
             agent_badge: "[agent] ".to_string(),
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
+            scrollbar_width: 14.0,
             resize_overlay: ResizeOverlayMode::AfterFirst,
             split_divider_color: None,
             focused_split_color: None,
@@ -2525,6 +2547,15 @@ impl Config {
                 }
                 "scroll-multiplier" | "mouse-scroll-multiplier" => {
                     v.parse::<f32>().is_ok_and(|n| (0.1..=50.0).contains(&n))
+                }
+                "scrollbar-width" | "scrollbar_width" => {
+                    v.parse::<f32>().is_ok_and(|n| (2.0..=40.0).contains(&n))
+                }
+                "tab-min-width" | "tab_min_width" => {
+                    v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
+                }
+                "tab-max-width" | "tab_max_width" => {
+                    v.parse::<f32>().is_ok_and(|n| (80.0..=1200.0).contains(&n))
                 }
                 "minimum-contrast" => v.parse::<f32>().is_ok_and(|n| (0.0..=21.0).contains(&n)),
                 // Special: scrollback accepts unlimited/infinite/0 as
@@ -3469,6 +3500,20 @@ impl Config {
                         cfg.scroll_tabbar = b;
                     }
                 }
+                "tab-min-width" | "tab_min_width" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
+                        cfg.tab_min_width = v.clamp(40.0, 600.0);
+                    }
+                }
+                "tab-max-width" | "tab_max_width" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
+                        cfg.tab_max_width = v.clamp(80.0, 1200.0);
+                    }
+                }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.hide_on_lose_focus = b;
@@ -3961,6 +4006,13 @@ impl Config {
                         _ => ScrollbarMode::Auto,
                     }
                 }
+                "scrollbar-width" | "scrollbar_width" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
+                        cfg.scrollbar_width = v.clamp(2.0, 40.0);
+                    }
+                }
                 "resize-overlay" | "resize_overlay" => {
                     cfg.resize_overlay = match e.value.to_ascii_lowercase().as_str() {
                         "never" | "off" | "false" => ResizeOverlayMode::Never,
@@ -4062,17 +4114,14 @@ impl Config {
                         cfg.mouse_hide_while_typing = b;
                     }
                 }
-                // Cycle 698 adds Terminator parity
-                // (terminatorlib/config.py `word_chars`): the
-                // VTE per-profile "characters that count as part
-                // of a word for double-click selection". Maps
-                // 1:1 onto kettle's existing `word-delimiters`
-                // (Alacritty / WezTerm naming).
-                "word-delimiters"
-                | "selection-word-chars"
-                | "semantic-escape-chars"
-                | "word_chars"
-                | "word-chars" => {
+                // `word-delimiters` (Alacritty / WezTerm) = the characters that
+                // BREAK words. v2.26.0 (audit): VTE/Terminator's `word_chars` is
+                // the INVERSE concept (characters that ARE part of a word), so
+                // aliasing it here produced exactly-inverted double-click
+                // selection. `word_chars`/`word-chars` are intentionally NOT
+                // accepted (they surface as unknown keys) rather than silently
+                // doing the opposite of what the user asked.
+                "word-delimiters" | "selection-word-chars" | "semantic-escape-chars" => {
                     cfg.word_delimiters = e.value.clone();
                 }
                 "font-feature" => {
@@ -5977,7 +6026,7 @@ cell-height = 1.2\n";
         assert!(d.close_button_on_tab);
         assert!(!d.new_tab_after_current_tab);
         assert!(!d.title_at_bottom);
-        assert!(!d.scroll_tabbar);
+        assert!(d.scroll_tabbar);
         assert!(!d.hide_on_lose_focus);
         assert!(!d.sticky);
         assert!(!d.hide_from_taskbar);
@@ -7250,17 +7299,14 @@ cell-height = 1.2\n";
             Config::parse_text("semantic-escape-chars = ()[]{}").word_delimiters,
             "()[]{}"
         );
-        // Cycle 698 Terminator parity: VTE's per-profile
-        // `word_chars` config key maps 1:1 onto kettle's
-        // `word-delimiters`. Both spellings (underscore +
-        // hyphen) parse.
-        assert_eq!(
-            Config::parse_text("word_chars = abcXYZ").word_delimiters,
-            "abcXYZ"
-        );
-        assert_eq!(
-            Config::parse_text("word-chars = abcXYZ").word_delimiters,
-            "abcXYZ"
+        // v2.26.0 (audit): VTE/Terminator `word_chars` is the INVERSE concept
+        // (word constituents, not delimiters), so it is intentionally NOT an
+        // alias — it leaves `word_delimiters` at its default rather than
+        // inverting the user's intent.
+        assert!(
+            Config::parse_text("word_chars = abcXYZ")
+                .word_delimiters
+                .is_empty()
         );
     }
 
