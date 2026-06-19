@@ -4,6 +4,41 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.29.0] — 2026-06-19
+
+  ### Fixed
+  - **Tab / window / pane titles now track the working directory for a stock
+    Windows shell — with zero setup.** A bare `pwsh`/`cmd` launched in kettle used
+    to show the full `…\pwsh.exe` path forever, because (1) ConPTY injects that
+    executable path as the startup window title and (2) the shell never reports
+    its directory unless shell-integration is sourced from `$PROFILE`. kettle now
+    (a) ignores that bogus injected exe-path title so the cwd fallback engages,
+    and (b) reads the foreground process's working directory natively from the OS
+    process table (reusing the existing 5 Hz process poll — no new dependency), so
+    the tab labels its directory and updates on `cd`, matching Windows Terminal.
+    OSC 7 stays authoritative whenever a shell *does* report a cwd (including WSL,
+    where the native read is meaningless and is skipped). The split-pane titlebar —
+    which had no cwd fallback at all — now also shows the cwd leaf for a
+    placeholder-titled pane.
+
+  ### Added
+  - **OSC 9;9 (ConEmu “set working directory”) is now honored** as a cwd source
+    alongside OSC 7. Any oh-my-posh / starship / custom prompt already emitting it
+    for Windows Terminal reports its directory to kettle for free (and it is the
+    correct cwd source for an in-distro WSL prompt).
+
+  ### Changed
+  - **App icon recolored to the TokyoNight Night palette** (kettle's default theme
+    since v2.28.0): a deep-navy `#1a1b26` window with a signature blue `#7aa2f7`
+    border + caret and a `#c0caf5` prompt chevron — the same blue kettle paints the
+    active-pane border in. Every artifact regenerated from the SVG (Linux hicolor
+    PNGs, the macOS `.iconset`, the 7-resolution Windows `.ico`, and the embedded
+    winit window icon).
+  - **Docs + showcase images aligned to the TokyoNight Night default.** The v2.28.0
+    default-theme switch left README / CONFIG / UX-COMPARISON / TESTING and the
+    architecture diagram still describing Catppuccin Mocha; these now read
+    TokyoNight Night, and the hero/showcase screenshots are re-rendered in it.
+
 ## [2.28.0] — 2026-06-19
 
   ### Fixed

@@ -46,7 +46,7 @@ flowchart LR
     mcp -->|"kettle-ctl client"| ipc["local IPC<br/>Unix socket / Windows named pipe"]
     ctl["kettle ctl"] -->|kettle-ctl client| ipc
     ipc --> srv
-    classDef off fill:#1e1e2e,stroke:#cba6f7,color:#cdd6f4;
+    classDef off fill:#1a1b26,stroke:#7aa2f7,color:#c0caf5;
     class srv,ipc off;
 ```
 

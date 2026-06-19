@@ -17,12 +17,13 @@ pub struct Theme {
     pub selection_background: Rgb,
     pub selection_foreground: Rgb,
     /// Cycle 937: the theme's UI-chrome accent (focus border, active tab,
-    /// status bar). Catppuccin Mocha sets this to its *signature* mauve
-    /// (#cba6f7) — the same color as the app icon — because mauve is a named
-    /// Catppuccin color that is NOT in the 16-slot ANSI palette, so the chrome
-    /// can't derive it otherwise. Themes that don't declare an `accent` default
-    /// it to `palette[4]` (their ANSI blue, the conventional focus color), so
-    /// nothing changes for them. A user `accent-color = …` still overrides.
+    /// status bar). Most themes don't declare one and default it to `palette[4]`
+    /// (their ANSI blue, the conventional focus color) — including the shipped
+    /// default TokyoNight Night, whose blue `#7aa2f7` is also the app icon's
+    /// accent. Catppuccin Mocha is the exception: it sets accent to its
+    /// *signature* mauve (#cba6f7), a named Catppuccin color NOT in the 16-slot
+    /// ANSI palette, so the chrome can't derive it otherwise. A user
+    /// `accent-color = …` still overrides.
     pub accent: Rgb,
 }
 
@@ -59,7 +60,7 @@ impl Default for Theme {
             cursor_text: Rgb::new(0x1e, 0x1e, 0x2e),
             selection_background: Rgb::new(0x58, 0x5b, 0x70),
             selection_foreground: Rgb::new(0xcd, 0xd6, 0xf4),
-            // Catppuccin Mocha signature mauve (matches the app icon).
+            // Catppuccin Mocha signature mauve (its named brand accent).
             accent: Rgb::new(0xcb, 0xa6, 0xf7),
         }
     }

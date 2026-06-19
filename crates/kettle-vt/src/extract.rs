@@ -306,6 +306,19 @@ impl Extractor {
             }
             return;
         }
+        // OSC 9;9;<path> — ConEmu "set working directory" (the Windows
+        // convention Windows Terminal also honors). The payload is a PLAIN
+        // filesystem path (often double-quoted), NOT a file:// URI like OSC 7.
+        // MUST precede the OSC 9 notification handler below, which strips the
+        // `9;` prefix and would otherwise swallow `9;9;C:\path` as a bogus
+        // notification. Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins;
+        // both are shell-volunteered truth).
+        if mode == Mode::Osc && seq.starts_with(b"9;9;") {
+            if let Some(path) = parse_osc9_9(&seq[4..]) {
+                out.push(Chunk::Cwd(path));
+            }
+            return;
+        }
         // OSC 9;<message> (iTerm2-style) and OSC 777;notify;<title>;<body>
         // (ConEmu-style) are terminal-to-desktop notification requests. Consume
         // only recognized notify shapes; leave unrelated OSC 777 commands
@@ -538,6 +551,24 @@ impl Extractor {
 fn parse_osc7(s: &str) -> Option<String> {
     let local = local_hostname();
     parse_osc7_with_host(s, local.as_deref())
+}
+
+/// v2.29.0: parse an OSC 9;9 working-directory payload (everything after the
+/// `9;9;`). ConEmu's "set working directory" convention — a PLAIN filesystem
+/// path (e.g. `C:\Users\me\proj` or `/home/me/proj`), frequently wrapped in
+/// double quotes — NOT a `file://` URI like OSC 7, so it is taken verbatim
+/// (after unquoting) rather than URL-decoded. Returns the unquoted path, or
+/// `None` if empty. Because Windows Terminal honors this sequence, any
+/// oh-my-posh / starship / custom prompt a user already configured for WT
+/// reports its cwd to kettle for free.
+fn parse_osc9_9(payload: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(payload);
+    let trimmed = s.trim().trim_matches('"').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// The machine's hostname for OSC 7 validation. Asks the OS
@@ -806,6 +837,47 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(passed, b"$ ");
+    }
+
+    /// v2.29.0: OSC 9;9 (ConEmu "set working directory") is consumed as a Cwd
+    /// chunk — a PLAIN path (often quoted), NOT a file:// URI. CRITICAL: it must
+    /// be handled by the dedicated 9;9 branch and NOT swallowed by the OSC 9
+    /// notification handler, while a bare `OSC 9;<msg>` still notifies and 9;4
+    /// still reports progress.
+    #[test]
+    fn osc9_9_sets_cwd_without_colliding_with_osc9_notification() {
+        let mut ex = Extractor::new();
+        // Plain Windows path.
+        let out = ex.feed(b"\x1b]9;9;C:\\Users\\me\\proj\x07");
+        assert!(
+            matches!(out.first(), Some(Chunk::Cwd(p)) if p == "C:\\Users\\me\\proj"),
+            "9;9 should emit Cwd, got {out:?}"
+        );
+        // Quoted path (some prompts wrap it in double quotes).
+        let out = ex.feed(b"\x1b]9;9;\"C:\\path with space\"\x07");
+        assert!(
+            matches!(out.first(), Some(Chunk::Cwd(p)) if p == "C:\\path with space"),
+            "quoted 9;9 should unquote, got {out:?}"
+        );
+        // Forward-slash / Unix path accepted verbatim (no file:// decode).
+        let out = ex.feed(b"\x1b]9;9;/home/me/proj\x07");
+        assert!(
+            matches!(out.first(), Some(Chunk::Cwd(p)) if p == "/home/me/proj"),
+            "unix 9;9 should emit Cwd, got {out:?}"
+        );
+        // REGRESSION: a bare OSC 9;<message> is STILL a notification, not a cwd.
+        let out = ex.feed(b"\x1b]9;build finished\x07");
+        assert!(
+            out.iter().any(|c| matches!(c, Chunk::Notification { .. }))
+                && !out.iter().any(|c| matches!(c, Chunk::Cwd(_))),
+            "bare OSC 9 must still notify and NOT be a cwd, got {out:?}"
+        );
+        // OSC 9;4 progress still works (its handler precedes the 9;9 branch).
+        let out = ex.feed(b"\x1b]9;4;1;50\x07");
+        assert!(
+            out.iter().any(|c| matches!(c, Chunk::Progress(_))),
+            "9;4 should still be progress, got {out:?}"
+        );
     }
 
     /// v2.20.0 P3 regression guards for the memchr bulk path: byte-exact

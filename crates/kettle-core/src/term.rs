@@ -163,8 +163,17 @@ pub struct Terminal {
     /// Protocol desktop notifications requested by the PTY. Bounded in the
     /// reader thread so a hostile program cannot queue unbounded toasts.
     pub protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>>,
-    /// Latest working directory reported via OSC 7.
+    /// Latest working directory reported via OSC 7 (or OSC 9;9). This is the
+    /// *authoritative* cwd — a shell that volunteers it (incl. an in-distro WSL
+    /// shell) is always right.
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// v2.29.0: a working directory read natively from the OS (the PTY child's
+    /// foreground process, via the platform process table) when the shell does
+    /// NOT emit OSC 7/9;9 — e.g. a stock Windows `pwsh`/`cmd`. Kept SEPARATE
+    /// from `cwd` so a stale/None native read can never clobber the authoritative
+    /// escape-sequence cwd; consulted only as a fallback by `current_dir_or_native`.
+    /// Never set for WSL/SSH panes (the relay's OS cwd is meaningless there).
+    pub native_cwd: Arc<Mutex<Option<String>>>,
     /// Cycle 745: latest OSC 9;4 progress state (drives the OS taskbar
     /// indicator); `None` until the program reports progress / after clear.
     pub progress: Arc<Mutex<Option<Progress>>>,
@@ -1132,6 +1141,9 @@ impl Terminal {
         let protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>> =
             Arc::new(Mutex::new(Vec::new()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
+        // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
+        // for native shells with no OSC 7/9;9). Starts empty.
+        let native_cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
         // The reader thread writes it; the App polls the focused pane's value
         // each frame and drives the OS taskbar indicator (pwsh 7 parity).
@@ -1496,6 +1508,7 @@ impl Terminal {
             command_finished,
             protocol_notifications,
             cwd: cwd_cell,
+            native_cwd: native_cwd_cell,
             progress: progress_cell,
             argv: argv.to_vec(),
             log_file: log_file_for_struct,
@@ -1562,9 +1575,29 @@ impl Terminal {
         self.log_active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Last working directory reported via OSC 7, if any.
+    /// Last working directory reported via OSC 7 (or OSC 9;9), if any. This is
+    /// the authoritative shell-volunteered cwd; callers that must NOT trust an
+    /// OS-derived guess (e.g. WSL split-cloning) use this directly.
     pub fn current_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// v2.29.0: set the OS-derived native cwd fallback (the App's process poll
+    /// writes this for native shells lacking OSC 7/9;9). `None` clears it.
+    pub fn set_native_cwd(&self, dir: Option<String>) {
+        if let Ok(mut c) = self.native_cwd.lock() {
+            *c = dir;
+        }
+    }
+
+    /// v2.29.0: the cwd to display in tab/window/pane labels — the authoritative
+    /// OSC 7/9;9 [`current_dir`](Self::current_dir) when the shell reported one,
+    /// else the OS-derived [`native_cwd`](Self::native_cwd) fallback. The
+    /// escape-sequence cwd always wins, so a shell that volunteers its directory
+    /// (including WSL, where the native Windows read is meaningless) is unaffected.
+    pub fn current_dir_or_native(&self) -> Option<String> {
+        self.current_dir()
+            .or_else(|| self.native_cwd.lock().ok().and_then(|c| c.clone()))
     }
 
     /// Cycle 745: latest OSC 9;4 taskbar-progress state reported by this pane

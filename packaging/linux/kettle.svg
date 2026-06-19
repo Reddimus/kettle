@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  kettle terminal icon — Catppuccin Mocha palette to match the default
-  theme. Shapes only (no embedded fonts) so it renders identically on
-  every host without typeface fallback surprises.
+  kettle terminal icon — TokyoNight Night palette to match the default
+  theme (kettle's default theme since v2.28.0). Shapes only (no embedded
+  fonts) so it renders identically on every host without typeface fallback
+  surprises.
 
-  Symbology: a clean terminal window (rounded rectangle, signature mauve
-  border) with a `>` prompt and a `_` caret — universal terminal-emulator
+  Symbology: a clean terminal window (rounded rectangle, signature blue
+  border — the same #7aa2f7 kettle paints the active-pane border and header
+  in) with a `>` prompt and a `_` caret — universal terminal-emulator
   iconography that reads at any size from the 22px panel icon down to the
   256px launcher tile. The macOS-style titlebar strip + traffic-light dots
   were removed in the v2.18 cycle (user request: they read as another
@@ -13,15 +15,15 @@
   freed space.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- Outer window: Catppuccin Mocha base #1e1e2e, signature mauve accent border #cba6f7. -->
+  <!-- Outer window: TokyoNight Night background #1a1b26, signature blue accent border #7aa2f7. -->
   <rect x="32" y="32" width="448" height="448" rx="64" ry="64"
-        fill="#1e1e2e" stroke="#cba6f7" stroke-width="20"/>
+        fill="#1a1b26" stroke="#7aa2f7" stroke-width="20"/>
 
-  <!-- Prompt chevron `>` in Catppuccin Mocha text #cdd6f4. -->
+  <!-- Prompt chevron `>` in TokyoNight Night foreground #c0caf5. -->
   <polyline points="156,168 260,256 156,344"
-            fill="none" stroke="#cdd6f4" stroke-width="36"
+            fill="none" stroke="#c0caf5" stroke-width="36"
             stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Underscore caret `_` in signature mauve accent #cba6f7. -->
-  <rect x="296" y="326" width="120" height="28" rx="8" fill="#cba6f7"/>
+  <!-- Underscore caret `_` in signature blue accent #7aa2f7. -->
+  <rect x="296" y="326" width="120" height="28" rx="8" fill="#7aa2f7"/>
 </svg>

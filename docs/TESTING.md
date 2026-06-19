@@ -49,8 +49,9 @@ discipline here.
   interleaved stream passes through intact in well under 5 s
   (linear-time / bounded-memory guard).
 
-- **kettle-config** (90+ tests): Catppuccin Mocha is the verified
-  default palette; Ghostty `key = value` overrides, repeats, `palette`
+- **kettle-config** (90+ tests): TokyoNight Night is the verified shipped
+  default theme (the self-contained `Theme::default()` fallback palette is
+  Catppuccin Mocha); Ghostty `key = value` overrides, repeats, `palette`
   (0..=15 + cycle-124 out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
   Night"; Terminator default keybinds and trigger parsing; the

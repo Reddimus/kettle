@@ -1378,6 +1378,63 @@ fn compose_pane_title(badge: &str, attached: bool, read_only: bool, title: &str)
     out
 }
 
+/// v2.29.0: does this OSC 2 title look like the bogus full-exe-path that
+/// conhost/ConPTY injects at startup for a native Windows shell, rather than a
+/// title the program set deliberately? When a stock `pwsh`/`cmd` launches,
+/// ConPTY seeds the window title with the launched executable's absolute path
+/// (e.g. `C:\Program Files\…\pwsh.exe`); kettle would otherwise show that ugly
+/// path and never fall back to the working directory.
+///
+/// Returns true when the title is that injected launch path:
+///   - with an explicit launch `argv`, the title must equal argv0 (case-
+///     insensitive, `/`+`\` normalized) OR be an absolute `X:\…\<leaf>.exe`
+///     whose leaf matches argv0's leaf — tight, so a program that sets its own
+///     title to some other path is never mistaken for the injection;
+///   - for the default shell (empty `argv`, argv0 unknown), any absolute
+///     `X:\…\*.exe` path qualifies — safe because the caller only consults this
+///     while the pane title is still the placeholder (the first title seen), and
+///     a real shell title is virtually never a bare absolute `.exe` path.
+///
+/// Pure (unit-tested). Never fires on Unix/macOS — those shells don't emit an
+/// absolute-Windows-path title and conhost doesn't exist there.
+fn is_conhost_startup_title(title: &str, argv: &[String]) -> bool {
+    let t = title.trim().trim_matches('"');
+    if t.is_empty() {
+        return false;
+    }
+    let tl = t.replace('/', "\\").to_ascii_lowercase();
+    let looks_abs_exe = {
+        let b = tl.as_bytes();
+        b.len() >= 3 && b[1] == b':' && b[2] == b'\\' && tl.ends_with(".exe")
+    };
+    let leaf = |s: &str| {
+        s.rsplit(['/', '\\'])
+            .find(|p| !p.is_empty())
+            .unwrap_or(s)
+            .to_ascii_lowercase()
+    };
+    match argv.first().map(String::as_str) {
+        Some(arg0) => {
+            let a_n = arg0.replace('/', "\\").to_ascii_lowercase();
+            tl == a_n || (looks_abs_exe && leaf(t) == leaf(arg0))
+        }
+        None => looks_abs_exe,
+    }
+}
+
+/// v2.29.0: is this argv launching `ssh` (by argv0 basename)? An ssh pane has no
+/// local working directory, so the native-cwd poll skips it (a native read would
+/// surface kettle's launch dir, not the remote host's). OSC 7 from the remote
+/// shell remains the only meaningful cwd there.
+fn argv_is_ssh(argv: &[String]) -> bool {
+    argv.first()
+        .map(|p| {
+            let last = p.rsplit(['/', '\\']).next().unwrap_or(p);
+            last.eq_ignore_ascii_case("ssh") || last.eq_ignore_ascii_case("ssh.exe")
+        })
+        .unwrap_or(false)
+}
+
 /// Map a click count + the Alt modifier to a selection type: double =
 /// word, triple = line, single = a normal drag, and Alt+single =
 /// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
@@ -4237,9 +4294,26 @@ impl App {
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
                     TermEvent::Title(t) => {
-                        pane.title = t;
+                        // v2.29.0: ignore the bogus full-exe-path title conhost/
+                        // ConPTY injects at startup for a native Windows shell —
+                        // keeping the "kettle" placeholder so the tab/window/pane
+                        // label falls back to the working directory (the OSC 7/9;9
+                        // cwd, else the natively-polled cwd) instead of showing an
+                        // ugly `…\pwsh.exe` path. Only a still-placeholder pane is
+                        // checked; ANY genuine OSC 2 title (incl. a later one from
+                        // the shell's own prompt) is stored and permanently ends
+                        // suppression, so a program-set title is never lost.
+                        if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
+                            // keep the placeholder seed; do not store the exe path
+                        } else {
+                            pane.title = t;
+                            pane.title_is_placeholder = false;
+                        }
                     }
-                    TermEvent::ResetTitle => pane.title = "kettle".into(),
+                    TermEvent::ResetTitle => {
+                        pane.title = "kettle".into();
+                        pane.title_is_placeholder = true;
+                    }
                     TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
                     TermEvent::ClipboardStore(_, s) => {
                         // OSC 52 write — gated by policy (default: allowed).
@@ -4596,7 +4670,12 @@ impl App {
     fn sync_window_title(&mut self, ws: &mut WindowState) {
         let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id));
         let title = pane.map(|p| p.title.as_str()).unwrap_or("kettle");
-        let cwd = pane.and_then(|p| p.term.current_dir()).unwrap_or_default();
+        // v2.29.0: OSC 7/9;9 cwd if the shell reported one, else the natively
+        // polled cwd — so the OS window title tracks the directory for a stock
+        // pwsh/cmd just like the tab label does.
+        let cwd = pane
+            .and_then(|p| p.term.current_dir_or_native())
+            .unwrap_or_default();
         let tab = ws.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
         // Cycle 876: an always-visible recording indicator in the title bar so
@@ -5382,6 +5461,23 @@ impl App {
                     }
                     snaps[si].capture(&g);
                     drop(g); // lock released — the render below is lock-free
+                    // v2.29.0: a placeholder-titled pane (e.g. a stock pwsh whose
+                    // only "title" was the suppressed conhost exe path) labels its
+                    // titlebar with the cwd leaf, matching the tab/window label —
+                    // the split titlebar previously had NO cwd fallback at all.
+                    let pane_label = if p.title_is_placeholder {
+                        p.term
+                            .current_dir_or_native()
+                            .as_deref()
+                            .and_then(|c| {
+                                c.rsplit(['/', '\\'])
+                                    .find(|s| !s.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .unwrap_or_else(|| p.title.clone())
+                    } else {
+                        p.title.clone()
+                    };
                     metas.push((
                         *id,
                         *r,
@@ -5391,7 +5487,7 @@ impl App {
                             &self.cfg.agent_badge,
                             p.agent_attached,
                             p.read_only,
-                            &p.title,
+                            &pane_label,
                         ),
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
@@ -8900,13 +8996,27 @@ impl App {
                 continue;
             };
             let detected = self.remote_scanner.detect_root(pid);
-            if let Some(pane) = ws.mux.panes.get_mut(&id)
-                && detected != pane.remote_context
-            {
-                if let Some(ctx) = &detected {
-                    pane.title = kettle_remote::format_remote_title(ctx);
+            // v2.29.0: native cwd fallback for shells that emit no OSC 7/9;9 (a
+            // stock Windows pwsh/cmd). Read the foreground process's cwd from the
+            // OS process table (same shared sysinfo snapshot — no extra refresh).
+            // SKIP WSL/SSH launchers: wsl.exe's Windows cwd is its launch dir (not
+            // the in-distro `cd`) and ssh panes have no local cwd, so a native read
+            // there is wrong — those rely on OSC 7. Stored in a SEPARATE cell so it
+            // can never clobber an authoritative OSC 7/9;9 value.
+            let native_cwd = if crate::mux::argv_is_wsl(&pane.argv) || argv_is_ssh(&pane.argv) {
+                None
+            } else {
+                self.remote_scanner.foreground_cwd(pid)
+            };
+            if let Some(pane) = ws.mux.panes.get_mut(&id) {
+                pane.term.set_native_cwd(native_cwd);
+                if detected != pane.remote_context {
+                    if let Some(ctx) = &detected {
+                        pane.title = kettle_remote::format_remote_title(ctx);
+                        pane.title_is_placeholder = false;
+                    }
+                    pane.remote_context = detected;
                 }
-                pane.remote_context = detected;
             }
         }
     }
@@ -16906,6 +17016,38 @@ mod tests {
         assert_eq!(capped_crab.chars().count(), 61);
         // Every char before the `…` should still be a full crab.
         assert!(capped_crab.chars().take(60).all(|c| c == '🦀'));
+    }
+
+    /// v2.29.0: the conhost startup-title detector that lets a stock Windows
+    /// shell fall back to a cwd label instead of showing its own exe path.
+    #[test]
+    fn conhost_startup_title_detected_real_titles_pass() {
+        use super::is_conhost_startup_title;
+        let pwsh = ["pwsh.exe".to_string()];
+        // The injected full exe path for a WindowsApps-packaged pwsh.
+        assert!(is_conhost_startup_title(
+            "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.2.0_x64__8wekyb3d8bbwe\\pwsh.exe",
+            &pwsh
+        ));
+        assert!(is_conhost_startup_title(
+            "C:\\Windows\\System32\\cmd.exe",
+            &["cmd.exe".to_string()]
+        ));
+        // Bare-name argv0 equality (no path in the title).
+        assert!(is_conhost_startup_title("pwsh", &["pwsh".to_string()]));
+        // Default shell (empty argv, argv0 unknown): any absolute .exe qualifies.
+        assert!(is_conhost_startup_title(
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+            &[]
+        ));
+        // A REAL program-set title is NEVER suppressed.
+        assert!(!is_conhost_startup_title("PS C:\\repos\\kettle>", &pwsh));
+        assert!(!is_conhost_startup_title("vim README.md", &pwsh));
+        // A different exe path the program legitimately set (leaf != argv0 leaf).
+        assert!(!is_conhost_startup_title("C:\\tools\\fzf.exe", &pwsh));
+        // Empty title, and a default-shell non-path title.
+        assert!(!is_conhost_startup_title("", &pwsh));
+        assert!(!is_conhost_startup_title("my session", &[]));
     }
 
     /// Cycle 934 (agent-first A4) + cycle 941 (read-only): the per-pane
