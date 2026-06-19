@@ -45,7 +45,7 @@ conflicts=('kettle')
 source=("kettle-linux-x86_64-${pkgver}.tar.gz::https://github.com/Reddimus/kettle/releases/download/v${pkgver}/kettle-linux-x86_64.tar.gz")
 # SHA-256 from the cycle-254 sidecar published alongside the artifact.
 # Bump in lockstep with `pkgver` on every release.
-sha256sums=('87f62e706d7a7912e5e3d618107c4c3b1c936fdd281a468ff8c33c3b2757967a')
+sha256sums=('2cbff937d1b246f0d25ce32baf4aa49586176504b5a0fe1b8b8fa1ac10108a77')
 options=('!strip')   # Already stripped by the release runner.
 
 package() {
