@@ -560,13 +560,14 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
     }
 }
 
-/// v2.26.0: horizontal tab-bar layout. Tabs divide `strip` evenly, clamped to
-/// `[min_w, max_w]` so two tabs never balloon to half the screen. When `scroll`
-/// is on and tabs would shrink below `min_w`, the bar overflows: tabs stay at
-/// `min_w`, `‹ ›` arrow buttons (each `arrow_w` wide) reserve the strip ends, and
-/// only whole tabs that fit between them are shown — chosen so the active tab is
-/// visible (pinned to the trailing edge once it scrolls past the first page).
-/// Pure — no `&self`, no renderer, no winit — so it is unit-testable.
+/// v2.26.0: horizontal tab-bar layout. Tabs divide `strip` evenly and **fill the
+/// bar** (two tabs each take half). v2.28.0: there is intentionally no max width —
+/// tabs always maximize width. When `scroll` is on and they would shrink below
+/// `min_w`, the bar overflows: tabs stay at `min_w`, `‹ ›` arrow buttons (each
+/// `arrow_w` wide) reserve the strip ends, and only whole tabs that fit between
+/// them are shown — chosen so the active tab is visible (pinned to the trailing
+/// edge once it scrolls past the first page). Pure — no `&self`, no renderer, no
+/// winit — so it is unit-testable.
 struct TabStripLayout {
     /// Uniform per-tab width.
     width: f32,
@@ -583,19 +584,17 @@ fn tab_strip_layout(
     strip: f32,
     arrow_w: f32,
     min_w: f32,
-    max_w: f32,
     scroll: bool,
 ) -> TabStripLayout {
     let n = n.max(1);
     let strip = strip.max(1.0);
     let min_w = min_w.max(1.0);
-    let max_w = max_w.max(min_w);
     let even = strip / n as f32;
     if !scroll || even >= min_w {
-        // Fits, or scrolling disabled: even width capped at `max_w`, left-packed.
-        // (Capping at max keeps a 2-tab window from giving each half the screen;
-        // with scrolling off and many tabs, width may fall below min_w.)
-        let width = even.min(max_w);
+        // Fits, or scrolling disabled: tabs divide the strip evenly and fill it,
+        // left-packed. (With scrolling off and many tabs, width may fall below
+        // min_w — they just keep shrinking, no overflow scroll.)
+        let width = even;
         let xs = (0..n).map(|i| Some(i as f32 * width)).collect();
         return TabStripLayout {
             width,
@@ -3340,9 +3339,8 @@ impl App {
         let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
-        // v2.26.0: tabs share the strip but never balloon past `tab_max_width`
-        // (so a 2-tab window doesn't make each half the screen) nor shrink below
-        // `tab_min_width`; past that the bar overflows and — when `scroll_tabbar`
+        // v2.26.0: tabs divide the strip evenly and fill the bar; once they would
+        // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
         // view). See `tab_strip_layout`. Scroll arrows are `height`-wide squares.
         let active = ws.mux.active;
@@ -3352,7 +3350,6 @@ impl App {
             strip,
             height,
             self.cfg.tab_min_width,
-            self.cfg.tab_max_width,
             self.cfg.scroll_tabbar,
         );
         // Tabs scrolled out of view are parked off-screen (kept in the segment
@@ -11023,16 +11020,36 @@ impl App {
                 {
                     let trig = Trigger::new(mods, kk);
                     let label = trig.label();
-                    // Live: this chord now triggers the action.
+                    // v2.28.0 (audit): a rebind REPLACES the action's binding.
+                    // Capture the chord(s) already mapped to this action (other
+                    // than the new one) and drop them live — so the old chord
+                    // stops firing and the Keybinds row can't show a stale chord
+                    // (the display scans the keybinds HashMap non-deterministically)
+                    // — then persist an `unbind` for each so a reload doesn't
+                    // re-add the default chord alongside the new one.
+                    let stale: Vec<String> = self
+                        .cfg
+                        .keybinds
+                        .iter()
+                        .filter(|(t, v)| **v == act && **t != trig)
+                        .map(|(t, _)| t.label())
+                        .collect();
+                    self.cfg.keybinds.retain(|_, v| *v != act);
                     self.cfg.keybinds.insert(trig, act);
-                    // Persist: append `keybind = <chord>=<action>`.
+                    // Persist: unbind the old chord(s), then bind the new one.
                     if let Some(path) = self
                         .config_path
                         .clone()
                         .or_else(kettle_config::Config::default_path)
-                        && let Err(e) = kettle_config::append_keybind(&path, &label, action)
                     {
-                        log::warn!("append_keybind({label}={action}) failed: {e}");
+                        for old in &stale {
+                            if let Err(e) = kettle_config::append_keybind(&path, old, "unbind") {
+                                log::warn!("append_keybind({old}=unbind) failed: {e}");
+                            }
+                        }
+                        if let Err(e) = kettle_config::append_keybind(&path, &label, action) {
+                            log::warn!("append_keybind({label}={action}) failed: {e}");
+                        }
                     }
                 }
                 if let Some(n) = ws.settings_nav.as_mut() {
@@ -18644,25 +18661,25 @@ mod tests {
         assert!(cache_dir_from_env(|_| None).is_none());
     }
 
-    /// v2.26.0 drift guard for `tab_strip_layout` (replaces the old equal-width
-    /// helper): max-cap, even division, min-floor + overflow, and active-tab
-    /// visibility.
+    /// v2.28.0 drift guard for `tab_strip_layout`: tabs ALWAYS fill the bar
+    /// (even division, no max cap), then floor at min-width + overflow-scroll;
+    /// plus active-tab visibility.
     #[test]
-    fn tab_strip_layout_caps_and_overflows() {
+    fn tab_strip_layout_fills_and_overflows() {
         use super::tab_strip_layout;
-        // Few tabs on a wide strip: capped at max (240), left-packed, no arrows —
-        // a 2-tab window must NOT give each tab half the screen.
-        let l = tab_strip_layout(2, 0, 1920.0, 24.0, 120.0, 240.0, true);
-        assert_eq!(l.width, 240.0);
-        assert_eq!(l.xs, vec![Some(0.0), Some(240.0)]);
+        // Few tabs on a wide strip FILL the bar — 2 tabs each take half (no max
+        // cap), left-packed, no arrows.
+        let l = tab_strip_layout(2, 0, 1920.0, 24.0, 120.0, true);
+        assert_eq!(l.width, 960.0);
+        assert_eq!(l.xs, vec![Some(0.0), Some(960.0)]);
         assert!(l.arrow_left.is_none() && l.arrow_right.is_none());
-        // Even division when it lands within [min, max].
+        // Even division also fills for more tabs while above the min floor.
         assert_eq!(
-            tab_strip_layout(4, 0, 800.0, 24.0, 120.0, 240.0, true).width,
+            tab_strip_layout(4, 0, 800.0, 24.0, 120.0, true).width,
             200.0
         );
         // Many tabs: overflow → min width, arrows, only whole tabs shown.
-        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, 240.0, true);
+        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, true);
         assert_eq!(l.width, 120.0);
         assert!(l.arrow_left.is_some() && l.arrow_right.is_some());
         let visible = l.xs.iter().filter(|x| x.is_some()).count();
@@ -18672,19 +18689,14 @@ mod tests {
         );
         assert_eq!(l.xs[0], Some(24.0), "active tab 0 visible at the left");
         // Active near the end is pinned into view; early tabs scroll off.
-        let l = tab_strip_layout(20, 19, 800.0, 24.0, 120.0, 240.0, true);
+        let l = tab_strip_layout(20, 19, 800.0, 24.0, 120.0, true);
         assert!(l.xs[19].is_some(), "active tab 19 must be visible");
         assert!(l.xs[0].is_none(), "early tabs scrolled off");
-        // Scrolling disabled: no arrows; width may fall below min.
-        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, 240.0, false);
+        // Scrolling disabled: no arrows; width may fall below min (just shrinks).
+        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, false);
         assert!(l.arrow_left.is_none() && l.arrow_right.is_none() && l.width < 120.0);
         // Degenerate (no tabs): panic-safe, one slot.
-        assert_eq!(
-            tab_strip_layout(0, 0, 100.0, 24.0, 120.0, 240.0, true)
-                .xs
-                .len(),
-            1
-        );
+        assert_eq!(tab_strip_layout(0, 0, 100.0, 24.0, 120.0, true).xs.len(), 1);
     }
 
     /// Link/path overlay underlines must follow focused output immediately.

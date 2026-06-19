@@ -271,6 +271,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["never", "auto", "always"],
                     &["hidden", "auto", "always"],
                 ),
+                // v2.28.0: width of the pronounced overlay scrollbar.
+                number("Scrollbar width", "scrollbar-width", 2, 40, 2, "px"),
                 choice(
                     "Bell",
                     "bell",
@@ -291,6 +293,31 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["click", "sloppy", "system"],
                     &["click to focus", "follows mouse", "system default"],
                 ),
+            ],
+        },
+        // v2.28.0 (audit): a dedicated Tabs page surfacing the tab-bar keys that
+        // were previously config-file-only. `tab-bar-position` offers only
+        // top/bottom — left/right (vertical bars) parse but don't render yet, so
+        // we don't let a non-technical user pick a silently-inert option.
+        Category {
+            name: "Tabs",
+            fields: vec![
+                choice(
+                    "Tab bar",
+                    "tab-bar",
+                    &["off", "auto", "always"],
+                    &["off", "auto (>1 tab)", "always"],
+                ),
+                choice(
+                    "Tab bar position",
+                    "tab-bar-position",
+                    &["top", "bottom"],
+                    &["top", "bottom"],
+                ),
+                number("Min tab width", "tab-min-width", 40, 600, 10, "px"),
+                toggle("Scrollable tab bar", "scroll-tabbar"),
+                toggle("Close button on tabs", "close-button-on-tab"),
+                toggle("Detachable tabs", "detachable-tabs"),
             ],
         },
         Category {
@@ -522,6 +549,9 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
         "gpu-force-software" => cfg.gpu_force_software,
+        "close-button-on-tab" => cfg.close_button_on_tab,
+        "scroll-tabbar" => cfg.scroll_tabbar,
+        "detachable-tabs" => cfg.detachable_tabs,
         _ => false,
     }
 }
@@ -608,6 +638,20 @@ fn read_choice(cfg: &Config, key: &str) -> String {
                 "auto".to_string()
             }
         }
+        // v2.28.0: Tabs category.
+        "tab-bar" => match cfg.tab_bar {
+            kettle_config::TabBarMode::Off => "off",
+            kettle_config::TabBarMode::Auto => "auto",
+            kettle_config::TabBarMode::Always => "always",
+        }
+        .to_string(),
+        "tab-bar-position" => match cfg.tab_bar_pos {
+            kettle_config::TabBarPos::Top => "top",
+            kettle_config::TabBarPos::Bottom => "bottom",
+            kettle_config::TabBarPos::Left => "left",
+            kettle_config::TabBarPos::Right => "right",
+        }
+        .to_string(),
         _ => String::new(),
     }
 }
@@ -627,6 +671,8 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         "window-padding-x" => cfg.padding_x.round() as i64,
         "scrollback" => cfg.scrollback as i64,
         "scrollback-bytes" => (cfg.scrollback_bytes / 1_000_000) as i64,
+        "tab-min-width" => cfg.tab_min_width.round() as i64,
+        "scrollbar-width" => cfg.scrollbar_width.round() as i64,
         _ => 0,
     }
 }

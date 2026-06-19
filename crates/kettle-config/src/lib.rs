@@ -1,5 +1,5 @@
 //! kettle configuration: Ghostty-compatible `key = value` config, the bundled
-//! Ghostty theme set (Catppuccin Mocha default), the embedded Nerd Font,
+//! Ghostty theme set (TokyoNight Night default), the embedded Nerd Font,
 //! Terminator-compatible keybindings, and the fuzzy matcher / command-palette
 //! infrastructure the SSH launcher (Ctrl+Shift+S) and command palette
 //! (Ctrl+Shift+K) reuse.
@@ -1132,14 +1132,12 @@ pub struct Config {
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
     /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
     pub scroll_tabbar: bool,
-    /// v2.26.0: min / max width (logical px) of a horizontal tab segment. Tabs
-    /// divide the bar evenly but never shrink below `tab_min_width` (past which
-    /// the bar overflows and — when `scroll_tabbar`, the default — scrolls with
-    /// `‹ ›` arrows + the mouse wheel) nor grow past `tab_max_width` (so a 2-tab
-    /// window doesn't make each tab half the screen). Clamped at parse;
-    /// `tab_max_width` is floored at `tab_min_width` where used.
+    /// v2.26.0: minimum width (logical px) of a horizontal tab segment. Tabs
+    /// divide the bar evenly and fill it (v2.28.0: no maximum — they always
+    /// maximize width); once they would shrink below `tab_min_width` the bar
+    /// overflows and — when `scroll_tabbar` (the default) — scrolls with `‹ ›`
+    /// arrows + the mouse wheel. Clamped at parse.
     pub tab_min_width: f32,
-    pub tab_max_width: f32,
     /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
@@ -1888,10 +1886,11 @@ impl Default for Config {
             font_family_italic: None,
             font_family_bold_italic: None,
             font_size: 13.0,
-            // Cycle 917 (#5, user-requested): Catppuccin Mocha is the shipped
-            // default theme (the darkest Catppuccin flavor).
-            theme_name: "Catppuccin Mocha".to_string(),
-            theme: Theme::by_name("Catppuccin Mocha"),
+            // v2.28.0 (user-requested): TokyoNight Night is the shipped default
+            // theme (it is also the unknown-theme-name fallback, so default ==
+            // fallback). Was Catppuccin Mocha (cycle 917).
+            theme_name: "TokyoNight Night".to_string(),
+            theme: Theme::by_name("TokyoNight Night"),
             scrollback: 10_000,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
             padding_x: 8.0,
@@ -1931,7 +1930,6 @@ impl Default for Config {
             title_at_bottom: false,
             scroll_tabbar: true,
             tab_min_width: 120.0,
-            tab_max_width: 260.0,
             hide_on_lose_focus: false,
             sticky: false,
             hide_from_taskbar: false,
@@ -2554,9 +2552,6 @@ impl Config {
                 "tab-min-width" | "tab_min_width" => {
                     v.parse::<f32>().is_ok_and(|n| (40.0..=600.0).contains(&n))
                 }
-                "tab-max-width" | "tab_max_width" => {
-                    v.parse::<f32>().is_ok_and(|n| (80.0..=1200.0).contains(&n))
-                }
                 "minimum-contrast" => v.parse::<f32>().is_ok_and(|n| (0.0..=21.0).contains(&n)),
                 // Special: scrollback accepts unlimited/infinite/0 as
                 // "no cap" plus any non-negative integer up to
@@ -3081,22 +3076,24 @@ impl Config {
                     //
                     // Unknown name (typo, copy-paste from another
                     // terminal's theme set, etc.): `Theme::by_name`
-                    // silently falls back to TokyoNight Night. The
-                    // cycle-176 fix keeps `cfg.theme_name` in sync
-                    // with that fallback — store the *canonical*
-                    // bundled name (with original casing) when found,
-                    // and leave the previous value (the default
-                    // "TokyoNight Night" on first hit) untouched when
-                    // the lookup misses. Otherwise `--check-config`
-                    // would echo `theme: TokyoNitght Night` while the
-                    // runtime used a different palette — same shape
-                    // as cycle 139 (font-size clamp matches runtime).
-                    // The malformed-value diagnostic still flags the
-                    // typo so the user sees their mistake.
+                    // falls back to `Theme::default()` — the
+                    // self-contained Catppuccin Mocha safety net. Keep
+                    // `cfg.theme_name` in sync with the loaded palette:
+                    // store the *canonical* bundled name when found, else
+                    // "Catppuccin Mocha" to match the fallback. (The
+                    // SHIPPED default for a fresh config is TokyoNight
+                    // Night via `Config::default`; an INVALID name
+                    // resolves to the safety net, not the default.)
+                    // Otherwise `--check-config` would echo
+                    // `theme: TokyoNitght Night` while the runtime used a
+                    // different palette — same shape as cycle 139
+                    // (font-size clamp matches runtime). The
+                    // malformed-value diagnostic still flags the typo.
                     if !e.value.trim().is_empty() {
                         cfg.theme = Theme::by_name(&e.value);
-                        if let Some(canonical) = Theme::find_name(&e.value) {
-                            cfg.theme_name = canonical.to_string();
+                        match Theme::find_name(&e.value) {
+                            Some(canonical) => cfg.theme_name = canonical.to_string(),
+                            None => cfg.theme_name = "Catppuccin Mocha".to_string(),
                         }
                     }
                 }
@@ -3505,13 +3502,6 @@ impl Config {
                         && v.is_finite()
                     {
                         cfg.tab_min_width = v.clamp(40.0, 600.0);
-                    }
-                }
-                "tab-max-width" | "tab_max_width" => {
-                    if let Ok(v) = e.value.parse::<f32>()
-                        && v.is_finite()
-                    {
-                        cfg.tab_max_width = v.clamp(80.0, 1200.0);
                     }
                 }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
@@ -4973,14 +4963,17 @@ cell-height = 1.2\n";
     }
 
     #[test]
-    fn default_is_catppuccin_mocha() {
-        // Cycle 917 (#5): the shipped default is Catppuccin Mocha (the darkest
-        // Catppuccin flavor). Values matched to `assets/themes/Catppuccin Mocha`.
+    fn default_is_tokyonight_night() {
+        // v2.28.0 (user-requested): the shipped default is TokyoNight Night.
+        // Assert via the bundled theme's fingerprint so it tracks the theme file
+        // without transcribing the palette.
         let c = Config::default();
-        assert_eq!(c.theme_name, "Catppuccin Mocha");
-        assert_eq!(c.theme.background, Rgb::new(0x1e, 0x1e, 0x2e));
-        assert_eq!(c.theme.foreground, Rgb::new(0xcd, 0xd6, 0xf4));
-        assert_eq!(c.theme.palette[4], Rgb::new(0x89, 0xb4, 0xfa));
+        assert_eq!(c.theme_name, "TokyoNight Night");
+        assert_eq!(
+            format!("{:?}", c.theme),
+            format!("{:?}", Theme::by_name("TokyoNight Night")),
+            "default theme must resolve to the bundled TokyoNight Night palette"
+        );
         assert_eq!(c.font_family, font::FAMILY);
     }
 
@@ -6232,9 +6225,10 @@ cell-height = 1.2\n";
         let t = Theme::parse("palette = 4=#336699");
         assert_eq!(t.accent, crate::color::Rgb::new(0x33, 0x66, 0x99));
 
-        // Mocha's accent is EXPLICIT (mauve ≠ palette[4]) — a config palette
-        // override must NOT hijack it.
-        let cfg = Config::parse_text("palette = 4=#102030");
+        // Catppuccin Mocha's accent is EXPLICIT (mauve ≠ palette[4]) — a config
+        // palette override must NOT hijack it. Explicitly load Mocha: the shipped
+        // default is now TokyoNight Night, whose accent DERIVES from palette[4].
+        let cfg = Config::parse_text("theme = Catppuccin Mocha\npalette = 4=#102030");
         let mauve = crate::color::Rgb::new(0xcb, 0xa6, 0xf7);
         assert_eq!(
             cfg.theme.palette[4],

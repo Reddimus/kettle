@@ -53,9 +53,8 @@ keys). The file is **watched and reloaded live**.
 | `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
-| `tab-min-width` | float 40–600 px | `120` | Minimum width of a horizontal tab segment. When tabs would shrink below this the bar overflows and (with `scroll-tabbar`) scrolls. Clamped `[40, 600]` |
-| `tab-max-width` | float 80–1200 px | `260` | Maximum width of a horizontal tab segment, so a 2-tab window doesn't give each tab half the screen. Clamped `[80, 1200]`, floored at `tab-min-width` |
-| `scroll-tabbar` | bool | `true` | When horizontal tabs overflow the bar, keep them at `tab-min-width` and scroll with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). `false` shrinks tabs to fit instead (still capped at `tab-max-width`) |
+| `tab-min-width` | float 40–600 px | `120` | Minimum width of a horizontal tab segment. Tabs divide the bar evenly and **fill it** (no maximum — they always maximize width); once they would shrink below this, the bar overflows and (with `scroll-tabbar`) scrolls. Clamped `[40, 600]` |
+| `scroll-tabbar` | bool | `true` | When horizontal tabs would shrink below `tab-min-width`, keep them at that width and scroll the bar with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). `false` lets them keep shrinking to fit instead |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch) |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |

@@ -62,6 +62,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Option | Config key | Notes |
 |---|---|---|
 | Scrollbar | `scrollbar` | hidden · auto · always |
+| Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
 | Bell | `bell` | off · visual · attention · both |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback MB | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
@@ -70,6 +71,17 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Focus mode | `focus` | click · follows-mouse · system |
 | Check for updates | `update-check` | on / off |
 | Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+
+**Tabs** (v2.28.0)
+
+| Option | Config key | Notes |
+|---|---|---|
+| Tab bar | `tab-bar` | off · auto (only with >1 tab) · always |
+| Tab bar position | `tab-bar-position` | top · bottom (left/right vertical bars are config-only for now) |
+| Min tab width | `tab-min-width` | 40–600 px — tabs fill the bar evenly; below this the bar overflows and scrolls |
+| Scrollable tab bar | `scroll-tabbar` | on / off — `‹ ›` arrows + wheel scroll when tabs overflow |
+| Close button on tabs | `close-button-on-tab` | on / off |
+| Detachable tabs | `detachable-tabs` | on / off — drag a tab out into its own window |
 
 **Graphics**
 
@@ -87,8 +99,8 @@ cross-platform answer to the OS GPU picker, and unlike it, it persists per-app.
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new
-chord you want (any modifier combination). It binds immediately and is saved to
-your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
+chord you want (any modifier combination). It binds immediately (replacing the
+action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
 actions: split right/down, close pane, new/next/previous tab, search, command
 palette, open settings, zoom pane, copy, paste.
 

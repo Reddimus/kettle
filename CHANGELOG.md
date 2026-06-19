@@ -4,6 +4,29 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.28.0] — 2026-06-19
+
+  ### Fixed
+  - **Tabs now fill the bar width.** Removed the erroneous `tab-max-width` cap
+    (introduced in v2.26.0) that left dead space with few tabs — tabs divide the
+    bar evenly and **maximize width** (2 tabs each take half), so the tiered label
+    can show the full path in a wide tab. The `tab-min-width` floor + `scroll-tabbar`
+    overflow scrolling are unchanged; the `tab-max-width` config key is removed.
+  - **Settings: rebinding a key replaces the old chord.** Capturing a new chord
+    for an action now drops the action's previous binding (live + persisted via an
+    `unbind` line), so the old chord no longer fires and the Keybinds row no longer
+    shows a stale chord (it previously read a non-deterministic HashMap).
+
+  ### Changed
+  - **Default theme is now TokyoNight Night** (was Catppuccin Mocha). Affects a
+    fresh config only; an explicit `theme =` line in your config is unchanged.
+
+  ### Added
+  - **Settings overlay: a Tabs page** exposing `tab-bar`, `tab-bar-position`
+    (top/bottom), `tab-min-width`, `scroll-tabbar`, `close-button-on-tab`, and
+    `detachable-tabs`; plus **`scrollbar-width`** on the Behavior page — all
+    previously config-file-only.
+
 ## [2.27.0] — 2026-06-19
 
   ### Fixed
