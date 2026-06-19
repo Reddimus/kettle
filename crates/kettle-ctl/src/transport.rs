@@ -184,11 +184,26 @@ mod imp {
         }
     }
 
-    /// Connect a client to `endpoint`.
+    /// Connect a client to `endpoint`. v2.27.0 (audit): retry briefly on a
+    /// transient `ConnectionRefused` (the server may be mid-accept or swapping
+    /// the socket) before giving up — mirroring the Windows named-pipe retry — so
+    /// a transient failure doesn't make `client::discover` permanently prune a
+    /// live server. `NotFound` (the socket file is gone) is definitive → bail at
+    /// once so a truly-dead entry is still pruned promptly.
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
-        Ok(CtlStream::Unix(std::os::unix::net::UnixStream::connect(
-            endpoint,
-        )?))
+        use std::os::unix::net::UnixStream;
+        let mut last = None;
+        for _ in 0..20 {
+            match UnixStream::connect(endpoint) {
+                Ok(s) => return Ok(CtlStream::Unix(s)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("unix socket connect failed")))
     }
 }
 

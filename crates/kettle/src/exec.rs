@@ -477,6 +477,15 @@ impl Outputter {
 
     fn finish(&mut self, sink: &mut dyn Write, code: i32, dur: Duration) {
         if self.mode == OutputMode::Json {
+            // v2.27.0 (audit): flush any trailing incomplete UTF-8 sequence
+            // lossily before the exit event, so a stream that ends mid-codepoint
+            // doesn't silently drop its final bytes.
+            if !self.utf8_carry.is_empty() {
+                let data = String::from_utf8_lossy(&self.utf8_carry).into_owned();
+                self.utf8_carry.clear();
+                let v = serde_json::json!({"v":1,"event":"output","data":data});
+                let _ = writeln!(sink, "{v}");
+            }
             let v = serde_json::json!({
                 "v":1,"event":"exit","code":code,"duration_ms":dur.as_millis() as u64
             });
