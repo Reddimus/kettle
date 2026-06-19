@@ -4,6 +4,31 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.30.0] — 2026-06-19
+
+  ### Added
+  - **Auto shell-integration — the tab now tracks `cd` for a stock PowerShell
+    with ZERO setup.** v2.29.0 could not make this work: PowerShell's
+    `Set-Location` does not update the OS process working directory, so kettle
+    can't read the cwd from outside the process (this is why even Windows Terminal
+    needs shell integration for PowerShell). kettle now launches its **default**
+    shell already wired to report its cwd — pwsh/powershell via `-NoExit
+    -EncodedCommand <kettle.ps1>` (your `$PROFILE` still loads first; kettle only
+    wraps the resulting prompt, preserving oh-my-posh / posh-git / starship). The
+    prompt then emits OSC 7 on every `cd`, so the tab/window/pane label tracks
+    your directory. New config **`shell-integration`** (`auto` default / `off`);
+    cmd.exe is left untouched (its process cwd already tracks `cd`, read by the
+    native poll); only the default shell is affected, not an explicit `command =`.
+
+  ### Fixed
+  - **Native cwd poll no longer shadowed by the launch directory.** The OSC-7 cwd
+    cell is pre-seeded with the shell's launch dir; v2.29.0's
+    `current_dir_or_native` always preferred it, so a stock shell's tab froze at
+    the launch dir. kettle now treats the seed as authoritative only once the
+    shell actually *reports* a cwd (OSC 7/9;9, tracked by a new `osc_cwd_seen`
+    flag); until then it uses the live native poll. This makes `cmd.exe` cwd
+    tracking work and lets the OSC 7 from the new auto-integration take over.
+
 ## [2.29.0] — 2026-06-19
 
   ### Fixed

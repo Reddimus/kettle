@@ -1104,6 +1104,17 @@ pub struct Config {
     /// shell semantics — reads /etc/profile, ~/.profile,
     /// ~/.bash_profile, ...). Default false matches Terminator.
     pub login_shell: bool,
+    /// v2.29.1: auto-load kettle's shell integration into the DEFAULT shell
+    /// kettle launches, so the shell reports its working directory (OSC 7) +
+    /// prompt marks (OSC 133) with zero `$PROFILE` setup — this is what makes the
+    /// tab track `cd` for a stock PowerShell (whose `Set-Location` does NOT update
+    /// the OS process cwd, so it cannot be read from outside the process).
+    /// Injects for pwsh/powershell via `-NoExit -EncodedCommand <kettle.ps1>`
+    /// (the user's `$PROFILE` still loads first; kettle only wraps the resulting
+    /// prompt). cmd.exe needs no injection (its process cwd tracks `cd`, read by
+    /// the native poll). Default `true`; `shell-integration = off` launches the
+    /// shell untouched (rely on a manually-sourced `$PROFILE` integration).
+    pub shell_integration: bool,
     /// Cycle 336 (Terminator parity, terminatorlib/config.py:118
     /// `exit_action`): what to do when the shell process exits.
     pub exit_action: ExitAction,
@@ -1922,6 +1933,7 @@ impl Default for Config {
             colorterm: "truecolor".to_string(),
             env: Vec::new(),
             login_shell: false,
+            shell_integration: true,
             exit_action: ExitAction::Close,
             agent_server: AgentServer::Off,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
@@ -2430,6 +2442,8 @@ impl Config {
         "log_strip_ansi",
         "login-shell",
         "login_shell",
+        "shell-integration",
+        "shell_integration",
         "mouse-autohide",
         "mouse-hide",
         "mouse-hide-while-typing",
@@ -3446,6 +3460,11 @@ impl Config {
                 "login-shell" | "login_shell" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.login_shell = b;
+                    }
+                }
+                "shell-integration" | "shell_integration" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.shell_integration = b;
                     }
                 }
                 "exit-action" | "exit_action" => {
@@ -6051,6 +6070,12 @@ cell-height = 1.2\n";
         assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
         assert!(Config::parse_text("login-shell = true").login_shell);
         assert!(Config::parse_text("login_shell = true").login_shell);
+        // v2.30.0: shell-integration is a bool, default on.
+        assert!(Config::default().shell_integration);
+        assert!(!Config::parse_text("shell-integration = off").shell_integration);
+        assert!(!Config::parse_text("shell-integration = false").shell_integration);
+        assert!(Config::parse_text("shell_integration = on").shell_integration);
+        assert!(Config::parse_text("shell-integration = true").shell_integration);
         assert_eq!(
             Config::parse_text("exit-action = restart").exit_action,
             ExitAction::Restart
