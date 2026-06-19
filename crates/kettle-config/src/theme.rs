@@ -28,10 +28,12 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        // Cycle 917 (#5, user-requested): Catppuccin Mocha — the darkest
-        // Catppuccin flavor — is now the shipped default. Matched verbatim to the
-        // bundled `assets/themes/Catppuccin Mocha` file; resolved from the bundle
-        // at startup, this struct is only the hard fallback.
+        // The hard, self-contained fallback theme (Catppuccin Mocha palette),
+        // returned only when a configured theme name matches no bundled theme.
+        // NOTE: the SHIPPED default (a fresh config) is TokyoNight Night
+        // (`Config::default`, v2.28.0); this struct stays the safe fallback so it
+        // carries no bundle dependency. Matched verbatim to `assets/themes/
+        // Catppuccin Mocha`.
         Theme {
             palette: [
                 Rgb::new(0x45, 0x47, 0x5a),
