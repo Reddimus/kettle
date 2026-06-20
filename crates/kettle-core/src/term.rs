@@ -4487,12 +4487,14 @@ mod teardown_tests {
         );
     }
 
-    /// v2.29.1: end-to-end — spawn the DEFAULT shell with auto shell-integration
-    /// in a REAL ConPTY, `Set-Location` into a known dir, and confirm the injected
-    /// pwsh reports it via OSC 7 so `current_dir()` updates (the whole point of
-    /// the feature: a stock PowerShell whose `Set-Location` doesn't move the
-    /// process cwd still tracks `cd` in the tab). `#[ignore]`d — spawns a real
-    /// pwsh, Windows-only, timing-dependent. Run:
+    /// v2.30.0/v2.30.1: end-to-end — spawn the DEFAULT shell with auto shell-
+    /// integration in a REAL ConPTY and confirm BOTH that it reports cwd via
+    /// OSC 7 (`current_dir()` updates) AND that a typed command still EXECUTES
+    /// (the shell stays interactive). The latter guards the v2.30.1 fix: v2.30.0
+    /// injected kettle.ps1 which captured the prompt as a `FunctionInfo` and
+    /// invoked it with `&` — that re-resolved to the new wrapper, recursed,
+    /// threw, and PowerShell re-fired the prompt forever (no prompt, no input).
+    /// `#[ignore]`d — spawns a real pwsh, Windows-only, timing-dependent. Run:
     /// `cargo test -p kettle-core -- --ignored shell_integration_injects_osc7`.
     #[test]
     #[ignore = "spawns a real pwsh in a ConPTY; Windows-only end-to-end shell-integration check"]
@@ -4535,15 +4537,15 @@ mod teardown_tests {
                 return;
             }
         };
-        // Poll until the first prompt's OSC 7 lands (generous — the user's
-        // $PROFILE still loads first). Drain raw output for diagnostics.
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        let mut got = None;
+        // Drive the shell + pump device-status replies (DSR/DA) back to the PTY
+        // exactly like the App does — without that pump PSReadLine blocks on its
+        // startup `ESC[6n` cursor query and never reaches a prompt. Run long
+        // enough to (a) see the first OSC 7, then (b) type a command and confirm
+        // it EXECUTES — which a broken (infinite-prompt-loop) injection cannot.
         let mut raw: Vec<u8> = Vec::new();
-        while std::time::Instant::now() < deadline {
-            // Pump device-status replies (DSR/DA) back to the PTY exactly like the
-            // App does — without this, PSReadLine blocks on its startup `ESC[6n`
-            // cursor query and the shell never reaches a prompt.
+        let mut typed = false;
+        let start = std::time::Instant::now();
+        loop {
             while let Ok(ev) = rx.try_recv() {
                 if let TermEvent::PtyWrite(s) = ev {
                     term.write(s.as_bytes());
@@ -4552,35 +4554,43 @@ mod teardown_tests {
             while let Ok(chunk) = orx.try_recv() {
                 raw.extend_from_slice(&chunk);
             }
-            if let Some(d) = term.current_dir() {
-                got = Some(d);
+            let secs = start.elapsed().as_secs();
+            if secs >= 6 && !typed {
+                term.write(b"echo KETTLE_OK_4242\r");
+                typed = true;
+            }
+            if secs >= 12 {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(80));
         }
         term.write(b"exit\r");
-        if got.is_none() {
-            let text = String::from_utf8_lossy(&raw);
-            eprintln!("=== DIAG raw_len={} ===", raw.len());
-            eprintln!("has ']7;' (OSC7): {}", text.contains("]7;"));
-            eprintln!(
-                "has PowerShell: {}",
-                text.contains("PowerShell") || text.contains("PS ")
-            );
-            if let Some(i) = text.find("]7;") {
-                let end = (i + 90).min(text.len());
-                eprintln!("OSC7 ctx: {:?}", &text[i..end]);
-            }
-            eprintln!("HEAD: {:?}", &text[..text.len().min(300)]);
-        }
+        let text = String::from_utf8_lossy(&raw);
+        let osc7_count = text.matches("]7;").count();
+        let marker_count = text.matches("KETTLE_OK_4242").count();
+        // (1) OSC 7 reached kettle → cwd tracking works.
         assert!(
-            got.as_deref().is_some_and(|d| !d.is_empty()),
-            "injected pwsh's prompt should report its cwd via OSC 7 (current_dir() \
-             None ⇒ OSC 7 never arrived or was rejected); got {got:?}"
+            term.current_dir().is_some_and(|d| !d.is_empty())
+                && term.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
+            "injected pwsh should report its cwd via OSC 7; current_dir={:?}",
+            term.current_dir()
         );
+        // (2) the typed command EXECUTED (its output echoes the marker) → the
+        // shell is interactive, NOT stuck in an infinite prompt loop (the v2.30.0
+        // regression: `& $FunctionInfo` recursed, the prompt threw, and PowerShell
+        // re-fired it forever — no prompt, no input).
         assert!(
-            term.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
-            "osc_cwd_seen must be set once a real OSC 7 is parsed"
+            marker_count >= 2,
+            "typed command did not execute — shell not interactive (infinite-\
+             prompt-loop regression). marker={marker_count}, osc7={osc7_count}, raw_len={}",
+            raw.len()
+        );
+        // (3) no prompt flood: a recursing/throwing prompt re-fires endlessly,
+        // emitting OSC 7 hundreds of times; normal operation emits a handful.
+        assert!(
+            osc7_count < 50,
+            "OSC 7 flood ({osc7_count}×) — prompt is looping (raw_len={})",
+            raw.len()
         );
     }
 

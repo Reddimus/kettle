@@ -26,7 +26,15 @@ if (-not $global:__kettle_prompt_installed) {
     # wrapper calls into it instead of replacing it. Without this,
     # sourcing this snippet would clobber starship / oh-my-posh /
     # posh-git / etc.
-    $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue)
+    #
+    # CRITICAL: capture the `.ScriptBlock` (a snapshot of the body), NOT the
+    # `FunctionInfo` itself. Invoking a captured `FunctionInfo` with `&`
+    # RE-RESOLVES the live `prompt` function — which, after we redefine it
+    # below, is THIS wrapper, so `& $info` recurses into itself, throws, and
+    # PowerShell re-invokes the throwing prompt forever (an infinite prompt
+    # loop: the shell shows no prompt and accepts no input). A ScriptBlock is
+    # a frozen copy of the original body, so `& $sb` always runs the original.
+    $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
     function global:prompt {
         $code = $LASTEXITCODE
@@ -53,12 +61,15 @@ if (-not $global:__kettle_prompt_installed) {
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
             [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
         }
-        # Render the user's original prompt (or PowerShell's built-in
-        # default if none was set).
+        # Render the user's original prompt (or PowerShell's built-in default
+        # if none was set). Guarded: a prompt that THROWS would otherwise make
+        # PowerShell re-invoke it endlessly (no prompt, no input), so on any
+        # failure fall back to the built-in default rather than loop.
+        $default = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
         $rendered = if ($null -ne $global:__kettle_original_prompt) {
-            & $global:__kettle_original_prompt
+            try { & $global:__kettle_original_prompt } catch { $default }
         } else {
-            "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+            $default
         }
         # B = end of prompt / input start. Emitted after the rendered
         # prompt text so the marker lands right where the user starts

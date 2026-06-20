@@ -4,6 +4,21 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.30.1] — 2026-06-20
+
+  ### Fixed
+  - **Critical: the v2.30.0 auto shell-integration broke the PowerShell prompt
+    (blank screen, couldn't type).** `kettle.ps1` stashed the existing prompt with
+    `Get-Item function:prompt` (a `FunctionInfo`) and called it with `&` — which
+    re-resolves the *live* `prompt`, i.e. the new kettle wrapper, so it recursed
+    into itself, threw, and PowerShell re-fired the (throwing) prompt forever: an
+    infinite prompt loop with no visible prompt and no input. Now it captures the
+    original prompt's `.ScriptBlock` (a frozen snapshot) and invokes that, and the
+    wrapper renders the original prompt inside a `try/catch` so a failure can never
+    re-create a loop. cwd tracking (OSC 7) is unaffected and still works. The
+    ConPTY integration test now also asserts a typed command *executes* (the shell
+    stays interactive), not just that OSC 7 fires.
+
 ## [2.30.0] — 2026-06-19
 
   ### Added
