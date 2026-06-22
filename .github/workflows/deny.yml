@@ -47,7 +47,7 @@ jobs:
     # headroom for the action's vendored binary download.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The official EmbarkStudios action vendors `cargo-deny`
       # itself; no separate `cargo install` step needed. Pinned to
       # v2 so a future v3 breaking change doesn't silently flip
