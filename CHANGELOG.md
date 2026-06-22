@@ -4,6 +4,37 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.31.0] — 2026-06-20
+
+  ### Fixed
+  - **kettle no longer hangs/crashes when the GPU device is lost** (a driver
+    TDR/reset under memory pressure — the user-reported crash while running many
+    tabs + windows + WSL). Diagnosis from the Windows event log: a GPU display-
+    watchdog reset, no kettle panic (the crash log was empty) → kettle's
+    surface-error arm spun reconfiguring a dead device forever (a permanent
+    freeze). Now: a wgpu **uncaptured-error handler** + **device-lost callback**
+    turn a GPU fault into a logged, observable event instead of wgpu's default
+    panic (which `panic = "abort"` had turned into a hard crash); a shared
+    `gpu_lost` flag (also tripped by a sustained surface-failure streak as a
+    backend-independent fallback) makes the App stop painting the dead device and
+    show a "GPU device lost — please reopen kettle" state, keeping the event loop
+    alive instead of spinning. The handlers are careful NOT to false-trip: a
+    recoverable `Validation` error is logged but does not flag device-loss, and the
+    benign transient `Occluded`/`Timeout` acquire states (e.g. a minimized macOS
+    window) are skipped, never counted toward the device-lost streak.
+  - **README hero/showcase screenshots: tabs now fill the bar.** The synthetic
+    `--screenshot` scene still drew the pre-v2.28.0 compact, label-width tabs; it
+    now renders the current style — each tab takes an equal share of the strip with
+    the title left-aligned, the `✕` at the tab's right edge, and the active-tab
+    accent — so the README matches the real product.
+
+  ### Changed
+  - **dev-record: `KETTLE_RECORD` may now be a DIRECTORY.** When it (or `--record`)
+    points at a directory, kettle drops a fresh `session-<unix>.cast` inside it —
+    so a *persistent* `KETTLE_RECORD=<dir>` records **every** launch (taskbar /
+    direct / reopen), not just the Start-menu VBS launch that passes an explicit
+    `--record <file>`. This is what makes a future crash reliably captured.
+
 ## [2.30.1] — 2026-06-20
 
   ### Fixed

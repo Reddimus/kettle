@@ -538,6 +538,65 @@ pub struct GpuContext {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// v2.31.0: set `true` when wgpu reports an uncaptured error or a device-loss
+    /// (a GPU driver TDR/reset, or VRAM exhaustion). The error handlers installed
+    /// in `install_gpu_error_handlers` LOG and set this flag INSTEAD of letting
+    /// wgpu's default handler panic — which, with the release profile's
+    /// `panic = "abort"`, hard-killed kettle on a GPU reset with no crash log. The
+    /// App checks this (a refcount-shared `Arc`, so every window's clone sees it)
+    /// to stop rendering on a dead device and surface a "GPU device lost" state
+    /// rather than spin or crash. Reset only by relaunching kettle.
+    pub gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GpuContext {
+    /// v2.31.0: has the GPU device been lost (driver reset / TDR) or hit an
+    /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
+    /// succeed until kettle is relaunched.
+    pub fn is_lost(&self) -> bool {
+        self.gpu_lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// v2.31.0: install wgpu's uncaptured-error + device-lost handlers so a GPU
+/// fault becomes a LOGGED, observable event instead of wgpu's default panic —
+/// which, under the release `panic = "abort"`, hard-aborted kettle (no unwind,
+/// no log) on a driver TDR/reset or a VRAM allocation failure. After this, the
+/// shared `gpu_lost` flag flips and the App degrades gracefully.
+fn install_gpu_error_handlers(
+    device: &wgpu::Device,
+    gpu_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let flag = gpu_lost.clone();
+    // The uncaptured-error path catches errors NOT routed to an error scope.
+    // NOTE (adversarial review): in wgpu 29 a genuine DEVICE-LOSS is delivered
+    // via `set_device_lost_callback` below, NOT here — this handler only ever
+    // sees `Validation` / `OutOfMemory` / `Internal`. So gate the latch by kind:
+    // a `Validation` error is a kettle code/data bug (bad descriptor, over-limit
+    // dim, stale bind group) on a HEALTHY device — log it loudly but do NOT set
+    // `gpu_lost` (that would falsely brick the window with "GPU device lost").
+    // Only `OutOfMemory` (VRAM exhaustion) / `Internal` are device-fatal. Without
+    // ANY handler, wgpu's default panics → `panic=abort` hard-crash, so installing
+    // this (even just to log) is what prevents the crash. `Fn`; must not panic.
+    device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| match e {
+        wgpu::Error::Validation { .. } => {
+            log::error!("wgpu validation error (a kettle bug, NOT device loss): {e}");
+        }
+        _ => {
+            log::error!("wgpu fatal GPU error (out of memory / internal): {e}");
+            flag.store(true, Ordering::Relaxed);
+        }
+    }));
+    let flag2 = gpu_lost.clone();
+    device.set_device_lost_callback(move |reason, msg| {
+        // `Destroyed` fires on our own clean shutdown (`device.destroy()` at drop)
+        // — that is not a crash. Only an `Unknown` loss (driver TDR/reset) flags.
+        if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+            log::error!("wgpu device lost ({reason:?}): {msg}");
+            flag2.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 impl GpuContext {
@@ -598,6 +657,14 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     gpu: GpuContext,
     config: wgpu::SurfaceConfiguration,
+    /// v2.31.0: consecutive frames whose `get_current_texture()` returned a
+    /// non-success state. A handful means a transient surface loss (resize /
+    /// sleep-wake) that the per-frame reconfigure recovers; a sustained streak
+    /// means the GPU device is genuinely gone (a driver TDR/reset where the
+    /// device-lost callback never fired) — at the threshold we flip
+    /// `gpu.gpu_lost` so the App's redraw guard stops spinning the reconfigure
+    /// loop on a dead device. Reset to 0 on any successful acquire.
+    surface_fail_streak: u32,
 
     font_system: FontSystem,
     swash: SwashCache,
@@ -916,11 +983,17 @@ impl Renderer {
             })
             .await
             .map_err(|e| anyhow!("failed to create device: {e:?}"))?;
+        // v2.31.0: turn a GPU driver reset (TDR) / VRAM exhaustion into a logged,
+        // observable event instead of wgpu's default panic (which `panic=abort`
+        // turned into a hard crash). Installed once on the shared device.
+        let gpu_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        install_gpu_error_handlers(&device, &gpu_lost);
         let gpu = GpuContext {
             instance,
             adapter,
             device,
             queue,
+            gpu_lost,
         };
         Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg)
     }
@@ -1081,6 +1154,7 @@ impl Renderer {
             surface,
             gpu,
             config,
+            surface_fail_streak: 0,
             font_system,
             swash,
             atlas,
@@ -3631,19 +3705,50 @@ impl Renderer {
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            // Cycle 798 (audit): ANY non-success state — Outdated (resize /
-            // format change), **Lost** (GPU device reset, laptop sleep/wake,
-            // monitor hot-swap, driver TDR), Timeout — reconfigures the
-            // surface and skips this frame; the next redraw paints on the
-            // fresh surface. Pre-798 only `Outdated` reconfigured and `Lost`
-            // fell into a bare `return Ok(())`, so after a device-lost the
-            // surface was never recovered: every subsequent frame returned
-            // Lost again and the window froze permanently. Reconfiguring on
-            // the catch-all is the standard wgpu recovery and is harmless for
-            // the rarer fatal states (a fresh configure simply fails the same
-            // way next frame rather than wedging).
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface_fail_streak = 0;
+                t
+            }
+            // v2.31.0 (adversarial review): Occluded and Timeout are BENIGN
+            // transient states, NOT device loss. CRITICAL: on macOS the Metal
+            // backend returns `Occluded` on EVERY acquire while the window is
+            // minimized/occluded (gfx-rs/wgpu#8309 — occluded `nextDrawable`
+            // hangs ~1s, so the HAL short-circuits before it), so a minimized
+            // window with any active output would otherwise rack up the streak
+            // and FALSELY latch `gpu_lost` on a perfectly healthy device. Pure
+            // skip-frame: do NOT count toward the streak and do NOT reconfigure
+            // (reconfiguring an occluded surface can itself hang).
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
+                return Ok(());
+            }
+            // Cycle 798 (audit): the genuinely surface-fatal states — Outdated
+            // (resize / format change), **Lost** (GPU device reset, sleep/wake,
+            // monitor hot-swap, driver TDR), Validation — reconfigure the surface
+            // and skip this frame; the next redraw paints on the fresh surface.
+            // Pre-798 only `Outdated` reconfigured and `Lost` fell into a bare
+            // `return Ok(())`, so after a device-lost the surface was never
+            // recovered: every frame returned Lost again and the window froze
+            // permanently. Reconfiguring on the catch-all is the standard wgpu
+            // recovery and is harmless for the rarer fatal states (a fresh
+            // configure simply fails the same way next frame rather than wedging).
             _ => {
+                // v2.31.0: a transient loss recovers in a frame or two (streak
+                // stays low); a SUSTAINED streak means the device is genuinely
+                // gone — a driver TDR/reset where the device-lost callback never
+                // fired (backend-dependent). At the threshold, flip the shared
+                // `gpu_lost` flag so the App's redraw guard stops re-entering this
+                // arm every frame (the pre-v2.31.0 behavior spun forever / froze
+                // the window on a dead device — the actual user-reported hang).
+                self.surface_fail_streak = self.surface_fail_streak.saturating_add(1);
+                if self.surface_fail_streak == 60 {
+                    log::error!(
+                        "GPU surface unrecoverable for 60 consecutive frames — \
+                         treating the device as lost (driver reset / TDR?)"
+                    );
+                    self.gpu
+                        .gpu_lost
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.surface.configure(&self.gpu.device, &self.config);
                 return Ok(());
             }
@@ -6059,25 +6164,35 @@ pub fn capture_png_with_annotation(
         // always line up with the glyphs. Cycle 859 (audit): the old fixed
         // 240px segments were ~2× wider than the ~120px labels, so the second
         // tab's text floated inside the first tab's highlight.
-        let tab0_label = " 1: zsh  ✕   ";
-        let tab1_label = "2: ssh prod  ✕";
-        let tabplus_label = "     +";
-        // Monospace: one cell == `cw`, so a label's pixel width is its char
-        // count × `cw`.
         let tab_text_left = 8.0_f32;
-        let w0 = tab0_label.chars().count() as f32 * cw;
-        let w1 = tab1_label.chars().count() as f32 * cw;
+        // v2.31.0: tabs FILL the bar (the live v2.28.0 layout), NOT the old
+        // compact label-width tabs — the README hero/showcase must reflect the
+        // current style. Each tab takes an equal share of the strip (minus the
+        // trailing `+` button); the title is left-aligned and the ✕ sits at the
+        // tab's right edge, padded with spaces between. Monospace, so a label's
+        // pixel width is its char count × `cw` and `tab_cols` chars == `tab_w` px.
+        let tabplus_label = "  +  ";
+        let plus_w = tabplus_label.chars().count() as f32 * cw;
+        let tab_w = (((wf - tab_text_left - plus_w) / 2.0).max(cw)).floor();
+        let tab_cols = (tab_w / cw).max(1.0) as usize;
+        let fill_tab = |title: &str| -> String {
+            let head = format!(" {title}");
+            let tail = "✕ ";
+            let used = head.chars().count() + tail.chars().count();
+            let gap = tab_cols.saturating_sub(used);
+            format!("{head}{}{tail}", " ".repeat(gap))
+        };
+        let tab0_label = fill_tab("1: zsh");
+        let tab1_label = fill_tab("2: ssh prod");
+        let (w0, w1) = (tab_w, tab_w);
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
-        // Active tab 0: themed background + left accent bar, sized to its label.
+        // Active tab 0: themed background + a 2px left accent bar (live style).
         // Cycle 293/937: cascade through the resolved accent so peacock + the
-        // theme's signature accent (Mocha mauve) show in --screenshot too.
+        // theme's signature accent show in --screenshot too.
         let screenshot_accent = cfg.resolved_accent(theme);
         q.push(rect(tab_text_left, 0.0, w0, tab_h, theme.background, 1.0));
         q.push(rect(tab_text_left, 0.0, 2.0, tab_h, screenshot_accent, 1.0));
-        // Inactive tab 1: a mostly-solid dark box (slight bar tint so it reads
-        // as "muted" vs the active tab) — without its own background the dim
-        // label would sit grey-on-grey against the `palette[8]` bar
-        // (cycle 859, audit).
+        // Inactive tab 1: a muted box (slightly lower opacity than the active tab).
         q.push(rect(
             tab_text_left + w0,
             0.0,
@@ -6086,22 +6201,22 @@ pub fn capture_png_with_annotation(
             theme.background,
             0.9,
         ));
-        // Subtle separators at each tab's right edge.
+        // 1px separators at each segment's right edge (live style).
         q.push(rect(
             tab_text_left + w0 - 1.0,
             0.0,
             1.0,
             tab_h,
-            theme.palette[8],
-            0.7,
+            theme.background,
+            0.5,
         ));
         q.push(rect(
             tab_text_left + w0 + w1 - 1.0,
             0.0,
             1.0,
             tab_h,
-            theme.palette[8],
-            0.7,
+            theme.background,
+            0.5,
         ));
 
         // --- Two-pane vertical split with focus border on the left pane.
@@ -6158,8 +6273,8 @@ pub fn capture_png_with_annotation(
         tab_buf.set_rich_text(
             &mut font_system,
             [
-                (tab0_label, fg.clone()),
-                (tab1_label, dim.clone()),
+                (tab0_label.as_str(), fg.clone()),
+                (tab1_label.as_str(), dim.clone()),
                 (tabplus_label, grn.clone()),
             ],
             &base,

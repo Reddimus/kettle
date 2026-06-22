@@ -552,6 +552,21 @@ fn crash_log_path(
         .join(format!("kettle-crash-{unix_secs}-{pid}.log"))
 }
 
+/// v2.31.0: resolve the asciicast record TARGET from `--record` / `KETTLE_RECORD`.
+/// If `p` is an existing DIRECTORY, return a fresh `session-<unix>.cast` inside
+/// it; otherwise use `p` verbatim as the output file. This lets a *persistent*
+/// `KETTLE_RECORD=<dir>` env var record every launch (the VBS launcher passes an
+/// explicit `--record <file>`, which is already a file so it's returned as-is).
+/// `now_secs` is injected so the mapping is unit-testable.
+#[cfg(feature = "dev-record")]
+fn resolve_record_target(p: std::path::PathBuf, now_secs: u64) -> std::path::PathBuf {
+    if p.is_dir() {
+        p.join(format!("session-{now_secs}.cast"))
+    } else {
+        p
+    }
+}
+
 /// Cycle 741: install a `panic = "abort"`-safe panic hook as the very first
 /// thing `main` does. Before this, a panic on a Start-menu launch was
 /// invisible — the cycle-740 console-hide path swallows stderr, and
@@ -1457,7 +1472,19 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "dev-record")]
         record: cli
             .record
-            .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from)),
+            .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from))
+            .map(|p| {
+                // v2.31.0: if the record target is a DIRECTORY, drop a fresh
+                // `session-<unix>.cast` inside it. Lets a PERSISTENT
+                // `KETTLE_RECORD=%USERPROFILE%\kettle-recordings` record EVERY
+                // launch (taskbar / direct / reopen), not just the VBS one that
+                // passes an explicit `--record <file>` — so a crash is captured.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                resolve_record_target(p, now)
+            }),
         // Cycle 916 (file-by-file audit): bool-PARSE the env var — `is_some()`
         // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
         // enabling raw keystroke (password) capture into the trace. Only an
@@ -1669,6 +1696,31 @@ mod window_state_flag_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "dev-record"))]
+mod record_target_tests {
+    use super::resolve_record_target;
+    use std::path::PathBuf;
+
+    /// A directory record target (a persistent `KETTLE_RECORD=<dir>`) becomes a
+    /// fresh `session-<unix>.cast` inside it.
+    #[test]
+    fn directory_target_gets_timestamped_session_file() {
+        let dir = std::env::temp_dir(); // a real existing directory
+        assert_eq!(
+            resolve_record_target(dir.clone(), 1_718_900_000),
+            dir.join("session-1718900000.cast")
+        );
+    }
+
+    /// An explicit file target (what the VBS passes via `--record <file>`) is used
+    /// verbatim — the timestamp is not appended.
+    #[test]
+    fn explicit_file_target_is_verbatim() {
+        let f = PathBuf::from("C:/does/not/exist/my-trace.cast");
+        assert_eq!(resolve_record_target(f.clone(), 123), f);
     }
 }
 

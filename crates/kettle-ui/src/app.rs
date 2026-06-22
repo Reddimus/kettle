@@ -5254,6 +5254,24 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // v2.31.0: if the GPU device was lost (a driver TDR/reset) or hit an
+        // uncaptured error (VRAM exhaustion under memory pressure), rendering
+        // against the dead device cannot succeed. The new wgpu error handlers
+        // (kettle_render::install_gpu_error_handlers) already turned the fault
+        // into a logged event + this flag instead of a `panic=abort` crash; here
+        // we stop painting (so we don't spin the surface-reconfigure loop),
+        // surface the state in the title bar, and keep the event loop alive so
+        // the user can close + reopen. (Full auto-recovery is a deferred follow-up.)
+        if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
+            const MSG: &str = "kettle — ⚠ GPU device lost — please reopen kettle";
+            if ws.last_title != MSG {
+                if let Some(w) = &ws.window {
+                    w.set_title(MSG);
+                }
+                ws.last_title = MSG.to_string();
+            }
+            return;
+        }
         // v2.21.1 (throughput): is THIS paint flushing coalesced PTY output?
         // Captured before the clear below so the flood detector can count
         // consecutive output-coalesced frames and stretch the paint budget
