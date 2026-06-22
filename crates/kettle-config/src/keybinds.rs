@@ -1086,6 +1086,10 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     let c = Mods::CTRL;
     let cs = Mods::CTRL | Mods::SHIFT;
     let a = Mods::ALT;
+    // `su` (Super alone) is only used for the non-Windows broadcast
+    // toggle below; on Windows the chord is Ctrl+Shift+G (Game Bar owns
+    // Win+G), so gate the binding to avoid an unused-variable warning.
+    #[cfg(not(windows))]
     let su = Mods::SUPER;
     let sus = Mods::SUPER | Mods::SHIFT;
     let mut m = Bindings::new();
@@ -1147,6 +1151,16 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(c, Char('0'), ResetFontSize);
     bind(cs, Char('x'), ToggleZoom);
     bind(cs, Char('r'), Reset);
+    // Broadcast toggle. Default chord is Super+G everywhere EXCEPT
+    // Windows, where Win+G is captured by the Windows Game Bar (the OS
+    // intercepts it before kettle's window ever sees the key) — so the
+    // broadcast toggle would silently never fire. Use Ctrl+Shift+G on
+    // Windows instead (verified free: no other Ctrl+Shift default binds
+    // `g`). The Super+Shift+G "broadcast off" partner stays as-is; it's
+    // only reachable once broadcast is already on.
+    #[cfg(windows)]
+    bind(cs, Char('g'), ToggleBroadcastAll);
+    #[cfg(not(windows))]
     bind(su, Char('g'), ToggleBroadcastAll);
     bind(sus, Char('g'), ToggleBroadcastOff);
     bind(Mods::empty(), F(11), ToggleFullscreen);
@@ -1473,6 +1487,50 @@ mod tests {
                 dups.join(", ")
             );
         }
+    }
+
+    #[test]
+    fn broadcast_toggle_default_is_platform_correct() {
+        // Win+G is captured by the Windows Game Bar before kettle sees
+        // it, so on Windows the broadcast toggle must default to a free
+        // chord (Ctrl+Shift+G) instead of Super+G. Elsewhere Super+G is
+        // the canonical Terminator-style chord. Pin both so a future
+        // edit can't silently put the toggle back onto a dead key.
+        let d = defaults();
+        let cs = Mods::CTRL | Mods::SHIFT;
+        let su = Mods::SUPER;
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                d.get(&Trigger::new(cs, Key::Char('g'))),
+                Some(&Action::ToggleBroadcastAll),
+                "on Windows broadcast toggle must be Ctrl+Shift+G (Win+G is Game Bar)"
+            );
+            assert_eq!(
+                d.get(&Trigger::new(su, Key::Char('g'))),
+                None,
+                "Super+G must NOT be bound on Windows (Game Bar swallows it)"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                d.get(&Trigger::new(su, Key::Char('g'))),
+                Some(&Action::ToggleBroadcastAll),
+                "off Windows broadcast toggle stays on Super+G"
+            );
+            assert_eq!(
+                d.get(&Trigger::new(cs, Key::Char('g'))),
+                None,
+                "Ctrl+Shift+G is only the Windows fallback"
+            );
+        }
+        // The Super+Shift+G "broadcast off" partner is unchanged on
+        // every platform.
+        assert_eq!(
+            d.get(&Trigger::new(Mods::SUPER | Mods::SHIFT, Key::Char('g'))),
+            Some(&Action::ToggleBroadcastOff),
+        );
     }
 
     #[test]

@@ -61,12 +61,9 @@ fn stream_events(client: &mut Client, pane: Option<u64>) -> i32 {
     loop {
         match client.next_event() {
             Ok(Some(ev)) => {
-                // Skip the internal keepalive: the subscribe stream sends periodic
-                // `ping` events so a write failure detects a dead peer; they must
-                // not pollute the user-facing NDJSON feed.
-                if ev.event == "ping" {
-                    continue;
-                }
+                // E3 (audit v2.32.0): ping keepalives are now consumed inside
+                // `Client::next_event` (the single forward-compat seam), so no
+                // per-consumer skip is needed here.
                 // Filter by pane when requested.
                 if let Some(want) = pane
                     && ev.pane.is_some()

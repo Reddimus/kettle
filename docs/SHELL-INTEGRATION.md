@@ -14,7 +14,40 @@ between commands:
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 
-## Enabling it in your shell
+## Automatic — no setup required (v2.30, default)
+
+**You almost certainly don't need to edit any `$PROFILE` / `.bashrc` / `.zshrc`
+/ `config.fish`.** Since v2.30.0, kettle ships with the config key
+`shell-integration = on` by **default** and auto-injects the wiring into the
+shell it launches for you:
+
+- **OSC 7** (current working directory) — so the tab/title tracks `cd` and new
+  tabs / splits inherit the directory.
+- **OSC 133** prompt marks (and **OSC 9;9**) — so prompt-jump (`Ctrl+Up` /
+  `Ctrl+Down`) and prompt-aware close-confirmation work.
+
+This happens for kettle's **default shell** (`pwsh` / `powershell` on Windows,
+`bash` / `zsh` / `fish` elsewhere) with **no rc-file edits**: kettle loads your
+existing profile *first*, then wraps the resulting prompt so the OSC sequences
+emit each prompt. Your starship / oh-my-posh / posh-git prompt is preserved.
+
+You only need the manual snippets in the rest of this document if **either**:
+
+1. you set an explicit non-default shell via `command = <shell>` in your config
+   (the auto-injection only wires kettle's *default* shell, not a custom
+   `command =`), **or**
+2. you turn the feature off with `shell-integration = off` (e.g. you prefer to
+   manage the hooks yourself, or your prompt does something exotic that the
+   wrapper doesn't expect).
+
+See the **`shell-integration`** key in [CONFIG.md](CONFIG.md) (bool, default
+`on`) to toggle it.
+
+## Enabling it manually in your shell
+
+> Most users can skip this section — see **Automatic** above. The snippets here
+> are for an explicit non-default `command = <shell>` or when
+> `shell-integration = off`.
 
 Most shells need a one-line hook. If you already use **Starship**, kitty's
 shell integration, or iTerm2's, those emit OSC 133 and kettle picks them up

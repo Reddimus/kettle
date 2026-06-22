@@ -5,10 +5,26 @@ use base64::Engine;
 use crate::image::ImageData;
 
 /// Decode an `OSC 1337` body (the bytes after `OSC` and before `ST`, i.e.
-/// starting with `1337;File=`).
+/// starting with `1337;File=`), returning the image **only** when it is meant
+/// to be displayed inline.
+///
+/// The `File=` args are `;`-separated `key=value` pairs. iTerm2's `inline` key
+/// governs display: `inline=1` draws the payload in the terminal grid, while
+/// `inline=0` (or an absent `inline`) is a plain file *transfer* (a download),
+/// which must NOT be rendered as an image. We therefore parse the args and
+/// return `None` for any non-inline transfer — the bytes are simply consumed,
+/// matching iTerm2's default-to-download behavior.
 pub fn decode(body: &str) -> Option<ImageData> {
     let rest = body.strip_prefix("1337;File=")?;
-    let (_args, b64) = rest.split_once(':')?;
+    let (args, b64) = rest.split_once(':')?;
+    // Only inline=1 is displayed; absent/0/other → file download, not an image.
+    let inline = args.split(';').any(|kv| {
+        kv.split_once('=')
+            .is_some_and(|(k, v)| k.trim().eq_ignore_ascii_case("inline") && v.trim() == "1")
+    });
+    if !inline {
+        return None;
+    }
     // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace
     // and `.trim()` only strips the ends, so a line-wrapped OSC-1337 body (raw
     // newlines aren't ST, so they reach the decoder) silently failed. Strip all
@@ -40,10 +56,37 @@ mod tests {
     #[test]
     fn decodes_a_well_formed_osc1337_body() {
         let b64 = base64::engine::general_purpose::STANDARD.encode(png(3, 2));
-        // `File=` args (size=…;inline=1) are ignored by the decoder; only
-        // the base64 after the `:` matters.
+        // `inline=1` marks it for display; the size= arg is informational. Only
+        // an inline image decodes; the base64 after the `:` is the payload.
         let body = format!("1337;File=size=99;inline=1:{b64}");
         let img = decode(&body).expect("valid OSC 1337 body should decode");
+        assert_eq!((img.width, img.height), (3, 2));
+    }
+
+    #[test]
+    fn non_inline_file_transfer_is_not_rendered() {
+        // inline=0 or an absent `inline` key is a plain file download (iTerm2's
+        // default), NOT an image to draw — decode must return None so the bytes
+        // are consumed rather than splatted onto the grid as a bogus image.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png(3, 2));
+        // Explicit inline=0.
+        assert!(
+            decode(&format!("1337;File=name=Zg==;size=10;inline=0:{b64}")).is_none(),
+            "inline=0 must not render inline"
+        );
+        // Absent inline key → defaults to download.
+        assert!(
+            decode(&format!("1337;File=name=Zg==;size=10:{b64}")).is_none(),
+            "absent inline must not render inline"
+        );
+        // Empty args (no inline) → still a download.
+        assert!(
+            decode(&format!("1337;File=:{b64}")).is_none(),
+            "no args means no inline display"
+        );
+        // inline=1 still renders (case-insensitive key, surrounding-space tolerant).
+        let img = decode(&format!("1337;File=inline=1;size=10:{b64}"))
+            .expect("inline=1 should still render");
         assert_eq!((img.width, img.height), (3, 2));
     }
 

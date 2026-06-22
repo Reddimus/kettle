@@ -17,6 +17,15 @@
 
 use std::io::{self, Read, Write};
 
+/// Shared client-connect retry policy, referenced by BOTH platform `connect`
+/// impls so the Unix socket and Windows named-pipe legs stay in lockstep. A
+/// *missing* endpoint (`NotFound`) is never retried (a dead server) — these
+/// bound only genuinely-transient failures (the server mid-accept or swapping
+/// instances): `CONNECT_RETRIES` attempts, `CONNECT_BACKOFF` between each, so
+/// the worst case is ~`CONNECT_RETRIES * CONNECT_BACKOFF` before giving up.
+const CONNECT_RETRIES: u32 = 50;
+const CONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// One accepted connection — a bidirectional byte stream. `Read`/`Write` go to
 /// the peer; [`try_clone`](CtlStream::try_clone) splits read/write across the
 /// per-connection reader + writer threads.
@@ -193,13 +202,13 @@ mod imp {
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
         use std::os::unix::net::UnixStream;
         let mut last = None;
-        for _ in 0..20 {
+        for _ in 0..super::CONNECT_RETRIES {
             match UnixStream::connect(endpoint) {
                 Ok(s) => return Ok(CtlStream::Unix(s)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
                 Err(e) => {
                     last = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(super::CONNECT_BACKOFF);
                 }
             }
         }
@@ -350,17 +359,24 @@ mod imp {
     }
 
     /// Connect a client to `endpoint` (a `\\.\pipe\…` name). std opens a named
-    /// pipe natively; retry briefly on a transient busy/not-found while the
-    /// server swaps instances.
+    /// pipe natively; retry briefly on a transient busy while the server swaps
+    /// instances. Mirrors the Unix early-out: `NotFound` (the pipe doesn't
+    /// exist) is definitive — a dead server — so bail at once rather than
+    /// spinning the full retry budget (~1s) per dead registry entry, which
+    /// would otherwise make `client::discover` hang scanning stale entries.
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
         use std::fs::OpenOptions;
         let mut last = None;
-        for _ in 0..50 {
+        for _ in 0..super::CONNECT_RETRIES {
             match OpenOptions::new().read(true).write(true).open(endpoint) {
                 Ok(f) => return Ok(CtlStream::Windows(f)),
+                // A missing pipe = a dead server: no point retrying. (A pipe
+                // that exists but is momentarily busy reports ERROR_PIPE_BUSY,
+                // not NotFound, and is still retried below.)
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
                 Err(e) => {
                     last = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(super::CONNECT_BACKOFF);
                 }
             }
         }
@@ -412,6 +428,47 @@ mod tests {
         let reply = String::from_utf8_lossy(&reply[..n]);
         assert!(reply.starts_with("echo:ping"), "got: {reply:?}");
         server.join().expect("server thread");
+    }
+
+    /// A connect to an endpoint that does not exist must fail FAST (a missing
+    /// socket / pipe = a dead server), not spin the full retry budget. Both
+    /// platform impls early-out on `NotFound`; assert the call returns well
+    /// under the worst-case `CONNECT_RETRIES * CONNECT_BACKOFF` budget so a
+    /// stale registry entry can't hang `client::discover`.
+    #[test]
+    fn connect_to_missing_endpoint_fails_fast() {
+        let pid = std::process::id();
+        #[cfg(unix)]
+        let endpoint = std::env::temp_dir()
+            .join(format!("kettle-ctl-absent-{pid}.sock"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let endpoint = format!(r"\\.\pipe\kettle-ctl-absent-{pid}");
+
+        let start = std::time::Instant::now();
+        let res = connect(&endpoint);
+        let elapsed = start.elapsed();
+        // Match on the Err directly — CtlStream (the Ok type) isn't Debug, so
+        // unwrap_err / is_err+assert_eq would require it.
+        match res {
+            Err(e) => assert_eq!(
+                e.kind(),
+                io::ErrorKind::NotFound,
+                "a missing endpoint surfaces NotFound"
+            ),
+            Ok(_) => panic!("connecting to a missing endpoint must fail"),
+        }
+        // The full retry budget would be CONNECT_RETRIES * CONNECT_BACKOFF
+        // (~1s); the early-out should be near-instant. Allow generous slack for
+        // a loaded CI box but well below even a single backoff iteration's
+        // worth of the full budget.
+        let budget = CONNECT_RETRIES * CONNECT_BACKOFF;
+        assert!(
+            elapsed < budget / 2,
+            "early-out took {elapsed:?}, expected well under {:?}",
+            budget / 2
+        );
     }
 
     /// The REAL server/client usage: each side splits its connection into a

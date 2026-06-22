@@ -12,6 +12,15 @@ pub enum SNode {
         /// argv the pane ran (empty = default shell); persists SSH panes.
         #[serde(default)]
         cmd: Vec<String>,
+        /// Named broadcast-group membership (mirrors `Pane::group_name`).
+        /// `Some(name)` = the pane belongs to that named broadcast group;
+        /// `None` = ungrouped (the Terminator default). `#[serde(default)]`
+        /// (additive wire field) so an OLD `session.json` written before this
+        /// field existed still deserializes — it just restores ungrouped, the
+        /// pre-cycle behavior. Populated by `Mux::snap`, consumed by
+        /// `Mux::build_node`.
+        #[serde(default)]
+        group: Option<String>,
     },
     Split {
         /// `true` = stacked (horizontal divider); `false` = side-by-side.
@@ -45,6 +54,21 @@ pub struct STab {
     /// behavior. Saved by `Mux::snapshot`, consumed by `Mux::restore`.
     #[serde(default)]
     pub focus: usize,
+    /// User-set tab-title override (mirrors `Tab::title_override`). `Some(s)`
+    /// = the tab bar shows `s` instead of the focused pane's auto-title;
+    /// `None` = auto-title. `#[serde(default)]` (additive wire field) so an
+    /// OLD `session.json` lacking it still loads — it restores with no
+    /// override, the pre-cycle behavior. Saved by `Mux::snapshot`, consumed
+    /// by `Mux::restore`.
+    #[serde(default)]
+    pub title_override: Option<String>,
+    /// Whether this tab was zoomed (focused pane maximized; mirrors
+    /// `Tab::zoomed`). `#[serde(default)]` (additive wire field, defaults to
+    /// `false`) so an OLD `session.json` without it loads unzoomed, the
+    /// pre-cycle behavior. Saved by `Mux::snapshot`, consumed by
+    /// `Mux::restore`.
+    #[serde(default)]
+    pub zoomed: bool,
 }
 
 /// C7 (multi-window): a window's saved outer position + inner size,
@@ -400,6 +424,7 @@ mod tests {
         let leaf = || SNode::Leaf {
             cwd: None,
             cmd: vec![],
+            group: None,
         };
         assert_eq!(leaf().leaf_count(), 1);
         let tree = SNode::Split {
@@ -564,8 +589,11 @@ mod tests {
                 root: SNode::Leaf {
                     cwd: Some("/tmp".into()),
                     cmd: vec!["bash".into()],
+                    group: None,
                 },
                 focus: 0,
+                title_override: None,
+                zoomed: false,
             }],
             active: 0,
             theme: Some("Dracula".into()),
@@ -607,8 +635,11 @@ mod tests {
                 root: SNode::Leaf {
                     cwd: None,
                     cmd: vec![],
+                    group: None,
                 },
                 focus: 0,
+                title_override: None,
+                zoomed: false,
             }],
             active: 0,
             theme: None,
@@ -657,13 +688,17 @@ mod tests {
                     a: Box::new(SNode::Leaf {
                         cwd: Some("/tmp".into()),
                         cmd: vec![],
+                        group: None,
                     }),
                     b: Box::new(SNode::Leaf {
                         cwd: None,
                         cmd: vec!["ssh".into(), "-t".into(), "me@host".into()],
+                        group: None,
                     }),
                 },
                 focus: 1, // second leaf focused — round-trip should keep it
+                title_override: None,
+                zoomed: false,
             }],
             active: 0,
             theme: Some("Dracula".into()),
@@ -702,8 +737,11 @@ mod tests {
             root: SNode::Leaf {
                 cwd: None,
                 cmd: vec![],
+                group: None,
             },
             focus: 0,
+            title_override: None,
+            zoomed: false,
         };
         let s = Session {
             // Dual-write mirror of window 1 (what save_session produces).
@@ -824,13 +862,17 @@ mod tests {
                     a: Box::new(SNode::Leaf {
                         cwd: None,
                         cmd: vec![],
+                        group: None,
                     }),
                     b: Box::new(SNode::Leaf {
                         cwd: None,
                         cmd: vec![],
+                        group: None,
                     }),
                 },
                 focus: 1,
+                title_override: None,
+                zoomed: false,
             }],
             active: 0,
             theme: None,
@@ -843,5 +885,85 @@ mod tests {
         let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}}],"active":0}"#;
         let l: Session = serde_json::from_str(legacy).unwrap();
         assert_eq!(l.tabs[0].focus, 0);
+    }
+
+    #[test]
+    fn session_round_trips_group_title_override_and_zoom() {
+        // Three pieces of per-pane / per-tab state were previously DROPPED on
+        // save/restore (the wire format had no slot for them, so restore
+        // hardcoded None/false): a pane's named broadcast-group membership
+        // (`SNode::Leaf::group`), a tab's user-set title override
+        // (`STab::title_override`), and a tab's zoom state (`STab::zoomed`).
+        // They're now additive `#[serde(default)]` wire fields. Confirm all
+        // three survive a JSON round-trip with their exact values.
+        let s = Session {
+            tabs: vec![STab {
+                root: SNode::Split {
+                    vertical: false,
+                    ratio: 0.5,
+                    // First leaf is a member of the "fleet" broadcast group.
+                    a: Box::new(SNode::Leaf {
+                        cwd: Some("/home/me".into()),
+                        cmd: vec![],
+                        group: Some("fleet".into()),
+                    }),
+                    // Second leaf is ungrouped (None must round-trip too).
+                    b: Box::new(SNode::Leaf {
+                        cwd: None,
+                        cmd: vec![],
+                        group: None,
+                    }),
+                },
+                focus: 0,
+                title_override: Some("deploys".into()),
+                zoomed: true,
+            }],
+            active: 0,
+            theme: None,
+            windows: vec![],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        let tab = &back.tabs[0];
+        assert_eq!(
+            tab.title_override.as_deref(),
+            Some("deploys"),
+            "tab title override round-trips"
+        );
+        assert!(tab.zoomed, "zoom state round-trips");
+        match &tab.root {
+            SNode::Split { a, b, .. } => {
+                assert!(
+                    matches!(**a, SNode::Leaf { ref group, .. }
+                        if group.as_deref() == Some("fleet")),
+                    "grouped pane's group name round-trips"
+                );
+                assert!(
+                    matches!(**b, SNode::Leaf { ref group, .. } if group.is_none()),
+                    "ungrouped pane stays ungrouped"
+                );
+            }
+            _ => panic!("expected split"),
+        }
+    }
+
+    #[test]
+    fn legacy_session_without_group_title_zoom_fields_loads_to_defaults() {
+        // The three new fields are all `#[serde(default)]`, so a session.json
+        // written by an OLDER kettle (no `group`/`title_override`/`zoomed`
+        // keys) must still deserialize cleanly — to the pre-cycle defaults:
+        // ungrouped pane, no title override, not zoomed. This is the
+        // backward-compat guarantee that makes the wire-format extension safe.
+        let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":"/tmp"}},"focus":0}],"active":0}"#;
+        let s: Session = serde_json::from_str(legacy).expect("legacy json must still load");
+        let tab = &s.tabs[0];
+        assert_eq!(tab.title_override, None, "missing title_override → None");
+        assert!(!tab.zoomed, "missing zoomed → false");
+        match &tab.root {
+            SNode::Leaf { group, .. } => {
+                assert_eq!(*group, None, "missing group → None (ungrouped)");
+            }
+            _ => panic!("expected leaf"),
+        }
     }
 }

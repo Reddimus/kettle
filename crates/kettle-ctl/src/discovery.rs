@@ -138,6 +138,29 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
     out
 }
 
+/// Like [`list`], but filters out entries whose owning process is no longer
+/// alive, best-effort `prune`ing each dead one as a side effect (mirroring
+/// `presence::live_entries`). Used by the client's `discover` so dead entries
+/// from a crashed/killed server don't accumulate and aren't probed.
+///
+/// `list` is kept pure (raw enumeration) for callers that want every entry
+/// regardless of liveness (e.g. diagnostics); this is the liveness-aware view.
+pub fn list_live(dir: &std::path::Path) -> Vec<RegistryEntry> {
+    let mut out = list(dir);
+    out.retain(|e| {
+        if crate::presence::pid_alive(e.pid) {
+            true
+        } else {
+            // Dead owner — its server can never come back under this pid; drop
+            // the entry so the dir can't grow forever and we don't waste a
+            // connect attempt on it.
+            prune(dir, e.pid);
+            false
+        }
+    });
+    out
+}
+
 /// Remove a stale entry file (e.g. when a connect proves the server is dead).
 pub fn prune(dir: &std::path::Path, pid: u32) {
     unregister(dir, pid);
@@ -187,6 +210,46 @@ mod tests {
         unregister(&dir, 222);
         assert_eq!(list(&dir).len(), 1);
         assert_eq!(list(&dir)[0].pid, 111);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_live_excludes_dead_pids_and_prunes_them() {
+        let dir = std::env::temp_dir().join(format!("kettle-ctl-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A live entry (our own pid) and a dead one (u32::MAX-1 is far past any
+        // real pid table on Windows and Linux alike — same convention as the
+        // presence tests).
+        let live = RegistryEntry {
+            v: 1,
+            kind: "gui".into(),
+            pid: std::process::id(),
+            endpoint: "ep-live".into(),
+            version: "x".into(),
+            started_unix: 100,
+        };
+        let dead = RegistryEntry {
+            pid: u32::MAX - 1,
+            endpoint: "ep-dead".into(),
+            started_unix: 200,
+            ..live.clone()
+        };
+        register(&dir, &live).unwrap();
+        register(&dir, &dead).unwrap();
+        // Raw `list` sees both; `list_live` keeps only the live one.
+        assert_eq!(list(&dir).len(), 2, "raw list enumerates both");
+        let alive = list_live(&dir);
+        assert_eq!(alive.len(), 1, "only the live entry survives");
+        assert_eq!(alive[0].pid, std::process::id());
+        // The dead entry's file is pruned from disk as a side effect.
+        assert!(
+            !entry_path(&dir, dead.pid).exists(),
+            "dead entry pruned from disk"
+        );
+        assert!(
+            entry_path(&dir, live.pid).exists(),
+            "live entry left on disk"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

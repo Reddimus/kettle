@@ -2217,7 +2217,17 @@ mod tests {
         );
         // Internal/handoff-only flags + ones documented by their short form
         // (`--exec` is documented as `-e`) that the man page intentionally omits.
-        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
+        // `record` / `record-raw-input` only exist under the developer-only
+        // `dev-record` feature and are intentionally absent from the public man
+        // page, so they must be excluded here too (else the guard reds under
+        // `cargo test -p kettle --features dev-record`).
+        let allow_missing: &[&str] = &[
+            "tab-handoff",
+            "tab-handoff-fd",
+            "exec",
+            "record",
+            "record-raw-input",
+        ];
         let cmd = Cli::command();
         let missing: Vec<String> = cmd
             .get_arguments()

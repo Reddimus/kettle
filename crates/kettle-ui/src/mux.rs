@@ -717,11 +717,23 @@ pub fn compute_broadcast_targets(
         BroadcastScope::Off => vec![focused_pane],
         BroadcastScope::Tab => panes_in_focused_tab.to_vec(),
         BroadcastScope::All => all_panes_with_groups.iter().map(|(id, _)| *id).collect(),
-        BroadcastScope::Group(name) => all_panes_with_groups
-            .iter()
-            .filter(|(_, g)| g.as_deref() == Some(name.as_str()))
-            .map(|(id, _)| *id)
-            .collect(),
+        BroadcastScope::Group(name) => {
+            // Every pane tagged with this group, regardless of tab — plus the
+            // focused (on-screen) pane, so input is never routed AWAY from the
+            // pane the user is looking at with no cue. The focused pane may not
+            // be a group member (e.g. broadcasting from an ungrouped pane into a
+            // named group); union it in (deduped) so the on-screen pane always
+            // receives input, mirroring how Off/Tab/All already include it.
+            let mut targets: Vec<u64> = all_panes_with_groups
+                .iter()
+                .filter(|(_, g)| g.as_deref() == Some(name.as_str()))
+                .map(|(id, _)| *id)
+                .collect();
+            if !targets.contains(&focused_pane) {
+                targets.push(focused_pane);
+            }
+            targets
+        }
     }
 }
 
@@ -944,6 +956,9 @@ impl Mux {
                     .get(id)
                     .map(|p| p.term.argv.clone())
                     .unwrap_or_default(),
+                // C7 (audit v2.32.0): persist broadcast-group membership so a
+                // restored pane rejoins its group instead of silently losing it.
+                group: self.panes.get(id).and_then(|p| p.group_name.clone()),
             },
             Node::Split { dir, ratio, a, b } => SNode::Split {
                 vertical: *dir == Dir::Vertical,
@@ -969,6 +984,8 @@ impl Mux {
         Some(STab {
             root: self.snap(&t.root),
             focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
+            title_override: t.title_override.clone(),
+            zoomed: t.zoomed,
         })
     }
 
@@ -987,6 +1004,8 @@ impl Mux {
                     // pre-cycle behavior, which is what missing-field
                     // restores fall back to via #[serde(default)].
                     focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
+                    title_override: t.title_override.clone(),
+                    zoomed: t.zoomed,
                 })
                 .collect(),
             active: self.active,
@@ -1015,7 +1034,7 @@ impl Mux {
         spawned: &mut Vec<u64>,
     ) -> Result<Node> {
         match n {
-            SNode::Leaf { cwd, cmd } => {
+            SNode::Leaf { cwd, cmd, group } => {
                 let argv = if cmd.is_empty() {
                     shell_argv(cfg)
                 } else {
@@ -1023,6 +1042,10 @@ impl Mux {
                 };
                 let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref(), &argv)?;
                 spawned.push(id);
+                // C7 (audit v2.32.0): rejoin the saved broadcast group.
+                if let Some(p) = self.panes.get_mut(&id) {
+                    p.group_name = group.clone();
+                }
                 Ok(Node::Leaf(id))
             }
             SNode::Split {
@@ -1090,8 +1113,10 @@ impl Mux {
                     self.tabs.push(Tab {
                         root,
                         focus,
-                        title_override: None,
-                        zoomed: false,
+                        // C7 (audit v2.32.0): restore the saved tab title
+                        // override + zoom state (was hardcoded to defaults).
+                        title_override: st.title_override.clone(),
+                        zoomed: st.zoomed,
                         last_output_at: None,
                         last_seen_at: None,
                         bell: false,
@@ -1773,7 +1798,22 @@ impl Mux {
                 !self.panes.contains_key(&id),
                 "pane id {id} already present in target Mux (global-id invariant broken)"
             );
-            self.panes.insert(id, p);
+            // Release builds must SURVIVE an id collision, not silently corrupt:
+            // a blind `insert` would overwrite the resident pane and LEAK it (its
+            // PTY + child process would dangle, untracked, until the OS reaps
+            // them). The global `NEXT_PANE_ID` allocator makes a collision a bug,
+            // but if one ever slips through (a stale detached tab re-attached
+            // twice, a future per-Mux regression), log it and DROP the displaced
+            // pane so its PTY/child end cleanly instead of leaking. The
+            // `debug_assert!` above still trips the invariant in test builds.
+            if let Some(old) = self.panes.insert(id, p) {
+                log::error!(
+                    "attach_tab: pane id {id} collided with an existing pane in the \
+                     target Mux (global-id invariant broken); dropping the displaced \
+                     pane to end its PTY/child"
+                );
+                drop(old);
+            }
         }
         let pos = at.unwrap_or(self.tabs.len()).min(self.tabs.len());
         self.insert_tab(pos, dt.tab);
@@ -2102,12 +2142,25 @@ impl Mux {
             .iter()
             .map(|(id, p)| (*id, p.group_name.as_deref()))
             .collect();
-        compute_broadcast_targets(
+        let targets = compute_broadcast_targets(
             &self.broadcast,
             tab.focus,
             &panes_in_focused_tab,
             &all_with_groups,
-        )
+        );
+        // Self-heal an emptied named group: if the active scope is a named
+        // Group but no pane currently matches it (the last member was closed
+        // or ungrouped, or the focused pane was never in the group), the
+        // target set is empty — which would BLACK-HOLE every keystroke while
+        // the broadcast indicator stays lit (the user types and nothing
+        // happens, with no cue). Fall back to the focused pane so input is
+        // never silently swallowed. This single point covers ungroup /
+        // last-member-closed / focused-not-in-group; Off/Tab/All can't reach
+        // here empty (they always include the focused/tab panes).
+        if targets.is_empty() && matches!(self.broadcast, BroadcastScope::Group(_)) {
+            return vec![tab.focus];
+        }
+        targets
     }
 
     /// Snap every pane in the active tab's broadcast set back to the
@@ -2212,8 +2265,18 @@ impl Mux {
             .map(|(i, t)| {
                 let pane = self.panes.get(&t.focus);
                 let title = pane.map(|p| p.title.as_str()).unwrap_or("");
+                // A pane we can't find (shouldn't happen) is treated as a
+                // placeholder so the cwd/`tab N` fallback applies, not an empty
+                // verbatim title.
+                let placeholder = pane.map(|p| p.title_is_placeholder).unwrap_or(true);
                 let cwd = pane.and_then(|p| p.term.current_dir_or_native());
-                resolve_tab_title(t.title_override.as_deref(), title, cwd.as_deref(), i)
+                resolve_tab_title(
+                    t.title_override.as_deref(),
+                    title,
+                    placeholder,
+                    cwd.as_deref(),
+                    i,
+                )
             })
             .collect()
     }
@@ -2230,10 +2293,14 @@ impl Mux {
             .map(|(i, t)| {
                 let pane = self.panes.get(&t.focus);
                 let title = pane.map(|p| p.title.as_str()).unwrap_or("");
+                // See `tab_titles`: a missing pane defaults to placeholder so the
+                // cwd/`tab N` fallback applies rather than an empty verbatim label.
+                let placeholder = pane.map(|p| p.title_is_placeholder).unwrap_or(true);
                 let cwd = pane.and_then(|p| p.term.current_dir_or_native());
                 resolve_tab_label(
                     t.title_override.as_deref(),
                     title,
+                    placeholder,
                     cwd.as_deref(),
                     home.as_deref(),
                     i,
@@ -2259,10 +2326,11 @@ impl Mux {
 fn resolve_tab_title(
     title_override: Option<&str>,
     pane_title: &str,
+    placeholder: bool,
     cwd: Option<&str>,
     idx: usize,
 ) -> String {
-    resolve_tab_label(title_override, pane_title, cwd, None, idx).text
+    resolve_tab_label(title_override, pane_title, placeholder, cwd, None, idx).text
 }
 
 /// v2.26.0: a resolved tab label. `text` is the compact display string (used by
@@ -2284,6 +2352,7 @@ pub(crate) struct TabLabel {
 fn resolve_tab_label(
     title_override: Option<&str>,
     pane_title: &str,
+    placeholder: bool,
     cwd: Option<&str>,
     home: Option<&str>,
     idx: usize,
@@ -2296,7 +2365,13 @@ fn resolve_tab_label(
             path: None,
         };
     }
-    if pane_title.is_empty() || pane_title == "kettle" {
+    // v2.32.0 (audit): branch on the authoritative `Pane::title_is_placeholder`
+    // flag, NOT a string compare against the "kettle" seed. A real shell title
+    // that happens to equal the seed string ("kettle") is a genuine title and
+    // must be shown verbatim — the flag is the single source of truth (the
+    // instant any real OSC 2 title arrives the flag is cleared; consistent with
+    // app.rs's `p.title_is_placeholder` titlebar branch).
+    if placeholder || pane_title.is_empty() {
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             let full = abbreviate_home(cwd, home);
             // Platform-independent leaf: a cwd's separator style follows the
@@ -2871,7 +2946,9 @@ mod node_tests {
             compute_broadcast_targets(&BroadcastScope::All, 2, &in_tab, &all),
             vec![1, 2, 3, 4, 5]
         );
-        // Group("fleet"): every pane tagged "fleet", regardless of tab.
+        // Group("fleet") with the focused pane (2) a MEMBER: every pane tagged
+        // "fleet", regardless of tab; the focused pane is already in the set so
+        // it is NOT duplicated.
         assert_eq!(
             compute_broadcast_targets(
                 &BroadcastScope::Group("fleet".to_string()),
@@ -2881,15 +2958,29 @@ mod node_tests {
             ),
             vec![1, 2, 5]
         );
-        // Group with no matches → empty.
-        assert!(
+        // Group("fleet") with the focused pane (4) NOT a member: the on-screen
+        // pane is unioned in (appended, deduped) so input is never routed away
+        // from it. v2.32.0 (audit) — the Group arm now always includes the
+        // focused pane, mirroring Off/Tab/All.
+        assert_eq!(
+            compute_broadcast_targets(
+                &BroadcastScope::Group("fleet".to_string()),
+                4,
+                &in_tab,
+                &all
+            ),
+            vec![1, 2, 5, 4]
+        );
+        // Group with no group matches still yields the focused pane (never an
+        // empty set that would black-hole input). v2.32.0 (audit).
+        assert_eq!(
             compute_broadcast_targets(
                 &BroadcastScope::Group("nonexistent".to_string()),
                 2,
                 &in_tab,
                 &all
-            )
-            .is_empty()
+            ),
+            vec![2]
         );
         // Default scope is Off.
         assert_eq!(BroadcastScope::default(), BroadcastScope::Off);
@@ -2916,44 +3007,92 @@ mod node_tests {
         }
     }
 
+    /// v2.32.0 (audit, HIGH): an emptied named broadcast Group must NEVER
+    /// black-hole input. When the active scope is a `Group` but no pane matches
+    /// it (last member closed / ungrouped / the focused pane was never in the
+    /// group), `broadcast_target_ids` self-heals to `[focus]` so typing still
+    /// reaches the on-screen pane instead of vanishing while the indicator stays
+    /// lit. Built without a PTY: the method only reads `tab.focus` and the group
+    /// names in `self.panes`, so an empty `panes` map with a `Group` scope
+    /// exercises the empty-group path directly.
+    #[test]
+    fn broadcast_target_ids_self_heals_empty_group_to_focus() {
+        let mut mux = Mux::new();
+        mux.tabs.push(Tab {
+            root: Node::Leaf(42),
+            focus: 42,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        mux.active = 0;
+        // No pane carries the "fleet" group (panes map is empty) → the raw
+        // target set is empty, but the self-heal returns the focused pane.
+        mux.broadcast = BroadcastScope::Group("fleet".to_string());
+        assert_eq!(
+            mux.broadcast_target_ids(),
+            vec![42],
+            "an empty named group must heal to the focused pane, never black-hole input"
+        );
+        // Sanity: the self-heal is Group-only — scope Off still short-circuits
+        // to an empty set (broadcast disabled, the caller writes to the focused
+        // pane directly), unchanged by this fix.
+        mux.broadcast = BroadcastScope::Off;
+        assert!(mux.broadcast_target_ids().is_empty());
+    }
+
     #[test]
     fn resolve_tab_title_precedence() {
         use super::resolve_tab_title;
         // Cycle 829 (audit): an explicit override wins over a real pane title
         // AND over the cwd fallback — the bug was that it was ignored entirely.
+        // (The `bool` arg is `Pane::title_is_placeholder`.)
         assert_eq!(
-            resolve_tab_title(Some("deploy"), "bash", Some("/home/u/proj"), 0),
+            resolve_tab_title(Some("deploy"), "bash", false, Some("/home/u/proj"), 0),
             "deploy"
         );
         assert_eq!(
-            resolve_tab_title(Some("notes"), "kettle", Some("/home/u/proj"), 2),
+            resolve_tab_title(Some("notes"), "kettle", true, Some("/home/u/proj"), 2),
             "notes"
         );
         // Empty override is ignored (falls through to the normal chain).
-        assert_eq!(resolve_tab_title(Some(""), "vim", None, 0), "vim");
+        assert_eq!(resolve_tab_title(Some(""), "vim", false, None, 0), "vim");
         // No override: a real shell title wins.
         assert_eq!(
-            resolve_tab_title(None, "vim - main.rs", None, 0),
+            resolve_tab_title(None, "vim - main.rs", false, None, 0),
             "vim - main.rs"
         );
-        // Placeholder title → cwd basename.
+        // Placeholder title (still the seed) → cwd basename.
         assert_eq!(
-            resolve_tab_title(None, "kettle", Some("/home/u/Repos/kettle"), 0),
+            resolve_tab_title(None, "kettle", true, Some("/home/u/Repos/kettle"), 0),
+            "kettle"
+        );
+        // v2.32.0 (audit): a REAL shell title that happens to equal the seed
+        // string "kettle" (placeholder = false) is shown VERBATIM — it must NOT
+        // be re-derived as a placeholder via a string compare against the seed.
+        assert_eq!(
+            resolve_tab_title(None, "kettle", false, Some("/home/u/Repos/proj"), 0),
             "kettle"
         );
         // Placeholder + no cwd → "tab N" (1-based).
-        assert_eq!(resolve_tab_title(None, "kettle", None, 3), "tab 4");
-        assert_eq!(resolve_tab_title(None, "", None, 0), "tab 1");
+        assert_eq!(resolve_tab_title(None, "kettle", true, None, 3), "tab 4");
+        // Empty title is always a placeholder regardless of the flag.
+        assert_eq!(resolve_tab_title(None, "", true, None, 0), "tab 1");
+        assert_eq!(resolve_tab_title(None, "", false, None, 0), "tab 1");
     }
 
     #[test]
     fn resolve_tab_label_surfaces_cwd_path() {
         use super::resolve_tab_label;
-        // cwd fallback: compact text is the leaf, but the full (abbreviated) path
-        // is surfaced for the renderer to tier.
+        // cwd fallback (placeholder title still the seed): compact text is the
+        // leaf, but the full (abbreviated) path is surfaced for the renderer to
+        // tier. (The `bool` arg is `Pane::title_is_placeholder`.)
         let l = resolve_tab_label(
             None,
             "kettle",
+            true,
             Some("/home/u/Repos/kettle"),
             Some("/home/u"),
             0,
@@ -2961,22 +3100,35 @@ mod node_tests {
         assert_eq!(l.text, "kettle");
         assert_eq!(l.path.as_deref(), Some("~/Repos/kettle"));
         // No home match → full path unabbreviated.
-        let l = resolve_tab_label(None, "kettle", Some("/srv/app"), Some("/home/u"), 0);
+        let l = resolve_tab_label(None, "kettle", true, Some("/srv/app"), Some("/home/u"), 0);
         assert_eq!(l.text, "app");
         assert_eq!(l.path.as_deref(), Some("/srv/app"));
+        // v2.32.0 (audit): a REAL title equal to the seed string "kettle"
+        // (placeholder = false) is shown verbatim and carries NO cwd path —
+        // the flag, not a string compare, decides placeholder-ness.
+        let l = resolve_tab_label(
+            None,
+            "kettle",
+            false,
+            Some("/home/u/Repos/proj"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "kettle");
+        assert!(l.path.is_none());
         // Override / real title / no-cwd carry no path (shown verbatim).
         assert!(
-            resolve_tab_label(Some("deploy"), "bash", Some("/x/y"), None, 0)
+            resolve_tab_label(Some("deploy"), "bash", false, Some("/x/y"), None, 0)
                 .path
                 .is_none()
         );
         assert!(
-            resolve_tab_label(None, "vim - main.rs", None, None, 0)
+            resolve_tab_label(None, "vim - main.rs", false, None, None, 0)
                 .path
                 .is_none()
         );
         assert!(
-            resolve_tab_label(None, "kettle", None, None, 3)
+            resolve_tab_label(None, "kettle", true, None, None, 3)
                 .path
                 .is_none()
         );
@@ -2984,6 +3136,7 @@ mod node_tests {
         let l = resolve_tab_label(
             None,
             "kettle",
+            true,
             Some("C:\\Users\\me\\Repos\\kettle"),
             Some("C:\\Users\\me"),
             0,

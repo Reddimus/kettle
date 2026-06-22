@@ -141,7 +141,11 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
             // Cycle 858 (audit): the previous `same_neighbor && row.is_none()`
             // arm produced the same `left.col + 1` as the plain `same_neighbor`
             // arm below, so it was a dead duplicate — merged.
-            None if same_neighbor => left.map(|l| l.col + 1).unwrap_or(0),
+            // Saturating add: `resolve_run` is a pure-spec `pub` fn; a
+            // >65,536-cell same-neighbor run would overflow `u16` and, under
+            // the release profile (`panic = "abort"` + overflow-checks), abort
+            // the process. Saturate at `u16::MAX` instead of wrapping/aborting.
+            None if same_neighbor => left.map(|l| l.col.saturating_add(1)).unwrap_or(0),
             None => 0,
         };
         let msb = c
@@ -363,5 +367,37 @@ mod tests {
         let res = resolve_run(&[head, tail]);
         assert_eq!(res[0].image_id, 33_554_474);
         assert_eq!(res[1].image_id, 33_554_474, "msb inherited from left");
+    }
+
+    #[test]
+    fn inherited_column_saturates_at_u16_max() {
+        // A same-neighbor cell whose left neighbor sits at the last column
+        // (`u16::MAX`) and omits its own column must NOT overflow when it
+        // inherits `left.col + 1`. Under the release profile (overflow-checks
+        // + `panic = "abort"`) a wrapping `+ 1` would abort the process; the
+        // saturating add pins it at `u16::MAX` instead.
+        let head = RawCell {
+            fg: 7,
+            placement_id: 0,
+            diacritics: CellDiacritics {
+                row: Some(0),
+                col: Some(u16::MAX),
+                msb: None,
+            },
+        };
+        let inherit = RawCell {
+            fg: 7,
+            placement_id: 0,
+            diacritics: CellDiacritics::default(),
+        };
+        let res = resolve_run(&[head, inherit]);
+        assert_eq!(res[0].col, u16::MAX);
+        assert_eq!(
+            res[1].col,
+            u16::MAX,
+            "inherited column must saturate at u16::MAX, not wrap/overflow"
+        );
+        // The whole run shares one image id and never panics.
+        assert!(res.iter().all(|c| c.image_id == 7));
     }
 }

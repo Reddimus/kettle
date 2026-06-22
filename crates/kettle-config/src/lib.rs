@@ -2791,6 +2791,24 @@ impl Config {
                         "solid" | "image" | "starfield" | "transparent"
                     )
                 }
+                // Cycle 943 (audit): the three background-image placement enums
+                // were stored verbatim and consumed by a renderer `match` with a
+                // silent `_ =>` fallback (mode falls back to stretch_and_fill;
+                // align falls back to center/middle) — a typo like `mode = tyle`
+                // passed `--check-config` yet placed the image wrong. Pin the
+                // accepted value set (matching kettle-render's match + the docs).
+                "background-image-mode" | "background_image_mode" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "tile" | "center" | "scale" | "stretch_and_fill"
+                ),
+                "background-image-align-horiz" | "background_image_align_horiz" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "left" | "center" | "right"
+                ),
+                "background-image-align-vert" | "background_image_align_vert" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "top" | "middle" | "bottom"
+                ),
                 "text-renderer" | "text_renderer" => {
                     matches!(v.to_ascii_lowercase().as_str(), "grid" | "legacy")
                 }
@@ -2997,7 +3015,19 @@ impl Config {
                 // doesn't see). Now: surface the malformed regex at
                 // check-config time so users see the issue before
                 // an event they expected to fire never does.
-                "trigger" => regex::Regex::new(v.trim()).is_ok(),
+                //
+                // Cycle (audit): mirror the apply path's split. A valid
+                // trigger is `REGEX :: command` (cycle 622) where ONLY
+                // the LHS before the `::` separator is the regex — the
+                // command can contain regex metacharacters freely.
+                // Validating the WHOLE value falsely flagged a line like
+                // `foo :: grep bar[baz` (the `[baz` is in the command,
+                // not the pattern). Use `parse_trigger_with_command` so
+                // the diagnostic and the runtime agree on what's a regex.
+                "trigger" => match parse_trigger_with_command(v.trim()) {
+                    Some((pat, _)) => regex::Regex::new(&pat).is_ok(),
+                    None => regex::Regex::new(v.trim()).is_ok(),
+                },
                 "env" => parse_env_assignment(v).is_some(),
                 "menu-item" | "menu_item" => v
                     .split_once('=')
@@ -3016,6 +3046,21 @@ impl Config {
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
+        // Cycle (audit): explicit single-color overrides
+        // (background / foreground / cursor block + glyph / selection
+        // bg + fg) are stashed here during the parse loop and applied
+        // AFTER the theme / `explicit_palette` re-apply block below, so
+        // an explicit color always wins over a `theme =` regardless of
+        // line order. Before this, `background = #ff0000` followed by
+        // `theme = Dracula` lost the red because applying the theme
+        // overwrote `cfg.theme.background` in place. Precedence:
+        // explicit single-color line > palette override > theme.
+        let mut explicit_background: Option<Rgb> = None;
+        let mut explicit_foreground: Option<Rgb> = None;
+        let mut explicit_cursor: Option<Rgb> = None;
+        let mut explicit_cursor_text: Option<Rgb> = None;
+        let mut explicit_selection_bg: Option<Rgb> = None;
+        let mut explicit_selection_fg: Option<Rgb> = None;
         let mut unknown: Vec<String> = Vec::new();
         // Cycle 619: Terminator splits bell into two orthogonal
         // bools (`visible_bell`, `urgent_bell`). Track them through
@@ -3117,13 +3162,17 @@ impl Config {
                     // are accepted as compatibility aliases so a Terminator
                     // config copies in without rename. Same for `foreground`
                     // and the cursor / fullscreen keys below.
+                    //
+                    // Cycle (audit): stash instead of writing
+                    // `cfg.theme.background` in place so a later `theme =`
+                    // line can't clobber it (applied post-theme below).
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.background = c;
+                        explicit_background = Some(c);
                     }
                 }
                 "foreground" | "foreground-color" | "foreground_color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.foreground = c;
+                        explicit_foreground = Some(c);
                     }
                 }
                 // `cursor-color` / Terminator's `cursor_bg_color` set the cursor
@@ -3133,22 +3182,22 @@ impl Config {
                 // under-glyph recolored — the standard terminal model.
                 "cursor-color" | "cursor-bg-color" | "cursor_bg_color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.cursor = c;
+                        explicit_cursor = Some(c);
                     }
                 }
                 "cursor-fg-color" | "cursor_fg_color" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.cursor_text = c;
+                        explicit_cursor_text = Some(c);
                     }
                 }
                 "selection-background" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.selection_background = c;
+                        explicit_selection_bg = Some(c);
                     }
                 }
                 "selection-foreground" => {
                     if let Some(c) = Rgb::parse(&e.value) {
-                        cfg.theme.selection_foreground = c;
+                        explicit_selection_fg = Some(c);
                     }
                 }
                 "palette" => {
@@ -4039,7 +4088,7 @@ impl Config {
                         cfg.focused_split_color = Some(c);
                     }
                 }
-                "accent-color" => {
+                "accent-color" | "accent_color" => {
                     // `auto` = Peacock: vary the accent per working directory
                     // and per window (the default since the multi-window
                     // cycle). `theme` / `off` / `none` opt OUT — every window
@@ -4244,6 +4293,29 @@ impl Config {
                 }
                 cfg.theme.palette[i] = c;
             }
+        }
+        // Cycle (audit): apply explicit single-color overrides AFTER the
+        // theme + palette re-apply above so they're order-independent —
+        // `background = #ff0000` keeps the red whether the `theme =`
+        // line comes before or after it. Precedence (highest first):
+        // explicit single-color line > `palette = N=#hex` > `theme =`.
+        if let Some(c) = explicit_background {
+            cfg.theme.background = c;
+        }
+        if let Some(c) = explicit_foreground {
+            cfg.theme.foreground = c;
+        }
+        if let Some(c) = explicit_cursor {
+            cfg.theme.cursor = c;
+        }
+        if let Some(c) = explicit_cursor_text {
+            cfg.theme.cursor_text = c;
+        }
+        if let Some(c) = explicit_selection_bg {
+            cfg.theme.selection_background = c;
+        }
+        if let Some(c) = explicit_selection_fg {
+            cfg.theme.selection_foreground = c;
         }
         // Cycle 619 (Terminator parity, config.py:215-216):
         // compose `visible_bell` + `urgent_bell` into kettle's
@@ -6427,6 +6499,256 @@ cell-height = 1.2\n";
             unknown.is_empty(),
             "bare padding aliases must not be reported as unknown: {unknown:?}"
         );
+    }
+
+    /// Cycle 943 (audit): `accent_color` (snake_case) was validated by
+    /// `detect_malformed_values` but the apply arm only handled
+    /// `accent-color`, so `accent_color = #ff8800` passed `--check-config`,
+    /// warned "unknown key", AND did nothing — the same validate-but-don't-
+    /// apply drift the `_color` aliases and `padding-x` already fixed.
+    #[test]
+    fn accent_color_snake_case_applies_and_is_known() {
+        let (cfg, unknown) = Config::parse_collect("accent_color = #ff8800\n");
+        assert_eq!(
+            cfg.accent_color,
+            Some(Rgb {
+                r: 0xff,
+                g: 0x88,
+                b: 0x00
+            }),
+            "snake_case accent_color must pin the explicit color"
+        );
+        assert!(!cfg.accent_auto, "an explicit hex disables Peacock auto");
+        assert!(
+            unknown.is_empty(),
+            "accent_color (snake_case) must not be reported as unknown: {unknown:?}"
+        );
+    }
+
+    /// Cycle 943 (audit): the three background-image placement enums fell back
+    /// silently in the renderer on a typo — now `detect_malformed_values` pins
+    /// them so a typo fails `--check-config` while every documented value (and
+    /// snake_case alias) passes.
+    #[test]
+    fn background_image_placement_enum_typos_are_flagged() {
+        let bad = Config::detect_malformed_values(
+            "background-image-mode = tyle\n\
+             background-image-align-horiz = lft\n\
+             background-image-align-vert = botom\n",
+        );
+        assert_eq!(bad.len(), 3, "all three typos should be flagged: {bad:?}");
+        assert!(bad.iter().any(|b| b.contains("background-image-mode")));
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("background-image-align-horiz"))
+        );
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("background-image-align-vert"))
+        );
+        // Every documented value (and the snake_case key alias) passes cleanly.
+        let ok = Config::detect_malformed_values(
+            "background-image-mode = tile\n\
+             background-image-mode = center\n\
+             background-image-mode = scale\n\
+             background-image-mode = stretch_and_fill\n\
+             background_image_mode = TILE\n\
+             background-image-align-horiz = left\n\
+             background-image-align-horiz = center\n\
+             background-image-align-horiz = right\n\
+             background_image_align_horiz = RIGHT\n\
+             background-image-align-vert = top\n\
+             background-image-align-vert = middle\n\
+             background-image-align-vert = bottom\n\
+             background_image_align_vert = TOP\n",
+        );
+        assert!(ok.is_empty(), "all valid placement values: {ok:?}");
+    }
+
+    /// Cycle 943 (audit): reverse-coverage guard — every key name the
+    /// `detect_malformed_values` validator recognizes must ALSO be recognized
+    /// (applied, not warned-as-unknown) by `parse_collect`. This is the test
+    /// that would have caught F1 (`accent_color` validated but not applied):
+    /// validate-but-don't-apply is a contradictory diagnostic (passes
+    /// `--check-config` yet warns "unknown key" + does nothing).
+    ///
+    /// The detect arms are match-arm literals — not enumerable at runtime — so
+    /// this list is hand-maintained. It mirrors at least every `_color` /
+    /// snake_case alias and the three background-image placement keys, each fed
+    /// a valid value; if a future edit teaches the validator a key the parser
+    /// doesn't apply, this reds.
+    #[test]
+    fn every_validated_key_is_also_applied() {
+        // (key, valid-value) pairs mirroring the detect_malformed_values arms.
+        let cases: &[(&str, &str)] = &[
+            // Color keys + their Terminator/snake_case aliases.
+            ("background", "#101010"),
+            ("foreground", "#fafafa"),
+            ("background-color", "#101010"),
+            ("background_color", "#101010"),
+            ("foreground-color", "#fafafa"),
+            ("foreground_color", "#fafafa"),
+            ("cursor-color", "#ff0000"),
+            ("cursor-bg-color", "#ff0000"),
+            ("cursor_bg_color", "#ff0000"),
+            ("cursor-fg-color", "#00ff00"),
+            ("cursor_fg_color", "#00ff00"),
+            ("selection-background", "#222222"),
+            ("selection-foreground", "#eeeeee"),
+            ("search-foreground", "#000000"),
+            ("search-background", "#ffff00"),
+            ("split-divider-color", "#333333"),
+            ("focused-split-color", "#7aa2f7"),
+            ("split-divider-color-focused", "#7aa2f7"),
+            ("title-transmit-bg-color", "#112233"),
+            ("title_transmit_bg_color", "#112233"),
+            ("title-receive-bg-color", "#112233"),
+            ("title_receive_bg_color", "#112233"),
+            ("title-inactive-bg-color", "#112233"),
+            ("title_inactive_bg_color", "#112233"),
+            ("title-transmit-fg-color", "#445566"),
+            ("title_transmit_fg_color", "#445566"),
+            ("title-receive-fg-color", "#445566"),
+            ("title_receive_fg_color", "#445566"),
+            ("title-inactive-fg-color", "#445566"),
+            ("title_inactive_fg_color", "#445566"),
+            // Accent — the F1 regression: snake_case validated but not applied.
+            ("accent-color", "#ff8800"),
+            ("accent_color", "#ff8800"),
+            // Enum keys with snake_case aliases.
+            ("background-type", "image"),
+            ("background_type", "image"),
+            ("text-renderer", "grid"),
+            ("text_renderer", "grid"),
+            // The three F2 background-image placement enums (+ snake_case).
+            ("background-image-mode", "scale"),
+            ("background_image_mode", "scale"),
+            ("background-image-align-horiz", "right"),
+            ("background_image_align_horiz", "right"),
+            ("background-image-align-vert", "top"),
+            ("background_image_align_vert", "top"),
+            // Other snake_case-aliased keys validated by detect.
+            ("theme-schedule", "sunrise/sunset"),
+            ("theme_schedule", "sunrise/sunset"),
+            ("ask-before-closing", "always"),
+            ("ask_before_closing", "always"),
+            ("light-theme", "TokyoNight"),
+            ("light_theme", "TokyoNight"),
+            ("dark-theme", "TokyoNight"),
+            ("dark_theme", "TokyoNight"),
+            ("theme-mode", "dark"),
+            ("theme_mode", "dark"),
+            ("cursor-shape", "block"),
+            ("cursor_shape", "block"),
+        ];
+        for (key, val) in cases {
+            // The validator must not flag the valid value...
+            let malformed = Config::detect_malformed_values(&format!("{key} = {val}\n"));
+            assert!(
+                malformed.is_empty(),
+                "validator flagged a valid `{key} = {val}`: {malformed:?}"
+            );
+            // ...and the parser must recognize (apply) the key, not warn unknown.
+            let (_cfg, unknown) = Config::parse_collect(&format!("{key} = {val}\n"));
+            assert!(
+                unknown.is_empty(),
+                "`{key}` is validated but parse_collect reports it unknown \
+                 (validate-but-don't-apply drift): {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_color_overrides_survive_a_later_theme_line() {
+        // Regression: `background = #ff0000` followed by `theme = Dracula`
+        // used to lose the red because applying the theme overwrote
+        // `cfg.theme.background` in place. Explicit single-color overrides
+        // are now order-independent (applied AFTER the theme), so each one
+        // wins regardless of where the `theme =` line sits.
+        let red = Rgb::parse("#ff0000").unwrap();
+        let green = Rgb::parse("#00ff00").unwrap();
+        let blue = Rgb::parse("#0000ff").unwrap();
+        let yellow = Rgb::parse("#ffff00").unwrap();
+        let cyan = Rgb::parse("#00ffff").unwrap();
+        let magenta = Rgb::parse("#ff00ff").unwrap();
+
+        // theme AFTER the color line — the historically-broken order.
+        let cfg = Config::parse_text(
+            "background = #ff0000\n\
+             foreground = #00ff00\n\
+             cursor-color = #0000ff\n\
+             cursor-fg-color = #ffff00\n\
+             selection-background = #00ffff\n\
+             selection-foreground = #ff00ff\n\
+             theme = Dracula\n",
+        );
+        assert_eq!(
+            cfg.theme.background, red,
+            "explicit bg must beat later theme"
+        );
+        assert_eq!(cfg.theme.foreground, green);
+        assert_eq!(cfg.theme.cursor, blue);
+        assert_eq!(cfg.theme.cursor_text, yellow);
+        assert_eq!(cfg.theme.selection_background, cyan);
+        assert_eq!(cfg.theme.selection_foreground, magenta);
+
+        // theme BEFORE the color line — must stay correct too (symmetry).
+        let cfg2 = Config::parse_text(
+            "theme = Dracula\n\
+             background = #ff0000\n\
+             foreground = #00ff00\n\
+             cursor-color = #0000ff\n\
+             cursor-fg-color = #ffff00\n\
+             selection-background = #00ffff\n\
+             selection-foreground = #ff00ff\n",
+        );
+        assert_eq!(cfg2.theme.background, red);
+        assert_eq!(cfg2.theme.foreground, green);
+        assert_eq!(cfg2.theme.cursor, blue);
+        assert_eq!(cfg2.theme.cursor_text, yellow);
+        assert_eq!(cfg2.theme.selection_background, cyan);
+        assert_eq!(cfg2.theme.selection_foreground, magenta);
+    }
+
+    #[test]
+    fn theme_with_no_explicit_color_override_still_applies_its_palette() {
+        // The order-independence fix must not break the plain case: a
+        // `theme =` with no explicit single-color overrides still loads
+        // the theme's own colors (we don't stash a default-None over them).
+        let dracula = Theme::by_name("Dracula");
+        let cfg = Config::parse_text("theme = Dracula\n");
+        assert_eq!(cfg.theme.background, dracula.background);
+        assert_eq!(cfg.theme.foreground, dracula.foreground);
+        assert_eq!(cfg.theme.cursor, dracula.cursor);
+        assert_eq!(cfg.theme.selection_background, dracula.selection_background);
+    }
+
+    #[test]
+    fn trigger_detect_allows_regex_metachars_in_the_command_half() {
+        // Cycle (audit): the trigger detect arm validates only the LHS
+        // regex of `REGEX :: command`, mirroring the apply path. A valid
+        // line whose COMMAND contains an unbalanced `[` must NOT be flagged
+        // (the `[baz` is an argv token, not part of the pattern).
+        let ok = Config::detect_malformed_values("trigger = foo :: grep bar[baz\n");
+        assert!(
+            ok.is_empty(),
+            "command-half metachars must not flag the trigger: {ok:?}"
+        );
+        // A plain `trigger = REGEX` (no `::`) is still validated whole.
+        let ok2 = Config::detect_malformed_values("trigger = error.*panic\n");
+        assert!(ok2.is_empty(), "valid bare regex must pass: {ok2:?}");
+    }
+
+    #[test]
+    fn trigger_detect_still_flags_an_invalid_pattern_half() {
+        // The LHS regex is still validated, so an unbalanced `[` BEFORE the
+        // `::` separator is flagged even though a command follows.
+        let bad = Config::detect_malformed_values("trigger = [unclosed :: notify hi\n");
+        assert_eq!(bad.len(), 1, "the invalid LHS regex must flag: {bad:?}");
+        assert!(bad[0].contains("trigger"));
+        // And a bare invalid regex (no command) is still flagged.
+        let bad2 = Config::detect_malformed_values("trigger = [unclosed\n");
+        assert_eq!(bad2.len(), 1, "bare invalid regex must flag: {bad2:?}");
     }
 
     #[test]

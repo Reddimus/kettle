@@ -68,11 +68,52 @@ impl Client {
     }
 
     /// Discover a running server and connect. If `pid` is `Some`, connect to
-    /// that pid's server; otherwise pick the newest live entry, pruning dead
-    /// ones as it probes.
+    /// that pid's server; otherwise pick the newest live entry.
+    ///
+    /// Robustness (audit): an entry is only *pruned* when its owning process is
+    /// genuinely dead (`presence::pid_alive` says so). A `connect_endpoint`
+    /// failure can also come from a *client-side* hiccup (a `try_clone` /
+    /// BufReader error while the server is alive and already connected) or a
+    /// transient transport error — pruning on those would permanently delete a
+    /// healthy server's entry, since the server `register`s exactly once at
+    /// start (no heartbeat). When the connect fails but the pid is still alive,
+    /// we leave the entry in place and remember the error, surfacing it rather
+    /// than masking every failure as a blanket `NoServer`.
     pub fn discover(pid: Option<u32>) -> Result<Self, CtlError> {
         let dir = discovery::registry_dir();
-        let entries = discovery::list(&dir);
+        Self::discover_in(
+            &dir,
+            pid,
+            Self::connect_endpoint,
+            crate::presence::pid_alive,
+        )
+    }
+
+    /// The dependency-injected core of [`discover`], split out so the
+    /// prune-gating invariant (a connect failure against a *live* pid must NOT
+    /// prune the entry) is unit-testable without the real registry/transport.
+    /// `connect` opens an endpoint; `pid_alive` reports whether a pid's owning
+    /// process is still running.
+    fn discover_in(
+        dir: &std::path::Path,
+        pid: Option<u32>,
+        connect: impl Fn(&str) -> Result<Self, CtlError>,
+        pid_alive: impl Fn(u32) -> bool,
+    ) -> Result<Self, CtlError> {
+        // `list_live` already drops + prunes pid-dead entries, so the loop only
+        // probes endpoints whose owner is alive at enumeration time.
+        let entries: Vec<_> = discovery::list(dir)
+            .into_iter()
+            .filter(|e| {
+                if pid_alive(e.pid) {
+                    true
+                } else {
+                    // Dead owner — its server can't return under this pid.
+                    discovery::prune(dir, e.pid);
+                    false
+                }
+            })
+            .collect();
         if entries.is_empty() {
             return Err(CtlError::NoServer);
         }
@@ -80,16 +121,29 @@ impl Client {
             Some(p) => entries.into_iter().filter(|e| e.pid == p).collect(),
             None => entries,
         };
+        if candidates.is_empty() {
+            return Err(CtlError::NoServer);
+        }
+        let mut last_err: Option<CtlError> = None;
         for e in candidates {
-            match Self::connect_endpoint(&e.endpoint) {
+            match connect(&e.endpoint) {
                 Ok(c) => return Ok(c),
-                Err(_) => {
-                    // Dead/stale entry — prune and try the next.
-                    discovery::prune(&dir, e.pid);
+                Err(err) => {
+                    // Only prune a TRULY dead server. If the owning process is
+                    // still alive the failure is client-side (a try_clone /
+                    // BufReader hiccup while the server is alive and already
+                    // connected) or a transient transport error — do NOT delete
+                    // a healthy entry; remember the error instead.
+                    if !pid_alive(e.pid) {
+                        discovery::prune(dir, e.pid);
+                    }
+                    last_err = Some(err);
                 }
             }
         }
-        Err(CtlError::NoServer)
+        // Surface the real reason we couldn't connect rather than a blanket
+        // NoServer, unless every candidate vanished without an error.
+        Err(last_err.unwrap_or(CtlError::NoServer))
     }
 
     /// Issue a request and return its result value (or a structured error).
@@ -145,8 +199,14 @@ impl Client {
         }
     }
 
-    /// Read the next event from the stream (after a successful `subscribe`).
-    /// Returns `None` on clean EOF.
+    /// Read the next *meaningful* event from the stream (after a successful
+    /// `subscribe`). Returns `None` on clean EOF.
+    ///
+    /// `ping` keepalives are consumed and skipped internally — they exist only
+    /// so the server can detect a dead peer on write, and carry no payload for
+    /// consumers. This is the single forward-compat seam for that filtering, so
+    /// every caller need not re-discover it. Non-event lines (e.g. a late
+    /// response) are likewise skipped.
     pub fn next_event(&mut self) -> Result<Option<Event>, CtlError> {
         loop {
             let Some(trimmed) = self.read_capped_line()? else {
@@ -162,11 +222,14 @@ impl Client {
                         ev.v
                     )));
                 }
+                // Swallow keepalives — they're a transport-liveness mechanism,
+                // not a consumer event.
+                if ev.event == "ping" {
+                    continue;
+                }
                 return Ok(Some(ev));
             }
-            // Skip non-event lines (e.g. a late response). Ignore a `ping`
-            // keepalive too (it parses as an Event and is returned; callers
-            // filter by kind).
+            // Skip non-event lines (e.g. a late response) and keep reading.
         }
     }
 
@@ -186,5 +249,137 @@ impl Client {
             return Err(CtlError::Protocol("server line exceeds 1 MiB".into()));
         }
         Ok(Some(String::from_utf8_lossy(&bytes).trim_end().to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Event;
+    use crate::transport::CtlListener;
+
+    /// Spin up a loopback listener whose server side writes `lines` (each is a
+    /// raw NDJSON message, no trailing newline needed) then closes, and return a
+    /// `Client` connected to it. Mirrors `transport::tests` so the Windows
+    /// named-pipe leg is exercised on CI too.
+    fn client_fed(lines: Vec<String>) -> Client {
+        let pid = std::process::id();
+        let tag = format!("{pid}-{:p}", &lines);
+        #[cfg(unix)]
+        let endpoint = std::env::temp_dir()
+            .join(format!("kettle-ctl-evt-{tag}.sock"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let endpoint = format!(r"\\.\pipe\kettle-ctl-evt-{tag}");
+
+        let listener = CtlListener::bind(&endpoint).expect("bind");
+        let ep = endpoint.clone();
+        std::thread::spawn(move || {
+            let mut conn = listener.accept().expect("accept");
+            for line in lines {
+                conn.write_all(line.as_bytes()).expect("write");
+                conn.write_all(b"\n").expect("write nl");
+            }
+            conn.flush().ok();
+            // Drop closes the connection → the client sees clean EOF.
+        });
+        Client::connect_endpoint(&ep).expect("connect")
+    }
+
+    use crate::discovery::{self, RegistryEntry};
+
+    fn reg_entry(pid: u32, endpoint: &str, started: u64) -> RegistryEntry {
+        RegistryEntry {
+            v: 1,
+            kind: "gui".into(),
+            pid,
+            endpoint: endpoint.into(),
+            version: "x".into(),
+            started_unix: started,
+        }
+    }
+
+    /// Fix 1 invariant: when `connect_endpoint` fails but the owning pid is
+    /// still ALIVE (a client-side `try_clone`/BufReader hiccup or a transient
+    /// transport error — the server `register`s exactly once, no heartbeat), the
+    /// healthy entry MUST NOT be pruned, and the real transport error must be
+    /// surfaced rather than masked as a blanket `NoServer`.
+    #[test]
+    fn discover_does_not_prune_live_pid_on_connect_failure() {
+        let dir = std::env::temp_dir().join(format!("kettle-ctl-disc-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid = 4242;
+        discovery::register(&dir, &reg_entry(pid, "ep-flaky", 100)).unwrap();
+
+        // Connect always fails with a transport error; pid is reported alive.
+        let connect = |_ep: &str| -> Result<Client, CtlError> {
+            Err(CtlError::Io(std::io::Error::other(
+                "transient transport hiccup",
+            )))
+        };
+        let res = Client::discover_in(&dir, None, connect, |_p| true);
+
+        // The error is surfaced (not masked as NoServer)…
+        match res {
+            Err(CtlError::Io(_)) => {}
+            Err(other) => panic!("expected the transport Io error to surface, got {other:?}"),
+            Ok(_) => panic!("connect closure always errs; discover must not succeed"),
+        }
+        // …and crucially the live entry is STILL on disk (not pruned).
+        assert!(
+            discovery::list(&dir).iter().any(|e| e.pid == pid),
+            "a live server's entry must survive a transient connect failure"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Conversely, a connect failure whose pid is DEAD does prune the entry
+    /// (the complementary half of the gate).
+    #[test]
+    fn discover_prunes_dead_pid_on_connect_failure() {
+        let dir = std::env::temp_dir().join(format!("kettle-ctl-disc-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid = 4243;
+        discovery::register(&dir, &reg_entry(pid, "ep-dead", 100)).unwrap();
+
+        let connect = |_ep: &str| -> Result<Client, CtlError> {
+            Err(CtlError::Io(std::io::Error::other("x")))
+        };
+        // pid reported dead → enumeration filter prunes it before any connect,
+        // so discovery yields NoServer and the entry is gone.
+        let res = Client::discover_in(&dir, None, connect, |_p| false);
+        assert!(matches!(res, Err(CtlError::NoServer)));
+        assert!(
+            !discovery::list(&dir).iter().any(|e| e.pid == pid),
+            "a dead server's entry must be pruned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn next_event_skips_ping_keepalives() {
+        // A ping, then a real event: next_event must yield only the real one.
+        let ping = serde_json::to_string(&Event::new("ping", None, Value::Null)).unwrap();
+        let output =
+            serde_json::to_string(&Event::new("output", Some(3), serde_json::json!("hi"))).unwrap();
+        let mut client = client_fed(vec![ping, output]);
+
+        let ev = client.next_event().expect("ok").expect("an event");
+        assert_eq!(ev.event, "output", "ping was leaked instead of skipped");
+        assert_eq!(ev.pane, Some(3));
+    }
+
+    #[test]
+    fn next_event_skips_runs_of_pings_then_returns_eof() {
+        // Several consecutive pings with no real event → clean EOF (None), never
+        // a ping handed back to the caller.
+        let ping = serde_json::to_string(&Event::new("ping", None, Value::Null)).unwrap();
+        let mut client = client_fed(vec![ping.clone(), ping.clone(), ping]);
+
+        assert!(
+            client.next_event().expect("ok").is_none(),
+            "only pings were sent — next_event should reach EOF without yielding one"
+        );
     }
 }

@@ -4,6 +4,102 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.32.0] — 2026-06-21
+
+  A correctness, robustness, and security hardening release driven by an
+  exhaustive multi-agent audit of every crate plus seven cross-cutting
+  dimensions (Rust, terminal-emulator correctness, docs, UI/UX, architecture,
+  security, performance). Every fix below was adversarially re-verified against
+  the code before landing. Larger structural items (in-process GPU
+  auto-recovery, the `app.rs` split, kitty `a=q` replies, vertical-list pickers)
+  are tracked as a follow-up in `docs/AUDIT-DEFERRED.md`.
+
+  ### Fixed — terminal correctness
+  - **Bracketed paste no longer corrupts newlines.** The CR-normalization that
+    guards against paste auto-run was applied unconditionally, rewriting `\n`→`\r`
+    even *inside* the `ESC[200~`/`201~` markers — garbling multi-line pastes into
+    vim / IPython / node. It now applies only on the non-bracketed path; bracketed
+    pastes preserve `\n` (and still strip embedded end-markers).
+  - **OSC 9 ConEmu subcommands no longer fire bogus desktop notifications.** Every
+    `OSC 9;<n>` (progress `9;1`, `9;2`, …) was treated as an iTerm2 notification
+    title; the parser now forwards the structured ConEmu shape downstream and only
+    notifies on genuine free-text `OSC 9` titles.
+  - **Legacy (non-SGR) mouse mode reports button release.** A release re-encoded
+    the original button instead of the release sentinel (code 3); pagers/editors
+    using X10/normal mouse mode now see button-up.
+  - **Combining (zero-width) marks are preserved** on screen and in search /
+    links / agent-scrape, routed through one shared `grid_text` helper + a
+    `SnapCell.zerowidth` field (a decomposed `e`+U+0301 renders as `é`).
+  - **iTerm2 OSC 1337 file transfers with `inline=0`** are no longer rendered as
+    inline images; `bail()` on an over-long control string now appends a synthetic
+    terminator so the downstream VT parser can't desync; OSC 7 percent-decoding
+    rejects sign-prefixed escapes.
+  - **Vi-mode cursor + visual selection now render** with the search bar closed
+    (the normal case) — the overlay early-return had omitted the vi fields.
+
+  ### Fixed — robustness & multi-window
+  - **A lost GPU device no longer spins the event loop.** Building on v2.31.0, the
+    redraw guard now clears the coalescing flag and snapshots per-pane output
+    generations, `about_to_wait` short-circuits animation wakes, and a resize can't
+    reconfigure a dead surface — so streaming panes during a driver TDR quiesce
+    instead of waking at 30–60 Hz.
+  - **OS focus changes route correctly.** `focused_seq` was never updated on a
+    window-manager focus change, so `--remote`/ctl "focused-window" operations, the
+    update banner, and the agent `focused_window`/`to_window` JSON targeted a stale
+    window.
+  - **Close-confirmation is no longer skipped for a busy multi-pane scope.** A tab
+    or window with several panes but only one busy pane bypassed the
+    "MultipleTerminals" prompt and closed without asking; the busy count is now only
+    the all-idle skip, while the prompt decision uses the full scope size.
+  - **Broadcast input is never black-holed.** An emptied named broadcast group
+    self-heals to the focused pane (was: all keystrokes silently dropped with the
+    indicator still lit), and a group broadcast always includes the on-screen pane.
+  - **Session save/restore round-trips** tab title overrides, pane broadcast-group
+    membership, and zoom state (additively, so old session files still load).
+  - **ctl control-plane:** `discover()` now prunes a registry entry only when the
+    owning process is genuinely dead (a transient client-side hiccup no longer makes
+    a live server permanently undiscoverable); the Windows connector fast-fails a
+    missing pipe instead of a ~1 s retry spin; `run_command` probes for a
+    disconnected client so a Ctrl+C'd run frees its slot + badge promptly; one
+    connection-cap counter is the single source of truth.
+  - A directly-launched `ssh`/`docker` pane (no shell parent) is now detected as a
+    remote context; `foreground_cwd` only follows a *linear* process chain, so a
+    background job can't mislabel the pane's directory; `attach_tab` drops a
+    displaced pane instead of leaking its PTY + child.
+
+  ### Security
+  - **OSC window titles are sanitized** before reaching the OS titlebar / tab /
+    status bar: control characters and Unicode bidirectional-override format
+    characters (the U+202E Alt-Tab / titlebar spoofing vector) become spaces, and
+    the length is capped.
+  - **dev-record redacts modifier+printable keystrokes** unless raw-input recording
+    is explicitly on — AltGr is reported as Ctrl+Alt on Windows, so non-US-layout
+    symbols / accented letters would otherwise have landed in the always-on trace in
+    cleartext.
+  - **Remote reconnect commands are shell-safe.** Host/user/container fields parsed
+    from a descendant's argv are now charset-validated at parse time and
+    POSIX-single-quoted at build time; a value with a control char yields no
+    Reconnect menu item rather than an unsafe auto-executed line. `ssh -l <user>`
+    now reconnects as the right user.
+
+  ### Fixed — config & UX
+  - `accent_color` (snake_case) now applies instead of validating-but-silently-
+    ignoring; `background-image-mode` / `-align-*` enum typos are flagged by
+    `--check-config`; an explicit color override (`background = …`) survives a later
+    `theme =` line; a valid `trigger = REGEX :: cmd` no longer false-positives.
+  - The default broadcast chord is `Ctrl+Shift+G` on Windows (Win+G is the OS Game
+    Bar); `Ctrl+Shift+D` half-page menu scroll now goes *down*.
+  - `--screenshot` honors the default **Grid** (cell-locked) text renderer, so the
+    README hero/showcase imagery matches the live product; block (Alt+drag)
+    selection draws the column rectangle it actually copies.
+
+  ### Internal / docs
+  - `resolve_run` column inheritance saturates instead of risking a `u16` overflow
+    abort. Documentation sweep: README / INSTALL version pins, the default theme
+    name, the `group_tab` description, accent-color defaults, and a new
+    auto-shell-integration section in `docs/SHELL-INTEGRATION.md`. The dev-record
+    feature build is now exercised in CI.
+
 ## [2.31.0] — 2026-06-20
 
   ### Fixed

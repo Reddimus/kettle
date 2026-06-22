@@ -255,7 +255,7 @@ impl Extractor {
     }
 
     fn bail(&mut self, out: &mut Vec<Chunk>) {
-        let mut v = Vec::with_capacity(self.seq.len() + 2);
+        let mut v = Vec::with_capacity(self.seq.len() + 4);
         v.push(0x1b);
         v.push(match self.mode {
             Mode::Dcs => b'P',
@@ -263,6 +263,18 @@ impl Extractor {
             _ => b']',
         });
         v.extend_from_slice(&self.seq);
+        // Append a synthetic terminator so the downstream vte parser doesn't
+        // stay mid-string and swallow the following bytes (which would desync
+        // every later sequence). Mirrors the R::None path: BEL closes an OSC,
+        // ESC \ closes a DCS/APC — both return the engine to Ground. (We have
+        // no real terminator here — this is an abandoned over-long string —
+        // so OSC always uses BEL regardless of `term_bel`.)
+        if self.mode == Mode::Osc {
+            v.push(0x07);
+        } else {
+            v.push(0x1b);
+            v.push(b'\\');
+        }
         out.push(Chunk::Pass(v));
         self.seq.clear();
         self.mode = Mode::Pass;
@@ -655,12 +667,20 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
+            // Require BOTH escape bytes to be ASCII hex digits. `u8::from_str_radix`
+            // also accepts a leading sign (`+5`/`-5`), so `%+5`/`%-5` would
+            // otherwise mis-decode to a byte instead of being passed through as
+            // the literal text they are — guard the digits explicitly first.
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
             // Slice the *bytes* (never the &str): a `%` immediately
             // followed by a multibyte UTF-8 char would otherwise make
             // `&path[i+1..i+3]` land on a non-char-boundary and panic
             // (a hard crash under panic=abort) before from_str_radix
             // could reject it. from_utf8 rejects a mid-char byte pair,
             // so the `%` falls through and is pushed as a literal byte.
+            // (Both bytes are now known ASCII hex, so from_utf8 / from_str_radix
+            // cannot fail here, but keep the chained form for robustness.)
             && let Ok(hex) = std::str::from_utf8(&b[i + 1..i + 3])
             && let Ok(c) = u8::from_str_radix(hex, 16)
         {
@@ -717,6 +737,26 @@ fn parse_osc9_4(seq: &[u8]) -> Option<Progress> {
 
 fn parse_protocol_notification(seq: &[u8]) -> Option<(String, String)> {
     if let Some(rest) = seq.strip_prefix(b"9;") {
+        // ConEmu/Windows-Terminal OSC 9 is a structured command namespace
+        // (`9;1` progress, `9;2`, `9;3`, `9;4` taskbar progress, …), NOT an
+        // iTerm2 free-text notification. The 9;4 / 9;9 carve-outs above catch
+        // the two kettle understands; forward the rest downstream rather than
+        // firing a spurious notification with a numeric/garbled title. Two
+        // structured shapes:
+        //   * `<digits>;…`  — a subcommand id followed by `;` and a payload.
+        //   * all-digit/whitespace (e.g. a bare `ESC]9;4 ST`) — a subcommand
+        //     id with no payload.
+        // iTerm2 free text (`9;build finished`, `9;100% done`) has its digits
+        // NOT immediately followed by `;`, so it still notifies.
+        let lead_digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        let structured = (lead_digits > 0 && rest.get(lead_digits) == Some(&b';'))
+            || (!rest.is_empty()
+                && rest
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || b.is_ascii_whitespace()));
+        if structured {
+            return None;
+        }
         let title = clean_notify_field(rest, false)?;
         return Some((title, String::new()));
     }
@@ -1008,6 +1048,133 @@ mod tests {
         let mut ex = Extractor::new();
         let out = ex.feed(b"\x1b]2;a\x1bzb\x07after");
         assert_eq!(passed(&out), b"\x1b]2;a\x1bzb\x07after");
+    }
+
+    /// FIX 1: ConEmu/Windows-Terminal OSC 9 subcommands (`9;1`, `9;2`, `9;3`,
+    /// bare `9;4`, …) are structured commands, NOT iTerm2 free-text
+    /// notifications. They must NOT fire a spurious desktop notification with a
+    /// numeric/garbled title; they forward downstream instead. iTerm2 free text
+    /// (digits not directly followed by `;`) must STILL notify.
+    #[test]
+    fn osc9_conemu_subcommands_do_not_notify() {
+        let mut ex = Extractor::new();
+        for seq in [
+            &b"\x1b]9;1;x\x07"[..],
+            &b"\x1b]9;2;x\x07"[..],
+            &b"\x1b]9;3;x\x07"[..],
+        ] {
+            let out = ex.feed(seq);
+            assert!(
+                !out.iter().any(|c| matches!(c, Chunk::Notification { .. })),
+                "structured OSC 9 subcommand must not notify: {seq:?} → {out:?}"
+            );
+        }
+        // A bare `ESC]9;4 ST` (all-digit/whitespace remainder, no payload) must
+        // not notify either — it is a degenerate progress/clear command.
+        let out = ex.feed(b"\x1b]9;4\x07");
+        assert!(
+            !out.iter().any(|c| matches!(c, Chunk::Notification { .. })),
+            "bare OSC 9;4 must not notify, got {out:?}"
+        );
+        // iTerm2 free-text notifications STILL fire (digits not followed by `;`).
+        let out = ex.feed(b"\x1b]9;build finished\x07");
+        assert!(
+            out.iter().any(|c| matches!(
+                c,
+                Chunk::Notification { title, .. } if title == "build finished"
+            )),
+            "iTerm2 free-text OSC 9 must still notify, got {out:?}"
+        );
+        let out = ex.feed(b"\x1b]9;100% done\x07");
+        assert!(
+            out.iter().any(|c| matches!(
+                c,
+                Chunk::Notification { title, .. } if title == "100% done"
+            )),
+            "OSC 9 free text beginning with digits (not followed by `;`) must notify, got {out:?}"
+        );
+    }
+
+    /// FIX 2: an over-long / abandoned control string is forwarded verbatim by
+    /// `bail()`, but with a synthetic terminator appended so the downstream
+    /// engine returns to Ground and does NOT swallow a following sequence (which
+    /// would desync every later sequence). The bailed OSC Pass must END with a
+    /// BEL, and a clean sequence fed afterward must still parse and not be eaten.
+    #[test]
+    fn bail_appends_terminator_and_does_not_desync() {
+        let mut ex = Extractor::new();
+        // > MAX_SEQ non-terminator bytes inside an OSC bail it. (No terminator
+        // is present, so the whole accumulated body forwards verbatim once the
+        // MAX_SEQ cap is hit.)
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b]2;");
+        input.extend(std::iter::repeat_n(b'A', super::MAX_SEQ + 16));
+        let out = ex.feed(&input);
+        let bytes = passed(&out);
+        // The bailed OSC must be BEL-terminated (synthetic terminator appended)
+        // so the downstream parser is returned to Ground.
+        assert_eq!(
+            bytes.last(),
+            Some(&0x07),
+            "bailed OSC must end with a synthetic BEL terminator"
+        );
+        // A clean sequence + plain text fed afterward still parses and passes
+        // through (the extractor is back in Pass mode, the downstream engine is
+        // not stuck mid-string). This is the desync the fix prevents.
+        let out = ex.feed(b"\x1b]133;A\x07ok");
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
+            "a clean sequence after a bail must still parse, got {out:?}"
+        );
+        assert_eq!(passed(&out), b"ok");
+    }
+
+    /// FIX 2 (DCS variant): a runaway DCS is re-terminated with `ESC \`, not BEL.
+    #[test]
+    fn bail_dcs_appends_esc_backslash() {
+        let mut ex = Extractor::new();
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1bP");
+        input.extend(std::iter::repeat_n(b'B', super::MAX_SEQ + 16));
+        let out = ex.feed(&input);
+        let bytes = passed(&out);
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            b"\x1b\\",
+            "bailed DCS must end with a synthetic ESC-\\ terminator"
+        );
+        // Downstream not desynced: a clean OSC after the bail still parses.
+        let out = ex.feed(b"\x1b]133;A\x07ok");
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
+            "a clean sequence after a DCS bail must still parse, got {out:?}"
+        );
+    }
+
+    /// FIX 3: the OSC 7 percent-decoder must require BOTH escape bytes to be
+    /// ASCII hex digits. `u8::from_str_radix` accepts a sign prefix (`+5`),
+    /// which would otherwise mis-decode `%+5` to a byte; it must instead pass
+    /// the `%` (and the rest) through literally — no panic, no mis-decode.
+    #[test]
+    fn osc7_percent_decoder_rejects_sign_prefixed_escape() {
+        use super::parse_osc7_with_host;
+        // `%+5` is not a valid escape — the `%` and following chars are literal.
+        assert_eq!(
+            parse_osc7_with_host("file:///p%+5x", Some("myhost")),
+            Some("/p%+5x".to_string())
+        );
+        // `%-5` likewise.
+        assert_eq!(
+            parse_osc7_with_host("file:///p%-5x", Some("myhost")),
+            Some("/p%-5x".to_string())
+        );
+        // A genuine hex escape still decodes (regression guard).
+        assert_eq!(
+            parse_osc7_with_host("file:///p%41x", Some("myhost")),
+            Some("/pAx".to_string())
+        );
     }
 
     #[test]

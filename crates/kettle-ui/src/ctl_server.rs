@@ -151,11 +151,22 @@ impl CtlServer {
     }
 
     /// Register a freshly-accepted connection.
+    ///
+    /// The connection cap is enforced SOLELY at the source in `accept_loop`,
+    /// which gates on the atomic `active` counter and refuses + closes an
+    /// over-cap connection before it ever spawns a thread or sends `NewConn`.
+    /// We must therefore ALWAYS insert here: a second, divergent `conns.len()`
+    /// cap-check on this (App) thread could silently DROP a connection that
+    /// `accept_loop` already admitted — under a cross-thread Disconnect/NewConn
+    /// reorder right at the cap, `conns.len()` can momentarily read full while
+    /// `active` has room. The dropped connection would still serve
+    /// `get_state`/`send_text` (handled on the connection thread) but
+    /// `subscribe`/`attach_pane` would silently no-op (no `ConnState` to flip),
+    /// leaving an untracked-but-live connection. The atomic `active` is the
+    /// single source of truth; `remove_conn` already no-ops on an absent id, so
+    /// always inserting is safe and keeps `conns` membership in lockstep with
+    /// `active`.
     pub fn add_conn(&mut self, conn_id: u64, event_tx: Sender<Event>) {
-        if self.conns.len() >= MAX_CONNECTIONS {
-            log::warn!("agent-server: connection cap reached; dropping conn {conn_id}");
-            return;
-        }
         self.conns.insert(
             conn_id,
             ConnState {
@@ -337,16 +348,37 @@ fn connection_loop(
                 }
             }
             wake();
-            // Block until the App replies (run_command can take its timeout),
-            // then write the response on this handle.
-            match rrx.recv() {
-                Ok(resp) => {
-                    if write_line(&mut conn, &resp).is_err() {
-                        break 'outer;
+            // Block until the App replies (a deferred `run_command` can take up
+            // to its full `timeout_s`, e.g. 600s), then write the response on
+            // this handle. We must NOT block UNBOUNDED on `rrx.recv()`: while the
+            // App holds a deferred `run_command` reply, this thread is parked
+            // OUTSIDE `conn.read()`, so a client that vanishes mid-run (Ctrl+C'd
+            // `kettle ctl`, crashed MCP host) is never observed — the
+            // MAX_CONNECTIONS slot, the agent badge, and the per-pane
+            // `PendingRun` (which makes new runs on that pane return BUSY) stay
+            // pinned until the command deadline. Mirror `wait_for_poll`: poll the
+            // reply on a short interval and probe `conn.peer_disconnected()` on
+            // each timeout. The zero-byte peek is safe here — this IS the
+            // connection thread with no other I/O outstanding. On a gone peer we
+            // send `Disconnect` (so the App drops the `PendingRun` + clears the
+            // badge) and end the connection; the trailing `Disconnect` at loop
+            // exit is a harmless no-op (`remove_conn` ignores an absent id).
+            let resp = loop {
+                match rrx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(resp) => break resp,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if conn.peer_disconnected() {
+                            let _ = tx.send(CtlServerMsg::Disconnect { conn_id });
+                            wake();
+                            break 'outer;
+                        }
                     }
+                    // App dropped the reply sender (shutdown) — end the connection.
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'outer,
                 }
-                // App dropped the reply sender (shutdown) — end the connection.
-                Err(_) => break 'outer,
+            };
+            if write_line(&mut conn, &resp).is_err() {
+                break 'outer;
             }
             if is_subscribe {
                 // Switch to event-only streaming for the rest of the
@@ -655,6 +687,91 @@ mod tests {
                 "conn-thread method {m} has no connection_loop arm"
             );
         }
+    }
+
+    /// Build a bare `CtlServer` for table-level unit tests: no listener thread,
+    /// an empty conn table, a temp registry dir (so `Drop`'s `unregister`
+    /// remove_file is a harmless no-op). Returns the server plus the inbound
+    /// channel's sender, kept alive so the receiver in `rx` stays open.
+    fn test_server() -> (CtlServer, Sender<CtlServerMsg>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
+        let accept = std::thread::Builder::new()
+            .spawn(|| {})
+            .expect("spawn noop");
+        let server = CtlServer {
+            mode: AgentServer::Full,
+            rx,
+            conns: HashMap::new(),
+            registry_dir: std::env::temp_dir(),
+            pid: 0,
+            _accept: accept,
+        };
+        (server, tx)
+    }
+
+    fn dummy_event_tx() -> Sender<Event> {
+        // The table tests only check membership, never the event channel, so a
+        // dropped receiver is fine: a `Sender` stays valid after its `Receiver`
+        // is gone (sends would just fail — nothing here sends).
+        let (tx, _rx) = crossbeam_channel::bounded::<Event>(EVENT_QUEUE_CAP);
+        tx
+    }
+
+    /// E2 regression: `add_conn` no longer re-checks `conns.len()` against the
+    /// cap. `accept_loop` is the single gate (atomic `active`); `add_conn` must
+    /// ALWAYS insert so `conns` membership cannot silently diverge from the set
+    /// of connections `accept_loop` admitted. Here we register exactly
+    /// MAX_CONNECTIONS connections (what `accept_loop`'s `active` gate permits)
+    /// and assert every one is tracked — none is dropped by a second counter.
+    #[test]
+    fn add_conn_always_inserts_up_to_cap() {
+        let (mut server, _tx) = test_server();
+        for id in 0..MAX_CONNECTIONS as u64 {
+            server.add_conn(id, dummy_event_tx());
+        }
+        // `active` (the source-of-truth counter) admitted MAX_CONNECTIONS; the
+        // conn table must agree exactly — no admitted connection went untracked.
+        assert_eq!(server.conns.len(), MAX_CONNECTIONS);
+        for id in 0..MAX_CONNECTIONS as u64 {
+            assert!(
+                server.conns.contains_key(&id),
+                "conn {id} admitted by accept_loop must be tracked by add_conn"
+            );
+        }
+    }
+
+    /// E2 invariant: membership + the admission count agree across a
+    /// Disconnect/NewConn reorder at the cap. Simulate the race that the old
+    /// `conns.len() >= MAX_CONNECTIONS` guard mishandled: with the table full,
+    /// `accept_loop` drops one (decrementing `active`) and admits a replacement
+    /// (incrementing `active` back to the cap). The App may process the new
+    /// `NewConn` BEFORE the `Disconnect`; momentarily `conns.len()` would read
+    /// full — the old guard would have silently dropped the replacement. With
+    /// the guard gone, the replacement is always inserted; after the reorder
+    /// settles, `conns` holds exactly the admitted set.
+    #[test]
+    fn add_conn_survives_disconnect_newconn_reorder_at_cap() {
+        let (mut server, _tx) = test_server();
+        for id in 0..MAX_CONNECTIONS as u64 {
+            server.add_conn(id, dummy_event_tx());
+        }
+        assert_eq!(server.conns.len(), MAX_CONNECTIONS);
+        // Reordered: the replacement (id == cap) is admitted by accept_loop's
+        // `active` gate and inserted here while the table still reads full...
+        let replacement = MAX_CONNECTIONS as u64;
+        server.add_conn(replacement, dummy_event_tx());
+        assert!(
+            server.conns.contains_key(&replacement),
+            "replacement admitted at the cap must NOT be silently dropped"
+        );
+        // ...then the lagging Disconnect for the evicted connection (id 0)
+        // lands; remove_conn no-ops if already gone, so this is always safe.
+        server.remove_conn(0);
+        // Net: exactly MAX_CONNECTIONS tracked — one in, one out — matching the
+        // atomic `active` count accept_loop maintains.
+        assert_eq!(server.conns.len(), MAX_CONNECTIONS);
+        assert!(!server.conns.contains_key(&0));
+        assert!(server.conns.contains_key(&replacement));
     }
 
     /// Drift guard: every method arm in `App::handle_ctl_request` must appear in

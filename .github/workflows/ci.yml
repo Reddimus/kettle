@@ -67,6 +67,11 @@ jobs:
           # `recorder_output_flushed_before_reap_and_on_close` lives in
           # `app::tests::`, so the old narrow filter compiled it but never ran it.
           cargo test -p kettle-ui --features dev-record
+          # Audit (v2.32.0): the `kettle` crate's dev-record-gated tests — the
+          # v2.31.0 `resolve_record_target` `record_target_tests` and the
+          # man-page-flag guard's `--record`/`--record-raw-input` exclusions —
+          # only compile under the feature, so run them here too or they bit-rot.
+          cargo test -p kettle --features dev-record
       # Cycle 730: verify the Justfile parses on every OS — catches
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a
