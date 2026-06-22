@@ -4291,10 +4291,17 @@ impl Renderer {
                 ));
             }
             let dc = if hidden { ' ' } else { sc.c };
+            // Combining (zero-width) marks layered on this cell — a decomposed
+            // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
+            // Append them right after the base char so the shaper composes the
+            // full grapheme; skip on a HIDDEN cell (the base became a space, so
+            // the marks have nothing to attach to). audit v2.32.0.
+            let marks: &[char] = if hidden { &[] } else { sc.zerowidth() };
             match cur {
                 Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
                     // Same style — extend the current run (the last live span).
                     spans[n - 1].0.push(dc);
+                    spans[n - 1].0.extend(marks.iter().copied());
                 }
                 _ => {
                     // New run: reuse the pooled slot's String if one exists
@@ -4303,12 +4310,14 @@ impl Renderer {
                         let slot = &mut spans[n];
                         slot.0.clear();
                         slot.0.push(dc);
+                        slot.0.extend(marks.iter().copied());
                         slot.1 = fg;
                         slot.2 = bold;
                         slot.3 = italic;
                     } else {
                         let mut s = String::new();
                         s.push(dc);
+                        s.extend(marks.iter().copied());
                         spans.push((s, fg, bold, italic));
                     }
                     n += 1;
@@ -4320,7 +4329,9 @@ impl Renderer {
             self.ensure_bundled_style_faces();
         }
 
-        // Selection.
+        // Selection. A block (Alt+drag) selection draws a per-row COLUMN
+        // rectangle so the highlight matches the rectangular text that's copied;
+        // a linear selection wraps full lines. `selection_row_span` encodes both.
         if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
             for r in s.line.0..=e.line.0 {
@@ -4332,15 +4343,13 @@ impl Renderer {
                 if vrow < 0 || vrow >= screen_rows {
                     continue;
                 }
-                let (c0, c1) = if s.line.0 == e.line.0 {
-                    (s.column.0, e.column.0)
-                } else if r == s.line.0 {
-                    (s.column.0, cols.saturating_sub(1))
-                } else if r == e.line.0 {
-                    (0, e.column.0)
-                } else {
-                    (0, cols.saturating_sub(1))
-                };
+                let (c0, c1) = selection_row_span(
+                    r,
+                    (s.line.0, s.column.0),
+                    (e.line.0, e.column.0),
+                    cols,
+                    sel.is_block,
+                );
                 let w = (c1 + 1).saturating_sub(c0).max(1);
                 quads.push(rect(
                     ox + c0 as f32 * cw,
@@ -4710,53 +4719,21 @@ impl Renderer {
             let default_color = GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b);
 
             let buf = &pane_buffers[i];
-            for run in buf.layout_runs() {
-                // Map a cluster's byte offset → grid column. `Wrap::None`
-                // guarantees one run per buffer line and `build_pane` pushes
-                // exactly one char per cell, so the Nth char IS grid column N.
-                glyph_char_starts.clear();
-                for (b, _) in run.text.char_indices() {
-                    glyph_char_starts.push(b as u32);
-                }
-                let line_y = run.line_y;
-                for glyph in run.glyphs.iter() {
-                    let col = glyph_grid_col(glyph_char_starts, glyph.start);
-                    let fs = glyph.font_size;
-                    // Pin the pen to the cell, snapped to an integer physical
-                    // pixel (crisp + cache-friendly: x_bin = 0), while keeping any
-                    // intra-cluster x_offset. Feeding cosmic-text's `physical()`
-                    // an offset that lands the logical X exactly there reuses its
-                    // exact cache-key + vertical + subpixel math, so the rasterized
-                    // bitmap is byte-identical to glyphon's.
-                    let cell_left = ox + col as f32 * cw;
-                    let x_off_px = fs * glyph.x_offset;
-                    let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
-                    let phys = glyph.physical((off_x, oy), 1.0);
-                    let key = phys.cache_key;
-                    let slot = match glyph_pipeline.ensure_glyph(device, queue, key, || {
-                        RasterGlyph::from_swash(swash.get_image(font_system, key).as_ref()?)
-                    }) {
-                        Some(s) => s,
-                        None => continue, // empty / whitespace glyph — nothing to draw
-                    };
-                    let color = glyph.color_opt.unwrap_or(default_color);
-                    let qx = phys.x + slot.left;
-                    let qy = line_y.round() as i32 + phys.y - slot.top;
-                    out.push(GlyphInstance {
-                        pos: [qx as f32, qy as f32],
-                        size: [slot.w, slot.h],
-                        uv: [slot.atlas_x, slot.atlas_y],
-                        color: [
-                            color.r() as f32 / 255.0,
-                            color.g() as f32 / 255.0,
-                            color.b() as f32 / 255.0,
-                            color.a() as f32 / 255.0,
-                        ],
-                        kind: slot.kind,
-                        _pad: [0; 3],
-                    });
-                }
-            }
+            // `build_pane` pushes exactly one char per cell with `Wrap::None`, so
+            // the shared cell-lock emit pins each glyph to its grid column.
+            emit_cell_locked_glyphs(
+                out,
+                buf,
+                (ox, oy),
+                cw,
+                default_color,
+                glyph_pipeline,
+                swash,
+                font_system,
+                device,
+                queue,
+                glyph_char_starts,
+            );
             clips.push(GlyphClip {
                 rect: [rx, ry, rw, rh],
                 start: clip_start,
@@ -4822,6 +4799,39 @@ fn vi_selection_row_span(
         cols.saturating_sub(1)
     };
     (last >= first).then_some((first, last))
+}
+
+/// The inclusive `(first_col, last_col)` the mouse selection highlights on grid
+/// row `r`. A **block** (Alt+drag) selection is a column rectangle: every row
+/// spans the same `min(start_col, end_col)..=max(start_col, end_col)`, matching
+/// the rectangular text that's copied. A **linear** selection wraps full lines:
+/// the start row begins at the anchor and runs to `cols-1`, interior rows span
+/// the whole width, and the end row runs from column 0 to the cursor.
+///
+/// Splitting this out of the inline `build_pane` loop is what makes the
+/// block/linear distinction unit-testable: the highlight quad must match the
+/// copied text, and a block selection drawn with the linear (full-line) spans
+/// highlighted cells the copy never includes.
+fn selection_row_span(
+    r: i32,
+    start: (i32, usize),
+    end: (i32, usize),
+    cols: usize,
+    is_block: bool,
+) -> (usize, usize) {
+    if is_block {
+        return (start.1.min(end.1), start.1.max(end.1));
+    }
+    let last_col = cols.saturating_sub(1);
+    if start.0 == end.0 {
+        (start.1, end.1)
+    } else if r == start.0 {
+        (start.1, last_col)
+    } else if r == end.0 {
+        (0, end.1)
+    } else {
+        (0, last_col)
+    }
 }
 
 /// Attrs for one style run: the family picks the bold/italic variant
@@ -5810,6 +5820,83 @@ fn cell_locked_pen_x(cell_left: f32, x_offset_px: f32) -> f32 {
     (cell_left + x_offset_px).round()
 }
 
+/// Emit cell-locked glyph instances for ONE shaped `TextBuffer`, appending to
+/// `out`. This is the single source of truth for the Grid (cell-locked)
+/// renderer's per-glyph emit: `emit_pane_glyphs` (live panes), the offscreen
+/// `capture_png_with_annotation` screenshot path, and the `grid_prompt_blink`
+/// test fixture all call it so they can never drift apart.
+///
+/// `origin` is the buffer's top-left in physical pixels (the same coordinate a
+/// glyphon `TextArea`'s `left`/`top` would use); every glyph is pinned to its
+/// grid cell `origin.0 + col * cell_w`, snapped to an integer pixel, while any
+/// intra-cluster `x_offset` (combining marks) is preserved. `default_color` is
+/// the fallback for a glyph with no explicit color span (mirrors a `TextArea`'s
+/// `default_color`). `char_starts` is a scratch buffer reused across runs to
+/// avoid per-line allocation. Glyphs are appended in buffer order, so the
+/// caller can wrap the appended range in one `GlyphClip` for scissor clipping.
+#[allow(clippy::too_many_arguments)]
+fn emit_cell_locked_glyphs(
+    out: &mut Vec<GlyphInstance>,
+    buf: &TextBuffer,
+    origin: (f32, f32),
+    cell_w: f32,
+    default_color: GColor,
+    glyph_pipeline: &mut GlyphPipeline,
+    swash: &mut SwashCache,
+    font_system: &mut FontSystem,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    char_starts: &mut Vec<u32>,
+) {
+    for run in buf.layout_runs() {
+        // Map a cluster's byte offset → grid column. `Wrap::None` guarantees one
+        // run per buffer line and one char per cell, so the Nth char IS grid
+        // column N.
+        char_starts.clear();
+        for (b, _) in run.text.char_indices() {
+            char_starts.push(b as u32);
+        }
+        let line_y = run.line_y;
+        for glyph in run.glyphs.iter() {
+            let col = glyph_grid_col(char_starts, glyph.start);
+            let fs = glyph.font_size;
+            // Pin the pen to the cell, snapped to an integer physical pixel
+            // (crisp + cache-friendly: x_bin = 0), while keeping any intra-
+            // cluster x_offset. Feeding cosmic-text's `physical()` an offset that
+            // lands the logical X exactly there reuses its exact cache-key +
+            // vertical + subpixel math, so the rasterized bitmap is byte-
+            // identical to glyphon's.
+            let cell_left = origin.0 + col as f32 * cell_w;
+            let x_off_px = fs * glyph.x_offset;
+            let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
+            let phys = glyph.physical((off_x, origin.1), 1.0);
+            let key = phys.cache_key;
+            let slot = match glyph_pipeline.ensure_glyph(device, queue, key, || {
+                RasterGlyph::from_swash(swash.get_image(font_system, key).as_ref()?)
+            }) {
+                Some(s) => s,
+                None => continue, // empty / whitespace glyph — nothing to draw
+            };
+            let color = glyph.color_opt.unwrap_or(default_color);
+            let qx = phys.x + slot.left;
+            let qy = line_y.round() as i32 + phys.y - slot.top;
+            out.push(GlyphInstance {
+                pos: [qx as f32, qy as f32],
+                size: [slot.w, slot.h],
+                uv: [slot.atlas_x, slot.atlas_y],
+                color: [
+                    color.r() as f32 / 255.0,
+                    color.g() as f32 / 255.0,
+                    color.b() as f32 / 255.0,
+                    color.a() as f32 / 255.0,
+                ],
+                kind: slot.kind,
+                _pad: [0; 3],
+            });
+        }
+    }
+}
+
 fn measure_cell(
     fs: &mut FontSystem,
     buf: &mut TextBuffer,
@@ -6374,11 +6461,30 @@ pub fn capture_png_with_annotation(
             q.push(rect(0.0, hf - annotate_h, wf, 1.0, theme.palette[8], 1.0));
         }
 
-        let mut areas = vec![
-            TextArea {
+        // The pane body text (tab bar, left + right panes) is the imagery the
+        // README hero/showcase ships, so it MUST render through whatever
+        // `text-renderer` the config selects — the same branch the live
+        // `render_frame` takes. Grid (the default) cell-locks every glyph via the
+        // shared `emit_cell_locked_glyphs`; Legacy keeps glyphon. Either way the
+        // origins below mirror the live pane layout so columns line up. The
+        // annotation + context-menu chrome always go through glyphon.
+        let grid = cfg.text_renderer == TextRendererMode::Grid;
+        // (left, top, clip-rect) for each pane body buffer, shared between the
+        // glyphon `TextArea`s (Legacy) and the GlyphPipeline emit (Grid) so the
+        // two paths can never disagree on placement.
+        let tab_origin = (8.0_f32, 6.0_f32);
+        let tab_clip = [0.0, 0.0, wf, tab_h];
+        let left_origin = (pad, ly + pad);
+        let left_clip = [0.0, ly, split_x, hf - ly];
+        let right_origin = (split_x + pad, ly + pad);
+        let right_clip = [split_x, ly, wf - split_x, hf - ly];
+
+        let mut areas: Vec<TextArea> = Vec::new();
+        if !grid {
+            areas.push(TextArea {
                 buffer: &tab_buf,
-                left: 8.0,
-                top: 6.0,
+                left: tab_origin.0,
+                top: tab_origin.1,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
@@ -6388,11 +6494,11 @@ pub fn capture_png_with_annotation(
                 },
                 default_color: gc(theme.foreground),
                 custom_glyphs: &[],
-            },
-            TextArea {
+            });
+            areas.push(TextArea {
                 buffer: &left,
-                left: pad,
-                top: ly + pad,
+                left: left_origin.0,
+                top: left_origin.1,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
@@ -6402,11 +6508,11 @@ pub fn capture_png_with_annotation(
                 },
                 default_color: gc(theme.foreground),
                 custom_glyphs: &[],
-            },
-            TextArea {
+            });
+            areas.push(TextArea {
                 buffer: &right,
-                left: split_x + pad,
-                top: ly + pad,
+                left: right_origin.0,
+                top: right_origin.1,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: split_x as i32,
@@ -6416,8 +6522,8 @@ pub fn capture_png_with_annotation(
                 },
                 default_color: gc(theme.foreground),
                 custom_glyphs: &[],
-            },
-        ];
+            });
+        }
         // Cycle 294: append the annotation TextArea if set. Bottom-
         // anchored — left margin 8 px, text baseline ~4 px above
         // the bottom edge so the descenders don't clip.
@@ -6456,6 +6562,45 @@ pub fn capture_png_with_annotation(
             areas,
             &mut swash,
         )?;
+
+        // Grid (default `text-renderer`): emit the pane body buffers through the
+        // cell-locked GlyphPipeline — the exact renderer the shipped product
+        // uses — so the README imagery isn't a legacy-glyphon misrepresentation.
+        // Each buffer's appended instance range gets its own `GlyphClip` so the
+        // scissor clips text to its pane, mirroring the live `emit_pane_glyphs`.
+        let mut grid_glyphs = GlyphPipeline::new(&device, format);
+        let mut grid_instances: Vec<GlyphInstance> = Vec::new();
+        let mut grid_clips: Vec<GlyphClip> = Vec::new();
+        if grid {
+            let mut char_starts: Vec<u32> = Vec::new();
+            let default_color = gc(theme.foreground);
+            for (buf_ref, origin, clip) in [
+                (&tab_buf, tab_origin, tab_clip),
+                (&left, left_origin, left_clip),
+                (&right, right_origin, right_clip),
+            ] {
+                let start = grid_instances.len() as u32;
+                emit_cell_locked_glyphs(
+                    &mut grid_instances,
+                    buf_ref,
+                    origin,
+                    cw,
+                    default_color,
+                    &mut grid_glyphs,
+                    &mut swash,
+                    &mut font_system,
+                    &device,
+                    &queue,
+                    &mut char_starts,
+                );
+                grid_clips.push(GlyphClip {
+                    rect: clip,
+                    start,
+                    count: grid_instances.len() as u32 - start,
+                });
+            }
+            grid_glyphs.upload(&device, &queue, [wf, hf], &grid_instances);
+        }
 
         // `DebugScene::ContextMenu`: build a synthetic context menu at
         // a fixed anchor (so the resulting PNG is byte-deterministic)
@@ -6688,6 +6833,12 @@ pub fn capture_png_with_annotation(
                 multiview_mask: None,
             });
             quads.draw(&mut pass);
+            // Grid mode draws pane body text through the cell-locked pipeline
+            // (the `grid_clips` scissor each pane); the `text_renderer` then only
+            // carries the annotation chrome. Legacy mode left all pane text in
+            // `text_renderer` and `grid_clips` is empty (no-op draw). Same pass
+            // order as the live `Renderer::render_frame`: quads, then glyphs.
+            grid_glyphs.draw(&mut pass, &grid_clips);
             text_renderer.render(&atlas, &vp, &mut pass)?;
             // Cycle 251: menu chrome + menu text, same pass order as
             // the live `Renderer::render_frame`. Cheap no-ops for the
@@ -6856,6 +7007,102 @@ mod gpu_tests {
         }
     }
 
+    /// v2.32.0 fix #1: the shared `emit_cell_locked_glyphs` — the loop the
+    /// default (Grid) `--screenshot` path now runs over the same `left`/`right`
+    /// pane buffers it used to hand only to glyphon — must produce a NON-EMPTY
+    /// cell-locked glyph set. Before the fix the screenshot path built no
+    /// `GlyphPipeline` at all, so the README hero/showcase imagery (generated by
+    /// this path) rendered through legacy glyphon and misrepresented the shipped
+    /// cell-locked renderer. Shaping a prompt-like buffer exactly as the
+    /// screenshot does and asserting glyphs come out proves the Grid screenshot
+    /// path emits real cell-locked glyphs.
+    #[test]
+    fn screenshot_grid_emits_cell_locked_glyphs() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = match request_adapter_or_fallback(
+                &instance,
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::None,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                },
+                "screenshot_grid_emit",
+            )
+            .await
+            {
+                Ok(a) => a,
+                Err(_) => {
+                    eprintln!("no GPU adapter on this host; skipped");
+                    return;
+                }
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-screenshot-grid-emit-test"),
+                    ..Default::default()
+                })
+                .await
+                .expect("request_device");
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let cfg = Config::default();
+            // Default config selects the Grid renderer (the case the screenshot
+            // path now honors). Guard that assumption so this stays meaningful.
+            assert_eq!(
+                cfg.text_renderer,
+                TextRendererMode::Grid,
+                "default text-renderer must be Grid for this fix to matter"
+            );
+            let family = cfg.font_family.clone();
+            let mut font_system = FontSystem::new();
+            for face in kettle_config::font::all() {
+                load_bundled_font(&mut font_system, face);
+            }
+            let mut swash = SwashCache::new();
+            let mut glyph_pipe = GlyphPipeline::new(&device, format);
+
+            let metrics = Metrics::new(24.0, 30.0);
+            let mut measure = TextBuffer::new(&mut font_system, metrics);
+            let (cw, _ch) = measure_cell(&mut font_system, &mut measure, &family, metrics);
+
+            let mut buf = TextBuffer::new(&mut font_system, metrics);
+            buf.set_size(&mut font_system, Some(2048.0), Some(512.0));
+            buf.set_wrap(&mut font_system, Wrap::None);
+            buf.set_text(
+                &mut font_system,
+                "kevim@kettle:~/Repos/kettle$ cargo test",
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut font_system, false);
+
+            let mut instances = Vec::new();
+            let mut starts = Vec::new();
+            let default_color =
+                GColor::rgb(cfg.theme.foreground.r, cfg.theme.foreground.g, cfg.theme.foreground.b);
+            emit_cell_locked_glyphs(
+                &mut instances,
+                &buf,
+                (12.0, 12.0),
+                cw,
+                default_color,
+                &mut glyph_pipe,
+                &mut swash,
+                &mut font_system,
+                &device,
+                &queue,
+                &mut starts,
+            );
+            assert!(
+                instances.len() > 20,
+                "the Grid screenshot path must emit a non-empty cell-locked glyph \
+                 set; got {} glyphs",
+                instances.len()
+            );
+        });
+    }
+
     /// v2.25.1 regression guard for the grid renderer/cursor interaction. The
     /// prompt glyphs are uploaded ONCE through the cell-locked glyph pipeline,
     /// then two offscreen frames are rendered while only the cursor quad toggles.
@@ -7009,43 +7256,20 @@ mod gpu_tests {
             let mut starts = Vec::new();
             let default_color =
                 GColor::rgb(theme.foreground.r, theme.foreground.g, theme.foreground.b);
-            for run in buf.layout_runs() {
-                starts.clear();
-                for (b, _) in run.text.char_indices() {
-                    starts.push(b as u32);
-                }
-                for glyph in run.glyphs {
-                    let col = glyph_grid_col(&starts, glyph.start);
-                    let fs = glyph.font_size;
-                    let cell_left = origin.0 + col as f32 * cw;
-                    let x_off_px = fs * glyph.x_offset;
-                    let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
-                    let phys = glyph.physical((off_x, origin.1), 1.0);
-                    let key = phys.cache_key;
-                    let Some(slot) = glyph_pipe.ensure_glyph(&device, &queue, key, || {
-                        RasterGlyph::from_swash(swash.get_image(&mut font_system, key).as_ref()?)
-                    }) else {
-                        continue;
-                    };
-                    let color = glyph.color_opt.unwrap_or(default_color);
-                    instances.push(GlyphInstance {
-                        pos: [
-                            (phys.x + slot.left) as f32,
-                            (run.line_y.round() as i32 + phys.y - slot.top) as f32,
-                        ],
-                        size: [slot.w, slot.h],
-                        uv: [slot.atlas_x, slot.atlas_y],
-                        color: [
-                            color.r() as f32 / 255.0,
-                            color.g() as f32 / 255.0,
-                            color.b() as f32 / 255.0,
-                            color.a() as f32 / 255.0,
-                        ],
-                        kind: slot.kind,
-                        _pad: [0; 3],
-                    });
-                }
-            }
+            // Same cell-lock emit the live renderer + screenshot path use.
+            emit_cell_locked_glyphs(
+                &mut instances,
+                &buf,
+                origin,
+                cw,
+                default_color,
+                &mut glyph_pipe,
+                &mut swash,
+                &mut font_system,
+                &device,
+                &queue,
+                &mut starts,
+            );
             glyph_pipe.upload(&device, &queue, [w as f32, h as f32], &instances);
             let clips = [GlyphClip {
                 rect: [0.0, 0.0, w as f32, h as f32],
@@ -8511,6 +8735,99 @@ mod vi_selection_row_span_tests {
 }
 
 #[cfg(test)]
+mod selection_row_span_tests {
+    use super::selection_row_span;
+
+    /// The selection highlight quad's width = `(c1 + 1 - c0) * cell_w`, the same
+    /// arithmetic the `build_pane` draw uses. Pin it here so a span change is
+    /// caught at the source of truth.
+    fn span_width(span: (usize, usize)) -> usize {
+        span.1 + 1 - span.0
+    }
+
+    /// A BLOCK (Alt+drag) selection is a column rectangle: every row — including
+    /// interior rows — spans only `min_col..=max_col`, so the highlight matches
+    /// the rectangular text the copy yields. A linear selection drawn for the
+    /// same endpoints would span the FULL row on an interior row, which is the
+    /// bug this fix closes.
+    #[test]
+    fn block_selection_highlights_column_rectangle_on_every_row() {
+        let cols = 200;
+        // Block from (row 4, col 10) to (row 8, col 25): a 16-wide column band.
+        let (start, end) = ((4, 10), (8, 25));
+        let block_w = 25 + 1 - 10; // 16 columns
+        for r in 4..=8 {
+            let span = selection_row_span(r, start, end, cols, true);
+            assert_eq!(
+                span,
+                (10, 25),
+                "block row {r} must span the column rectangle, not the full line"
+            );
+            assert_eq!(span_width(span), block_w);
+        }
+        // The interior row (r = 6) is the load-bearing case: a linear selection
+        // would span the whole row here.
+        let interior = selection_row_span(6, start, end, cols, true);
+        assert_eq!(span_width(interior), block_w);
+        assert_ne!(
+            span_width(interior),
+            cols,
+            "interior block row must NOT be a full-row highlight"
+        );
+    }
+
+    /// A block selection's column endpoints are normalized, so dragging
+    /// up-and-left (end col < start col) still yields the same `min..=max` band.
+    #[test]
+    fn block_selection_normalizes_reversed_columns() {
+        let cols = 80;
+        // end column (5) is left of the start column (20).
+        let span = selection_row_span(3, (2, 20), (6, 5), cols, true);
+        assert_eq!(span, (5, 20));
+    }
+
+    /// Linear (normal drag) selection is unchanged: the start row runs from the
+    /// anchor to the last column, interior rows span the full width, and the end
+    /// row runs from column 0 to the cursor.
+    #[test]
+    fn linear_selection_wraps_full_lines() {
+        let cols = 120;
+        let (start, end) = ((4, 10), (8, 25));
+        assert_eq!(
+            selection_row_span(4, start, end, cols, false),
+            (10, cols - 1),
+            "start row runs from the anchor to the last column"
+        );
+        assert_eq!(
+            selection_row_span(6, start, end, cols, false),
+            (0, cols - 1),
+            "interior row spans the full width"
+        );
+        assert_eq!(
+            selection_row_span(8, start, end, cols, false),
+            (0, 25),
+            "end row runs from column 0 to the cursor"
+        );
+        // A single-row linear selection stays within its endpoints.
+        assert_eq!(selection_row_span(4, (4, 3), (4, 7), cols, false), (3, 7));
+    }
+
+    /// Grid-absolute lines are negative when scrolled into history; the span
+    /// logic must still compare rows correctly with `i32` endpoints.
+    #[test]
+    fn negative_scrollback_rows_compare_correctly() {
+        let cols = 100;
+        // Linear selection entirely in scrollback (rows -5..=-3).
+        let (start, end) = ((-5, 8), (-3, 12));
+        assert_eq!(selection_row_span(-5, start, end, cols, false), (8, cols - 1));
+        assert_eq!(selection_row_span(-4, start, end, cols, false), (0, cols - 1));
+        assert_eq!(selection_row_span(-3, start, end, cols, false), (0, 12));
+        // Block selection over the same scrollback rows is a column band.
+        assert_eq!(selection_row_span(-4, start, end, cols, true), (8, 12));
+    }
+}
+
+#[cfg(test)]
 mod run_attrs_tests {
     use super::{GColor, Rgb, Style, Weight, font_features, run_attrs};
     use glyphon::Family;
@@ -8724,6 +9041,63 @@ mod glyph_cell_lock_tests {
         assert!(
             !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),
             "grid upload gate/block must not depend on cursor blink state"
+        );
+    }
+
+    /// v2.32.0 fix #1 (durability): the cell-locked emit loop must live in ONE
+    /// free function, `emit_cell_locked_glyphs`, called from all THREE sites
+    /// (live panes, the screenshot path, the blink test fixture). Three hand-
+    /// copied loops could silently drift so the README imagery no longer matches
+    /// the live renderer; pin the single source of truth here.
+    #[test]
+    fn cell_lock_emit_is_a_single_shared_fn() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("fn emit_cell_locked_glyphs("),
+            "the shared cell-locked emit function must exist"
+        );
+        // Exactly one definition; the rest must be CALLS, not re-implementations.
+        let calls = src.matches("emit_cell_locked_glyphs(").count();
+        assert!(
+            calls >= 4,
+            "emit_cell_locked_glyphs must be the single emit, called from \
+             emit_pane_glyphs, the screenshot path, and the blink fixture \
+             (def + 3 calls = 4); found {calls} occurrences"
+        );
+    }
+
+    /// v2.32.0 fix #1: the offscreen `--screenshot` path must honor
+    /// `cfg.text_renderer`. In Grid mode (the default) it builds a GlyphPipeline
+    /// and routes the pane body buffers through `emit_cell_locked_glyphs` +
+    /// `grid_glyphs.draw`, leaving glyphon only the annotation/menu chrome; in
+    /// Legacy mode it keeps glyphon. Without this the README hero/showcase
+    /// imagery rendered through legacy glyphon regardless of the shipped default.
+    #[test]
+    fn screenshot_routes_pane_text_by_renderer_mode() {
+        let src = include_str!("lib.rs");
+        // The capture path reads the renderer mode.
+        assert!(
+            src.contains("let grid = cfg.text_renderer == TextRendererMode::Grid;"),
+            "capture_png path must branch on the configured text-renderer"
+        );
+        // Pane TextAreas only go to glyphon in Legacy mode.
+        assert!(
+            src.contains("if !grid {"),
+            "pane body TextAreas must be glyphon-only in Legacy (`if !grid`) mode"
+        );
+        // Grid mode builds a GlyphPipeline and draws it in the pass.
+        assert!(
+            src.contains("let mut grid_glyphs = GlyphPipeline::new(&device, format);"),
+            "Grid screenshot path must build a GlyphPipeline"
+        );
+        assert!(
+            src.contains("grid_glyphs.draw(&mut pass, &grid_clips);"),
+            "Grid screenshot path must draw the cell-locked pane glyphs in the pass"
+        );
+        // The annotation buffer (chrome) still goes through glyphon in both modes.
+        assert!(
+            src.contains("buffer: &annotate_buf,"),
+            "the annotation chrome must still render via glyphon"
         );
     }
 }

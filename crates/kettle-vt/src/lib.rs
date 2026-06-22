@@ -548,7 +548,7 @@ mod tests {
         }
         let plain_len = input.len();
         let png = base64_png();
-        input.extend(format!("\x1b]1337;File=:{png}\x07").bytes());
+        input.extend(format!("\x1b]1337;File=inline=1:{png}\x07").bytes());
 
         let t = std::time::Instant::now();
         let mut e = Extractor::new();

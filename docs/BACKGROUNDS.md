@@ -131,7 +131,7 @@ distraction and the lowest wake rate.
 
 ## Where to get good, clearly-licensed wallpapers
 
-Start with the [included starfield](#the-included-sample--a-subtle-starfield).
+Start with the [included starfield](#the-included-starfield--a-fixed-built-in-example-recommended).
 If you want something else, keep the [principles](#what-makes-a-good-terminal-background)
 in mind (dark, slow, abstract) and use sources whose license allows use:
 

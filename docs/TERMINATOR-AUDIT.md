@@ -395,7 +395,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`term`~~ | config.py | ✅ cycle-343 — string config key (default `xterm-256color`) wired to spawned PTY env | cycle-343 |
 | ~~`colorterm`~~ | config.py | ✅ cycle-343 + cycle-799 — string config key (default `truecolor`) wired to spawned PTY env; WSL launches also propagate it via `WSLENV` | cycle-799 |
 | ~~`title_at_bottom`~~ | config.py | ✅ — `title-at-bottom` config key (lib.rs:520-522) wired in kettle-render at the per-pane titlebar layout (render/lib.rs:1099-1106 + 1583-1590). Flips bar to bottom of pane when true. | (covered) |
-| `scroll_tabbar` (scrollable tab bar) | config.py | E | kettle's tab strip uses equal-width segments across the available strip — no scrollable bar (every tab stays visible). The wheel-over-tabs gesture in kettle cycles tabs (kitty/iTerm2 parity), distinct from Terminator's "scroll the bar." |
+| ~~`scroll_tabbar` (scrollable tab bar)~~ | config.py | ✅ v2.26.0 — `scroll-tabbar` config key: when tabs overflow the bar width, the strip scrolls with ‹›arrows + the mouse wheel (Terminator's "scroll the bar"). With it off, the wheel-over-tabs gesture cycles tabs instead (kitty/iTerm2 parity). | v2.26.0 |
 | `homogeneous_tabbar` / `tab_max_width` | config.py | ✅ cycle-964 — kettle always uses equal-width tabs across the available strip and does not expose either Terminator knob. The full segment is the active surface, hit target, drag target, and title budget. | cycle-964 |
 | ~~`close_button_on_tab`~~ (toggle ✕ on tabs) | config.py | ✅ `close-button-on-tab` config key wired to tab-bar render | (covered) |
 | ~~`borderless`~~ | config.py | ✅ cycle-332 — bool config key, applied via winit `Window::with_decorations(false)` | cycle-332 |

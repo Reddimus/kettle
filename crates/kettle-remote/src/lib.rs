@@ -314,30 +314,34 @@ fn build_children_index<T: ProcessTree + ?Sized>(
 }
 
 /// BFS from `child_pid` over a **prebuilt** parent→children index, resolving
-/// the closest descendant whose argv matches a known remote client. Does no
-/// refresh and no map build — cheap enough to call per pane against a shared
-/// index (cycle 851, audit). `argv_of` lookups still go to `tree`, but those
-/// hit sysinfo's already-refreshed cache (no OS walk).
+/// the closest process (starting with the pane root itself) whose argv matches a
+/// known remote client. Does no refresh and no map build — cheap enough to call
+/// per pane against a shared index (cycle 851, audit). `argv_of` lookups still go
+/// to `tree`, but those hit sysinfo's already-refreshed cache (no OS walk).
+///
+/// v2.32.0 (audit, low): the BFS now seeds at depth 0 with `child_pid` ITSELF, so
+/// a pane that launched a remote client DIRECTLY (`command = ssh box`, no
+/// intervening shell) is detected. The pre-fix walk only enqueued `child_pid`'s
+/// children, so a directly-launched `ssh`/`docker` pane got no [`RemoteContext`]
+/// (no Reconnect menu, no remote pane title). Existing trees that root at a plain
+/// shell are unaffected — a shell argv matches neither detector.
 fn detect_root_in_index<T: ProcessTree + ?Sized>(
     child_pid: u32,
     tree: &T,
     children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
 ) -> Option<RemoteContext> {
     let pids_len = children_by_parent.len();
-    // BFS from child_pid; closer descendants checked first. Loop
-    // bound: each pid is enqueued ≤ 1 time (a Pid only has one
-    // parent), so termination is guaranteed even on a cyclic
-    // children_by_parent (which shouldn't happen but the bound
-    // protects against a future fixture bug).
+    // BFS from child_pid; closer processes checked first. Loop bound: each pid is
+    // enqueued ≤ 1 time (a Pid only has one parent, and `visited` dedupes), so
+    // termination is guaranteed even on a cyclic children_by_parent (which
+    // shouldn't happen but the bound protects against a future fixture bug).
     let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
     let mut visited: std::collections::HashSet<u32> =
         std::collections::HashSet::with_capacity(pids_len);
-    if let Some(initial) = children_by_parent.get(&child_pid) {
-        for &pid in initial {
-            if visited.insert(pid) {
-                queue.push_back(pid);
-            }
-        }
+    // Seed depth 0: the pane root pid itself, so a directly-launched remote
+    // client (no shell in between) is considered before its descendants.
+    if visited.insert(child_pid) {
+        queue.push_back(child_pid);
     }
     while let Some(pid) = queue.pop_front() {
         if let Some(argv) = tree.argv_of(pid) {
@@ -557,42 +561,54 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
     })
 }
 
-/// v2.29.0: the deepest live descendant pid of `root` (BFS by depth; a
-/// same-depth tie resolves to the first-popped node, and sibling lists are
-/// pre-sorted ascending so the walk is deterministic run-to-run). `None` when
-/// `root` has no descendants — the caller then reads `root`'s own cwd. Used by
-/// [`RemoteScanner::foreground_cwd`] to find the foreground process whose cwd is
-/// "where the user is". Unlike [`find_foreground_shell_in_index`] it does not
-/// filter to known shells — any descendant inherits the shell's cwd.
+/// v2.29.0: the deepest live descendant pid of `root` — but ONLY along a LINEAR
+/// chain (each level has ≤1 child). `None` when `root` has no descendants OR the
+/// tree forks (some level has >1 child); the caller then reads `root`'s own cwd.
+/// Used by [`RemoteScanner::foreground_cwd`] to find the foreground process whose
+/// cwd is "where the user is". Unlike [`find_foreground_shell_in_index`] it does
+/// not filter to known shells — any descendant inherits the shell's cwd.
+///
+/// v2.32.0 (audit, medium): the pre-fix walk took the deepest descendant across
+/// ALL branches, so when the pane shell had two children (e.g. a backgrounded
+/// `sleep 999 &` alongside an idle foreground prompt, or a long-running build in
+/// one branch while the user `cd`s in the shell) the cwd label tracked whichever
+/// branch happened to be deeper — a BACKGROUND job, not the foreground. "Deepest
+/// descendant" is only a valid foreground signal on a single (linear) chain like
+/// `pwsh → wsl → bash → git`; the moment the tree forks there is no unambiguous
+/// foreground from the process tree alone, so we bail to `None` and let
+/// `foreground_cwd` fall back to the root shell's own process cwd (which tracks
+/// the shell's builtin `cd` correctly regardless of background jobs).
 fn deepest_descendant_in_index(
     root: u32,
     children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
 ) -> Option<u32> {
-    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    // Walk straight down the chain. At each level the node must have exactly one
+    // child to continue; >1 child means a fork (ambiguous foreground → None), 0
+    // children means we've reached the deepest node of a linear chain.
+    let mut node = root;
+    let mut deepest: Option<u32> = None;
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    if let Some(initial) = children_by_parent.get(&root) {
-        for &pid in initial {
-            if visited.insert(pid) {
-                queue.push_back((pid, 1));
-            }
-        }
-    }
-    let mut best: Option<(u32, u32)> = None; // (depth, pid)
-    while let Some((pid, depth)) = queue.pop_front() {
-        // Strictly-deeper wins; equal depth keeps the first-popped (lowest-pid
-        // branch, siblings pre-sorted) so the result is stable across ticks.
-        if best.map(|(d, _)| depth > d).unwrap_or(true) {
-            best = Some((depth, pid));
-        }
-        if let Some(grand) = children_by_parent.get(&pid) {
-            for &gpid in grand {
-                if visited.insert(gpid) {
-                    queue.push_back((gpid, depth + 1));
+    visited.insert(root);
+    loop {
+        match children_by_parent.get(&node).map(Vec::as_slice) {
+            // Linear step: descend to the sole child.
+            Some([only]) => {
+                // Defensive against a cyclic fixture/index (a pid can normally
+                // have only one parent, so this should never fire): stop rather
+                // than loop forever.
+                if !visited.insert(*only) {
+                    break;
                 }
+                deepest = Some(*only);
+                node = *only;
             }
+            // Fork: >1 child at this level → ambiguous foreground, bail to None.
+            Some(_) => return None,
+            // Leaf: end of a linear chain (or `root` itself had no children).
+            None => break,
         }
     }
-    best.map(|(_, pid)| pid)
+    deepest
 }
 
 /// Cycle 888: one-shot [`find_foreground_shell_in_index`] over a fresh snapshot
@@ -622,6 +638,66 @@ fn argv0_basename(prog: &str) -> String {
     let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
     let lower = base.to_ascii_lowercase();
     lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+/// v2.32.0 (audit H1, SECURITY): does `s` contain a control character (newline,
+/// carriage return, NUL, tab, ESC, …)? A control char in an argv-derived
+/// host/user/container token is the highest-severity case: a newline would split
+/// [`clone_session_command`]'s output into extra shell lines that the caller
+/// auto-executes. Such a token must NEVER become a [`RemoteContext`] (rejected at
+/// parse time) and, defensively, must never be emitted (rejected at build time).
+fn has_control_char(s: &str) -> bool {
+    s.chars().any(|c| c.is_control())
+}
+
+/// v2.32.0 (audit H1, SECURITY): parse-time validation of a dynamic field
+/// (ssh host, ssh user, container name) that was extracted from a descendant
+/// process's argv and will later be interpolated into an auto-executed shell
+/// command by [`clone_session_command`]. Rejects (returns `false`) any token
+/// that is empty, carries a control char, or contains a character outside a
+/// conservative per-field allowlist — so a malformed/hostile token never becomes
+/// a [`RemoteContext`] in the first place (layer 1 of the defense; the build-time
+/// single-quoting in [`clone_session_command`] is layer 2).
+///
+/// `extra` is the field-specific set of punctuation permitted on top of the
+/// common `[A-Za-z0-9]`. These sets are deliberately tight: real SSH hosts
+/// (DNS names, IPv4/IPv6, `%`-zone, `[bracketed]` literals), usernames, and
+/// container names/ids never need shell metacharacters (`;`, `$`, backticks,
+/// quotes, `&`, `|`, `<`, `>`, `(`, `)`, spaces, …), so excluding them costs
+/// nothing and closes the injection surface.
+fn field_is_safe(s: &str, extra: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+}
+
+/// SSH host: DNS labels (`a-z0-9.-`), IPv6 literals (`:`, optional `[ ]`
+/// brackets and `%zone`), and the `user@host` split already consumed the `@`.
+const SSH_HOST_EXTRA: &str = ".-_:%[]";
+/// SSH login user: POSIX usernames plus the small set real-world accounts use.
+const SSH_USER_EXTRA: &str = ".-_$\\@";
+/// Container name/id: Docker/Podman/kubectl/lxc allow `[A-Za-z0-9][A-Za-z0-9_.-]`
+/// plus `/` (kubectl `type/name`, registry-qualified refs) and `:` (tags).
+const CONTAINER_EXTRA: &str = ".-_:/";
+
+/// v2.32.0 (audit H1, SECURITY): POSIX single-quote a dynamic field so it is
+/// inert when interpolated into a shell command — every character between the
+/// quotes is literal, and an embedded single-quote is closed/escaped/reopened
+/// via the canonical `'\''` idiom. Belt-and-suspenders with the parse-time
+/// [`field_is_safe`] check: even a value that somehow slipped through cannot
+/// break out of the quotes.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Cycle 644 (sub-cycle 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
@@ -659,6 +735,10 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     };
     let mut i = inner_start;
     let mut target: Option<&str> = None;
+    // H2 (audit v2.32.0): capture `-l user` so Reconnect / the remote title keep
+    // the login user. An explicit `user@host` (parsed from `target` below) wins
+    // per OpenSSH precedence, so `-l` only fills `user` when `user@host` didn't.
+    let mut flag_user: Option<&str> = None;
     while i < argv.len() {
         let a = &argv[i];
         if let Some(s) = a.strip_prefix("--")
@@ -702,6 +782,15 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
                     | "w"
             );
             if needs_value && i + 1 < argv.len() {
+                // H2 (audit v2.32.0): `-l user` (login name) — capture the value
+                // instead of merely skipping it, so a later Reconnect / title
+                // reproduces it. Only the bare `-l` form carries the user here;
+                // the joined `-luser` form is a single multi-char token that
+                // falls to the `else` (skipped, no separate value) — matching the
+                // pre-existing behavior for every other value-taking flag.
+                if s == "l" {
+                    flag_user = Some(argv[i + 1].as_str());
+                }
                 i += 2;
             } else {
                 i += 1;
@@ -714,9 +803,23 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     let raw = target?;
     let (user, host) = match raw.split_once('@') {
         Some((u, h)) if !u.is_empty() && !h.is_empty() => (Some(u.to_string()), h.to_string()),
-        _ => (None, raw.to_string()),
+        // No `user@` in the target — fall back to any `-l user` we captured
+        // (OpenSSH precedence: an explicit `user@host` would have won above).
+        _ => (flag_user.map(str::to_string), raw.to_string()),
     };
     if host.is_empty() {
+        return None;
+    }
+    // H1 (audit v2.32.0, SECURITY): reject any host/user that carries a control
+    // char or escapes the conservative per-field charset, so a token that could
+    // break out of the auto-executed Reconnect command never becomes a
+    // RemoteContext. (clone_session_command additionally single-quotes — layer 2.)
+    if !field_is_safe(&host, SSH_HOST_EXTRA) {
+        return None;
+    }
+    if let Some(u) = &user
+        && !field_is_safe(u, SSH_USER_EXTRA)
+    {
         return None;
     }
     Some(RemoteContext::Ssh { host, user })
@@ -803,9 +906,14 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         {
             // Lxc: -n VALUE is the container name.
             if runtime == ContainerRuntime::Lxc && stripped == "n" && i + 1 < argv.len() {
+                let container = &argv[i + 1];
+                // H1 (audit v2.32.0, SECURITY): see the final return below.
+                if !field_is_safe(container, CONTAINER_EXTRA) {
+                    return None;
+                }
                 return Some(RemoteContext::Container {
                     runtime,
-                    container: argv[i + 1].clone(),
+                    container: container.clone(),
                 });
             }
             let single_char_needs_value =
@@ -821,6 +929,13 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         // form is `lxc-attach -n name`; without `-n` the first
         // positional IS the name. So either way, this is the
         // container token.
+        // H1 (audit v2.32.0, SECURITY): reject a container token that carries a
+        // control char or escapes the conservative charset, so it can never
+        // become a RemoteContext whose Reconnect command the caller auto-execs.
+        // (clone_session_command additionally single-quotes — layer 2.)
+        if !field_is_safe(a, CONTAINER_EXTRA) {
+            return None;
+        }
         return Some(RemoteContext::Container {
             runtime,
             container: a.clone(),
@@ -836,26 +951,59 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
 /// entry — clicking writes this string to the focused pane's PTY
 /// (one shell-line away from re-establishing the session).
 ///
-/// - `Ssh { user: None, host: "box" }` → `"ssh box"`
-/// - `Ssh { user: Some("me"), host: "box" }` → `"ssh me@box"`
-/// - `Container { Docker, c }` → `"docker exec -it c $SHELL"`
-/// - `Container { Kubectl, c }` → `"kubectl exec -it c -- $SHELL"`
+/// - `Ssh { user: None, host: "box" }` → `Some("ssh 'box'")`
+/// - `Ssh { user: Some("me"), host: "box" }` → `Some("ssh 'me'@'box'")`
+/// - `Container { Docker, c }` → `Some("docker exec -it 'c' $SHELL")`
+/// - `Container { Kubectl, c }` → `Some("kubectl exec -it 'c' -- $SHELL")`
 ///
 /// Pure — no `&self`, no env. Unit-testable. The "$SHELL"
 /// placeholder leaves shell-choice to the user's environment
 /// (the running pane's shell resolves it at command time).
-pub fn clone_session_command(ctx: &RemoteContext) -> String {
+///
+/// v2.32.0 (audit H1, SECURITY): the host/user/container fields are
+/// argv-derived (from a descendant process's command line) and the caller
+/// AUTO-EXECUTES this string by writing it to the pane's PTY with a trailing
+/// newline. To keep the data→code boundary safe this function:
+///
+/// 1. POSIX single-quotes (`'…'`) every dynamic field via
+///    [`shell_single_quote`], so even a value that slipped past parse-time
+///    validation ([`field_is_safe`]) is inert (no `;`/`$()`/space splits it);
+/// 2. returns `None` if any field still contains a control char (a newline
+///    would split the auto-exec into extra shell lines) — the caller then
+///    omits the Reconnect menu item rather than emit an unsafe line.
+///
+/// This is layer 2; layer 1 is the parse-time rejection in
+/// [`detect_ssh`] / [`detect_container`]. Returning `Option` lets the UI drop
+/// the menu entry entirely when no safe command can be built.
+pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     match ctx {
-        RemoteContext::Ssh { host, user } => match user {
-            Some(u) => format!("ssh {u}@{host}"),
-            None => format!("ssh {host}"),
-        },
-        RemoteContext::Container { runtime, container } => match runtime {
-            ContainerRuntime::Docker => format!("docker exec -it {container} $SHELL"),
-            ContainerRuntime::Podman => format!("podman exec -it {container} $SHELL"),
-            ContainerRuntime::Kubectl => format!("kubectl exec -it {container} -- $SHELL"),
-            ContainerRuntime::Lxc => format!("lxc-attach -n {container}"),
-        },
+        RemoteContext::Ssh { host, user } => {
+            if has_control_char(host) {
+                return None;
+            }
+            let h = shell_single_quote(host);
+            match user {
+                Some(u) => {
+                    if has_control_char(u) {
+                        return None;
+                    }
+                    Some(format!("ssh {}@{h}", shell_single_quote(u)))
+                }
+                None => Some(format!("ssh {h}")),
+            }
+        }
+        RemoteContext::Container { runtime, container } => {
+            if has_control_char(container) {
+                return None;
+            }
+            let c = shell_single_quote(container);
+            Some(match runtime {
+                ContainerRuntime::Docker => format!("docker exec -it {c} $SHELL"),
+                ContainerRuntime::Podman => format!("podman exec -it {c} $SHELL"),
+                ContainerRuntime::Kubectl => format!("kubectl exec -it {c} -- $SHELL"),
+                ContainerRuntime::Lxc => format!("lxc-attach -n {c}"),
+            })
+        }
     }
 }
 
@@ -972,13 +1120,15 @@ mod tests {
     /// dispatched command. Sub-cycle 7 of remote.py design.
     #[test]
     fn clone_session_command_for_all_shapes() {
+        // v2.32.0 (audit H1): dynamic fields are POSIX single-quoted and the
+        // return is `Option` (None only for an unsafe/control-char field).
         // SSH without user.
         assert_eq!(
             clone_session_command(&RemoteContext::Ssh {
                 host: "box".into(),
                 user: None,
             }),
-            "ssh box"
+            Some("ssh 'box'".to_string())
         );
         // SSH with user.
         assert_eq!(
@@ -986,7 +1136,7 @@ mod tests {
                 host: "box".into(),
                 user: Some("me".into()),
             }),
-            "ssh me@box"
+            Some("ssh 'me'@'box'".to_string())
         );
         // Docker.
         assert_eq!(
@@ -994,7 +1144,7 @@ mod tests {
                 runtime: ContainerRuntime::Docker,
                 container: "ubuntu".into(),
             }),
-            "docker exec -it ubuntu $SHELL"
+            Some("docker exec -it 'ubuntu' $SHELL".to_string())
         );
         // Podman.
         assert_eq!(
@@ -1002,7 +1152,7 @@ mod tests {
                 runtime: ContainerRuntime::Podman,
                 container: "fedora".into(),
             }),
-            "podman exec -it fedora $SHELL"
+            Some("podman exec -it 'fedora' $SHELL".to_string())
         );
         // Kubectl (note the `--` separator).
         assert_eq!(
@@ -1010,7 +1160,7 @@ mod tests {
                 runtime: ContainerRuntime::Kubectl,
                 container: "my-pod".into(),
             }),
-            "kubectl exec -it my-pod -- $SHELL"
+            Some("kubectl exec -it 'my-pod' -- $SHELL".to_string())
         );
         // LXC.
         assert_eq!(
@@ -1018,8 +1168,166 @@ mod tests {
                 runtime: ContainerRuntime::Lxc,
                 container: "alpine".into(),
             }),
-            "lxc-attach -n alpine"
+            Some("lxc-attach -n 'alpine'".to_string())
         );
+    }
+
+    /// H1 (audit v2.32.0, SECURITY): the host/user/container fields are
+    /// argv-derived and the caller AUTO-EXECUTES `clone_session_command`'s output
+    /// by writing it to the PTY with a trailing newline. A hostile token must
+    /// either (a) never become a RemoteContext (parse-time rejection in
+    /// detect_ssh/detect_container) or (b) be rendered inert by single-quoting,
+    /// and a control char (esp. newline) must yield None — never a multi-line
+    /// command. This test exercises BOTH layers.
+    #[test]
+    fn clone_session_command_neutralizes_shell_injection() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // --- Layer 1: parse-time rejection ---------------------------------
+        // A host carrying a `;`/`$()` shell metachar never becomes a context.
+        assert_eq!(detect_ssh(&argv(&["ssh", "h; rm -rf ~"])), None);
+        assert_eq!(detect_ssh(&argv(&["ssh", "$(reboot)@h"])), None);
+        // A container named `$(reboot)` is likewise rejected at parse time.
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", "$(reboot)", "sh"])),
+            None
+        );
+        assert_eq!(detect_container(&argv(&["lxc-attach", "-n", "a;b"])), None);
+        // A NEWLINE in the token (worst case — would split into extra exec'd
+        // lines) is rejected outright: it can never produce a RemoteContext.
+        assert_eq!(detect_ssh(&argv(&["ssh", "h\nrm -rf ~"])), None);
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", "c\nreboot", "sh"])),
+            None
+        );
+
+        // --- Layer 2: build-time single-quoting + control-char None --------
+        // Even if a metachar value were constructed directly (bypassing the
+        // detectors), single-quoting makes it inert — the `;`/`$()` are literal.
+        let cmd = clone_session_command(&RemoteContext::Ssh {
+            host: "h; rm -rf ~".into(),
+            user: None,
+        })
+        .expect("no control char → Some, just quoted");
+        // The metacharacters live entirely inside one quoted argument — there is
+        // no UNQUOTED `;`/`$`/`(` that the shell could act on. (The exact-string
+        // compare below pins this fully; the helper double-checks the property.)
+        assert_eq!(cmd, "ssh 'h; rm -rf ~'");
+        assert!(
+            !has_unquoted_metachar(&cmd),
+            "metachars must stay quoted: {cmd}"
+        );
+
+        let cmd = clone_session_command(&RemoteContext::Container {
+            runtime: ContainerRuntime::Docker,
+            container: "$(reboot)".into(),
+        })
+        .expect("no control char → Some");
+        // NOTE: the trailing literal `$SHELL` placeholder is intentional (the
+        // user's pane shell resolves it), so the metachar property is asserted on
+        // just the quoted container token, not the whole line.
+        assert_eq!(cmd, "docker exec -it '$(reboot)' $SHELL");
+        assert!(
+            !has_unquoted_metachar("docker exec -it '$(reboot)'"),
+            "container token metachars must stay quoted: {cmd}"
+        );
+
+        // An embedded single-quote is escaped via the `'\''` idiom (no break-out).
+        let cmd = clone_session_command(&RemoteContext::Ssh {
+            host: "a'b".into(),
+            user: None,
+        })
+        .unwrap();
+        assert_eq!(cmd, "ssh 'a'\\''b'");
+
+        // A control char (newline) at build time → None (never a multi-line cmd).
+        assert_eq!(
+            clone_session_command(&RemoteContext::Ssh {
+                host: "h\nrm -rf ~".into(),
+                user: None,
+            }),
+            None
+        );
+        assert_eq!(
+            clone_session_command(&RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("u\nx".into()),
+            }),
+            None
+        );
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "p\nx".into(),
+            }),
+            None
+        );
+        // Whatever clone_session_command returns, it is always a single line.
+        for ctx in [
+            RemoteContext::Ssh {
+                host: "ok-host".into(),
+                user: Some("me".into()),
+            },
+            RemoteContext::Container {
+                runtime: ContainerRuntime::Podman,
+                container: "ok_container".into(),
+            },
+        ] {
+            if let Some(cmd) = clone_session_command(&ctx) {
+                assert!(!cmd.contains('\n'), "command must be one line: {cmd}");
+            }
+        }
+    }
+
+    /// Test helper: is there a shell metacharacter OUTSIDE single quotes in
+    /// `cmd`? Used to assert the dynamic fields are fully quoted. Tracks a simple
+    /// in/out-of-`'…'` state (kettle's quoting never nests quotes — a literal
+    /// quote is rendered as the `'\''` break-out idiom, which this still reads
+    /// correctly because the inner `\'` is itself outside quotes but is a
+    /// backslash-escape, not one of the metachars we flag).
+    fn has_unquoted_metachar(cmd: &str) -> bool {
+        let mut in_quote = false;
+        for c in cmd.chars() {
+            match c {
+                '\'' => in_quote = !in_quote,
+                ';' | '$' | '`' | '&' | '|' | '<' | '>' | '(' | ')' if !in_quote => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// H2 (audit v2.32.0): `ssh -l bob h` must reproduce the login user end to
+    /// end — both the remote title and the Reconnect command render `bob@h`. An
+    /// explicit `user@host` still wins over `-l` (OpenSSH precedence).
+    #[test]
+    fn ssh_dash_l_user_reaches_title_and_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "h"])).unwrap();
+        assert_eq!(
+            ctx,
+            RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("bob".into()),
+            }
+        );
+        assert_eq!(format_remote_title(&ctx), "ssh bob@h");
+        assert_eq!(
+            clone_session_command(&ctx),
+            Some("ssh 'bob'@'h'".to_string())
+        );
+        assert_eq!(clone_session_label(&ctx), "Reconnect ssh bob@h");
+
+        // user@host wins over -l.
+        let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])).unwrap();
+        assert_eq!(
+            ctx,
+            RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("alice".into()),
+            }
+        );
+        assert_eq!(format_remote_title(&ctx), "ssh alice@h");
     }
 
     /// Cycle 658 drift guard: `clone_session_label` is the menu
@@ -1173,12 +1481,23 @@ mod tests {
                 user: None,
             })
         );
-        // ssh -l user host (kettle-supplied user via -l)
+        // ssh -l user host — H2 (audit v2.32.0): `-l bob` now populates the user
+        // so Reconnect / the remote title reproduce `ssh bob@h` (previously the
+        // login user was silently dropped).
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-l", "bob", "h"])),
             Some(RemoteContext::Ssh {
                 host: "h".into(),
-                user: None, // -l user goes into ssh-internal state; we don't extract it
+                user: Some("bob".into()),
+            })
+        );
+        // ssh -l bob alice@h — an explicit user@host wins over -l (OpenSSH
+        // precedence); the login user stays `alice`.
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])),
+            Some(RemoteContext::Ssh {
+                host: "h".into(),
+                user: Some("alice".into()),
             })
         );
         // sshpass -p secret ssh user@host
@@ -1447,6 +1766,44 @@ mod tests {
         assert_eq!(deepest_descendant_in_index(20, &idx), None);
     }
 
+    /// v2.32.0 (audit, medium): once the tree FORKS, "deepest descendant" is no
+    /// longer a valid foreground signal — a background job in another branch can
+    /// be deeper than the real foreground. So a root with >1 child returns None,
+    /// and `foreground_cwd` falls back to the root shell's own cwd (which tracks
+    /// the shell's builtin `cd`). Pre-fix this walked into the deeper background
+    /// branch and labelled the pane with the wrong dir.
+    #[test]
+    fn deepest_descendant_forked_tree_returns_none() {
+        // pwsh → { idle foreground prompt (leaf), backgrounded `sleep 999 &`
+        // chain that happens to be deeper }. The fork at the root means we cannot
+        // tell the foreground apart, so bail to None (root-cwd fallback).
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]); // root shell (two children = fork)
+        tree.add(2, Some(1), &["nvim"]); // foreground at depth 1
+        tree.add(3, Some(1), &["sleep", "999"]); // background at depth 1
+        tree.add(4, Some(3), &["sleep-helper"]); // deeper background at depth 2
+        let idx = build_children_index(&tree);
+        assert_eq!(
+            deepest_descendant_in_index(1, &idx),
+            None,
+            "a forked root is ambiguous → None so foreground_cwd uses the root's own cwd"
+        );
+
+        // A fork DEEPER in an otherwise-linear chain also bails: pwsh → wsl →
+        // { bash, htop } — the linear prefix is fine but the fork at wsl is not.
+        let mut tree = MockProcessTree::new();
+        tree.add(10, None, &["pwsh.exe"]);
+        tree.add(11, Some(10), &["wsl.exe"]);
+        tree.add(12, Some(11), &["bash"]);
+        tree.add(13, Some(11), &["htop"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(
+            deepest_descendant_in_index(10, &idx),
+            None,
+            "a fork at any level is ambiguous → None"
+        );
+    }
+
     /// v2.29.1: end-to-end check that the sysinfo-backed native cwd read actually
     /// works on this Windows host — spawns a real `pwsh`, `Set-Location`s it to a
     /// known dir, and reads that dir back via `RemoteScanner::foreground_cwd`.
@@ -1663,6 +2020,42 @@ mod tests {
             Some(RemoteContext::Ssh {
                 host: "server.example.com".into(),
                 user: Some("alice".into()),
+            })
+        );
+    }
+
+    /// v2.32.0 (audit, low): a pane that launches a remote client DIRECTLY
+    /// (`command = ssh box`, no intervening shell) — the pane root pid IS the
+    /// `ssh` process. The BFS must inspect the root itself (depth 0), not only its
+    /// children, or the pane gets no RemoteContext (no Reconnect, no remote title).
+    #[test]
+    fn detect_in_tree_root_pid_is_ssh() {
+        let mut tree = MockProcessTree::new();
+        // No shell — the pane's child_pid argv is ssh itself.
+        tree.add(100, None, &["ssh", "carol@direct.example.com"]);
+        assert_eq!(
+            detect_in_tree(100, &mut tree),
+            Some(RemoteContext::Ssh {
+                host: "direct.example.com".into(),
+                user: Some("carol".into()),
+            })
+        );
+    }
+
+    /// v2.32.0 (audit, low): same root-pid detection through the shared-index
+    /// path that `RemoteScanner::detect_root` actually uses, with a directly-
+    /// launched `docker exec` pane root.
+    #[test]
+    fn detect_root_in_index_root_pid_is_container() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["docker", "exec", "-it", "api-1", "bash"]);
+        tree.refresh();
+        let idx = build_children_index(&tree);
+        assert_eq!(
+            detect_root_in_index(100, &tree, &idx),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "api-1".into(),
             })
         );
     }

@@ -1752,6 +1752,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "bytemuck",
+ "crossbeam-channel",
  "glyphon",
  "image",
  "kettle-config",

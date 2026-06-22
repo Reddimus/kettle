@@ -31,3 +31,7 @@ wgpu = "29.0.3"
 # (tests/menu_visual.rs). Standard crate for this; tiny dep, only
 # pulled in for test compilation.
 tempfile = "3"
+# audit v2.32.0: the snapshot zerowidth round-trip test builds a real
+# `Term<EventProxy>`, whose `EventProxy::new` needs a crossbeam Sender.
+# Same version kettle-core already pins; test-only.
+crossbeam-channel = "0.5.15"

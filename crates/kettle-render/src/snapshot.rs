@@ -31,6 +31,13 @@ use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
 use kettle_core::EventProxy;
 
+/// Max combining (zero-width) marks stored inline per [`SnapCell`]. A cell with
+/// more than this many marks (pathological) has the excess dropped at capture —
+/// the rendered base grapheme stays correct, only an extra accent beyond the
+/// fourth is lost. Inline storage keeps `SnapCell: Copy` and the snapshot's
+/// zero-allocation pooling (no per-cell `Vec`).
+const MAX_ZEROWIDTH: usize = 4;
+
 /// One viewport cell, captured verbatim from the grid's `display_iter`
 /// (including wide-char spacers — the renderer's wide-cursor logic depends
 /// on seeing them).
@@ -49,6 +56,13 @@ pub struct SnapCell {
     pub flags: Flags,
     /// SGR 58 per-cell underline color (neovim spell squiggles).
     pub underline_color: Option<AnsiColor>,
+    /// Combining (zero-width) marks layered on `c` — a decomposed accent
+    /// (`e`+U+0301), an emoji ZWJ sequence, a variation selector. Captured so
+    /// the renderer draws the full grapheme rather than a stripped base char
+    /// (audit v2.32.0). Stored inline (see [`MAX_ZEROWIDTH`]); read via
+    /// [`SnapCell::zerowidth`], mirroring the grid `Cell::zerowidth`.
+    zerowidth: [char; MAX_ZEROWIDTH],
+    zerowidth_len: u8,
 }
 
 impl SnapCell {
@@ -57,6 +71,16 @@ impl SnapCell {
     #[inline]
     pub fn point(&self) -> Point {
         Point::new(Line(self.line), Column(self.col))
+    }
+
+    /// The combining (zero-width) marks layered on this cell's base char, in
+    /// order — empty when the cell carries none. Mirrors the grid
+    /// `Cell::zerowidth()` (which returns `Option<&[char]>`); here an empty
+    /// slice is returned instead of `None` since the inline array is always
+    /// present.
+    #[inline]
+    pub fn zerowidth(&self) -> &[char] {
+        &self.zerowidth[..self.zerowidth_len as usize]
     }
 }
 
@@ -120,6 +144,15 @@ impl PaneSnapshot {
             .reserve(self.columns.saturating_mul(self.screen_lines));
         for indexed in content.display_iter {
             let cell = indexed.cell;
+            // Copy combining marks inline (the common case is none → zero work).
+            let mut zerowidth = ['\0'; MAX_ZEROWIDTH];
+            let mut zerowidth_len = 0u8;
+            if let Some(marks) = cell.zerowidth() {
+                for &mark in marks.iter().take(MAX_ZEROWIDTH) {
+                    zerowidth[zerowidth_len as usize] = mark;
+                    zerowidth_len += 1;
+                }
+            }
             self.cells.push(SnapCell {
                 line: indexed.point.line.0,
                 col: indexed.point.column.0,
@@ -128,7 +161,84 @@ impl PaneSnapshot {
                 bg: cell.bg,
                 flags: cell.flags,
                 underline_color: cell.underline_color(),
+                zerowidth,
+                zerowidth_len,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::Term;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::Processor;
+    use kettle_core::Waker;
+
+    /// Minimal `Dimensions` so the test can build a `Term` without pulling in
+    /// kettle-core's (private) `TermSize` test helper.
+    struct Size {
+        cols: usize,
+        rows: usize,
+    }
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            self.rows
+        }
+        fn screen_lines(&self) -> usize {
+            self.rows
+        }
+        fn columns(&self) -> usize {
+            self.cols
+        }
+    }
+
+    fn test_term(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let proxy = EventProxy::new(tx, waker);
+        let term = Term::new(TermConfig::default(), &Size { cols, rows }, proxy);
+        (term, Processor::new())
+    }
+
+    #[test]
+    fn snapcell_zerowidth_roundtrips_combining_marks() {
+        // Feed a base 'e' immediately followed by COMBINING ACUTE ACCENT
+        // (U+0301): the alacritty engine attaches the accent as a zero-width
+        // mark on the base cell. capture() must carry it into SnapCell.
+        let (mut term, mut proc) = test_term(8, 2);
+        proc.advance(&mut term, "e\u{0301}x".as_bytes());
+
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&term);
+
+        // Column 0 holds the base 'e' with the accent as its only mark.
+        let base = snap
+            .cells
+            .iter()
+            .find(|c| c.col == 0 && c.line == 0)
+            .expect("base cell present");
+        assert_eq!(base.c, 'e');
+        assert_eq!(base.zerowidth(), &['\u{0301}']);
+
+        // Column 1 holds plain 'x' with no marks (empty slice, not None).
+        let next = snap
+            .cells
+            .iter()
+            .find(|c| c.col == 1 && c.line == 0)
+            .expect("next cell present");
+        assert_eq!(next.c, 'x');
+        assert!(next.zerowidth().is_empty());
+    }
+
+    #[test]
+    fn snapcell_zerowidth_empty_for_plain_cells() {
+        let (mut term, mut proc) = test_term(8, 2);
+        proc.advance(&mut term, b"ab");
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&term);
+        assert!(snap.cells.iter().all(|c| c.zerowidth().is_empty()));
     }
 }
