@@ -43,26 +43,45 @@ pub fn mouse_encode(
     row: usize,
     mods: ModifiersState,
 ) -> Vec<u8> {
-    let mut cb = btn as u32;
-    if motion {
-        cb += 32;
-    }
-    if mods.shift_key() {
-        cb += 4;
-    }
-    if mods.alt_key() {
-        cb += 8;
-    }
-    if mods.control_key() {
-        cb += 16;
-    }
     let x = col + 1;
     let y = row + 1;
+    // Build the modifier/motion bitfield onto a per-mode button base. SGR
+    // always reports the real button (and signals press/release with the M/m
+    // final byte), so its base is `btn`. Legacy X10 has no separate release
+    // final byte: a release is encoded by substituting the "button-release"
+    // sentinel `3` for the button code on the `!pressed` event. Wheel/extended
+    // buttons (`btn >= 64`) are press-only motion notches with no release at
+    // all, so they keep their real code.
+    let base = |sentinel: bool| -> u32 {
+        if sentinel && !pressed && btn < 64 {
+            3
+        } else {
+            btn as u32
+        }
+    };
+    let bits = |b: u32| -> u32 {
+        let mut cb = b;
+        if motion {
+            cb += 32;
+        }
+        if mods.shift_key() {
+            cb += 4;
+        }
+        if mods.alt_key() {
+            cb += 8;
+        }
+        if mods.control_key() {
+            cb += 16;
+        }
+        cb
+    };
     if sgr {
+        let cb = bits(base(false));
         let kind = if pressed { 'M' } else { 'm' };
         format!("\x1b[<{cb};{x};{y}{kind}").into_bytes()
     } else {
         // Legacy X10: clamp to the 1..223 representable range.
+        let cb = bits(base(true));
         let enc = |v: usize| (v.min(223) as u8).wrapping_add(32);
         let b = (cb.min(223) as u8).wrapping_add(32);
         vec![0x1b, b'[', b'M', b, enc(x), enc(y)]
@@ -318,36 +337,54 @@ pub fn encode(
     None
 }
 
-/// Build the bytes for a clipboard paste. Newlines are normalized to CR (so a
-/// trailing newline can't auto-run a shell command unexpectedly), and when the
-/// app enabled bracketed paste the content is wrapped and any embedded end
-/// marker stripped (paste-injection guard).
+/// Build the bytes for a clipboard paste.
+///
+/// In **bracketed-paste** mode the receiving application (vim, IPython, node,
+/// $EDITOR, …) is explicitly opting in to handle multi-line content itself, so
+/// line endings must be preserved as `\n` — rewriting them to CR garbles a
+/// multi-line paste (the app sees a bare carriage return between lines instead
+/// of a newline, collapsing or mangling rows). We only collapse `\r\n`→`\n` for
+/// consistency and wrap the body in the `\x1b[200~` … `\x1b[201~` markers, with
+/// any embedded markers stripped (paste-injection guard).
+///
+/// In the **non-bracketed** path the bytes go straight to the shell's line
+/// discipline, so every newline is normalized to CR — a trailing newline would
+/// otherwise auto-run the pasted command unexpectedly (and each interior `\n`
+/// would submit a line). This CR normalization is correct ONLY here; it must
+/// never touch the bracketed body above.
 pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
-    let body = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed {
-        // Strip *both* bracketed-paste markers from the body. The closing
-        // marker is the well-known injection target (close the bracket
-        // early to make the shell auto-run the remainder); the opening
-        // marker is the same class of bug going the other way — a paste
-        // containing `\x1b[200~` can confuse some shells into treating our
-        // genuine closer as "still pasted text" and never leaving paste
-        // mode, swallowing further input. Alacritty/iTerm2/WezTerm all
-        // strip both.
-        // Strip in a FIXPOINT loop, not a single left-to-right pass: a crafted
-        // body like `\x1b[20\x1b[201~1~` re-forms an intact `\x1b[201~` across
-        // the splice seam after one `.replace`, leaving a live closer that ends
-        // bracketed paste early and auto-runs the tail. Loop until no marker
-        // survives (cycle 916, file-by-file audit).
-        let mut safe = body;
+    // Strip *both* bracketed-paste markers from a body. The closing marker is
+    // the well-known injection target (close the bracket early to make the
+    // shell auto-run the remainder); the opening marker is the same class of
+    // bug going the other way — a paste containing `\x1b[200~` can confuse some
+    // shells into treating our genuine closer as "still pasted text" and never
+    // leaving paste mode, swallowing further input. Alacritty/iTerm2/WezTerm all
+    // strip both.
+    // Strip in a FIXPOINT loop, not a single left-to-right pass: a crafted body
+    // like `\x1b[20\x1b[201~1~` re-forms an intact `\x1b[201~` across the splice
+    // seam after one `.replace`, leaving a live closer that ends bracketed paste
+    // early and auto-runs the tail. Loop until no marker survives (cycle 916,
+    // file-by-file audit). The guard runs in BOTH arms: even a non-bracketed
+    // paste can carry a stray marker that the receiving app would misread.
+    let strip_markers = |s: String| -> String {
+        let mut safe = s;
         while safe.contains("\x1b[200~") || safe.contains("\x1b[201~") {
             safe = safe.replace("\x1b[200~", "").replace("\x1b[201~", "");
         }
+        safe
+    };
+    if bracketed {
+        // Preserve `\n` line endings; only normalize CRLF→LF for consistency.
+        let safe = strip_markers(text.replace("\r\n", "\n"));
         let mut v = Vec::with_capacity(safe.len() + 12);
         v.extend_from_slice(b"\x1b[200~");
         v.extend_from_slice(safe.as_bytes());
         v.extend_from_slice(b"\x1b[201~");
         v
     } else {
+        // Normalize every newline to CR so a trailing/interior newline can't
+        // auto-run a command via the shell's line discipline.
+        let body = strip_markers(text.replace("\r\n", "\r").replace('\n', "\r"));
         body.into_bytes()
     }
 }
@@ -358,9 +395,31 @@ mod tests {
 
     #[test]
     fn paste_normalizes_and_brackets() {
+        // Non-bracketed: every newline (CRLF or LF) collapses to a single CR so
+        // the shell's line discipline can't auto-run interior/trailing lines.
         assert_eq!(paste_payload("a\r\nb\n", false), b"a\rb\r");
         let p = paste_payload("x\n", true);
         assert!(p.starts_with(b"\x1b[200~") && p.ends_with(b"\x1b[201~"));
+    }
+
+    #[test]
+    fn paste_bracketed_preserves_newlines() {
+        // P0 data-corruption regression: a multi-line bracketed paste must reach
+        // the application (vim/IPython/node) with `\n` between lines — NOT `\r`.
+        // The old code ran `.replace('\n', "\r")` unconditionally, garbling every
+        // multi-line paste into an editor. The CR normalization belongs to the
+        // non-bracketed path only.
+        let p = paste_payload("line1\nline2\nline3", true);
+        assert_eq!(p, b"\x1b[200~line1\nline2\nline3\x1b[201~");
+        // CRLF input is collapsed to LF (consistency), never to CR.
+        let q = paste_payload("a\r\nb\n", true);
+        assert_eq!(q, b"\x1b[200~a\nb\n\x1b[201~");
+        // No carriage returns leak into a bracketed body.
+        assert!(
+            !q[6..q.len() - 6].contains(&b'\r'),
+            "bracketed body must not contain CR: {}",
+            String::from_utf8_lossy(&q)
+        );
     }
 
     #[test]
@@ -740,6 +799,70 @@ mod tests {
         assert_eq!(
             mouse_encode(true, 0, true, false, 0, 0, shift),
             b"\x1b[<4;1;1M" // 0 + 4 (shift)
+        );
+    }
+
+    #[test]
+    fn mouse_encode_legacy_release_uses_sentinel() {
+        // Legacy X10/normal mode has no separate release final byte (it always
+        // sends `ESC [ M`), so a button release must encode the "button-release"
+        // sentinel `3` instead of the pressed button's code. The old code
+        // re-encoded the original button on release, so an app could never tell
+        // which button (if any) came up — and a left release looked identical to
+        // a left press, breaking drag-select / click-up handling in legacy apps.
+        let none = ModifiersState::empty();
+        // Left (btn 0) release at grid (0,0): ESC [ M (32+3) (32+1) (32+1).
+        assert_eq!(
+            mouse_encode(false, 0, false, false, 0, 0, none),
+            vec![0x1b, 0x5b, 0x4d, 0x23, 0x21, 0x21] // 0x23 = 32+3
+        );
+        // Middle (1) and right (2) releases ALSO collapse to the `3` sentinel —
+        // legacy mode cannot distinguish which normal button was released.
+        assert_eq!(
+            mouse_encode(false, 1, false, false, 0, 0, none),
+            vec![0x1b, 0x5b, 0x4d, 0x23, 0x21, 0x21]
+        );
+        assert_eq!(
+            mouse_encode(false, 2, false, false, 0, 0, none),
+            vec![0x1b, 0x5b, 0x4d, 0x23, 0x21, 0x21]
+        );
+        // A legacy PRESS still reports the real button (unchanged).
+        assert_eq!(
+            mouse_encode(false, 2, true, false, 0, 0, none),
+            vec![0x1b, 0x5b, 0x4d, 32 + 2, 0x21, 0x21]
+        );
+        // Modifier/motion bits still ride on top of the `3` sentinel on release
+        // (the sentinel replaces only the button base, before the +32/+bits).
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            mouse_encode(false, 0, false, false, 0, 0, ctrl),
+            vec![0x1b, 0x5b, 0x4d, (3 + 16 + 32) as u8, 0x21, 0x21] // 3 + ctrl(16) + 32
+        );
+        // Wheel/extended buttons (btn >= 64) are press-only notches with no
+        // release semantics, so they keep their real code even when !pressed.
+        assert_eq!(
+            mouse_encode(false, 64, false, false, 0, 0, none),
+            vec![0x1b, 0x5b, 0x4d, 32 + 64, 0x21, 0x21]
+        );
+    }
+
+    #[test]
+    fn mouse_encode_sgr_release_keeps_real_button() {
+        // SGR mode signals release with the trailing `m` final byte and reports
+        // the REAL button number — it must NOT be rewritten to the `3` sentinel.
+        let none = ModifiersState::empty();
+        // Right-button (2) release: button 2, trailing 'm', not '3'.
+        let p = mouse_encode(true, 2, false, false, 0, 0, none);
+        assert_eq!(p, b"\x1b[<2;1;1m");
+        assert!(p.ends_with(b"m"), "SGR release must use the 'm' final byte");
+        assert!(
+            !p.starts_with(b"\x1b[<3;"),
+            "SGR release must carry the real button, not the legacy `3` sentinel"
+        );
+        // Middle (1) release likewise keeps button 1.
+        assert_eq!(
+            mouse_encode(true, 1, false, false, 0, 0, none),
+            b"\x1b[<1;1;1m"
         );
     }
 }

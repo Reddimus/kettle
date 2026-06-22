@@ -7079,8 +7079,11 @@ mod gpu_tests {
 
             let mut instances = Vec::new();
             let mut starts = Vec::new();
-            let default_color =
-                GColor::rgb(cfg.theme.foreground.r, cfg.theme.foreground.g, cfg.theme.foreground.b);
+            let default_color = GColor::rgb(
+                cfg.theme.foreground.r,
+                cfg.theme.foreground.g,
+                cfg.theme.foreground.b,
+            );
             emit_cell_locked_glyphs(
                 &mut instances,
                 &buf,
@@ -8819,8 +8822,14 @@ mod selection_row_span_tests {
         let cols = 100;
         // Linear selection entirely in scrollback (rows -5..=-3).
         let (start, end) = ((-5, 8), (-3, 12));
-        assert_eq!(selection_row_span(-5, start, end, cols, false), (8, cols - 1));
-        assert_eq!(selection_row_span(-4, start, end, cols, false), (0, cols - 1));
+        assert_eq!(
+            selection_row_span(-5, start, end, cols, false),
+            (8, cols - 1)
+        );
+        assert_eq!(
+            selection_row_span(-4, start, end, cols, false),
+            (0, cols - 1)
+        );
         assert_eq!(selection_row_span(-3, start, end, cols, false), (0, 12));
         // Block selection over the same scrollback rows is a column band.
         assert_eq!(selection_row_span(-4, start, end, cols, true), (8, 12));

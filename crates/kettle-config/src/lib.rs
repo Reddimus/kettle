@@ -6538,8 +6538,14 @@ cell-height = 1.2\n";
         );
         assert_eq!(bad.len(), 3, "all three typos should be flagged: {bad:?}");
         assert!(bad.iter().any(|b| b.contains("background-image-mode")));
-        assert!(bad.iter().any(|b| b.contains("background-image-align-horiz")));
-        assert!(bad.iter().any(|b| b.contains("background-image-align-vert")));
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("background-image-align-horiz"))
+        );
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("background-image-align-vert"))
+        );
         // Every documented value (and the snake_case key alias) passes cleanly.
         let ok = Config::detect_malformed_values(
             "background-image-mode = tile\n\
@@ -6676,7 +6682,10 @@ cell-height = 1.2\n";
              selection-foreground = #ff00ff\n\
              theme = Dracula\n",
         );
-        assert_eq!(cfg.theme.background, red, "explicit bg must beat later theme");
+        assert_eq!(
+            cfg.theme.background, red,
+            "explicit bg must beat later theme"
+        );
         assert_eq!(cfg.theme.foreground, green);
         assert_eq!(cfg.theme.cursor, blue);
         assert_eq!(cfg.theme.cursor_text, yellow);

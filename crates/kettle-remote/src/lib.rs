@@ -966,14 +966,14 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
 /// newline. To keep the data→code boundary safe this function:
 ///
 /// 1. POSIX single-quotes (`'…'`) every dynamic field via
-///    [`shell_single_quote`], so even a value that slipped past parse-time
-///    validation ([`field_is_safe`]) is inert (no `;`/`$()`/space splits it);
+///    `shell_single_quote`, so even a value that slipped past parse-time
+///    validation (`field_is_safe`) is inert (no `;`/`$()`/space splits it);
 /// 2. returns `None` if any field still contains a control char (a newline
 ///    would split the auto-exec into extra shell lines) — the caller then
 ///    omits the Reconnect menu item rather than emit an unsafe line.
 ///
 /// This is layer 2; layer 1 is the parse-time rejection in
-/// [`detect_ssh`] / [`detect_container`]. Returning `Option` lets the UI drop
+/// `detect_ssh` / `detect_container`. Returning `Option` lets the UI drop
 /// the menu entry entirely when no safe command can be built.
 pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     match ctx {

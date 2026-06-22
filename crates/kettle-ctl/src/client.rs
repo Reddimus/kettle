@@ -314,7 +314,9 @@ mod tests {
 
         // Connect always fails with a transport error; pid is reported alive.
         let connect = |_ep: &str| -> Result<Client, CtlError> {
-            Err(CtlError::Io(std::io::Error::other("transient transport hiccup")))
+            Err(CtlError::Io(std::io::Error::other(
+                "transient transport hiccup",
+            )))
         };
         let res = Client::discover_in(&dir, None, connect, |_p| true);
 
@@ -341,8 +343,9 @@ mod tests {
         let pid = 4243;
         discovery::register(&dir, &reg_entry(pid, "ep-dead", 100)).unwrap();
 
-        let connect =
-            |_ep: &str| -> Result<Client, CtlError> { Err(CtlError::Io(std::io::Error::other("x"))) };
+        let connect = |_ep: &str| -> Result<Client, CtlError> {
+            Err(CtlError::Io(std::io::Error::other("x")))
+        };
         // pid reported dead → enumeration filter prunes it before any connect,
         // so discovery yields NoServer and the entry is gone.
         let res = Client::discover_in(&dir, None, connect, |_p| false);

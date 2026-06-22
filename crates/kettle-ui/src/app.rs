@@ -959,7 +959,16 @@ fn dev_record_key(
     }
     let token = match key {
         Key::Named(nk) => Some(format!("{prefix}{nk:?}")),
-        Key::Character(s) if !prefix.is_empty() => Some(format!("{prefix}{}", s.as_str())),
+        // I2 (audit v2.32.0): redact the PAYLOAD of a modifier+printable key
+        // unless raw-input recording is on, keeping only the modifier prefix +
+        // timing. AltGr is reported as Ctrl+Alt on Windows, so a non-US-layout
+        // symbol / accented letter typed via AltGr would otherwise land in the
+        // always-on trace in cleartext — breaking the documented "a typed
+        // password never reaches the trace" guarantee.
+        Key::Character(s) if !prefix.is_empty() => Some(format!(
+            "{prefix}{}",
+            crate::dev_record::printable_token(s.as_str(), rec.raw_input())
+        )),
         Key::Character(s) => Some(crate::dev_record::printable_token(
             s.as_str(),
             rec.raw_input(),
@@ -969,6 +978,38 @@ fn dev_record_key(
     if let Some(t) = token {
         rec.record_input(&t);
     }
+}
+
+/// I1 (audit v2.32.0): neutralize an OSC-set window/tab title before it reaches
+/// the OS titlebar, the tab label, and the status bar. Replaces control
+/// characters AND Unicode bidirectional-override format characters (the U+202E
+/// titlebar / Alt-Tab spoofing vector) with a space, and caps the length so a
+/// pathological program can't set a multi-kilobyte title. Mirrors the
+/// notification path's control-stripping + length-cap policy.
+fn sanitize_title(t: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 512;
+    t.chars()
+        .map(|c| {
+            if c.is_control() || is_bidi_format_char(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(MAX_TITLE_CHARS)
+        .collect()
+}
+
+/// Unicode bidirectional formatting / override code points. These are NOT
+/// `char::is_control()` (they are general category Cf) but enable right-to-left
+/// titlebar / Alt-Tab spoofing, so a sanitized title must neutralize them too.
+fn is_bidi_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}'      // LRE RLE PDF LRO RLO
+            | '\u{2066}'..='\u{2069}' // LRI RLI FSI PDI
+            | '\u{200E}' | '\u{200F}' // LRM RLM
+    )
 }
 
 /// Pure pointer → `(col, line, side)` math for a pane, shared by `px_to_point`.
@@ -4231,7 +4272,12 @@ impl App {
     }
 
     fn apply_window_resize(&mut self, ws: &mut WindowState, width: u32, height: u32) {
-        if let Some(r) = ws.renderer.as_mut() {
+        // C1 (audit v2.32.0): never reconfigure a dead surface — a Resized
+        // event after a GPU device loss would otherwise drive a surface
+        // configure on the lost device. The grid resize below still runs so the
+        // layout is correct if the user reopens.
+        let gpu_lost = self.gpu.as_ref().is_some_and(|g| g.is_lost());
+        if !gpu_lost && let Some(r) = ws.renderer.as_mut() {
             r.resize(width, height);
         }
         self.resize_all(ws);
@@ -4306,7 +4352,10 @@ impl App {
                         if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
                             // keep the placeholder seed; do not store the exe path
                         } else {
-                            pane.title = t;
+                            // I1 (audit v2.32.0): sanitize before storing — this
+                            // string flows to set_title(), the tab label, and the
+                            // status bar.
+                            pane.title = sanitize_title(&t);
                             pane.title_is_placeholder = false;
                         }
                     }
@@ -5144,6 +5193,14 @@ impl App {
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = self.settings_overlay_projection(ws);
+        // Audit v2.32.0: compute the vi-mode cursor + visual anchor BEFORE the
+        // search split so the search-CLOSED early-return (the normal case)
+        // carries them too. Previously they were only set on the search-open
+        // literal and the early-return fell back to `..Overlay::default()`
+        // (None) — so the magenta vi cursor + visual selection never rendered
+        // unless the search bar happened to be open.
+        let vi_cursor = ws.vi_mode.map(|v| (v.row, v.col));
+        let vi_visual_anchor = ws.vi_mode.and_then(|v| v.visual_anchor);
         let s = &ws.mux.search;
         if !s.open {
             return Overlay {
@@ -5162,6 +5219,8 @@ impl App {
                 bell,
                 resize_overlay,
                 context_menu,
+                vi_cursor,
+                vi_visual_anchor,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
                 update_available: self.update_available.clone(),
@@ -5205,8 +5264,8 @@ impl App {
             bell,
             resize_overlay,
             context_menu,
-            vi_cursor: ws.vi_mode.map(|v| (v.row, v.col)),
-            vi_visual_anchor: ws.vi_mode.and_then(|v| v.visual_anchor),
+            vi_cursor,
+            vi_visual_anchor,
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
@@ -5269,6 +5328,19 @@ impl App {
                     w.set_title(MSG);
                 }
                 ws.last_title = MSG.to_string();
+            }
+            // C1 (audit v2.32.0): we are NOT painting this dead device, but we
+            // must still mark pending PTY output as "seen" and clear the
+            // coalescing flag — otherwise `window_has_new_output` stays true
+            // forever and a streaming pane (the user's many Claude-Code tabs
+            // during a TDR) spins the event loop at 30-60 Hz burning CPU/
+            // battery. Cleared here, the loop quiesces to ControlFlow::Wait
+            // between output bursts. (`about_to_wait_inner` also short-circuits
+            // animation wakes while lost.)
+            ws.coalescing_paint = false;
+            ws.seen_output_gen.clear();
+            for (id, p) in &ws.mux.panes {
+                ws.seen_output_gen.insert(*id, p.term.output_generation());
             }
             return;
         }
@@ -6073,11 +6145,18 @@ impl App {
         let Some(ctx) = &pane.remote_context else {
             return;
         };
-        items.push(ContextMenuItem::Separator);
-        items.push(ContextMenuItem::ConfigItem {
-            label: kettle_remote::clone_session_label(ctx),
-            command: kettle_remote::clone_session_command(ctx),
-        });
+        // H1 (audit v2.32.0): clone_session_command now returns None when a
+        // host/user/container token is unsafe (control chars / shell metachars
+        // that couldn't be neutralized) — drop the menu item entirely rather
+        // than typing an unsafe line into the PTY, and skip the dangling
+        // separator too.
+        if let Some(command) = kettle_remote::clone_session_command(ctx) {
+            items.push(ContextMenuItem::Separator);
+            items.push(ContextMenuItem::ConfigItem {
+                label: kettle_remote::clone_session_label(ctx),
+                command,
+            });
+        }
     }
 
     /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
@@ -7409,7 +7488,13 @@ impl App {
                             .count()
                     })
                     .unwrap_or(panes_in_tab);
-                if busy_in_tab > 0 && self.cfg.ask_before_closing.should_prompt(busy_in_tab) {
+                // Audit v2.32.0: decouple the two questions. `busy_in_tab > 0`
+                // is the all-idle SKIP (nothing running → nothing to lose), but
+                // the single-vs-multiple decision must use the TOTAL scope
+                // (`panes_in_tab`), not the busy count — otherwise a 3-pane tab
+                // with one busy pane passed `should_prompt(1)` and silently
+                // closed all three under MultipleTerminals mode.
+                if busy_in_tab > 0 && self.cfg.ask_before_closing.should_prompt(panes_in_tab) {
                     self.close_all_modals(ws);
                     ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close tab with {panes_in_tab} pane(s)?"),
@@ -7457,7 +7542,11 @@ impl App {
                     .values()
                     .filter(|p| !p.term.shell_idle())
                     .count();
-                if busy > 0 && self.cfg.ask_before_closing.should_prompt(busy) {
+                // Audit v2.32.0: `busy > 0` is the all-idle skip; the
+                // single-vs-multiple decision uses the TOTAL `scope` (see
+                // CloseTab above) so a window of N panes with one busy pane
+                // still prompts under MultipleTerminals.
+                if busy > 0 && self.cfg.ask_before_closing.should_prompt(scope) {
                     self.close_all_modals(ws);
                     ws.confirm_dialog = Some(ConfirmDialogState {
                         prompt: format!("Close {scope} pane(s)?"),
@@ -11617,7 +11706,10 @@ impl App {
                 true
             }
             ("d", true) | ("u", true) => {
-                let dir: isize = if s.as_str() == "d" { 1 } else { -1 };
+                // Audit v2.32.0: derive direction from the case-FOLDED key, not
+                // the raw char — Ctrl+Shift+D arrives as `s == "D"`, so the old
+                // `s == "d"` test was false and a half-page-DOWN scrolled UP.
+                let dir: isize = if folded == "d" { 1 } else { -1 };
                 let Some(((_, _), (_, panel_h))) = self.context_menu_geometry(ws) else {
                     return true;
                 };
@@ -15091,6 +15183,16 @@ impl App {
             }
             WindowEvent::Focused(f) => {
                 ws.window_focused = f;
+                // D1 (audit v2.32.0): track the OS focus in `focused_seq` so
+                // window-less events (RemoteCommand, ctl "focused-window" ops,
+                // the UpdateAvailable banner) and the agent-facing
+                // focused_window/to_window JSON route to the window the user
+                // actually clicked — not whichever window was last opened or
+                // ctl-focused. `ws.seq` is this window's BTreeMap key;
+                // finish_window_dispatch re-inserts it after dispatch.
+                if f {
+                    self.focused_seq = ws.seq;
+                }
                 // Cycle 876: non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
                 #[cfg(feature = "dev-record")]
@@ -15544,6 +15646,15 @@ impl App {
             self.pending_window_close = true;
             return None;
         }
+        // C1 (audit v2.32.0): once the GPU device is lost we no longer paint
+        // (see the redraw guard), so do NOT schedule cursor-blink / animated-bg
+        // / resize-chip wakes — they would wake the loop only to early-return,
+        // re-spinning at the animation frame rate. Returning None parks the loop
+        // on ControlFlow::Wait until a real event (e.g. the user closing the
+        // window) arrives. The reap above still runs so an exited pane can close.
+        if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
+            return None;
+        }
         let now = std::time::Instant::now();
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
@@ -15764,12 +15875,80 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
-        find_menu_row_y, modal_swallows_pointer, rank_layouts, selection_kind,
+        find_menu_row_y, modal_swallows_pointer, rank_layouts, sanitize_title, selection_kind,
         should_restore_session, should_reveal_after_renderer_init, startup_inner_size_px,
         typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    /// I1 (audit v2.32.0): an OSC-set title is neutralized before it reaches the
+    /// OS titlebar / tab / status bar — control chars AND Unicode bidi-override
+    /// format chars become spaces, and the length is capped.
+    #[test]
+    fn sanitize_title_neutralizes_control_bidi_and_caps_length() {
+        // C0/C1 control chars -> spaces.
+        assert_eq!(sanitize_title("a\x07b\x1b\nc"), "a b  c");
+        // U+202E (RLO) and friends -> spaces (Alt-Tab / titlebar spoofing).
+        assert_eq!(sanitize_title("safe\u{202e}evil"), "safe evil");
+        assert_eq!(sanitize_title("\u{2066}\u{2069}x"), "  x");
+        // Plain text is untouched.
+        assert_eq!(
+            sanitize_title("~/projects/kettle — main"),
+            "~/projects/kettle — main"
+        );
+        // Length is capped at 512 chars.
+        let long = "x".repeat(5000);
+        assert_eq!(sanitize_title(&long).chars().count(), 512);
+    }
+
+    /// D1 (audit v2.32.0) source-drift guard: the `WindowEvent::Focused(f)` arm
+    /// must sync `focused_seq` to the focused window, or window-less events
+    /// (ctl / remote / update banner) misroute to a stale window.
+    #[test]
+    fn focused_event_updates_focused_seq() {
+        let src = include_str!("app.rs");
+        let arm = src
+            .find("WindowEvent::Focused(f) =>")
+            .expect("Focused arm present");
+        let body = &src[arm..arm + 1100];
+        assert!(
+            body.contains("self.focused_seq = ws.seq"),
+            "the Focused arm must set self.focused_seq = ws.seq when focused"
+        );
+    }
+
+    /// C1 (audit v2.32.0) source-drift guard: while the GPU device is lost the
+    /// redraw guard must clear `coalescing_paint` + snapshot `seen_output_gen`
+    /// (so a streaming pane can't spin the loop), and `about_to_wait_inner` must
+    /// early-return on `is_lost()` (so animation wakes don't re-spin it).
+    #[test]
+    fn gpu_lost_quiesces_the_event_loop() {
+        let src = include_str!("app.rs");
+        let guard = src
+            .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {")
+            .expect("gpu_lost redraw guard present");
+        let body = &src[guard..guard + 1400];
+        assert!(
+            body.contains("ws.coalescing_paint = false")
+                && body.contains("ws.seen_output_gen.clear()"),
+            "the gpu_lost redraw guard must clear coalescing + snapshot seen_output_gen"
+        );
+        let wait = src
+            .find("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner present");
+        let wait_body = &src[wait..];
+        // about_to_wait_inner is the last method in the impl, so the next
+        // column-0 `}` closes the impl (excludes the test module below).
+        let end = wait_body
+            .find("\n}\n")
+            .map(|i| i + 2)
+            .unwrap_or(wait_body.len());
+        assert!(
+            wait_body[..end].contains("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {"),
+            "about_to_wait_inner must short-circuit animation wakes when the GPU is lost"
+        );
+    }
 
     /// Startup drift guard: the window is hidden only while renderer init runs,
     /// then revealed for every visible startup state. `window_state = hidden`
