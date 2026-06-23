@@ -4,6 +4,14 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.32.3] — 2026-06-23
+
+  ### Fixed
+  - **Wide tabs recover full cwd labels from shell-truncated titles.** If a
+    shell or prompt sets a left-truncated title such as `..ine-server-go` while
+    the pane cwd is `flight-event-line-server-go`, Kettle now resolves the tab
+    back to the full directory leaf and keeps the width-aware path metadata.
+
 ## [2.32.2] — 2026-06-23
 
   ### Fixed

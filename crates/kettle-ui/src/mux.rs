@@ -2398,11 +2398,11 @@ fn resolve_tab_label(
     }
     if let Some(cwd) = cwd.filter(|c| !c.is_empty())
         && let Some(name) = cwd.rsplit(['/', '\\']).find(|s| !s.is_empty())
-        && name == pane_title
+        && title_matches_cwd_leaf(pane_title, name)
     {
         let full = abbreviate_home(cwd, home);
         return TabLabel {
-            text: pane_title.to_string(),
+            text: name.to_string(),
             path: Some(full),
         };
     }
@@ -2410,6 +2410,22 @@ fn resolve_tab_label(
         text: pane_title.to_string(),
         path: None,
     }
+}
+
+fn title_matches_cwd_leaf(title: &str, leaf: &str) -> bool {
+    if title == leaf {
+        return true;
+    }
+
+    let Some(suffix) = title
+        .strip_prefix('…')
+        .or_else(|| title.strip_prefix("..."))
+        .or_else(|| title.strip_prefix(".."))
+    else {
+        return false;
+    };
+
+    !suffix.is_empty() && suffix.chars().count() >= 8 && leaf.ends_with(suffix)
 }
 
 /// v2.26.0: collapse a leading `$HOME` in `path` to `~` (e.g.
@@ -3142,6 +3158,46 @@ mod node_tests {
             l.path.as_deref(),
             Some("~/Repos/SPI-1/flight-event-line-server-go")
         );
+        // Shells/prompts may set an already-left-truncated title. When that
+        // title is a clear suffix of the cwd leaf, recover the full leaf/path so
+        // wide tabs can show all available context instead of preserving stale
+        // truncation.
+        let l = resolve_tab_label(
+            None,
+            "..ine-server-go",
+            false,
+            Some("/home/u/Repos/SPI-1/flight-event-line-server-go"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "flight-event-line-server-go");
+        assert_eq!(
+            l.path.as_deref(),
+            Some("~/Repos/SPI-1/flight-event-line-server-go")
+        );
+        let l = resolve_tab_label(
+            None,
+            "…ine-server-go",
+            false,
+            Some("/home/u/Repos/SPI-1/flight-event-line-server-go"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "flight-event-line-server-go");
+        assert_eq!(
+            l.path.as_deref(),
+            Some("~/Repos/SPI-1/flight-event-line-server-go")
+        );
+        let l = resolve_tab_label(
+            None,
+            "..go",
+            false,
+            Some("/home/u/Repos/SPI-1/flight-event-line-server-go"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "..go");
+        assert!(l.path.is_none());
         // Override / real title / no-cwd carry no path (shown verbatim).
         assert!(
             resolve_tab_label(Some("deploy"), "bash", false, Some("/x/y"), None, 0)
