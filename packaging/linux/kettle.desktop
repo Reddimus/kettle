@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=kettle
+Name=Kettle
 GenericName=Terminal
 Comment=A fast cross-platform GPU terminal emulator
 Exec=kettle

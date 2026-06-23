@@ -4,6 +4,13 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.32.2] — 2026-06-23
+
+  ### Fixed
+  - **Linux desktop launchers display as `Kettle`.** Packaged and user-local
+    `.desktop` entries now use the user-facing app name expected by Ubuntu /
+    GNOME Super-key search.
+
 ## [2.32.1] — 2026-06-23
 
   ### Fixed

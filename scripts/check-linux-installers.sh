@@ -24,6 +24,8 @@ trap 'rm -rf "$tmp_root"' EXIT INT TERM
 assert_abs_desktop_paths() {
   local prefix=$1
   local desktop="${prefix}/share/applications/kettle.desktop"
+  grep -qx "Name=Kettle" "$desktop" \
+    || fail "desktop Name is not the user-facing app name Kettle"
   grep -qx "Exec=${prefix}/bin/kettle" "$desktop" \
     || fail "desktop Exec does not point at ${prefix}/bin/kettle"
   grep -qx "TryExec=${prefix}/bin/kettle" "$desktop" \
