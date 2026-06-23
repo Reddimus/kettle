@@ -330,6 +330,26 @@ tabbar-click-smoke:
 tabbar-click-smoke:
     python scripts/check-live-ui-smoke.py tabbar
 
+# Reproduce cwd-derived title recovery for shell-truncated tab titles.
+# Captures list_panes/list_tabs/ui_geometry under target/diagnostics/tab-title-*.
+[unix]
+tab-title-smoke:
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle tab-title
+
+[windows]
+tab-title-smoke:
+    python scripts/check-live-ui-smoke.py tab-title
+
+# Reproduce app-level zoom keybind matching without compositor key injection.
+# Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
+[unix]
+zoom-keybind-smoke:
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle zoom-keybind
+
+[windows]
+zoom-keybind-smoke:
+    python scripts/check-live-ui-smoke.py zoom-keybind
+
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]

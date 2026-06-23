@@ -435,7 +435,7 @@ def run_tabbar(kettle: str, root: Path) -> Path:
             [
                 "agent-server = full",
                 "tab-bar = always",
-                "tab-bar-pos = top",
+                "tab-bar-position = top",
                 "status-bar = off",
                 "restore-session = false",
                 "update-check = false",
@@ -1584,9 +1584,213 @@ def run_interaction(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_tab_title(kettle: str, root: Path) -> Path:
+    if platform.system() == "Windows":
+        out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "skipped.txt").write_text("tab-title smoke skipped on Windows\n")
+        return out
+
+    out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "tab-bar-pos = top",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 220",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    nested = out / "fixture" / "Repos" / "SPI-1" / "platform"
+    nested.mkdir(parents=True, exist_ok=True)
+    expected_path = str(nested)
+    home = os.path.expanduser("~")
+    expected_display = "~" + expected_path[len(home) :] if expected_path.startswith(home + os.sep) else expected_path
+    marker = "KETTLE_TAB_TITLE_READY"
+    command = (
+        f"cd {shell_quote(expected_path)}; "
+        "printf '\\033]7;file://localhost%s\\007\\033]2;..PI-1/platform\\007"
+        f"{marker}\\n' \"$PWD\"; sleep 5"
+    )
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        live.ctl("send_text", params={"text": command})
+        live.ctl("send_keys", params={"keys": ["enter"]})
+        wait = live.json_ctl("wait_for", params={"text": marker, "timeout_ms": 8000, "quiet_ms": 250})
+        if not wait.get("matched"):
+            screen = live.json_ctl("read_screen", params={"scrollback_lines": 20})
+            raise SystemExit(
+                "tab-title smoke: marker did not appear; "
+                f"wait={wait} screen={screen.get('text')!r}"
+            )
+
+        panes = live.json_ctl("list_panes")
+        tabs = live.json_ctl("list_tabs")
+        geo: Dict[str, object] = {}
+        for _ in range(20):
+            geo = live.json_ctl("ui_geometry")
+            segments = geo.get("tab_bar", {}).get("segments", [])  # type: ignore[union-attr]
+            active = [s for s in segments if isinstance(s, dict) and s.get("active")]
+            if active and active[0].get("fitted_title") == expected_display:
+                break
+            time.sleep(0.1)
+
+        (out / "panes.json").write_text(json.dumps(panes, indent=2) + "\n")
+        (out / "tabs.json").write_text(json.dumps(tabs, indent=2) + "\n")
+        (out / "geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+
+    pane_rows = panes.get("panes", [])
+    focused = [p for p in pane_rows if isinstance(p, dict) and p.get("focused")]
+    if len(focused) != 1:
+        raise SystemExit(f"tab-title smoke: expected one focused pane, got {focused}")
+    pane = focused[0]
+    if pane.get("title") != "..PI-1/platform":
+        raise SystemExit(f"tab-title smoke: raw pane title did not preserve shell title: {pane}")
+    if pane.get("cwd") != expected_path:
+        raise SystemExit(
+            f"tab-title smoke: pane cwd did not track OSC 7: got {pane.get('cwd')!r}, "
+            f"expected {expected_path!r}"
+        )
+
+    tab_rows = tabs.get("tabs", [])
+    active_tabs = [t for t in tab_rows if isinstance(t, dict) and t.get("active")]
+    if len(active_tabs) != 1:
+        raise SystemExit(f"tab-title smoke: expected one active tab, got {active_tabs}")
+    if active_tabs[0].get("title") != "platform":
+        raise SystemExit(f"tab-title smoke: semantic tab title not normalized: {active_tabs[0]}")
+
+    segments = geo.get("tab_bar", {}).get("segments", [])  # type: ignore[union-attr]
+    active_segments = [s for s in segments if isinstance(s, dict) and s.get("active")]
+    if len(active_segments) != 1:
+        raise SystemExit(f"tab-title smoke: expected one active segment, got {active_segments}")
+    seg = active_segments[0]
+    if seg.get("title") != "platform":
+        raise SystemExit(f"tab-title smoke: geometry title not normalized: {seg}")
+    if seg.get("path") != expected_display:
+        raise SystemExit(f"tab-title smoke: geometry path missing cwd metadata: {seg}")
+    if seg.get("fitted_title") != expected_display:
+        raise SystemExit(f"tab-title smoke: wide tab did not fit full cwd: {seg}")
+    return out
+
+
+def run_zoom_keybind(kettle: str, root: Path) -> Path:
+    out = root / f"zoom-keybind-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "font-size = 13",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 100",
+                "window-height = 28",
+            ]
+        )
+        + "\n"
+    )
+
+    def font_size(geo: Dict[str, object]) -> float:
+        cell = geo.get("cell")
+        if not isinstance(cell, dict):
+            raise SystemExit(f"zoom-keybind smoke: missing cell geometry: {geo}")
+        value = cell.get("font_size")
+        if not isinstance(value, (int, float)):
+            raise SystemExit(f"zoom-keybind smoke: missing font_size: {geo}")
+        return float(value)
+
+    def wait_font(live: LiveKettle, expected: float) -> Dict[str, object]:
+        last: Dict[str, object] = {}
+        for _ in range(30):
+            last = live.json_ctl("ui_geometry")
+            if abs(font_size(last) - expected) < 0.01:
+                return last
+            time.sleep(0.1)
+        raise SystemExit(
+            f"zoom-keybind smoke: expected font size {expected}, got {font_size(last)}"
+        )
+
+    steps = [
+        (
+            "physical-equal-shift",
+            {"logical": "unidentified", "physical": "Equal", "mods": "ctrl+shift"},
+            14.0,
+            "IncreaseFontSize",
+        ),
+        (
+            "numpad-subtract",
+            {"logical": "unidentified", "physical": "NumpadSubtract", "mods": "ctrl"},
+            13.0,
+            "DecreaseFontSize",
+        ),
+        (
+            "numpad-add",
+            {"logical": "unidentified", "physical": "NumpadAdd", "mods": "ctrl"},
+            14.0,
+            "IncreaseFontSize",
+        ),
+        (
+            "digit-reset",
+            {"logical": "unidentified", "physical": "Digit0", "mods": "ctrl"},
+            13.0,
+            "ResetFontSize",
+        ),
+    ]
+
+    analysis: Dict[str, object] = {"steps": []}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        initial = wait_font(live, 13.0)
+        (out / "geometry-initial.json").write_text(json.dumps(initial, indent=2) + "\n")
+        for label, params, expected, action in steps:
+            result = live.json_ctl("dispatch_keybind", params=params)
+            (out / f"{label}.dispatch.json").write_text(json.dumps(result, indent=2) + "\n")
+            if result.get("action") != action or result.get("dispatched") is not True:
+                raise SystemExit(
+                    f"zoom-keybind smoke: {label} dispatched wrong action: {result}"
+                )
+            geo = wait_font(live, expected)
+            (out / f"{label}.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+            analysis["steps"].append(
+                {
+                    "label": label,
+                    "params": params,
+                    "dispatch": result,
+                    "font_size": font_size(geo),
+                }
+            )
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=["tabbar", "underline", "agent-tui", "interaction", "all"])
+    parser.add_argument(
+        "case",
+        choices=[
+            "tabbar",
+            "tab-title",
+            "zoom-keybind",
+            "underline",
+            "agent-tui",
+            "interaction",
+            "all",
+        ],
+    )
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
     args = parser.parse_args()
@@ -1600,6 +1804,12 @@ def main() -> int:
     if args.case in ("tabbar", "all"):
         out = run_tabbar(args.kettle, root)
         print(f"tabbar-click smoke: OK artifacts={out}")
+    if args.case in ("tab-title", "all"):
+        out = run_tab_title(args.kettle, root)
+        print(f"tab-title smoke: OK artifacts={out}")
+    if args.case in ("zoom-keybind", "all"):
+        out = run_zoom_keybind(args.kettle, root)
+        print(f"zoom-keybind smoke: OK artifacts={out}")
     if args.case in ("underline", "all"):
         out = run_underline(args.kettle, root)
         print(f"underline-scroll smoke: OK artifacts={out}")

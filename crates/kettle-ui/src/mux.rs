@@ -2397,14 +2397,9 @@ fn resolve_tab_label(
         };
     }
     if let Some(cwd) = cwd.filter(|c| !c.is_empty())
-        && let Some(name) = cwd.rsplit(['/', '\\']).find(|s| !s.is_empty())
-        && title_matches_cwd_leaf(pane_title, name)
+        && let Some(label) = cwd_label_for_shell_title(pane_title, cwd, home)
     {
-        let full = abbreviate_home(cwd, home);
-        return TabLabel {
-            text: name.to_string(),
-            path: Some(full),
-        };
+        return label;
     }
     TabLabel {
         text: pane_title.to_string(),
@@ -2412,7 +2407,28 @@ fn resolve_tab_label(
     }
 }
 
-fn title_matches_cwd_leaf(title: &str, leaf: &str) -> bool {
+/// If a real shell title is just a prompt-rendered cwd (or an ellipsized suffix
+/// of it), recover the cwd-derived label so wide tabs/window titles are not
+/// stuck with the shell's already-truncated text. Oh My Zsh's term support, for
+/// example, emits `%15<..<%~%<<`, yielding titles like `..PI-1/platform` even
+/// when Kettle also has the authoritative OSC 7 cwd.
+pub(crate) fn cwd_label_for_shell_title(
+    title: &str,
+    cwd: &str,
+    home: Option<&str>,
+) -> Option<TabLabel> {
+    let leaf = cwd.rsplit(['/', '\\']).find(|s| !s.is_empty())?;
+    if !shell_title_matches_cwd(title, cwd, leaf) {
+        return None;
+    }
+    Some(TabLabel {
+        text: leaf.to_string(),
+        path: Some(abbreviate_home(cwd, home)),
+    })
+}
+
+fn shell_title_matches_cwd(title: &str, cwd: &str, leaf: &str) -> bool {
+    let title = title.trim();
     if title == leaf {
         return true;
     }
@@ -2425,7 +2441,11 @@ fn title_matches_cwd_leaf(title: &str, leaf: &str) -> bool {
         return false;
     };
 
-    !suffix.is_empty() && suffix.chars().count() >= 8 && leaf.ends_with(suffix)
+    if suffix.chars().count() < 8 {
+        return false;
+    }
+
+    leaf.ends_with(suffix) || cwd.ends_with(suffix) || abbreviate_home(cwd, None).ends_with(suffix)
 }
 
 /// v2.26.0: collapse a leading `$HOME` in `path` to `~` (e.g.
@@ -2433,7 +2453,7 @@ fn title_matches_cwd_leaf(title: &str, leaf: &str) -> bool {
 /// separator style. Best-effort — a path whose prefix doesn't match `home`
 /// (different separator convention, MSYS `/c/...` vs `C:\...`, etc.) is returned
 /// unchanged. Pure → unit-tested.
-fn abbreviate_home(path: &str, home: Option<&str>) -> String {
+pub(crate) fn abbreviate_home(path: &str, home: Option<&str>) -> String {
     if let Some(home) = home.filter(|h| !h.is_empty()) {
         if path == home {
             return "~".to_string();
@@ -2450,7 +2470,7 @@ fn abbreviate_home(path: &str, home: Option<&str>) -> String {
 
 /// The user's home directory (`USERPROFILE` on Windows, else `HOME`), used to
 /// abbreviate cwd-derived tab labels. `None` when unset/empty.
-fn home_dir_string() -> Option<String> {
+pub(crate) fn home_dir_string() -> Option<String> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
@@ -3198,6 +3218,28 @@ mod node_tests {
         );
         assert_eq!(l.text, "..go");
         assert!(l.path.is_none());
+        for truncated in ["...PI-1/platform", "..PI-1/platform", "…PI-1/platform"] {
+            let l = resolve_tab_label(
+                None,
+                truncated,
+                false,
+                Some("/home/u/Repos/SPI-1/platform"),
+                Some("/home/u"),
+                0,
+            );
+            assert_eq!(l.text, "platform", "{truncated}");
+            assert_eq!(l.path.as_deref(), Some("~/Repos/SPI-1/platform"));
+        }
+        let l = resolve_tab_label(
+            None,
+            "..PI-1/platform",
+            false,
+            Some("/home/u/Repos/other/platform"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "..PI-1/platform");
+        assert!(l.path.is_none());
         // Override / real title / no-cwd carry no path (shown verbatim).
         assert!(
             resolve_tab_label(Some("deploy"), "bash", false, Some("/x/y"), None, 0)
@@ -3219,6 +3261,16 @@ mod node_tests {
             None,
             "kettle",
             true,
+            Some("C:\\Users\\me\\Repos\\kettle"),
+            Some("C:\\Users\\me"),
+            0,
+        );
+        assert_eq!(l.text, "kettle");
+        assert_eq!(l.path.as_deref(), Some("~\\Repos\\kettle"));
+        let l = resolve_tab_label(
+            None,
+            "...Repos\\kettle",
+            false,
             Some("C:\\Users\\me\\Repos\\kettle"),
             Some("C:\\Users\\me"),
             0,

@@ -11,6 +11,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     shell or prompt sets a left-truncated title such as `..ine-server-go` while
     the pane cwd is `flight-event-line-server-go`, Kettle now resolves the tab
     back to the full directory leaf and keeps the width-aware path metadata.
+  - **Cwd title recovery now handles parent-directory suffixes.** Oh My Zsh-style
+    titles such as `..PI-1/platform` are recognized as truncated cwd renderings
+    when OSC 7 reports the full cwd, so wide tabs and the Ubuntu window title can
+    show the full cwd context instead of preserving the shell's stale truncation.
+  - **Zoom keybinds survive Ubuntu/Wayland key reporting.** App keybind matching
+    now falls back from winit's logical key to the physical plus/minus/reset key
+    codes, so Ctrl+Plus / Ctrl+Minus / Ctrl+0 keep changing the font size even
+    when the compositor reports a truncated or layout-dependent logical key.
 
 ## [2.32.2] — 2026-06-23
 

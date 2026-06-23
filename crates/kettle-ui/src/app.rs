@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use kettle_config::{
-    Action, Config, Key as KKey, Mods, StatusBarMode, TabBarMode, TabBarPos, Trigger,
+    Action, Bindings, Config, Key as KKey, Mods, StatusBarMode, TabBarMode, TabBarPos, Trigger,
 };
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
@@ -15,7 +15,7 @@ use kettle_render::{
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{
     CursorIcon, Fullscreen, Theme as WindowTheme, UserAttentionType, Window, WindowId,
 };
@@ -1286,12 +1286,24 @@ fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
 /// the in-app tab agree pre-OSC 2. Real shell-set titles still win the
 /// moment they arrive.
 fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> String {
+    let home = crate::mux::home_dir_string();
+    window_title_with_home(template, pane_title, cwd, home.as_deref(), tab)
+}
+
+fn window_title_with_home(
+    template: &str,
+    pane_title: &str,
+    cwd: &str,
+    home: Option<&str>,
+    tab: usize,
+) -> String {
     let t_raw = pane_title.trim();
     let pane_placeholder = t_raw.is_empty() || t_raw == "kettle";
     let cwd_basename = std::path::Path::new(cwd)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty());
+    let cwd_display = crate::mux::abbreviate_home(cwd, home);
     // If the shell hasn't set a real title yet but we know the cwd,
     // substitute the cwd basename — same behavior as the cycle-89 tab
     // title fallback so the OS window title and the in-app tab agree
@@ -1305,14 +1317,27 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
                 let tab = tab.to_string();
                 kettle_config::template::fill(
                     template,
-                    &[("title", name), ("cwd", cwd), ("tab", &tab)],
+                    &[("title", name), ("cwd", &cwd_display), ("tab", &tab)],
                 )
             }
             None => "kettle".to_string(),
         };
     }
+    if !cwd.is_empty()
+        && let Some(label) = crate::mux::cwd_label_for_shell_title(t_raw, cwd, home)
+        && let Some(path) = label.path.as_deref()
+    {
+        let tab = tab.to_string();
+        return kettle_config::template::fill(
+            template,
+            &[("title", path), ("cwd", &cwd_display), ("tab", &tab)],
+        );
+    }
     let tab = tab.to_string();
-    kettle_config::template::fill(template, &[("title", t_raw), ("cwd", cwd), ("tab", &tab)])
+    kettle_config::template::fill(
+        template,
+        &[("title", t_raw), ("cwd", &cwd_display), ("tab", &tab)],
+    )
 }
 
 /// Shell-quote a dropped file path so the user can press Enter without
@@ -9154,6 +9179,8 @@ impl App {
     }
 
     fn reload_config(&mut self, ws: &mut WindowState) {
+        let previous_config_font_size = self.cfg.font_size;
+        let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         let mut new = self
             .config_path
             .as_deref()
@@ -9166,7 +9193,19 @@ impl App {
             // cell dims for one frame). Both are no-ops when unchanged,
             // so steady-state reloads (same family / same size) are free.
             r.set_font_family(new.font_family.clone());
-            r.set_font_size(new.font_size);
+            // Runtime zoom is intentionally session-local: Increase/Decrease
+            // do not write the config, while ResetFontSize still uses the
+            // configured default. A no-op reload must therefore keep the live
+            // renderer zoom; only an actual config font-size change should
+            // replace it.
+            let font_size_changed =
+                (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
+            let effective_font_size = if font_size_changed {
+                new.font_size
+            } else {
+                runtime_font_size.unwrap_or(new.font_size)
+            };
+            r.set_font_size(effective_font_size);
             // Cycle 636: pick up cell-width/cell-height changes too.
             // Setter is a no-op when unchanged.
             r.set_cell_scale(new.cell_width, new.cell_height);
@@ -9367,6 +9406,8 @@ impl App {
                 .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
             "send_keys" => require_full(req.id, "send_keys")
                 .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
+            "dispatch_keybind" => require_full(req.id, "dispatch_keybind")
+                .unwrap_or_else(|| self.ctl_dispatch_keybind(ws, event_loop, req)),
             "send_mouse" => require_full(req.id, "send_mouse")
                 .unwrap_or_else(|| self.ctl_send_mouse(ws, event_loop, req)),
             "resize_window" => require_full(req.id, "resize_window")
@@ -9623,14 +9664,25 @@ impl App {
                     "font_size": 13.0,
                 })
             });
+        let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);
         let bar = self.tab_bar(target);
         let segments: Vec<serde_json::Value> = bar
             .segments
             .iter()
             .map(|seg| {
+                let fitted_title = kettle_render::fit_tab_segment_title(
+                    &seg.title,
+                    seg.path.as_deref(),
+                    seg.idx,
+                    &self.cfg.tab_format,
+                    seg.title_rect.2,
+                    cell_w,
+                );
                 serde_json::json!({
                     "index": seg.idx,
                     "title": seg.title,
+                    "path": seg.path.as_deref(),
+                    "fitted_title": fitted_title,
                     "active": seg.active,
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
@@ -9765,6 +9817,89 @@ impl App {
                 "action": resolved,
                 "requested": name,
                 "window": ws.seq,
+            }),
+        )
+    }
+
+    /// `dispatch_keybind`: diagnostic route for app-level keybind matching.
+    /// Unlike `send_keys`, this does not write PTY bytes; it exercises the same
+    /// resolver as the real window keyboard path and dispatches the matched app
+    /// action when no modal owns the keyboard.
+    fn ctl_dispatch_keybind(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let logical = match parse_ctl_logical_key(req.params.get("logical")) {
+            Ok(k) => k,
+            Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+        };
+        let physical = match parse_ctl_physical_key(req.params.get("physical")) {
+            Ok(k) => k,
+            Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+        };
+        if logical.is_none() && physical.is_none() {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "dispatch_keybind requires 'logical' or 'physical'",
+            );
+        }
+        let mods = match parse_ctl_mods(req.params.get("mods")) {
+            Ok(m) => m,
+            Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
+        };
+        let candidates = keybind_candidates(logical.as_ref(), physical.as_ref(), mods);
+        let candidate_labels: Vec<String> = candidates.iter().map(Trigger::label).collect();
+        let modal_blocked = self.any_modal_open(ws);
+        if modal_blocked {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "window": ws.seq,
+                    "dispatched": false,
+                    "modal_blocked": true,
+                    "candidates": candidate_labels,
+                }),
+            );
+        }
+        let Some((trigger, action)) = resolve_keybind_action(
+            &self.cfg.keybinds,
+            logical.as_ref(),
+            physical.as_ref(),
+            mods,
+        ) else {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "window": ws.seq,
+                    "dispatched": false,
+                    "modal_blocked": false,
+                    "candidates": candidate_labels,
+                }),
+            );
+        };
+        let trigger_label = trigger.label();
+        let action_name = kettle_config::keybinds::action_label(&action);
+        let font_size_before = ws.renderer.as_ref().map(|r| r.font_size());
+        self.handle_action(ws, action, event_loop);
+        let font_size_after = ws.renderer.as_ref().map(|r| r.font_size());
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "window": ws.seq,
+                "dispatched": true,
+                "modal_blocked": false,
+                "trigger": trigger_label,
+                "action": action_name,
+                "font_size_before": font_size_before,
+                "font_size_after": font_size_after,
+                "candidates": candidate_labels,
             }),
         )
     }
@@ -12094,6 +12229,164 @@ fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
         }
     }
     key.map(|k| (mods, k))
+}
+
+fn push_unique_trigger(out: &mut Vec<Trigger>, trigger: Trigger) {
+    if !out.contains(&trigger) {
+        out.push(trigger);
+    }
+}
+
+fn physical_keybind_chars(physical: &PhysicalKey, mods: ModifiersState) -> &'static [char] {
+    match physical {
+        PhysicalKey::Code(KeyCode::Equal) => {
+            if mods.shift_key() {
+                &['=', '+']
+            } else {
+                &['=']
+            }
+        }
+        PhysicalKey::Code(KeyCode::Minus) => {
+            if mods.shift_key() {
+                &['-', '_']
+            } else {
+                &['-']
+            }
+        }
+        PhysicalKey::Code(KeyCode::NumpadAdd) => &['+'],
+        PhysicalKey::Code(KeyCode::NumpadSubtract) => &['-'],
+        PhysicalKey::Code(KeyCode::NumpadEqual) => &['='],
+        PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => &['0'],
+        _ => &[],
+    }
+}
+
+fn keybind_candidates(
+    logical_key: Option<&Key>,
+    physical_key: Option<&PhysicalKey>,
+    mods: ModifiersState,
+) -> Vec<Trigger> {
+    let mut out = Vec::new();
+    let kmods = to_mods(mods);
+    if let Some(k) = logical_key.and_then(to_kkey) {
+        push_unique_trigger(&mut out, Trigger::new(kmods, k));
+    }
+    if let Some(physical) = physical_key {
+        for c in physical_keybind_chars(physical, mods) {
+            push_unique_trigger(&mut out, Trigger::new(kmods, KKey::Char(*c)));
+        }
+    }
+    out
+}
+
+fn resolve_keybind_action(
+    bindings: &Bindings,
+    logical_key: Option<&Key>,
+    physical_key: Option<&PhysicalKey>,
+    mods: ModifiersState,
+) -> Option<(Trigger, Action)> {
+    keybind_candidates(logical_key, physical_key, mods)
+        .into_iter()
+        .find_map(|trigger| {
+            bindings
+                .get(&trigger)
+                .cloned()
+                .map(|action| (trigger, action))
+        })
+}
+
+fn parse_ctl_mods(
+    value: Option<&serde_json::Value>,
+) -> std::result::Result<ModifiersState, String> {
+    let mut mods = ModifiersState::empty();
+    let Some(value) = value else {
+        return Ok(mods);
+    };
+    let parts: Vec<String> = if let Some(s) = value.as_str() {
+        if s.trim().is_empty() {
+            Vec::new()
+        } else {
+            s.split('+').map(|p| p.trim().to_string()).collect()
+        }
+    } else if let Some(arr) = value.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let Some(s) = item.as_str() else {
+                return Err("'mods' array entries must be strings".to_string());
+            };
+            out.push(s.to_string());
+        }
+        out
+    } else {
+        return Err("'mods' must be a string like 'ctrl+shift' or an array".to_string());
+    };
+    for part in parts {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "ctrl" | "control" => mods |= ModifiersState::CONTROL,
+            "alt" | "opt" | "option" => mods |= ModifiersState::ALT,
+            "shift" => mods |= ModifiersState::SHIFT,
+            "super" | "cmd" | "command" | "win" | "windows" | "meta" | "logo" => {
+                mods |= ModifiersState::SUPER;
+            }
+            other => return Err(format!("unknown modifier '{other}'")),
+        }
+    }
+    Ok(mods)
+}
+
+fn parse_ctl_logical_key(
+    value: Option<&serde_json::Value>,
+) -> std::result::Result<Option<Key>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(token) = value.as_str() else {
+        return Err("'logical' must be a key token string".to_string());
+    };
+    if matches!(
+        token.trim().to_ascii_lowercase().as_str(),
+        "" | "none" | "unidentified"
+    ) {
+        return Ok(None);
+    }
+    let Some((mods, key)) = parse_send_key(token) else {
+        return Err(format!("unrecognized logical key token '{token}'"));
+    };
+    if !mods.is_empty() {
+        return Err("'logical' must be one key token without modifiers".to_string());
+    }
+    Ok(Some(key))
+}
+
+fn parse_ctl_physical_key(
+    value: Option<&serde_json::Value>,
+) -> std::result::Result<Option<PhysicalKey>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err("'physical' must be a key-code string".to_string());
+    };
+    let normalized: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if matches!(normalized.as_str(), "" | "none" | "unidentified") {
+        return Ok(None);
+    }
+    let code = match normalized.as_str() {
+        "equal" | "equals" => KeyCode::Equal,
+        "minus" => KeyCode::Minus,
+        "digit0" | "key0" | "0" => KeyCode::Digit0,
+        "numpadadd" | "numpadplus" => KeyCode::NumpadAdd,
+        "numpadsubtract" | "numpadminus" => KeyCode::NumpadSubtract,
+        "numpadequal" | "numpadequals" => KeyCode::NumpadEqual,
+        "numpad0" => KeyCode::Numpad0,
+        _ => return Err(format!("unsupported physical key code '{raw}'")),
+    };
+    Ok(Some(PhysicalKey::Code(code)))
 }
 
 fn to_kkey(key: &Key) -> Option<KKey> {
@@ -15139,6 +15432,7 @@ impl App {
                         (r.font_size() - 1.0).max(6.0)
                     };
                     r.set_font_size(new);
+                    self.resize_all(ws);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15574,12 +15868,14 @@ impl App {
                     return;
                 }
 
-                if let Some(k) = to_kkey(&event.logical_key) {
-                    let trig = Trigger::new(to_mods(ws.mods), k);
-                    if let Some(act) = self.cfg.keybinds.get(&trig).cloned() {
-                        self.handle_action(ws, act, event_loop);
-                        return;
-                    }
+                if let Some((_trigger, act)) = resolve_keybind_action(
+                    &self.cfg.keybinds,
+                    Some(&event.logical_key),
+                    Some(&event.physical_key),
+                    ws.mods,
+                ) {
+                    self.handle_action(ws, act, event_loop);
+                    return;
                 }
 
                 let mode = ws
@@ -16467,6 +16763,90 @@ mod tests {
         assert_eq!(enc("up", TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
         assert_eq!(enc("shift+tab", plain), Some(b"\x1b[Z".to_vec()));
         assert_eq!(enc("G", plain), Some(b"G".to_vec()));
+    }
+
+    #[test]
+    fn keybind_resolver_uses_logical_before_physical_fallback() {
+        use super::resolve_keybind_action;
+        use kettle_config::{Action, Bindings, Key as KKey, Mods, Trigger};
+        use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let kmods = Mods::CTRL | Mods::SHIFT;
+        let mut bindings = Bindings::new();
+        bindings.insert(Trigger::new(kmods, KKey::Char('=')), Action::ResetFontSize);
+        bindings.insert(
+            Trigger::new(kmods, KKey::Char('+')),
+            Action::IncreaseFontSize,
+        );
+
+        let matched = resolve_keybind_action(
+            &bindings,
+            Some(&Key::Character("=".into())),
+            Some(&PhysicalKey::Code(KeyCode::Equal)),
+            mods,
+        );
+        assert_eq!(
+            matched,
+            Some((Trigger::new(kmods, KKey::Char('=')), Action::ResetFontSize))
+        );
+    }
+
+    #[test]
+    fn keybind_resolver_falls_back_to_physical_zoom_keys() {
+        use super::resolve_keybind_action;
+        use kettle_config::Action;
+        use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+
+        let defaults = kettle_config::keybinds::defaults();
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+
+        for (physical, mods, expected) in [
+            (
+                PhysicalKey::Code(KeyCode::Equal),
+                ctrl_shift,
+                Action::IncreaseFontSize,
+            ),
+            (
+                PhysicalKey::Code(KeyCode::NumpadAdd),
+                ctrl,
+                Action::IncreaseFontSize,
+            ),
+            (
+                PhysicalKey::Code(KeyCode::Minus),
+                ctrl,
+                Action::DecreaseFontSize,
+            ),
+            (
+                PhysicalKey::Code(KeyCode::NumpadSubtract),
+                ctrl,
+                Action::DecreaseFontSize,
+            ),
+            (
+                PhysicalKey::Code(KeyCode::Digit0),
+                ctrl,
+                Action::ResetFontSize,
+            ),
+            (
+                PhysicalKey::Code(KeyCode::Numpad0),
+                ctrl,
+                Action::ResetFontSize,
+            ),
+        ] {
+            let matched = resolve_keybind_action(&defaults, None, Some(&physical), mods)
+                .unwrap_or_else(|| panic!("{physical:?} should resolve"));
+            assert_eq!(matched.1, expected);
+        }
+        assert_eq!(
+            resolve_keybind_action(
+                &defaults,
+                None,
+                Some(&PhysicalKey::Code(KeyCode::KeyA)),
+                ctrl,
+            ),
+            None
+        );
     }
 
     /// v2.20.0 (`vim-menu-nav`) drift guards: (1) the vim layer must run
@@ -18461,7 +18841,7 @@ mod tests {
 
     #[test]
     fn window_title_formats_and_falls_back() {
-        use super::window_title;
+        use super::{window_title, window_title_with_home};
         let dflt = "{title} — kettle";
         assert_eq!(
             window_title(dflt, "vim README.md", "", 1),
@@ -18484,11 +18864,32 @@ mod tests {
             window_title(dflt, "kettle", "/home/k/Documents", 1),
             "Documents — kettle"
         );
+        assert_eq!(
+            window_title_with_home(
+                dflt,
+                "..PI-1/platform",
+                "/home/k/Repos/SPI-1/platform",
+                Some("/home/k"),
+                1
+            ),
+            "~/Repos/SPI-1/platform — kettle",
+            "truncated cwd-rendered shell titles recover the full cwd for the OS title"
+        );
         // Custom templates can use {tab} and {cwd}.
         let t = "[{tab}] {title} ({cwd})";
         assert_eq!(
             window_title(t, "vim", "/home/k/Repos/kettle", 2),
             "[2] vim (/home/k/Repos/kettle)"
+        );
+        assert_eq!(
+            window_title_with_home(
+                t,
+                "...PI-1/platform",
+                "/home/k/Repos/SPI-1/platform",
+                Some("/home/k"),
+                2
+            ),
+            "[2] ~/Repos/SPI-1/platform (~/Repos/SPI-1/platform)"
         );
     }
 

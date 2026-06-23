@@ -2705,20 +2705,15 @@ impl Renderer {
                 // format (the leading space + e.g. "{n}: ") so the title
                 // ellipsizes to keep the WHOLE label inside the segment rather
                 // than letting the prefix push it past the right edge.
+                let title = fit_tab_segment_title(
+                    &s.title,
+                    s.path.as_deref(),
+                    s.idx,
+                    &cfg.tab_format,
+                    title_w,
+                    cw,
+                );
                 let n = (s.idx + 1).to_string();
-                let avail = (title_w.max(0.0) / cw.max(1.0)) as usize;
-                let fixed_label =
-                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")]);
-                let fixed_w = display_width(&fixed_label);
-                let maxc = avail.saturating_sub(fixed_w);
-                // v2.26.0: directory-derived labels (carry a `path`) get the
-                // 3-tier fit (full path → leaf dir name → truncated tail) so a
-                // wide tab shows the whole path and narrows gracefully. Explicit
-                // / shell-set titles keep the older middle-ellipsis behavior.
-                let title = match &s.path {
-                    Some(p) => fit_tab_path(p, maxc),
-                    None => fit_tab_title(&s.title, maxc),
-                };
                 let body =
                     kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
                 // Title only — the ✕ is rendered separately below so we
@@ -5539,6 +5534,29 @@ fn fit_tab_path(full: &str, n: usize) -> String {
         return "…".to_string();
     }
     format!("…{}", take_cols_back(tail_src, n - 1))
+}
+
+/// Fit only the `{title}` value for a tab segment, using the same budget math as
+/// the renderer's tab text path. `title_w` is the title lane in pixels, `cell_w`
+/// is the measured monospace cell width, and `tab_format` contributes the fixed
+/// non-title prefix/suffix such as `{n}: `.
+pub fn fit_tab_segment_title(
+    title: &str,
+    path: Option<&str>,
+    idx: usize,
+    tab_format: &str,
+    title_w: f32,
+    cell_w: f32,
+) -> String {
+    let n = (idx + 1).to_string();
+    let avail = (title_w.max(0.0) / cell_w.max(1.0)) as usize;
+    let fixed_label = kettle_config::template::fill(tab_format, &[("n", &n), ("title", "")]);
+    let fixed_w = display_width(&fixed_label);
+    let maxc = avail.saturating_sub(fixed_w);
+    match path {
+        Some(p) => fit_tab_path(p, maxc),
+        None => fit_tab_title(title, maxc),
+    }
 }
 
 /// Build a per-pane titlebar label that fits `budget` display columns, shedding
@@ -8450,7 +8468,10 @@ mod pane_buffer_lifecycle_tests {
 
 #[cfg(test)]
 mod title_fit_tests {
-    use super::{display_width, fit_pane_title, fit_tab_path, fit_tab_title, middle_ellipsis};
+    use super::{
+        display_width, fit_pane_title, fit_tab_path, fit_tab_segment_title, fit_tab_title,
+        middle_ellipsis,
+    };
 
     #[test]
     fn middle_ellipsis_fits_and_keeps_both_ends() {
@@ -8566,6 +8587,43 @@ mod title_fit_tests {
         assert!(
             !fit_tab_path(path, display_width(leaf)).starts_with('…'),
             "leaf fits, so no leading ellipsis is needed"
+        );
+    }
+
+    #[test]
+    fn fit_tab_segment_title_uses_render_budget_and_path_tiers() {
+        let fmt = "{n}: {title}";
+        let path = "~/Repos/SPI-1/platform";
+        let leaf = "platform";
+        let cell = 10.0;
+        let lane_for_cols = |cols: usize| cols as f32 * cell;
+        let fixed = display_width("1: ");
+
+        assert_eq!(
+            fit_tab_segment_title(
+                leaf,
+                Some(path),
+                0,
+                fmt,
+                lane_for_cols(fixed + display_width(path)),
+                cell
+            ),
+            path
+        );
+        assert_eq!(
+            fit_tab_segment_title(
+                leaf,
+                Some(path),
+                0,
+                fmt,
+                lane_for_cols(fixed + display_width(leaf)),
+                cell
+            ),
+            leaf
+        );
+        assert_eq!(
+            fit_tab_segment_title(leaf, Some(path), 0, fmt, lane_for_cols(fixed + 5), cell),
+            "…form"
         );
     }
 

@@ -298,8 +298,8 @@ These need a real display and are run by hand (or on real hardware):
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
-    `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`, and
-    `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+    `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
+    `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review. Tabbar runs write `analysis.json` with the
     old/new active tab rects and outside-rect pixel-change counts; underline
     runs also assert tab labels use the full equal-width segment budget before

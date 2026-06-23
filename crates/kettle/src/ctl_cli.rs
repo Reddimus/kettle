@@ -212,6 +212,21 @@ fn pretty(method: &str, result: &Value) -> String {
             "performed action {} on window {}\n",
             result["action"], result["window"]
         ),
+        "dispatch_keybind" => {
+            if result.get("dispatched").and_then(|v| v.as_bool()) == Some(true) {
+                format!(
+                    "dispatched keybind {} ({}) on window {}\n",
+                    result["trigger"], result["action"], result["window"]
+                )
+            } else if result.get("modal_blocked").and_then(|v| v.as_bool()) == Some(true) {
+                format!(
+                    "keybind dispatch blocked by modal on window {}\n",
+                    result["window"]
+                )
+            } else {
+                format!("no keybind matched on window {}\n", result["window"])
+            }
+        }
         "ui_geometry" | "read_cells" => {
             serde_json::to_string_pretty(result).unwrap_or_else(|_| format!("{result}\n")) + "\n"
         }
