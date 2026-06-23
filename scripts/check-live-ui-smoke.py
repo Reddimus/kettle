@@ -368,6 +368,18 @@ def modal_open(geometry: Dict[str, object], name: str) -> bool:
     return isinstance(modals, dict) and bool(modals.get(name))
 
 
+def rect_intersects(a: Dict[str, object], b: Dict[str, object]) -> bool:
+    ax0 = float(a.get("x", 0.0))
+    ay0 = float(a.get("y", 0.0))
+    ax1 = ax0 + float(a.get("width", 0.0))
+    ay1 = ay0 + float(a.get("height", 0.0))
+    bx0 = float(b.get("x", 0.0))
+    by0 = float(b.get("y", 0.0))
+    bx1 = bx0 + float(b.get("width", 0.0))
+    by1 = by0 + float(b.get("height", 0.0))
+    return ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0
+
+
 def wait_for_resize(
     live: LiveKettle,
     before_width: int,
@@ -1503,6 +1515,18 @@ def run_interaction(kettle: str, root: Path) -> Path:
             live.screenshot(modal_shot)
             if not modal_open(modal_geo, modal_name):
                 raise SystemExit(f"interaction smoke: perform_action {action_name} did not open {modal_name}")
+            if modal_name == "title_edit":
+                title_edit = modal_geo.get("title_edit")
+                content = modal_geo.get("content")
+                if not isinstance(title_edit, dict) or not isinstance(title_edit.get("rect"), dict):
+                    raise SystemExit(f"interaction smoke: {label} has no title_edit rect")
+                if not isinstance(content, dict):
+                    raise SystemExit(f"interaction smoke: {label} has no content rect")
+                if rect_intersects(title_edit["rect"], content):  # type: ignore[index]
+                    raise SystemExit(
+                        f"interaction smoke: {label} title edit overlaps terminal content: "
+                        f"title={title_edit['rect']} content={content}"
+                    )
             changed = len(changed_pixels(previous_shot, modal_shot, 0.0, float(previous_geo["surface"]["height"])))  # type: ignore[index]
             if changed < 100:
                 raise SystemExit(f"interaction smoke: {label} changed too few pixels ({changed})")

@@ -2396,6 +2396,16 @@ fn resolve_tab_label(
             path: None,
         };
     }
+    if let Some(cwd) = cwd.filter(|c| !c.is_empty())
+        && let Some(name) = cwd.rsplit(['/', '\\']).find(|s| !s.is_empty())
+        && name == pane_title
+    {
+        let full = abbreviate_home(cwd, home);
+        return TabLabel {
+            text: pane_title.to_string(),
+            path: Some(full),
+        };
+    }
     TabLabel {
         text: pane_title.to_string(),
         path: None,
@@ -3116,6 +3126,22 @@ mod node_tests {
         );
         assert_eq!(l.text, "kettle");
         assert!(l.path.is_none());
+        // A real shell title that is exactly the cwd leaf still carries the
+        // full cwd path for width-aware tab fitting. The title itself wins;
+        // the path is metadata only.
+        let l = resolve_tab_label(
+            None,
+            "flight-event-line-server-go",
+            false,
+            Some("/home/u/Repos/SPI-1/flight-event-line-server-go"),
+            Some("/home/u"),
+            0,
+        );
+        assert_eq!(l.text, "flight-event-line-server-go");
+        assert_eq!(
+            l.path.as_deref(),
+            Some("~/Repos/SPI-1/flight-event-line-server-go")
+        );
         // Override / real title / no-cwd carry no path (shown verbatim).
         assert!(
             resolve_tab_label(Some("deploy"), "bash", false, Some("/x/y"), None, 0)

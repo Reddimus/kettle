@@ -275,7 +275,8 @@ These need a real display and are run by hand (or on real hardware):
     `notification-events.jsonl`, and `analysis.json` artifacts under
     `target/diagnostics/interaction-*`, and asserts default `read_screen`
     follows the visible scrolled viewport, modal state is reported by
-    `ui_geometry`, and resize updates the focused pane grid.
+    `ui_geometry`, title-edit chrome does not intersect the terminal content
+    rect, and resize updates the focused pane grid.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

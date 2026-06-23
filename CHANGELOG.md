@@ -4,6 +4,27 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.32.1] — 2026-06-23
+
+  ### Fixed
+  - **Title-edit input no longer covers terminal output on Ubuntu.** Window,
+    tab, pane, and group rename now render in tab/chrome space with matching
+    geometry for the background and text instead of placing the text at the
+    bottom of the terminal viewport.
+  - **Directory tab labels use the available tab width before ellipsizing.** A
+    tab titled from `flight-event-line-server-go` now shows the full leaf when
+    it fits, including when a shell title exactly matches the current directory
+    name.
+  - **Tab labels center inside their usable lane.** Two-tab windows with split
+    panes no longer look visually pulled off-center by the trailing close button
+    or the new-tab dropdown controls.
+
+  ### Changed
+  - Added a Linux maintainer install path for local dev-record launches:
+    `just install-local-dev-record` builds with `--features dev-record`, syncs
+    the user-local desktop launcher, and records Super-key launches under the
+    configured record directory.
+
 ## [2.32.0] — 2026-06-21
 
   A correctness, robustness, and security hardening release driven by an
