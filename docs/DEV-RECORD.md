@@ -14,6 +14,16 @@ cargo run --features dev-record -- --record /tmp/session.cast
 KETTLE_RECORD=/tmp/session.cast cargo run --features dev-record
 ```
 
+On Linux maintainer machines, the user-local launcher can be synced to a
+dev-record build so Ubuntu/GNOME Super-key launches record automatically:
+
+```sh
+just install-local-dev-record
+```
+
+By default this writes traces under `~/.cache/kettle/records`; pass
+`RECORD_DIR=/path/to/records` to use a different local directory.
+
 Released binaries (and anything built without the feature) contain **none** of
 the recorder code — no flag, no overhead, no attack surface. Recording is never
 on by default and never starts on first launch.

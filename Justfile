@@ -243,6 +243,19 @@ install-local: release
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
     @echo "local install synced to the current release build"
 
+# Linux maintainer install: build the GUI with the developer-only recorder
+# feature and make the desktop launcher record each Super-key launch into a
+# local asciicast directory. This is intentionally not the public release path.
+[unix]
+install-local-dev-record RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
+    cargo build --release -p kettle --features dev-record
+    ./scripts/install.sh --skip-build --record-dir={{RECORD_DIR}}
+    @echo "local dev-record install synced to {{RECORD_DIR}}"
+
+[windows]
+install-local-dev-record:
+    @echo "install-local-dev-record is a Linux maintainer helper."
+
 # === Misc ==========================================================
 
 # Run kettle in a real window (Linux: needs X11 / Wayland; Windows:
@@ -276,7 +289,7 @@ menu-shot *ARGS:
 # visible X11/Wayland session and complements the CI offscreen renderer tests.
 [unix]
 live-render-smoke:
-    ./scripts/check-live-render-smoke.sh
+    KETTLE_BIN=./target/release/kettle ./scripts/check-live-render-smoke.sh
 
 [windows]
 live-render-smoke:
@@ -291,7 +304,7 @@ live-render-smoke:
 # KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
 [unix]
 agent-tui-smoke:
-    python3 scripts/check-live-ui-smoke.py agent-tui
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle agent-tui
 
 [windows]
 agent-tui-smoke:
@@ -301,7 +314,7 @@ agent-tui-smoke:
 # selection drag, tab creation, context-menu split dispatch, and screenshots.
 [unix]
 interaction-smoke:
-    python3 scripts/check-live-ui-smoke.py interaction
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle interaction
 
 [windows]
 interaction-smoke:
@@ -311,7 +324,7 @@ interaction-smoke:
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
 [unix]
 tabbar-click-smoke:
-    ./scripts/check-tabbar-click-smoke.sh
+    KETTLE_BIN=./target/release/kettle ./scripts/check-tabbar-click-smoke.sh
 
 [windows]
 tabbar-click-smoke:
@@ -321,7 +334,7 @@ tabbar-click-smoke:
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]
 underline-scroll-smoke:
-    ./scripts/check-underline-scroll-smoke.sh
+    KETTLE_BIN=./target/release/kettle ./scripts/check-underline-scroll-smoke.sh
 
 [windows]
 underline-scroll-smoke:

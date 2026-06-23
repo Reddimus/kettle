@@ -208,6 +208,13 @@ pub struct ContextMenu {
     pub panel_h_clamped: f32,
 }
 
+/// Title-edit overlay projected by the UI.
+pub struct TitleEditOverlay {
+    pub label: String,
+    pub input: String,
+    pub rect: Rect4,
+}
+
 /// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
@@ -232,15 +239,9 @@ pub struct Overlay {
     pub layout_picker_query: Option<String>,
     pub layout_picker_hint: String,
     /// Cycle 372 (Terminator parity, edit-title overlay UX): the
-    /// in-progress title-edit text + a scope label for the prompt
-    /// (e.g. "Edit window title:" / "Edit tab title:" /
-    /// "Edit pane title:"). `None` when no edit is in progress.
-    ///
-    /// Cycle 395: optional anchor_y. When `Some(y)`, the overlay
-    /// renders at that surface y-position (used to anchor near
-    /// the clicked pane's titlebar for EditPaneTitle). When `None`,
-    /// renders at the window-bottom (window/tab scopes).
-    pub edit_title: Option<(String, String, Option<f32>)>,
+    /// in-progress title-edit text + a scope label and chrome rect.
+    /// `None` when no edit is in progress.
+    pub edit_title: Option<TitleEditOverlay>,
     /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
     pub window_focused: bool,
     /// v2.26.0: the focused pane's scrollbar should paint in its bright
@@ -370,6 +371,9 @@ pub struct TabSeg {
     pub idx: usize,
     /// Full segment rect.
     pub rect: Rect4,
+    /// Text lane within the segment, excluding fixed controls such as the
+    /// trailing close button.
+    pub title_rect: Rect4,
     /// Close-button (✕) hit rect within the segment.
     pub close: Rect4,
     pub title: String,
@@ -2422,18 +2426,15 @@ impl Renderer {
             ));
         }
 
-        // Search bar overlay.
+        // Search/modal single-line overlay. Most overlays live at the bottom;
+        // title edit and update banners carry explicit chrome rects so their
+        // background and glyphs cannot drift apart.
         let mut have_search = false;
-        // Cycle 808 (audit): how far ABOVE the surface bottom the shared
-        // bottom-bar text sits. Stays 0 for the modal bottom bars (search /
-        // confirm / broadcast), which intentionally cover any bottom chrome
-        // while they hold focus; the passive update banner sets it so it
-        // stacks above a bottom-anchored tab / status bar instead of clobbering
-        // it. See `update_banner_top`.
-        let mut bottom_bar_offset = 0.0_f32;
+        let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
         if let Some(q) = &overlay.search_query {
             have_search = true;
             let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
             // v2.20.0: advertise the Ctrl+j/k match stepping when
             // `vim-menu-nav` is on (the keys themselves live app-side).
@@ -2473,6 +2474,7 @@ impl Renderer {
         } else if let Some(q) = &overlay.palette_query {
             have_search = true;
             let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
             let label = format!(
                 "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
@@ -2497,6 +2499,7 @@ impl Renderer {
             // palette but the hint string lists layouts.
             have_search = true;
             let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[6], 0.96));
             let label = format!(
                 "  ▤ layout: {q}_   ▸ {}   (Enter spawn · Tab/↑↓ select · Esc cancel)",
@@ -2518,6 +2521,7 @@ impl Renderer {
         } else if let Some(q) = &overlay.ssh_query {
             have_search = true;
             let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[4], 0.96));
             let label = format!(
                 "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
@@ -2536,24 +2540,33 @@ impl Renderer {
             );
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some((label_prefix, q, anchor_y)) = &overlay.edit_title {
+        } else if let Some(edit) = &overlay.edit_title {
             // Cycle 372 (Terminator parity, edit-title overlay UX):
-            // a thin bar at the bottom of the window mirroring the
-            // shape of the cycle-X palette + ssh-input overlays.
+            // a thin bar in app chrome mirroring the shape of the cycle-X
+            // palette + ssh-input overlays without covering terminal rows.
             // Uses palette[3] (yellow) so it's visually distinct
             // from the palette (5) and ssh (4) bars.
-            //
-            // Cycle 395: pane scope anchors near the clicked pane;
-            // window/tab scopes fall back to window-bottom.
             have_search = true;
-            let bar_h = ch + 10.0;
-            let bar_y = anchor_y.unwrap_or(sh - bar_h);
-            quads.push(rect(0.0, bar_y, sw, bar_h, theme.palette[3], 0.96));
-            let label = format!("  ✎ {label_prefix} {q}_   (Enter apply · Esc cancel)");
+            search_rect = edit.rect;
+            quads.push(rect(
+                edit.rect.0,
+                edit.rect.1,
+                edit.rect.2,
+                edit.rect.3,
+                theme.palette[3],
+                0.96,
+            ));
+            let label = format!(
+                "  ✎ {} {}_   (Enter apply · Esc cancel)",
+                edit.label, edit.input
+            );
             self.search_buffer
                 .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_size(
+                &mut self.font_system,
+                Some(edit.rect.2),
+                Some(edit.rect.3),
+            );
             self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
@@ -2573,6 +2586,7 @@ impl Renderer {
             // dispatch through the same confirmation state machine.
             have_search = true;
             let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
             // Red-ish accent (palette[1]) to signal "destructive
             // confirmation pending" vs the cycle-X palette/ssh/
             // edit-title yellows/blues/cyans.
@@ -2640,8 +2654,8 @@ impl Renderer {
             } else {
                 0.0
             };
-            bottom_bar_offset = bottom_tabbar_h + bottom_status_h;
             let bar_y = update_banner_top(sh, bar_h, bottom_tabbar_h, bottom_status_h);
+            search_rect = (0.0, bar_y, sw, bar_h);
             quads.push(rect(0.0, bar_y, sw, bar_h, theme.palette[2], 0.96));
             let label = format!(
                 "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
@@ -2679,12 +2693,10 @@ impl Renderer {
             // shaped-text buffers retained).
             self.tab_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
-                let (_, _, w, _) = s.rect;
-                // chars that fit: segment minus the ✕ zone, ~cell_w each.
-                // `max(0.0)` so a segment narrower than the ✕ zone can't go
-                // negative, and `cw.max(1.0)` guards a degenerate cell width
-                // — both keep the `as usize` cast in its defined range
-                // rather than relying on float→int saturation.
+                let (_, _, title_w, title_h) = s.title_rect;
+                // chars that fit: explicit title lane, ~cell_w each. The lane
+                // excludes fixed tab chrome such as the close button, so
+                // fitting and visual centering share the same coordinate space.
                 //
                 // Cycle 804: the budget now tracks the *actual* segment width
                 // instead of a hard 24-char cap, so a wide tab shows its full
@@ -2694,13 +2706,11 @@ impl Renderer {
                 // ellipsizes to keep the WHOLE label inside the segment rather
                 // than letting the prefix push it past the right edge.
                 let n = (s.idx + 1).to_string();
-                let avail = ((w - tabbar.height).max(0.0) / cw.max(1.0)) as usize;
-                let fixed_label = format!(
-                    " {}",
-                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")])
-                );
+                let avail = (title_w.max(0.0) / cw.max(1.0)) as usize;
+                let fixed_label =
+                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", "")]);
                 let fixed_w = display_width(&fixed_label);
-                let maxc = avail.saturating_sub(fixed_w).max(3);
+                let maxc = avail.saturating_sub(fixed_w);
                 // v2.26.0: directory-derived labels (carry a `path`) get the
                 // 3-tier fit (full path → leaf dir name → truncated tail) so a
                 // wide tab shows the whole path and narrows gracefully. Explicit
@@ -2714,10 +2724,10 @@ impl Renderer {
                 // Title only — the ✕ is rendered separately below so we
                 // can color it independently from the title text and
                 // give it a real button chip background.
-                let label = format!(" {body}");
+                let label = body;
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(w), Some(tabbar.height));
+                buf.set_size(&mut self.font_system, Some(title_w), Some(title_h));
                 // v2.20.0 P1b: re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
                     buf.set_text(
@@ -3175,17 +3185,20 @@ impl Renderer {
             let ty = tabbar.y as i32;
             let tb = (tabbar.y + tabbar.height) as i32;
             for (bi, s) in tabbar.segments.iter().enumerate() {
-                let (x, _, w, _) = s.rect;
+                let (tx, ty_px, tw, th) = s.title_rect;
+                let label_cols = display_width(&self.tab_texts[bi]) as f32;
+                let label_w = label_cols * cw.max(1.0);
+                let centered_left = tx + ((tw - label_w) * 0.5).max(0.0);
                 areas.push(TextArea {
                     buffer: &self.tab_buffers[bi],
-                    left: x + 6.0,
-                    top: tabbar.y + 4.0,
+                    left: centered_left,
+                    top: ty_px + ((th - ch) * 0.5).max(0.0),
                     scale: 1.0,
                     bounds: TextBounds {
-                        left: x as i32,
-                        top: ty,
-                        right: (x + w) as i32,
-                        bottom: tb,
+                        left: tx as i32,
+                        top: ty_px as i32,
+                        right: (tx + tw) as i32,
+                        bottom: (ty_px + th) as i32,
                     },
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
@@ -3297,20 +3310,16 @@ impl Renderer {
             }
         }
         if have_search {
-            let bar_h = ch + 10.0;
             areas.push(TextArea {
                 buffer: &self.search_buffer,
-                left: 0.0,
-                // Cycle 808: `bottom_bar_offset` lifts the passive update
-                // banner's text above any bottom-anchored chrome (0 for the
-                // modal bars, which keep the flush-bottom position).
-                top: sh - bar_h - bottom_bar_offset + 5.0,
+                left: search_rect.0,
+                top: search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0),
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
+                    left: search_rect.0 as i32,
+                    top: search_rect.1 as i32,
+                    right: (search_rect.0 + search_rect.2) as i32,
+                    bottom: (search_rect.1 + search_rect.3) as i32,
                 },
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
@@ -8547,6 +8556,17 @@ mod title_fit_tests {
         assert_eq!(fit_tab_path(path, 0), "");
         // Backslash separators tier the same way.
         assert_eq!(fit_tab_path("~\\Repos\\kettle", 8), "kettle");
+    }
+
+    #[test]
+    fn fit_tab_path_keeps_long_leaf_when_it_fits() {
+        let path = "~/Repos/SPI-1/flight-event-line-server-go";
+        let leaf = "flight-event-line-server-go";
+        assert_eq!(fit_tab_path(path, display_width(leaf)), leaf);
+        assert!(
+            !fit_tab_path(path, display_width(leaf)).starts_with('…'),
+            "leaf fits, so no leading ellipsis is needed"
+        );
     }
 
     #[test]

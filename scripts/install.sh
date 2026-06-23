@@ -14,6 +14,8 @@
 # Usage (from the repo root):
 #   ./scripts/install.sh           # cargo build --release && install
 #   ./scripts/install.sh --skip-build   # use an existing target/release/kettle
+#   ./scripts/install.sh --record-dir=$HOME/.cache/kettle/records
+#                                 # build with dev-record and record launcher sessions
 #   ./scripts/install.sh --prefix=/usr  # system install (needs sudo / writable prefix)
 #
 # Uninstall:
@@ -30,11 +32,13 @@ PREFIX="${HOME}/.local"
 PREFIX_ARG_SET=0
 SKIP_BUILD=0
 UNINSTALL=0
+RECORD_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
     --prefix=*) PREFIX="${arg#--prefix=}"; PREFIX_ARG_SET=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --record-dir=*) RECORD_DIR="${arg#--record-dir=}" ;;
     --uninstall) UNINSTALL=1 ;;
     -h|--help)
       sed -n '2,/^set/p' "$0" | sed 's/^# \{0,1\}//;/^set/d'
@@ -123,7 +127,11 @@ fi
 
 if [[ "${TARBALL_MODE}" -eq 0 && "${SKIP_BUILD}" -eq 0 ]]; then
   echo "Building kettle (release)…"
-  ( cd "${REPO_ROOT}" && cargo build --release -p kettle )
+  if [[ -n "${RECORD_DIR}" ]]; then
+    ( cd "${REPO_ROOT}" && cargo build --release -p kettle --features dev-record )
+  else
+    ( cd "${REPO_ROOT}" && cargo build --release -p kettle )
+  fi
 fi
 
 if [[ ! -x "${BIN_SRC}" ]]; then
@@ -183,6 +191,11 @@ ICON_REPL=$(sed_repl "${ICON_ABS}")
 sed -i "s#^Exec=kettle\$#Exec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
 sed -i "s#^TryExec=kettle\$#TryExec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
 sed -i "s#^Icon=kettle\$#Icon=${ICON_REPL}#" "${APP_DIR}/kettle.desktop"
+if [[ -n "${RECORD_DIR}" ]]; then
+  mkdir -p "${RECORD_DIR}"
+  REC_REPL=$(sed_repl "${RECORD_DIR}")
+  sed -i "s#^Exec=.*\$#Exec=/usr/bin/env KETTLE_RECORD=${REC_REPL} ${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
+fi
 
 # 3b) Man page (cycle 279) — `man kettle` works after install if
 # /usr/share/man/<...>/man1 (or the user's $MANPATH) is searched. Many

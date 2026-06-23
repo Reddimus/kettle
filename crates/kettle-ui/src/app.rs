@@ -1979,6 +1979,20 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
     (surface_w - plus_w - arrow_w).max(plus_w)
 }
 
+/// Text lane inside a tab segment. The close button is visible chrome, so the
+/// label must be centered in the lane that remains before that button rather
+/// than centered against the full segment and visually drifting under `✕`.
+fn tab_title_rect(
+    segment: kettle_render::Rect4,
+    close: kettle_render::Rect4,
+    close_visible: bool,
+) -> kettle_render::Rect4 {
+    let (x, y, w, h) = segment;
+    let left = x + 8.0;
+    let right = if close_visible { close.0 } else { x + w - 8.0 };
+    (left, y, (right - left).max(0.0), h)
+}
+
 /// Cycle 917 (#4, user-requested): should the new-tab `▾` shell-dropdown arrow
 /// be shown? Hidden when there's only one shell to choose — e.g. a stock Ubuntu
 /// with just `bash` — so the arrow never opens a pointless one-item menu. On
@@ -3320,13 +3334,18 @@ impl App {
 
     fn tab_bar_h(&self, ws: &WindowState) -> f32 {
         let show = match self.cfg.tab_bar {
-            TabBarMode::Off => false,
+            // Title-edit needs a real chrome strip so the input never covers
+            // terminal rows. Honor `off` during normal operation, but materialize
+            // the strip while the modal owns keyboard focus.
+            TabBarMode::Off => ws.editing_title.is_some(),
             // v2.19.0 (tear-off UX, re-dock): a live dock preview
             // MATERIALIZES the bar on a single-tab auto window — the
             // strip appears under the hovering torn window so the drop
             // target is visible before the drop (Chrome's always-on
             // strip affordance, on demand).
-            TabBarMode::Auto => ws.mux.tabs.len() > 1 || ws.dock_preview.is_some(),
+            TabBarMode::Auto => {
+                ws.mux.tabs.len() > 1 || ws.dock_preview.is_some() || ws.editing_title.is_some()
+            }
             TabBarMode::Always => true,
         };
         if show {
@@ -3483,11 +3502,14 @@ impl App {
                         }
                     })
                     .unwrap_or(RenderTabActivity::Normal);
+                let rect = (x, y, seg_w, height);
+                let close = (x + seg_w - height, y, height, height);
                 TabSeg {
                     idx: i,
-                    rect: (x, y, seg_w, height),
+                    rect,
+                    title_rect: tab_title_rect(rect, close, self.cfg.close_button_on_tab),
                     // ✕ hit zone = the trailing `height`-wide square.
-                    close: (x + seg_w - height, y, height, height),
+                    close,
                     title: label.text.clone(),
                     path: label.path.clone(),
                     active: i == active,
@@ -3535,6 +3557,27 @@ impl App {
         }
     }
 
+    fn title_edit_rect(&self, ws: &WindowState) -> kettle_render::Rect4 {
+        let (w, h) = ws
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let (sw, sh) = (w as f32, h as f32);
+        let bar = self.tab_bar(ws);
+        if bar.height > 0.0 {
+            if self.cfg.tab_bar_pos.is_vertical() {
+                let (x, _, bw, _) = bar.segments.first().map(|s| s.rect).unwrap_or(bar.new_tab);
+                (x, 0.0, bw, bar.height.min(sh))
+            } else {
+                (0.0, bar.y, sw, bar.height)
+            }
+        } else {
+            let fallback_h = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+            (0.0, 0.0, sw, fallback_h)
+        }
+    }
+
     /// Cycle 668 (vertical-tabs sub-cycle 4): tab-bar layout for
     /// `TabBarPos::Left` / `Right`. Stacks segments vertically,
     /// each one (`VERTICAL_TAB_STRIP_W` × `tab_bar_h`).
@@ -3575,12 +3618,15 @@ impl App {
                         }
                     })
                     .unwrap_or(RenderTabActivity::Normal);
+                let rect = (strip_x, seg_y, strip_w, height);
+                let close = (strip_x + strip_w - height, seg_y, height, height);
                 TabSeg {
                     idx: i,
-                    rect: (strip_x, seg_y, strip_w, height),
+                    rect,
+                    title_rect: tab_title_rect(rect, close, self.cfg.close_button_on_tab),
                     // ✕ hit zone = the trailing-right square of the
                     // segment (same axis convention as horizontal).
-                    close: (strip_x + strip_w - height, seg_y, height, height),
+                    close,
                     title: label.text.clone(),
                     path: label.path.clone(),
                     active: i == active,
@@ -5125,13 +5171,10 @@ impl App {
 
         let context_menu = self.context_menu_overlay(ws);
         // Cycle 372: marshal the in-progress Edit-title state for
-        // the render layer so the user sees what they're typing.
-        //
-        // Cycle 395 (Terminator parity, titlebar Bucket-D sub-cycle 7):
-        // for Pane scope, also pass the focused pane's titlebar y so
-        // the overlay anchors near the clicked pane vs the window-
-        // bottom (window/tab scopes still use window-bottom).
-        let edit_title: Option<(String, String, Option<f32>)> =
+        // the render layer so the user sees what they're typing. The
+        // title-edit rect is app chrome, never a bottom overlay over terminal
+        // rows.
+        let edit_title: Option<kettle_render::TitleEditOverlay> =
             ws.editing_title.as_ref().map(|s| {
                 let label = match s.scope {
                     TitleEditScope::Window => "Edit window title:",
@@ -5139,29 +5182,11 @@ impl App {
                     TitleEditScope::Pane => "Edit pane title:",
                     TitleEditScope::Group => "Edit pane group:",
                 };
-                let anchor_y = if matches!(s.scope, TitleEditScope::Pane | TitleEditScope::Group) {
-                    let area = self.area(ws);
-                    let active = ws.mux.active;
-                    let rects = ws.mux.layout(active, area);
-                    let focus = ws.mux.active_focus();
-                    rects
-                        .iter()
-                        .find(|(id, _)| Some(*id) == focus)
-                        .map(|(_, (_, ry, _, rh))| {
-                            // Anchor just below the focused pane's titlebar.
-                            // Falls below the bar (top mode) or just above
-                            // the bottom bar (bottom mode); either way the
-                            // user's eye-line stays near where they clicked.
-                            if self.cfg.title_at_bottom {
-                                *ry + *rh - 60.0
-                            } else {
-                                *ry + 30.0
-                            }
-                        })
-                } else {
-                    None
-                };
-                (label.to_string(), s.input.clone(), anchor_y)
+                kettle_render::TitleEditOverlay {
+                    label: label.to_string(),
+                    input: s.input.clone(),
+                    rect: self.title_edit_rect(ws),
+                }
             });
         // Cycle 660: project the App's confirm_dialog into the
         // renderer's projection (so it shows even when no
@@ -9608,6 +9633,7 @@ impl App {
                     "title": seg.title,
                     "active": seg.active,
                     "rect": rect_json(seg.rect),
+                    "title_rect": rect_json(seg.title_rect),
                     "close": rect_json(seg.close),
                 })
             })
@@ -9659,6 +9685,18 @@ impl App {
                 "rows": rows,
             }))
         });
+        let title_edit = target.editing_title.as_ref().map(|state| {
+            let scope = match state.scope {
+                TitleEditScope::Window => "window",
+                TitleEditScope::Tab => "tab",
+                TitleEditScope::Pane => "pane",
+                TitleEditScope::Group => "group",
+            };
+            serde_json::json!({
+                "scope": scope,
+                "rect": rect_json(self.title_edit_rect(target)),
+            })
+        });
         serde_json::json!({
             "window": target.seq,
             "surface": {"width": surface.0, "height": surface.1},
@@ -9678,6 +9716,7 @@ impl App {
                 "vi_mode": target.vi_mode.is_some(),
             },
             "context_menu": context_menu,
+            "title_edit": title_edit,
             "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
                 "cols": cols,
                 "rows": rows,
@@ -17880,6 +17919,7 @@ mod tests {
             TabSeg {
                 idx: 0,
                 rect: (0.0, 0.0, 100.0, 24.0),
+                title_rect: (8.0, 0.0, 68.0, 24.0),
                 close: (76.0, 0.0, 24.0, 24.0),
                 title: "one".into(),
                 path: None,
@@ -17889,6 +17929,7 @@ mod tests {
             TabSeg {
                 idx: 1,
                 rect: (100.0, 0.0, 100.0, 24.0),
+                title_rect: (108.0, 0.0, 68.0, 24.0),
                 close: (176.0, 0.0, 24.0, 24.0),
                 title: "two".into(),
                 path: None,
@@ -17914,14 +17955,19 @@ mod tests {
     #[test]
     fn tab_drag_target_index_uses_rendered_segment_rects() {
         use super::tab_drag_target_index;
-        let seg = |idx, x, w| kettle_render::TabSeg {
-            idx,
-            rect: (x, 0.0, w, 24.0),
-            close: (x + w - 24.0, 0.0, 24.0, 24.0),
-            title: format!("tab-{idx}"),
-            path: None,
-            active: idx == 0,
-            activity: kettle_render::TabActivity::Normal,
+        let seg = |idx, x, w| {
+            let rect = (x, 0.0, w, 24.0);
+            let close = (x + w - 24.0, 0.0, 24.0, 24.0);
+            kettle_render::TabSeg {
+                idx,
+                rect,
+                title_rect: super::tab_title_rect(rect, close, true),
+                close,
+                title: format!("tab-{idx}"),
+                path: None,
+                active: idx == 0,
+                activity: kettle_render::TabActivity::Normal,
+            }
         };
         // 3 equal tabs, 300-px strip → 100 px per segment. Cursor at
         // 50 → tab 0; 150 → tab 1; 250 → tab 2.
@@ -17950,6 +17996,22 @@ mod tests {
         assert_eq!(tab_drag_target_index(f32::MAX, &natural), 2);
         // Empty bar → 0 (defensive no-op).
         assert_eq!(tab_drag_target_index(50.0, &[]), 0);
+    }
+
+    #[test]
+    fn tab_title_rect_excludes_visible_close_button() {
+        use super::tab_title_rect;
+
+        let segment = (100.0, 0.0, 240.0, 24.0);
+        let close = (316.0, 0.0, 24.0, 24.0);
+        assert_eq!(
+            tab_title_rect(segment, close, true),
+            (108.0, 0.0, 208.0, 24.0)
+        );
+        assert_eq!(
+            tab_title_rect(segment, close, false),
+            (108.0, 0.0, 224.0, 24.0)
+        );
     }
 
     #[test]
