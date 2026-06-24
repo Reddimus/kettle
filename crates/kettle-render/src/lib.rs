@@ -513,6 +513,14 @@ pub struct PaneView<'a> {
     /// the cycle-379 titlebar background quad when
     /// cfg.show_titlebar = true. Borrowed from `metas` (cycle 852).
     pub title: &'a str,
+    /// Prefix badges that belong immediately before the semantic title, such as
+    /// `[RO] ` and the configured agent badge. Kept separate from `title` so
+    /// cwd/path-aware fitting can replace only the title body.
+    pub title_prefix: &'a str,
+    /// Authoritative cwd-derived path for title fitting, when the app can
+    /// prove the pane title is a placeholder or an already-truncated cwd
+    /// suffix. Home-abbreviated by the caller.
+    pub title_path: Option<&'a str>,
     /// Cycle 386 (Terminator parity, per-pane-titlebar Bucket-D
     /// sub-cycle 6): pane terminal size in cols × rows. Appended
     /// to the titlebar title text as `WxH` unless
@@ -1677,7 +1685,15 @@ impl Renderer {
                     .then(|| format!("{}x{}", pv.size_cols, pv.size_rows));
                 let bell = (cfg.icon_bell && pv.bell).then_some("\u{1F514}");
                 let budget = (rw / cw.max(1.0)).floor().max(1.0) as usize;
-                let label = fit_pane_title(group, title, size_text.as_deref(), bell, budget);
+                let label = fit_pane_titlebar_title(
+                    group,
+                    pv.title_prefix,
+                    title,
+                    pv.title_path,
+                    size_text.as_deref(),
+                    bell,
+                    budget,
+                );
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
@@ -5565,14 +5581,17 @@ pub fn fit_tab_segment_title(
 /// title (keeping the program/leaf name) → at the floor, the leaf alone. The
 /// bell indicator (if any) is kept throughout — it's small and important.
 /// Mirrors the label format built inline pre-2.24.0 (`"  [g]  title  WxH  🔔"`).
-fn fit_pane_title(
+pub fn fit_pane_titlebar_title(
     group: Option<&str>,
+    title_prefix: &str,
     title: &str,
+    title_path: Option<&str>,
     size_text: Option<&str>,
     bell: Option<&str>,
     budget: usize,
 ) -> String {
     let bell_part = bell.map(|b| format!("  {b}")).unwrap_or_default();
+    let display_title = title_path.unwrap_or(title);
     let assemble = |g: Option<&str>, t: &str, sz: Option<&str>| -> String {
         let mut s = String::new();
         if let Some(g) = g {
@@ -5581,6 +5600,7 @@ fn fit_pane_title(
             s.push(']');
         }
         s.push_str("  ");
+        s.push_str(title_prefix);
         s.push_str(t);
         if let Some(sz) = sz {
             s.push_str("  ");
@@ -5590,24 +5610,32 @@ fn fit_pane_title(
         s
     };
     // 1. Everything.
-    let full = assemble(group, title, size_text);
+    let full = assemble(group, display_title, size_text);
     if display_width(&full) <= budget {
         return full;
     }
     // 2. Drop the size text.
-    let no_size = assemble(group, title, None);
+    let no_size = assemble(group, display_title, None);
     if display_width(&no_size) <= budget {
         return no_size;
     }
     // 3. Drop the group tag.
-    let no_group = assemble(None, title, None);
+    let no_group = assemble(None, display_title, None);
     if display_width(&no_group) <= budget {
         return no_group;
     }
-    // 4. Middle-ellipsize the title; "  " lead + the bell are fixed overhead.
-    let fixed = 2 + display_width(&bell_part);
+
+    // 4. With metadata shed, prefer the authoritative cwd path when available:
+    // full path if it fits, then leaf, then ellipsized leaf tail. This mirrors
+    // tab fitting and avoids rendering a shell's already-truncated cwd suffix
+    // when Kettle also has OSC 7 cwd truth.
+    let fixed = 2 + display_width(title_prefix) + display_width(&bell_part);
     let title_budget = budget.saturating_sub(fixed).max(1);
-    format!("  {}{}", middle_ellipsis(title, title_budget), bell_part)
+    let fitted_title = match title_path {
+        Some(path) => fit_tab_path(path, title_budget),
+        None => middle_ellipsis(title, title_budget),
+    };
+    format!("  {title_prefix}{fitted_title}{bell_part}")
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
@@ -8469,7 +8497,7 @@ mod pane_buffer_lifecycle_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        display_width, fit_pane_title, fit_tab_path, fit_tab_segment_title, fit_tab_title,
+        display_width, fit_pane_titlebar_title, fit_tab_path, fit_tab_segment_title, fit_tab_title,
         middle_ellipsis,
     };
 
@@ -8631,15 +8659,25 @@ mod title_fit_tests {
     fn pane_title_sheds_size_then_group_then_ellipsizes() {
         let long = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
         // Wide budget: everything shows, including size + group.
-        let wide = fit_pane_title(Some("fleet"), long, Some("120x60"), None, 120);
+        let wide =
+            fit_pane_titlebar_title(Some("fleet"), "", long, None, Some("120x60"), None, 120);
         assert!(wide.contains("[fleet]") && wide.contains("120x60") && wide.contains(long));
         // Medium: size text is dropped first, group + full title still fit.
         let med_budget = display_width("  [fleet]  ") + long.chars().count() + 1;
-        let med = fit_pane_title(Some("fleet"), long, Some("120x60"), None, med_budget);
+        let med = fit_pane_titlebar_title(
+            Some("fleet"),
+            "",
+            long,
+            None,
+            Some("120x60"),
+            None,
+            med_budget,
+        );
         assert!(med.contains(long), "title intact: {med}");
         assert!(!med.contains("120x60"), "size shed first: {med}");
         // Narrow: group dropped too, and the title middle-ellipsized to the leaf.
-        let narrow = fit_pane_title(Some("fleet"), long, Some("120x60"), None, 18);
+        let narrow =
+            fit_pane_titlebar_title(Some("fleet"), "", long, None, Some("120x60"), None, 18);
         assert!(!narrow.contains("[fleet]"), "group shed: {narrow}");
         assert!(narrow.ends_with("pwsh.exe"), "leaf survives: {narrow}");
         assert!(display_width(&narrow) <= 18, "fits budget: {narrow}");
@@ -8648,8 +8686,49 @@ mod title_fit_tests {
     #[test]
     fn pane_title_keeps_the_bell_through_shedding() {
         let long = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell\\pwsh.exe";
-        let narrow = fit_pane_title(Some("fleet"), long, Some("120x60"), Some("\u{1F514}"), 20);
+        let narrow = fit_pane_titlebar_title(
+            Some("fleet"),
+            "",
+            long,
+            None,
+            Some("120x60"),
+            Some("\u{1F514}"),
+            20,
+        );
         assert!(narrow.contains('\u{1F514}'), "bell must survive: {narrow}");
+    }
+
+    #[test]
+    fn pane_title_uses_path_tiers_after_metadata_sheds() {
+        let raw = "..ine-server-go";
+        let path = "~/Repos/SPI-1/flight-event-line-server-go";
+        let leaf = "flight-event-line-server-go";
+        let wide_budget = display_width("  [RO] ") + display_width(path);
+        let wide = fit_pane_titlebar_title(
+            None,
+            "[RO] ",
+            raw,
+            Some(path),
+            Some("131x30"),
+            None,
+            wide_budget,
+        );
+        assert_eq!(wide, format!("  [RO] {path}"));
+
+        let leaf_budget = display_width("  [RO] ") + display_width(leaf);
+        let leaf_fit = fit_pane_titlebar_title(
+            None,
+            "[RO] ",
+            raw,
+            Some(path),
+            Some("131x30"),
+            None,
+            leaf_budget,
+        );
+        assert_eq!(leaf_fit, format!("  [RO] {leaf}"));
+
+        let tail = fit_pane_titlebar_title(None, "", raw, Some(path), None, None, 12);
+        assert_eq!(tail, "  …server-go");
     }
 }
 

@@ -340,6 +340,16 @@ tab-title-smoke:
 tab-title-smoke:
     python scripts/check-live-ui-smoke.py tab-title
 
+# Reproduce cwd-derived title recovery for split-pane titlebars.
+# Captures screenshot/list_panes/ui_geometry under target/diagnostics/split-titlebar-*.
+[unix]
+split-titlebar-smoke:
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle split-titlebar
+
+[windows]
+split-titlebar-smoke:
+    python scripts/check-live-ui-smoke.py split-titlebar
+
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
 [unix]

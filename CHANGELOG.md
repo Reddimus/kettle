@@ -11,6 +11,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     shell or prompt sets a left-truncated title such as `..ine-server-go` while
     the pane cwd is `flight-event-line-server-go`, Kettle now resolves the tab
     back to the full directory leaf and keeps the width-aware path metadata.
+  - **Split-pane titlebars use cwd-aware title fitting.** Pane titlebars now use
+    OSC 7 cwd metadata to recover the full directory path when the shell title
+    is only a truncated cwd suffix, matching the fixed tab title behavior.
   - **Cwd title recovery now handles parent-directory suffixes.** Oh My Zsh-style
     titles such as `..PI-1/platform` are recognized as truncated cwd renderings
     when OSC 7 reports the full cwd, so wide tabs and the Ubuntu window title can

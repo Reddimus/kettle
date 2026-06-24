@@ -299,11 +299,12 @@ These need a real display and are run by hand (or on real hardware):
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
     `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
+    `just tab-title-smoke`, `just split-titlebar-smoke`,
     `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review. Tabbar runs write `analysis.json` with the
-    old/new active tab rects and outside-rect pixel-change counts; underline
-    runs also assert tab labels use the full equal-width segment budget before
-    ellipsizing. Underline runs write
+    old/new active tab rects and outside-rect pixel-change counts; tab-title
+    and split-titlebar runs assert cwd-derived labels use the available title
+    budget before ellipsizing. Underline runs write
     `analysis.json` with the visible underlined sentinel sequence across down/up
     scrolling plus per-row SGR underline, plain-row, and autodetected `/` and
     `\` path-overlay pixel hit counts from the PNG frames. The underline probe

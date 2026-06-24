@@ -1599,7 +1599,7 @@ def run_tab_title(kettle: str, root: Path) -> Path:
             [
                 "agent-server = full",
                 "tab-bar = always",
-                "tab-bar-pos = top",
+                "tab-bar-position = top",
                 "status-bar = off",
                 "restore-session = false",
                 "update-check = false",
@@ -1624,17 +1624,26 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     )
 
     with LiveKettle(kettle, cfg, out / "kettle.log") as live:
-        live.ctl("send_text", params={"text": command})
-        live.ctl("send_keys", params={"keys": ["enter"]})
-        wait = live.json_ctl("wait_for", params={"text": marker, "timeout_ms": 8000, "quiet_ms": 250})
-        if not wait.get("matched"):
+        live.ctl("send_text", params={"text": command + "\n"})
+        panes: Dict[str, object] = {}
+        for _ in range(50):
+            panes = live.json_ctl("list_panes")
+            pane_rows = panes.get("panes", [])
+            focused = [p for p in pane_rows if isinstance(p, dict) and p.get("focused")]
+            if (
+                len(focused) == 1
+                and focused[0].get("title") == "..PI-1/platform"
+                and focused[0].get("cwd") == expected_path
+            ):
+                break
+            time.sleep(0.1)
+        else:
             screen = live.json_ctl("read_screen", params={"scrollback_lines": 20})
             raise SystemExit(
-                "tab-title smoke: marker did not appear; "
-                f"wait={wait} screen={screen.get('text')!r}"
+                "tab-title smoke: pane title/cwd did not settle; "
+                f"panes={panes} screen={screen.get('text')!r}"
             )
 
-        panes = live.json_ctl("list_panes")
         tabs = live.json_ctl("list_tabs")
         geo: Dict[str, object] = {}
         for _ in range(20):
@@ -1680,6 +1689,113 @@ def run_tab_title(kettle: str, root: Path) -> Path:
         raise SystemExit(f"tab-title smoke: geometry path missing cwd metadata: {seg}")
     if seg.get("fitted_title") != expected_display:
         raise SystemExit(f"tab-title smoke: wide tab did not fit full cwd: {seg}")
+    return out
+
+
+def run_split_titlebar(kettle: str, root: Path) -> Path:
+    if platform.system() == "Windows":
+        out = root / f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "skipped.txt").write_text("split-titlebar smoke skipped on Windows\n")
+        return out
+
+    out = root / f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "tab-bar-position = top",
+                "status-bar = off",
+                "show-titlebar = true",
+                "title-hide-sizetext = true",
+                "restore-session = false",
+                "update-check = false",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 240",
+                "window-height = 60",
+            ]
+        )
+        + "\n"
+    )
+    nested = Path("/tmp") / f"kettle-split-titlebar-{os.getpid()}" / "Repos" / "SPI-1" / "flight-event-line-server-go"
+    nested.mkdir(parents=True, exist_ok=True)
+    expected_path = str(nested)
+    marker = "KETTLE_SPLIT_TITLEBAR_READY"
+    truncated_title = "..PI-1/flight-event-line-server-go"
+    command = (
+        f"cd {shell_quote(expected_path)}; "
+        "printf '\\033]7;file://localhost%s\\007\\033]2;"
+        f"{truncated_title}\\007{marker}\\n' \"$PWD\"; sleep 5"
+    )
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        live.ctl("send_text", params={"text": command + "\n"})
+        for _ in range(50):
+            initial = live.json_ctl("list_panes")
+            pane_rows = initial.get("panes", [])
+            focused = [p for p in pane_rows if isinstance(p, dict) and p.get("focused")]
+            if (
+                len(focused) == 1
+                and focused[0].get("title") == truncated_title
+                and focused[0].get("cwd") == expected_path
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            screen = live.json_ctl("read_screen", params={"scrollback_lines": 20})
+            raise SystemExit(
+                "split-titlebar smoke: pane title/cwd did not settle; "
+                f"panes={initial} screen={screen.get('text')!r}"
+            )
+
+        live.json_ctl("perform_action", params={"action": "split_right"})
+        panes: Dict[str, object] = {}
+        geo: Dict[str, object] = {}
+        for _ in range(40):
+            panes = live.json_ctl("list_panes")
+            pane_rows = panes.get("panes", [])
+            geo = live.json_ctl("ui_geometry")
+            titlebars = geo.get("pane_titlebars", [])
+            if (
+                isinstance(pane_rows, list)
+                and len(pane_rows) >= 2
+                and isinstance(titlebars, list)
+                and len(titlebars) >= 2
+            ):
+                break
+            time.sleep(0.1)
+
+        live.screenshot(out / "split-titlebar.png")
+        (out / "panes.json").write_text(json.dumps(panes, indent=2) + "\n")
+        (out / "geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+
+    pane_rows = panes.get("panes", [])
+    if not isinstance(pane_rows, list) or len(pane_rows) < 2:
+        raise SystemExit(f"split-titlebar smoke: split did not create two panes: {panes}")
+    if not any(isinstance(p, dict) and p.get("title") == truncated_title for p in pane_rows):
+        raise SystemExit(f"split-titlebar smoke: raw truncated title was not preserved: {panes}")
+
+    titlebars = geo.get("pane_titlebars", [])
+    if not isinstance(titlebars, list) or len(titlebars) < 2:
+        raise SystemExit(f"split-titlebar smoke: missing pane titlebar diagnostics: {geo}")
+    for titlebar in titlebars:
+        if not isinstance(titlebar, dict):
+            raise SystemExit(f"split-titlebar smoke: malformed titlebar: {titlebar}")
+        if titlebar.get("path") != expected_path:
+            raise SystemExit(f"split-titlebar smoke: titlebar path did not track cwd: {titlebar}")
+        fitted = titlebar.get("fitted_title")
+        if not isinstance(fitted, str) or fitted.strip() != expected_path:
+            raise SystemExit(
+                "split-titlebar smoke: wide split titlebar did not recover full cwd: "
+                f"{titlebar}"
+            )
+        if fitted.strip().startswith(".."):
+            raise SystemExit(f"split-titlebar smoke: rendered truncated shell title: {titlebar}")
+
     return out
 
 
@@ -1784,6 +1900,7 @@ def main() -> int:
         choices=[
             "tabbar",
             "tab-title",
+            "split-titlebar",
             "zoom-keybind",
             "underline",
             "agent-tui",
@@ -1807,6 +1924,9 @@ def main() -> int:
     if args.case in ("tab-title", "all"):
         out = run_tab_title(args.kettle, root)
         print(f"tab-title smoke: OK artifacts={out}")
+    if args.case in ("split-titlebar", "all"):
+        out = run_split_titlebar(args.kettle, root)
+        print(f"split-titlebar smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")

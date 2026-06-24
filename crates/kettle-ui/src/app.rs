@@ -1428,10 +1428,27 @@ fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
 /// the `agent-badge` when an agent control connection has the pane attached.
 /// Pure (unit-tested). No badges → the title unchanged (zero cost for the
 /// common case).
+#[cfg(test)]
 fn compose_pane_title(badge: &str, attached: bool, read_only: bool, title: &str) -> String {
+    let prefix = pane_title_prefix(badge, attached, read_only);
+    if prefix.is_empty() {
+        title.to_string()
+    } else {
+        format!("{prefix}{title}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneTitleParts {
+    prefix: String,
+    title: String,
+    path: Option<String>,
+}
+
+fn pane_title_prefix(badge: &str, attached: bool, read_only: bool) -> String {
     let agent = attached && !badge.is_empty();
     if !read_only && !agent {
-        return title.to_string();
+        return String::new();
     }
     let mut out = String::new();
     if read_only {
@@ -1440,8 +1457,51 @@ fn compose_pane_title(badge: &str, attached: bool, read_only: bool, title: &str)
     if agent {
         out.push_str(badge);
     }
-    out.push_str(title);
     out
+}
+
+fn pane_title_parts(
+    agent_badge: &str,
+    attached: bool,
+    read_only: bool,
+    pane_title: &str,
+    placeholder: bool,
+    cwd: Option<&str>,
+    home: Option<&str>,
+) -> PaneTitleParts {
+    let prefix = pane_title_prefix(agent_badge, attached, read_only);
+    let raw = pane_title.trim();
+    if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+        if placeholder || raw.is_empty() {
+            let path = crate::mux::abbreviate_home(cwd, home);
+            let title = cwd
+                .rsplit(['/', '\\'])
+                .find(|s| !s.is_empty())
+                .unwrap_or(raw)
+                .to_string();
+            return PaneTitleParts {
+                prefix,
+                title,
+                path: Some(path),
+            };
+        }
+        if let Some(label) = crate::mux::cwd_label_for_shell_title(raw, cwd, home) {
+            return PaneTitleParts {
+                prefix,
+                title: label.text,
+                path: label.path,
+            };
+        }
+    }
+    PaneTitleParts {
+        prefix,
+        title: if raw.is_empty() {
+            "kettle".to_string()
+        } else {
+            raw.to_string()
+        },
+        path: None,
+    }
 }
 
 /// v2.29.0: does this OSC 2 title look like the bogus full-exe-path that
@@ -5589,6 +5649,7 @@ impl App {
         // titlebar can render the text.
         let mut snaps = std::mem::take(&mut ws.pane_snapshots);
         let mut metas = Vec::with_capacity(layout.len());
+        let home = crate::mux::home_dir_string();
         for (id, r) in &layout {
             if let Some(p) = ws.mux.panes.get(id) {
                 let mut imgs = p.term.placements();
@@ -5601,34 +5662,24 @@ impl App {
                     }
                     snaps[si].capture(&g);
                     drop(g); // lock released — the render below is lock-free
-                    // v2.29.0: a placeholder-titled pane (e.g. a stock pwsh whose
-                    // only "title" was the suppressed conhost exe path) labels its
-                    // titlebar with the cwd leaf, matching the tab/window label —
-                    // the split titlebar previously had NO cwd fallback at all.
-                    let pane_label = if p.title_is_placeholder {
-                        p.term
-                            .current_dir_or_native()
-                            .as_deref()
-                            .and_then(|c| {
-                                c.rsplit(['/', '\\'])
-                                    .find(|s| !s.is_empty())
-                                    .map(str::to_string)
-                            })
-                            .unwrap_or_else(|| p.title.clone())
-                    } else {
-                        p.title.clone()
-                    };
+                    let cwd = p.term.current_dir_or_native();
+                    let title_parts = pane_title_parts(
+                        &self.cfg.agent_badge,
+                        p.agent_attached,
+                        p.read_only,
+                        &p.title,
+                        p.title_is_placeholder,
+                        cwd.as_deref(),
+                        home.as_deref(),
+                    );
                     metas.push((
                         *id,
                         *r,
                         Some(*id) == focus,
                         imgs,
-                        compose_pane_title(
-                            &self.cfg.agent_badge,
-                            p.agent_attached,
-                            p.read_only,
-                            &pane_label,
-                        ),
+                        title_parts.prefix,
+                        title_parts.title,
+                        title_parts.path,
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
                         false,
@@ -5647,17 +5698,21 @@ impl App {
             .iter()
             .zip(snaps.iter())
             .map(
-                |((id, r, f, imgs, title, cols, rows, bell, group_name), snap)| PaneView {
-                    id: *id,
-                    rect: *r,
-                    snap,
-                    focused: *f,
-                    images: imgs.as_slice(),
-                    title: title.as_str(),
-                    size_cols: *cols,
-                    size_rows: *rows,
-                    bell: *bell,
-                    group_name: group_name.as_deref(),
+                |((id, r, f, imgs, prefix, title, path, cols, rows, bell, group_name), snap)| {
+                    PaneView {
+                        id: *id,
+                        rect: *r,
+                        snap,
+                        focused: *f,
+                        images: imgs.as_slice(),
+                        title_prefix: prefix.as_str(),
+                        title: title.as_str(),
+                        title_path: path.as_deref(),
+                        size_cols: *cols,
+                        size_rows: *rows,
+                        bell: *bell,
+                        group_name: group_name.as_deref(),
+                    }
                 },
             )
             .collect();
@@ -9665,6 +9720,7 @@ impl App {
                 })
             });
         let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);
+        let cell_h = target.renderer.as_ref().map(|r| r.cell_h).unwrap_or(16.0);
         let bar = self.tab_bar(target);
         let segments: Vec<serde_json::Value> = bar
             .segments
@@ -9690,6 +9746,72 @@ impl App {
                 })
             })
             .collect();
+        let pane_layout = target.mux.layout(target.mux.active, self.area(target));
+        let pane_titlebar_h = if self.cfg.show_titlebar && pane_layout.len() > 1 {
+            cell_h + 6.0
+        } else {
+            0.0
+        };
+        let home = crate::mux::home_dir_string();
+        let focus = target.mux.active_focus();
+        let pane_titlebars: Vec<serde_json::Value> = if pane_titlebar_h > 0.0 {
+            pane_layout
+                .iter()
+                .filter_map(|(pane_id, rect)| {
+                    let pane = target.mux.panes.get(pane_id)?;
+                    let cwd = pane.term.current_dir_or_native();
+                    let title_parts = pane_title_parts(
+                        &self.cfg.agent_badge,
+                        pane.agent_attached,
+                        pane.read_only,
+                        &pane.title,
+                        pane.title_is_placeholder,
+                        cwd.as_deref(),
+                        home.as_deref(),
+                    );
+                    let (cols, rows) = self.grid_of_inset(target, *rect, pane_titlebar_h);
+                    let size_text =
+                        (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
+                    let bell: Option<&str> = None;
+                    let budget = (rect.2 / cell_w.max(1.0)).floor().max(1.0) as usize;
+                    let group = pane.group_name.as_deref().filter(|g| !g.is_empty());
+                    let fitted_title = kettle_render::fit_pane_titlebar_title(
+                        group,
+                        &title_parts.prefix,
+                        &title_parts.title,
+                        title_parts.path.as_deref(),
+                        size_text.as_deref(),
+                        bell,
+                        budget,
+                    );
+                    let titlebar_rect = if self.cfg.title_at_bottom {
+                        (
+                            rect.0,
+                            rect.1 + rect.3 - pane_titlebar_h,
+                            rect.2,
+                            pane_titlebar_h,
+                        )
+                    } else {
+                        (rect.0, rect.1, rect.2, pane_titlebar_h)
+                    };
+                    Some(serde_json::json!({
+                        "pane": pane_id,
+                        "focused": Some(*pane_id) == focus,
+                        "rect": rect_json(titlebar_rect),
+                        "pane_rect": rect_json(*rect),
+                        "raw_title": pane.title,
+                        "title": title_parts.title,
+                        "title_prefix": title_parts.prefix,
+                        "path": title_parts.path,
+                        "fitted_title": fitted_title,
+                        "cols": cols,
+                        "rows": rows,
+                    }))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let context_menu = target.context_menu.as_ref().and_then(|menu| {
             let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(target)?;
             let (_, ch) = self.menu_cell(target);
@@ -9786,6 +9908,7 @@ impl App {
                 "insert_marker": bar.insert_marker,
                 "segments": segments,
             },
+            "pane_titlebars": pane_titlebars,
         })
     }
 
@@ -17670,7 +17793,7 @@ mod tests {
     /// titlebar badges, composed by `compose_pane_title`.
     #[test]
     fn pane_title_badges_compose_from_state() {
-        use super::compose_pane_title;
+        use super::{compose_pane_title, pane_title_parts};
         // No badges: title unchanged regardless of the configured badge text.
         assert_eq!(compose_pane_title("[agent] ", false, false, "bash"), "bash");
         // Agent attached: badge prefixed.
@@ -17694,6 +17817,22 @@ mod tests {
         );
         // Read-only with an empty agent badge still shows `[RO]`.
         assert_eq!(compose_pane_title("", true, true, "bash"), "[RO] bash");
+
+        let parts = pane_title_parts(
+            "[agent] ",
+            true,
+            true,
+            "..ine-server-go",
+            false,
+            Some("/home/u/Repos/SPI-1/flight-event-line-server-go"),
+            Some("/home/u"),
+        );
+        assert_eq!(parts.prefix, "[RO] [agent] ");
+        assert_eq!(parts.title, "flight-event-line-server-go");
+        assert_eq!(
+            parts.path.as_deref(),
+            Some("~/Repos/SPI-1/flight-event-line-server-go")
+        );
     }
 
     #[test]

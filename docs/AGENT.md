@@ -152,7 +152,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
-| `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, open context-menu rect/rows, cursor, and tab drag armed/visible state |
+| `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, and tab drag armed/visible state |
 | `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
@@ -335,6 +335,16 @@ title such as `..PI-1/platform`, and asserts `list_panes`, `list_tabs`, and
 `ui_geometry` agree: raw pane title remains observable, cwd metadata is surfaced,
 and a wide tab's `fitted_title` recovers the full cwd path. Artifacts are saved
 under `target/diagnostics/tab-title-*`.
+
+```sh
+just split-titlebar-smoke
+```
+
+Starts a real Kettle window with pane titlebars enabled, emits OSC 7 plus a
+truncated shell title, creates a split, and asserts `ui_geometry.pane_titlebars`
+recovers the full cwd path for the rendered titlebar labels while `list_panes`
+still preserves the raw shell title. Artifacts are saved under
+`target/diagnostics/split-titlebar-*`.
 
 ```sh
 just zoom-keybind-smoke
