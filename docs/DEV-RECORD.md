@@ -67,7 +67,7 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   (or `KETTLE_RECORD_RAW_INPUT=1`) opts into literal capture — ⚠ the trace can
   then contain typed secrets; leave it off unless you need byte-exact input.
 - **Pasted content is never recorded** — only a `kettle:paste len=N` marker.
-- An always-visible **`● REC`** indicator sits in the title bar.
+- An always-visible **`[REC]`** indicator sits in the title bar.
 - The trace file is local-only (`0600` on Unix); kettle never uploads it. Writes
   are best-effort — a full disk disables the recorder, it never crashes kettle.
 

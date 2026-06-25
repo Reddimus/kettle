@@ -1290,6 +1290,17 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
     window_title_with_home(template, pane_title, cwd, home.as_deref(), tab)
 }
 
+#[cfg(feature = "dev-record")]
+const RECORDING_TITLE_SUFFIX: &str = " [REC]";
+
+#[cfg(feature = "dev-record")]
+fn recording_window_title(mut title: String, recording: bool) -> String {
+    if recording {
+        title.push_str(RECORDING_TITLE_SUFFIX);
+    }
+    title
+}
+
 fn window_title_with_home(
     template: &str,
     pane_title: &str,
@@ -4848,6 +4859,16 @@ impl App {
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
     fn sync_window_title(&mut self, ws: &mut WindowState) {
+        let want = self.desired_window_title(ws);
+        if want != ws.last_title {
+            if let Some(w) = &ws.window {
+                w.set_title(&want);
+            }
+            ws.last_title = want;
+        }
+    }
+
+    fn desired_window_title(&self, ws: &WindowState) -> String {
         let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id));
         let title = pane.map(|p| p.title.as_str()).unwrap_or("kettle");
         // v2.29.0: OSC 7/9;9 cwd if the shell reported one, else the natively
@@ -4859,19 +4880,11 @@ impl App {
         let tab = ws.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
         // Cycle 876: an always-visible recording indicator in the title bar so
-        // the dev recorder is never silently capturing.
+        // the dev recorder is never silently capturing. Keep it ASCII because
+        // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
-        let want = if self.recorder.is_some() {
-            format!("{want}  ● REC")
-        } else {
-            want
-        };
-        if want != ws.last_title {
-            if let Some(w) = &ws.window {
-                w.set_title(&want);
-            }
-            ws.last_title = want;
-        }
+        let want = recording_window_title(want, self.recorder.is_some());
+        want
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
@@ -9504,6 +9517,7 @@ impl App {
             "focused_pane": ws.mux.tabs.get(ws.mux.active).map(|t| t.focus),
             "windows": 1 + self.windows.len(),
             "focused_window": self.focused_seq,
+            "window_title": self.desired_window_title(ws),
         })
     }
 
@@ -19029,6 +19043,40 @@ mod tests {
                 2
             ),
             "[2] ~/Repos/SPI-1/platform (~/Repos/SPI-1/platform)"
+        );
+    }
+
+    #[cfg(feature = "dev-record")]
+    #[test]
+    fn recording_window_title_suffix_is_ascii_safe() {
+        use super::{RECORDING_TITLE_SUFFIX, recording_window_title};
+
+        assert_eq!(
+            recording_window_title("kettle".to_string(), false),
+            "kettle"
+        );
+        assert_eq!(
+            recording_window_title("kettle".to_string(), true),
+            "kettle [REC]"
+        );
+        assert!(RECORDING_TITLE_SUFFIX.is_ascii());
+        assert!(
+            !RECORDING_TITLE_SUFFIX.contains('●'),
+            "native title-bar text must avoid host-font-dependent symbol glyphs"
+        );
+    }
+
+    #[test]
+    fn get_state_reports_desired_window_title() {
+        let src = include_str!("app.rs");
+        let body = src
+            .split("fn ctl_get_state")
+            .nth(1)
+            .and_then(|s| s.split("fn ctl_list_tabs").next())
+            .expect("ctl_get_state body present");
+        assert!(
+            body.contains("\"window_title\": self.desired_window_title(ws),"),
+            "get_state must expose the same native title string that sync_window_title sets"
         );
     }
 
