@@ -4,6 +4,15 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.32.4] — 2026-06-25
+
+  ### Fixed
+  - **Dev-record title bars avoid missing Ubuntu glyphs.** The native OS title
+    indicator now uses ASCII `[REC]` instead of `● REC`, so Linux desktop title
+    fonts that lack the symbol still show the recording state clearly. The
+    control-plane `get_state` result now also reports the computed
+    `window_title` for diagnostics and live smoke tests.
+
 ## [2.32.3] — 2026-06-23
 
   ### Fixed
