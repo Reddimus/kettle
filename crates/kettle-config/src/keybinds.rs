@@ -165,6 +165,12 @@ pub fn describe(bindings: &Bindings) -> Vec<String> {
 pub enum Action {
     Copy,
     Paste,
+    /// Select the entire scrollback + screen (keyboard / palette select-all).
+    SelectAll,
+    /// Extend the selection up to the first line / top of the buffer (Shift+Home).
+    SelectToTop,
+    /// Extend the selection down to the last line / last cell (Shift+End).
+    SelectToBottom,
     NewTab,
     CloseTab,
     NextTab,
@@ -515,6 +521,9 @@ pub fn action_names() -> Vec<&'static str> {
         "copy_to_clipboard",
         "paste",
         "paste_from_clipboard",
+        "select_all",
+        "select_to_top",
+        "select_to_bottom",
         "new_tab",
         "close_tab",
         "next_tab",
@@ -749,6 +758,9 @@ impl Action {
         Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
             "paste_from_clipboard" | "paste" => Paste,
+            "select_all" | "select-all" => SelectAll,
+            "select_to_top" | "select-to-top" | "select_to_first_line" => SelectToTop,
+            "select_to_bottom" | "select-to-bottom" | "select_to_last_line" => SelectToBottom,
             "new_tab" => NewTab,
             "close_tab" => CloseTab,
             // Cycle 614: `cycle_next` / `cycle_prev` are
@@ -1188,8 +1200,14 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     // ScrollByLine(-1)`).
     bind(cs, Up, ScrollLineUp);
     bind(cs, Down, ScrollLineDown);
-    bind(Mods::SHIFT, Home, ScrollToTop);
-    bind(Mods::SHIFT, End, ScrollToBottom);
+    // Shift+Home/End extend the text selection to the top / bottom of the buffer
+    // (the AskUbuntu "select all in terminator" gesture). Scroll-to-extremes moved
+    // to Ctrl+Home / Ctrl+End so both behaviors stay reachable. (These chords were
+    // already keybinds — never forwarded to the PTY — so apps lose nothing.)
+    bind(Mods::SHIFT, Home, SelectToTop);
+    bind(Mods::SHIFT, End, SelectToBottom);
+    bind(c, Home, ScrollToTop);
+    bind(c, End, ScrollToBottom);
     // Alt+1..9 jumps to tab 1..9 (kitty / Terminator / Ghostty parity).
     // No-op when the requested tab doesn't exist — the app-side handler
     // already clamps against `tabs.len()`.
@@ -1589,6 +1607,42 @@ mod tests {
                 d.get(&trig)
             );
         }
+    }
+
+    #[test]
+    fn shift_home_end_select_and_scroll_moves_to_ctrl() {
+        // Keyboard text-selection feature: Shift+Home/End now extend the
+        // selection to the top / bottom of the buffer; scroll-to-extremes
+        // relocated to Ctrl+Home / Ctrl+End so both behaviors stay reachable.
+        let d = defaults();
+        assert_eq!(
+            d.get(&Trigger::new(Mods::SHIFT, Key::Home)),
+            Some(&Action::SelectToTop)
+        );
+        assert_eq!(
+            d.get(&Trigger::new(Mods::SHIFT, Key::End)),
+            Some(&Action::SelectToBottom)
+        );
+        assert_eq!(
+            d.get(&Trigger::new(Mods::CTRL, Key::Home)),
+            Some(&Action::ScrollToTop)
+        );
+        assert_eq!(
+            d.get(&Trigger::new(Mods::CTRL, Key::End)),
+            Some(&Action::ScrollToBottom)
+        );
+        // SelectAll is bindable but intentionally has no default chord.
+        assert!(!d.values().any(|a| *a == Action::SelectAll));
+        // The new tokens parse back through from_name (round-trip).
+        assert_eq!(Action::from_name("select_all"), Some(Action::SelectAll));
+        assert_eq!(
+            Action::from_name("select_to_top"),
+            Some(Action::SelectToTop)
+        );
+        assert_eq!(
+            Action::from_name("select-to-bottom"),
+            Some(Action::SelectToBottom)
+        );
     }
 
     #[test]

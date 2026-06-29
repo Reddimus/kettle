@@ -56,6 +56,9 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("SSH launcher", OpenSsh),
         ("Copy", Copy),
         ("Paste", Paste),
+        ("Select all", SelectAll),
+        ("Select to top of buffer", SelectToTop),
+        ("Select to bottom of buffer", SelectToBottom),
         ("Increase font size", IncreaseFontSize),
         ("Decrease font size", DecreaseFontSize),
         ("Reset font size", ResetFontSize),
@@ -198,6 +201,9 @@ mod tests {
         let every_action: Vec<Action> = vec![
             Copy,
             Paste,
+            SelectAll,
+            SelectToTop,
+            SelectToBottom,
             NewTab,
             CloseTab,
             NextTab,
@@ -313,7 +319,10 @@ mod tests {
         // to add a row to `every_action` above as well.
         for a in &every_action {
             match a {
-                Copy
+                SelectAll
+                | SelectToTop
+                | SelectToBottom
+                | Copy
                 | Paste
                 | NewTab
                 | CloseTab

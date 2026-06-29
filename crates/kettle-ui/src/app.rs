@@ -1074,6 +1074,28 @@ fn viewport_point_to_grid(
     )
 }
 
+/// Grid-absolute `(top-left, bottom-right)` points spanning the whole buffer —
+/// scrollback included — for keyboard "select to top/bottom" and "select all".
+/// Alacritty's convention: the active screen is `Line(0)..Line(screen_lines)` and
+/// history is *negative* down to `Line(-history_size)`, so the oldest line is
+/// `Line(-(history_size))` col 0 and the last cell is `Line(screen_lines-1)` at the
+/// final column. Pure so the boundary math is unit-testable without a GPU/Term.
+fn selection_buffer_bounds(
+    history_size: usize,
+    screen_lines: usize,
+    columns: usize,
+) -> (kettle_core::Point, kettle_core::Point) {
+    let top = kettle_core::Point::new(
+        kettle_core::Line(-(history_size as i32)),
+        kettle_core::Column(0),
+    );
+    let bottom = kettle_core::Point::new(
+        kettle_core::Line(screen_lines.saturating_sub(1) as i32),
+        kettle_core::Column(columns.saturating_sub(1)),
+    );
+    (top, bottom)
+}
+
 /// Cycle 910 (R2): minimum wall-clock between output-driven frames — a 60 fps
 /// paint cap (the standard terminal/display refresh target; Alacritty/WezTerm do
 /// the same). Imperceptible for keystroke echo / streaming output, large enough
@@ -8090,6 +8112,66 @@ impl App {
                         Action::ScrollToTop => Scroll::Top,
                         _ => Scroll::Bottom,
                     });
+                }
+            }
+            Action::SelectAll => {
+                // Select the entire buffer (scrollback + screen). Mirrors
+                // `apply_smart_selection`'s Selection-building, spanning the
+                // grid-absolute buffer bounds.
+                if let Some(p) = ws.mux.focused()
+                    && let Ok(mut t) = p.term.term.lock()
+                {
+                    use kettle_core::Dimensions;
+                    let (top, bottom) = selection_buffer_bounds(
+                        t.grid().history_size(),
+                        t.grid().screen_lines(),
+                        t.grid().columns(),
+                    );
+                    let mut sel = kettle_core::Selection::new(
+                        kettle_core::SelectionType::Simple,
+                        top,
+                        kettle_core::Side::Left,
+                    );
+                    sel.update(bottom, kettle_core::Side::Right);
+                    t.selection = Some(sel);
+                }
+            }
+            Action::SelectToTop | Action::SelectToBottom => {
+                // Extend the selection to the first line / last cell of the
+                // buffer (the AskUbuntu "select all in terminator" gesture,
+                // Shift+Home / Shift+End), then scroll to reveal the new extent.
+                let to_top = matches!(action, Action::SelectToTop);
+                if let Some(p) = ws.mux.focused()
+                    && let Ok(mut t) = p.term.term.lock()
+                {
+                    use kettle_core::Dimensions;
+                    let (top, bottom) = selection_buffer_bounds(
+                        t.grid().history_size(),
+                        t.grid().screen_lines(),
+                        t.grid().columns(),
+                    );
+                    let (edge, side) = if to_top {
+                        (top, kettle_core::Side::Left)
+                    } else {
+                        (bottom, kettle_core::Side::Right)
+                    };
+                    match t.selection.as_mut() {
+                        // Grow an existing selection's active end toward the
+                        // edge, keeping its anchor (editor-style range growth).
+                        Some(sel) => sel.update(edge, side),
+                        // No selection yet: anchor at the cursor, extend to edge.
+                        None => {
+                            let anchor = t.grid().cursor.point;
+                            let mut sel = kettle_core::Selection::new(
+                                kettle_core::SelectionType::Simple,
+                                anchor,
+                                kettle_core::Side::Left,
+                            );
+                            sel.update(edge, side);
+                            t.selection = Some(sel);
+                        }
+                    }
+                    t.scroll_display(if to_top { Scroll::Top } else { Scroll::Bottom });
                 }
             }
             Action::JumpPrevPrompt | Action::JumpNextPrompt => {
@@ -19804,5 +19886,64 @@ mod tests {
         );
         // Neither set: no-op.
         assert_eq!(pick_light_dark_target("anything", "", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod keyboard_selection_tests {
+    use super::selection_buffer_bounds;
+
+    /// The whole-buffer bounds are grid-absolute: top is the oldest history line
+    /// (negative), column 0; bottom is the last active row, last column.
+    #[test]
+    fn buffer_bounds_span_scrollback_to_last_cell() {
+        let (top, bottom) = selection_buffer_bounds(100, 24, 80);
+        assert_eq!(top.line.0, -100);
+        assert_eq!(top.column.0, 0);
+        assert_eq!(bottom.line.0, 23);
+        assert_eq!(bottom.column.0, 79);
+    }
+
+    /// Degenerate dims must not underflow (empty scrollback / 1-col / 1-row).
+    #[test]
+    fn buffer_bounds_are_saturating() {
+        let (top, bottom) = selection_buffer_bounds(0, 1, 1);
+        assert_eq!((top.line.0, top.column.0), (0, 0));
+        assert_eq!((bottom.line.0, bottom.column.0), (0, 0));
+        // No scrollback, single screen line: top == bottom row.
+        let (top, bottom) = selection_buffer_bounds(0, 24, 80);
+        assert_eq!(top.line.0, 0);
+        assert_eq!(bottom.line.0, 23);
+    }
+
+    /// Source-drift guard: the new selection actions must actually mutate
+    /// `t.selection` (not silently no-op), and the Shift+click extend path must
+    /// stay wired into the mouse-press handler. A behavioral test would need a
+    /// live Term + window; pin the wiring at the source level.
+    #[test]
+    fn selection_actions_and_shift_click_are_wired() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        // SelectAll arm builds a full-buffer selection.
+        let all = src
+            .find("Action::SelectAll =>")
+            .expect("SelectAll arm present");
+        assert!(
+            src[all..all + 1100].contains("t.selection = Some(sel);"),
+            "SelectAll must set the term selection"
+        );
+        // SelectToTop/Bottom arm extends/sets the selection and scrolls.
+        let edge = src
+            .find("Action::SelectToTop | Action::SelectToBottom =>")
+            .expect("SelectToTop/Bottom arm present");
+        let edge_body = &src[edge..edge + 2100];
+        assert!(
+            edge_body.contains("sel.update(edge, side)") && edge_body.contains("t.scroll_display("),
+            "SelectToTop/Bottom must extend the selection and reveal it by scrolling"
+        );
+        // Shift+click extension (existing behavior) must remain wired.
+        assert!(
+            src.contains("self.extend_selection_to_cursor(ws, area)"),
+            "Shift+click must still extend the selection via extend_selection_to_cursor"
+        );
     }
 }
