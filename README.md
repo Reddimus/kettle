@@ -255,7 +255,8 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 | **SSH launcher** | **`Ctrl+Shift+S`** | **Command palette** | **`Ctrl+Shift+K`** |
 | **Quick-select hints** | **`Ctrl+Shift+H`** | Fullscreen | `F11` |
 | Jump prev/next prompt | `Ctrl+Up` / `Down` | Resize split | `Shift+Arrows` |
-| Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Shift+Home` / `End` |
+| Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Ctrl+Home` / `End` |
+| Select to top/bottom | `Shift+Home` / `End` | Select all | command palette (`select_all`) |
 | Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
 | Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |

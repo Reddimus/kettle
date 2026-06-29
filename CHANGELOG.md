@@ -4,7 +4,23 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [2.32.4] — 2026-06-25
+## [2.33.0] — 2026-06-29
+
+  ### Added
+  - **Keyboard text selection — Shift+Home/End, and Select All.** Selecting
+    scrollback text no longer needs the mouse (the AskUbuntu "select all in
+    terminator" gestures):
+    - **Shift+Home** extends the selection up to the first line / top of the
+      buffer (scrollback included); **Shift+End** extends it down to the last
+      cell. Both scroll the viewport to reveal the new extent.
+    - **Shift+click** on a character still extends the current selection to that
+      point (unchanged).
+    - **Select All** (`select_all`) selects the entire scrollback + screen — in
+      the command palette and bindable as a keybind (no default chord to avoid
+      conflicts).
+    - Scroll-to-extremes moved off Shift+Home/End to **Ctrl+Home / Ctrl+End** so
+      both behaviors stay reachable. New bindable actions: `select_all`,
+      `select_to_top`, `select_to_bottom`.
 
   ### Fixed
   - **Dev-record title bars avoid missing Ubuntu glyphs.** The native OS title

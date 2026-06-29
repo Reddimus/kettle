@@ -336,7 +336,12 @@ kettle window's tab bar merges it there), `open_settings`
 (`take_screenshot` / `terminalshot`).
 
 **Editing**: `copy` (`copy_to_clipboard`), `paste`
-(`paste_from_clipboard`).
+(`paste_from_clipboard`), `select_all` (select the whole scrollback + screen;
+in the command palette, bindable, no default chord), `select_to_top`
+(`select_to_first_line`) and `select_to_bottom` (`select_to_last_line`) —
+extend the selection to the top / bottom of the buffer, bound by default to
+**Shift+Home** / **Shift+End** (Shift+click still extends to the click point).
+Scroll-to-extremes moved to **Ctrl+Home** / **Ctrl+End** as a result.
 
 **Search + jump**: `start_search` (`search`), `prev_prompt`
 (`jump_to_prompt_prev`), `next_prompt` (`jump_to_prompt_next`).
