@@ -1309,17 +1309,100 @@ impl Terminal {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
                     let mut buf = [0u8; 65536];
+                    // DEC 2026 synchronized-update fix: a blocking PTY read can't
+                    // wake at the sync-update deadline, so an app that opens a
+                    // synchronized update (BSU `\e[?2026h`) and then goes quiet —
+                    // never sending the closing ESU `\e[?2026l`, with no further
+                    // output — would leave vte's `Processor` buffering the update
+                    // forever and the grid frozen on the pre-update content (the
+                    // "leftover text in Claude Code's bottom input box" symptom).
+                    // Split the raw blocking read into a tiny pump thread feeding a
+                    // channel; the processor loop then waits with
+                    // `recv_timeout(deadline)` and force-flushes the buffered
+                    // update via `stop_sync` once the 150 ms cap elapses — matching
+                    // alacritty's own synchronized-update behavior.
+                    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+                    {
+                        let pump_stop = stop.clone();
+                        // Detached, like the processor thread: it winds down when
+                        // the pseudoconsole closes (read returns 0/Err) or when the
+                        // processor side hangs up the channel (`send` errors).
+                        let _ = std::thread::Builder::new()
+                            .name("kettle-pty-pump".into())
+                            .spawn(move || {
+                                let mut rbuf = [0u8; 65536];
+                                loop {
+                                    // Same teardown guard as the processor loop:
+                                    // don't re-enter a blocking read once Drop has
+                                    // signaled stop (the in-flight read still ends
+                                    // only when the pseudoconsole closes).
+                                    if pump_stop.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    match reader.read(&mut rbuf) {
+                                        Ok(0) | Err(_) => {
+                                            let _ = raw_tx.send(None);
+                                            break;
+                                        }
+                                        Ok(n) => {
+                                            if raw_tx.send(Some(rbuf[..n].to_vec())).is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                    }
                     loop {
-                        // Cycle 742: bail out during teardown (Drop sets
-                        // `stop`). This can't interrupt a *currently* blocked
-                        // read — only the pseudoconsole closing does that —
-                        // but it stops us re-entering a fresh blocking read
-                        // after the close, so the detached thread winds down
-                        // immediately instead of processing stale output.
+                        // Cycle 742: bail out during teardown (Drop sets `stop`).
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        match reader.read(&mut buf) {
+                        // Block for the next chunk — but only until a pending
+                        // synchronized-update deadline, then flush and retry. A
+                        // `None` from the channel (or a hangup) is end-of-stream,
+                        // surfaced to the existing match below as `Ok(0)`.
+                        let read_result: std::io::Result<usize> = loop {
+                            match processor.sync_timeout().sync_timeout() {
+                                Some(deadline) => {
+                                    let wait = deadline
+                                        .saturating_duration_since(std::time::Instant::now());
+                                    match raw_rx.recv_timeout(wait) {
+                                        Ok(Some(d)) => {
+                                            let n = d.len().min(buf.len());
+                                            buf[..n].copy_from_slice(&d[..n]);
+                                            break Ok(n);
+                                        }
+                                        Ok(None) => break Ok(0),
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                            // The 150 ms cap elapsed with no closing
+                                            // ESU and no new output: apply the
+                                            // buffered synchronized update so the
+                                            // grid reflects the latest state.
+                                            if let Ok(mut t) = term.lock() {
+                                                processor.stop_sync(&mut *t);
+                                            }
+                                            out_gen_reader
+                                                .fetch_add(1, std::sync::atomic::Ordering::Release);
+                                            (waker)();
+                                            continue;
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                            break Ok(0);
+                                        }
+                                    }
+                                }
+                                None => match raw_rx.recv() {
+                                    Ok(Some(d)) => {
+                                        let n = d.len().min(buf.len());
+                                        buf[..n].copy_from_slice(&d[..n]);
+                                        break Ok(n);
+                                    }
+                                    Ok(None) | Err(_) => break Ok(0),
+                                },
+                            }
+                        };
+                        match read_result {
                             Ok(0) | Err(_) => {
                                 proxy.send_event_exit();
                                 break;
@@ -4879,5 +4962,37 @@ mod pty_dim_tests {
     fn zero_inputs_are_benign() {
         assert_eq!(clamp_pty_dim(0, 80), 0);
         assert_eq!(clamp_pty_dim(8, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod sync_update_flush_guard {
+    /// Stale-text fix drift guard. vte's `Processor` buffers bytes during a DEC
+    /// 2026 synchronized update and only applies them on the closing ESU, a full
+    /// 2 MiB buffer, or an explicit `stop_sync`. A blocking PTY read can't wake at
+    /// the 150 ms deadline, so an app that opens a sync update and goes quiet
+    /// (Claude Code's bottom input box, a delayed/split ESU) would freeze the grid
+    /// on stale content. The reader must therefore wait with `recv_timeout` keyed
+    /// on `sync_timeout()` and force-flush via `stop_sync` on expiry. A behavioral
+    /// test would need a live PTY mid-sync; pin the mechanism at the source level.
+    #[test]
+    fn reader_force_flushes_pending_sync_update() {
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let start = src
+            .find("let reader_thread = {")
+            .expect("reader_thread present");
+        let body = &src[start..start + 6000];
+        assert!(
+            body.contains("processor.sync_timeout().sync_timeout()"),
+            "the reader must consult the synchronized-update deadline"
+        );
+        assert!(
+            body.contains("recv_timeout"),
+            "the reader must bound its wait on the sync deadline via recv_timeout"
+        );
+        assert!(
+            body.contains("processor.stop_sync(&mut *t)"),
+            "the reader must force-flush the buffered sync update when the deadline elapses"
+        );
     }
 }

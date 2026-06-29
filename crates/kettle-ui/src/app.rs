@@ -2528,6 +2528,20 @@ pub struct App {
     /// frame) and cached for the session; `categories()` reads it. Empty until
     /// the overlay is first opened (the picker then shows just "Automatic").
     gpu_choices: Vec<(String, String)>,
+    /// GPU auto-recovery: consecutive rebuild attempts since the device was lost
+    /// (a driver TDR/reset, an RDP console↔session transition, or VRAM
+    /// exhaustion). Drives [`kettle_render::escalation_for_attempt`] — re-try the
+    /// configured GPU, then any other hardware, then software — and the retry
+    /// backoff. Reset to 0 once a rebuild succeeds.
+    gpu_recovery_attempts: u32,
+    /// GPU auto-recovery: when the next rebuild attempt is due. `None` while the
+    /// GPU is healthy; armed (with a short settle delay so a transient TDR can
+    /// clear first) the first time `about_to_wait_inner` observes `is_lost()`.
+    gpu_recovery_next_at: Option<std::time::Instant>,
+    /// GPU auto-recovery: `true` when the live context fell back to the software
+    /// rasterizer (WARP / llvmpipe) after a recovery — surfaced as an on-screen
+    /// notice (title suffix) so the user knows why rendering is slower.
+    gpu_software_fallback: bool,
     /// C4: set by any "this window is done" path (last tab closed, X button,
     /// reap drained the panes) while its WindowState is checked out of the
     /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
@@ -2991,6 +3005,9 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             gpu_choices: Vec::new(),
+            gpu_recovery_attempts: 0,
+            gpu_recovery_next_at: None,
+            gpu_software_fallback: false,
             pending_window_close: false,
             quit_requested: false,
             #[cfg(feature = "dev-record")]
@@ -4884,7 +4901,103 @@ impl App {
         // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
         let want = recording_window_title(want, self.recorder.is_some());
-        want
+        // GPU auto-recovery: after a device loss forced a fall back to the
+        // software rasterizer (WARP / llvmpipe — the common case under RDP, where
+        // the physical GPU isn't exposed to the session), keep the user informed
+        // that rendering is slower until they relaunch on a healthy GPU.
+        if self.gpu_software_fallback {
+            format!("{want} — ⚠ software rendering (GPU unavailable)")
+        } else {
+            want
+        }
+    }
+
+    /// GPU auto-recovery: rebuild the render stack after a device loss. Reuses
+    /// the escalation chain ([`kettle_render::escalation_for_attempt`]:
+    /// configured GPU → any other hardware → software) and rebinds every live
+    /// window's surface to a fresh device. The `Mux`/PTYs are untouched, so a
+    /// long-running Claude Code session survives the rebuild. Returns `true` on
+    /// success (the caller clears the recovery state); on failure it leaves the
+    /// old (lost) context in place so `is_lost()` stays `true` and the caller
+    /// retries on the backoff. `ws` is the window currently checked out of
+    /// `self.windows`; the rest are rebound via `self.windows`.
+    fn try_recover_gpu(&mut self, ws: &mut WindowState) -> bool {
+        let Some(window) = ws.window.clone() else {
+            return false; // no primary window to rebuild against yet
+        };
+        let escalation = kettle_render::escalation_for_attempt(self.gpu_recovery_attempts);
+        // When escalating to "any other hardware", avoid re-picking the adapter
+        // that just died.
+        let avoid = self.gpu.as_ref().map(|g| g.adapter_ids());
+        log::warn!(
+            "GPU recovery attempt {} ({escalation:?}) — rebuilding the renderer",
+            self.gpu_recovery_attempts + 1
+        );
+        // Free the dead surfaces first (only one surface per window is allowed),
+        // but keep the old lost context until we have a healthy replacement.
+        ws.renderer = None;
+        for w in self.windows.values_mut() {
+            w.renderer = None;
+        }
+        let cfg = self.cfg.clone();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let new_renderer = match pollster::block_on(kettle_render::Renderer::new_with_escalation(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &cfg,
+            escalation,
+            avoid,
+        )) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("GPU recovery: renderer rebuild failed: {e}");
+                return false;
+            }
+        };
+        let new_gpu = new_renderer.gpu().clone();
+        self.gpu_software_fallback = new_gpu.is_software();
+        log::info!(
+            "GPU recovery succeeded on adapter {:?} (software={})",
+            new_gpu.adapter_name(),
+            self.gpu_software_fallback
+        );
+        ws.renderer = Some(new_renderer);
+        // Rebind every other live window to the new shared device.
+        for w in self.windows.values_mut() {
+            let Some(win) = w.window.clone() else {
+                continue;
+            };
+            let sz = win.inner_size();
+            let sc = win.scale_factor() as f32;
+            match kettle_render::Renderer::new_with_gpu(
+                &new_gpu,
+                win,
+                sz.width.max(1),
+                sz.height.max(1),
+                sc,
+                &cfg,
+            ) {
+                Ok(r) => w.renderer = Some(r),
+                Err(e) => log::error!(
+                    "GPU recovery: window {} could not rebind to the new device: {e}",
+                    w.seq
+                ),
+            }
+        }
+        self.gpu = Some(new_gpu);
+        // Force a full repaint on the restored device for every live window.
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        for w in self.windows.values() {
+            if let Some(win) = &w.window {
+                win.request_redraw();
+            }
+        }
+        true
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
@@ -5441,11 +5554,13 @@ impl App {
         // against the dead device cannot succeed. The new wgpu error handlers
         // (kettle_render::install_gpu_error_handlers) already turned the fault
         // into a logged event + this flag instead of a `panic=abort` crash; here
-        // we stop painting (so we don't spin the surface-reconfigure loop),
-        // surface the state in the title bar, and keep the event loop alive so
-        // the user can close + reopen. (Full auto-recovery is a deferred follow-up.)
+        // we stop painting (so we don't spin the surface-reconfigure loop) and
+        // surface the state in the title bar. `about_to_wait_inner` then drives
+        // GPU auto-recovery — rebuilding the renderer on another adapter
+        // (escalating to software) so the UI self-heals instead of needing a
+        // manual relaunch; the Mux/PTYs keep running throughout.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
-            const MSG: &str = "kettle — ⚠ GPU device lost — please reopen kettle";
+            const MSG: &str = "kettle — ⚠ GPU device lost — recovering…";
             if ws.last_title != MSG {
                 if let Some(w) = &ws.window {
                     w.set_title(MSG);
@@ -12630,6 +12745,25 @@ fn should_restore_session(startup_restore: bool, cfg_restore_session: bool) -> b
 /// to a clean diagnostic exit instead of an infinite invisible-window hang.
 const GPU_INIT_TIMEOUT_SECS: u64 = 30;
 
+/// GPU auto-recovery: settle delay between first observing a device loss and the
+/// first rebuild attempt, so a transient TDR (which usually clears in ~1-2s) can
+/// recover the original GPU before we escalate.
+const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// GPU auto-recovery: backoff before the Nth (1-based) rebuild attempt. Starts
+/// fast and eases off, capping at ~4s so a permanently-gone hardware GPU (the
+/// RDP case) reaches the software-fallback escalation promptly without
+/// busy-looping on a dying adapter. Pure fn so the schedule is unit-testable.
+fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
+    let ms = match attempt {
+        0 | 1 => 500,
+        2 => 1000,
+        3 => 2000,
+        _ => 4000,
+    };
+    std::time::Duration::from_millis(ms)
+}
+
 /// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
 /// until `timeout` elapses. Returns `true` if the timeout was reached without
 /// `done` ever being observed set — i.e. the caller should treat the init as
@@ -16118,14 +16252,39 @@ impl App {
             self.pending_window_close = true;
             return None;
         }
-        // C1 (audit v2.32.0): once the GPU device is lost we no longer paint
-        // (see the redraw guard), so do NOT schedule cursor-blink / animated-bg
-        // / resize-chip wakes — they would wake the loop only to early-return,
-        // re-spinning at the animation frame rate. Returning None parks the loop
-        // on ControlFlow::Wait until a real event (e.g. the user closing the
-        // window) arrives. The reap above still runs so an exited pane can close.
+        // GPU auto-recovery: once the device is lost (a driver TDR/reset, an RDP
+        // console↔session transition, or VRAM exhaustion) we no longer paint
+        // (see the redraw guard); instead of parking forever we rebuild the
+        // render stack on a backoff, escalating the adapter choice (configured
+        // GPU → any other hardware → software) until the UI is usable again. The
+        // Mux/PTYs keep running throughout, so a streaming Claude Code session
+        // survives the rebuild. We still short-circuit the animation wakes below
+        // while lost — only a recovery wake (or a real event) drives the loop.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
-            return None;
+            let now = std::time::Instant::now();
+            let due = match self.gpu_recovery_next_at {
+                // First observation of the loss: arm with a short settle delay so
+                // a transient TDR can clear before we spend the first attempt.
+                None => {
+                    self.gpu_recovery_next_at = Some(now + GPU_RECOVERY_SETTLE);
+                    return Some(GPU_RECOVERY_SETTLE.as_millis() as u64);
+                }
+                Some(at) => at,
+            };
+            if now < due {
+                return Some((due.saturating_duration_since(now).as_millis() as u64).max(1));
+            }
+            if self.try_recover_gpu(ws) {
+                // Recovered — reset state and fall through to normal scheduling
+                // (try_recover_gpu already requested a full repaint).
+                self.gpu_recovery_attempts = 0;
+                self.gpu_recovery_next_at = None;
+            } else {
+                self.gpu_recovery_attempts = self.gpu_recovery_attempts.saturating_add(1);
+                let backoff = gpu_recovery_backoff(self.gpu_recovery_attempts);
+                self.gpu_recovery_next_at = Some(now + backoff);
+                return Some(backoff.as_millis() as u64);
+            }
         }
         let now = std::time::Instant::now();
         // Drive cursor blink + visual-bell decay without busy-looping: only
@@ -18140,12 +18299,15 @@ mod tests {
         let flush = body
             .find("ws.coalescing_paint = false")
             .expect("the coalesce_due flush must exist in about_to_wait");
+        // Anchor on the COALESCED-output wait clamp specifically (not just the
+        // first `.max(1)` in the method — GPU-recovery scheduling also clamps a
+        // wait earlier in the body, and that one is unrelated to coalescing).
         let clamp = body
-            .find(".max(1)")
-            .expect("the wait-ms clamp must exist in about_to_wait");
+            .find("let ms = (remaining.as_millis() as u64).max(1);")
+            .expect("the coalesced-output wait clamp must exist in about_to_wait");
         assert!(
             flush < clamp,
-            "coalescing_paint flush must precede the .max(1) wait clamp (anti-busy-spin)"
+            "coalescing_paint flush must precede the coalesced-output wait clamp (anti-busy-spin)"
         );
     }
 
@@ -19804,5 +19966,50 @@ mod tests {
         );
         // Neither set: no-op.
         assert_eq!(pick_light_dark_target("anything", "", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod gpu_recovery_tests {
+    use super::gpu_recovery_backoff;
+
+    /// GPU auto-recovery backoff: starts fast (so a quick TDR recovers
+    /// promptly), eases off, and caps at ~4s so a permanently-gone hardware GPU
+    /// (the RDP case) still reaches the software-fallback escalation without
+    /// busy-looping. Monotonic non-decreasing.
+    #[test]
+    fn backoff_grows_and_caps() {
+        let ms = |a| gpu_recovery_backoff(a).as_millis();
+        assert_eq!(ms(1), 500);
+        assert_eq!(ms(2), 1000);
+        assert_eq!(ms(3), 2000);
+        assert_eq!(ms(4), 4000);
+        assert_eq!(ms(50), 4000, "backoff must cap, not grow unbounded");
+        for a in 1..20 {
+            assert!(
+                gpu_recovery_backoff(a) <= gpu_recovery_backoff(a + 1),
+                "backoff must be monotonic non-decreasing"
+            );
+        }
+    }
+
+    /// Source-drift guard: `about_to_wait_inner` must DRIVE recovery (call
+    /// `try_recover_gpu`) while the GPU is lost — not just park the loop. If this
+    /// regresses, a device loss freezes the UI permanently again.
+    #[test]
+    fn about_to_wait_drives_recovery() {
+        let src = include_str!("app.rs");
+        let wait = src
+            .find("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner present");
+        let body = &src[wait..wait + 4000];
+        assert!(
+            body.contains("self.try_recover_gpu(ws)"),
+            "about_to_wait_inner must attempt GPU recovery while the device is lost"
+        );
+        assert!(
+            body.contains("gpu_recovery_backoff("),
+            "recovery retries must use the backoff schedule"
+        );
     }
 }

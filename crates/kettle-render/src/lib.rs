@@ -564,9 +564,31 @@ pub struct GpuContext {
 impl GpuContext {
     /// v2.31.0: has the GPU device been lost (driver reset / TDR) or hit an
     /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
-    /// succeed until kettle is relaunched.
+    /// succeed against this context — the App's GPU-recovery path rebuilds a
+    /// fresh context (with a fresh flag) on a new adapter.
     pub fn is_lost(&self) -> bool {
         self.gpu_lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// GPU auto-recovery: is this context running on the software rasterizer
+    /// (WARP / llvmpipe)? Used to surface the "software rendering" notice after a
+    /// recovery escalates past all hardware adapters.
+    pub fn is_software(&self) -> bool {
+        matches!(self.adapter.get_info().device_type, wgpu::DeviceType::Cpu)
+    }
+
+    /// GPU auto-recovery: the human-readable adapter name (for the recovery /
+    /// software-fallback notice).
+    pub fn adapter_name(&self) -> String {
+        self.adapter.get_info().name
+    }
+
+    /// GPU auto-recovery: the PCI `(vendor, device)` of the live adapter, so a
+    /// rebuild can ask `resolve_adapter` to *avoid* re-picking the adapter that
+    /// just died.
+    pub fn adapter_ids(&self) -> (u32, u32) {
+        let i = self.adapter.get_info();
+        (i.vendor, i.device)
     }
 }
 
@@ -979,6 +1001,39 @@ impl Renderer {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
+        // Startup always honors the config exactly (`Preferred`); the higher
+        // escalation levels are only used by the App's GPU-recovery path.
+        Self::new_with_escalation(
+            window,
+            width,
+            height,
+            scale,
+            cfg,
+            AdapterEscalation::Preferred,
+            None,
+        )
+        .await
+    }
+
+    /// GPU auto-recovery: like [`Renderer::new`], but with an explicit adapter
+    /// [`AdapterEscalation`] and an optional `avoid` `(vendor, device)` — the
+    /// adapter that just died — so a rebuild after a device loss can step past a
+    /// dead pinned GPU to other hardware and finally to software. The window's
+    /// first renderer (window 1, or every window after a recovery) goes through
+    /// here; windows 2..N reuse the resulting [`GpuContext`] via
+    /// [`Renderer::new_with_gpu`].
+    pub async fn new_with_escalation<W>(
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        escalation: AdapterEscalation,
+        avoid: Option<(u32, u32)>,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
         // v2.23.0: resolve the adapter per config — an explicitly pinned GPU
@@ -986,8 +1041,11 @@ impl Renderer {
         // `gpu-power-preference` policy, which defaults to `Auto`: let wgpu /
         // the platform choose unless the user explicitly asks for low-power or
         // high-performance. `resolve_adapter` falls through to that policy (and
-        // finally a software adapter) whenever no pin matches.
-        let adapter = resolve_adapter(&instance, &surface, cfg, "Renderer::new").await?;
+        // finally a software adapter) whenever no pin matches. The `escalation`
+        // arg lets the recovery path override this toward other hardware /
+        // software after a loss.
+        let adapter =
+            resolve_adapter(&instance, &surface, cfg, escalation, avoid, "Renderer::new").await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
@@ -5046,6 +5104,45 @@ fn power_preference_of(pref: kettle_config::GpuPowerPreference) -> wgpu::PowerPr
     }
 }
 
+/// GPU auto-recovery: how aggressively `resolve_adapter` picks an adapter when
+/// the renderer is (re)built. `Preferred` honors the user's config exactly
+/// (pinned GPU → `gpu-power-preference` → software) and is the only level the
+/// normal startup path uses, so the steady-state behavior is unchanged. After a
+/// device loss (a driver TDR/reset, an RDP console↔session transition, or VRAM
+/// exhaustion) the App escalates through the higher levels so the UI self-heals
+/// instead of freezing:
+///   * `AnyHardware` — ignore a possibly-dead pin and take any *other* working
+///     hardware adapter (a second GPU, integrated graphics), skipping the one
+///     that just died; falls through to the power-preference/software path if no
+///     such adapter exists.
+///   * `ForceSoftware` — request the software rasterizer (WARP on Windows,
+///     llvmpipe/lavapipe on Linux) directly, guaranteeing a usable — if slower —
+///     UI even when no hardware GPU is reachable (the common RDP case, where the
+///     physical GPU is not exposed to the remote session).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterEscalation {
+    /// Honor the config: pinned GPU → `gpu-power-preference` → software.
+    Preferred,
+    /// Ignore the pin; take any working hardware adapter except the dead one.
+    AnyHardware,
+    /// Force the software rasterizer (WARP / llvmpipe), bypassing hardware.
+    ForceSoftware,
+}
+
+/// GPU auto-recovery: map the Nth recovery attempt onto an [`AdapterEscalation`].
+/// The first couple of attempts re-try the user's configured GPU (a TDR usually
+/// clears within a second or two, and the pinned adapter then works again);
+/// after that we ignore the pin and try any other hardware; once the hardware
+/// budget is spent we force software so the UI is *always* restored. Kept here
+/// (next to the enum) so the escalation policy is unit-testable without a GPU.
+pub fn escalation_for_attempt(attempt: u32) -> AdapterEscalation {
+    match attempt {
+        0 | 1 => AdapterEscalation::Preferred,
+        2 | 3 => AdapterEscalation::AnyHardware,
+        _ => AdapterEscalation::ForceSoftware,
+    }
+}
+
 /// Cycle 753: request a GPU adapter, preferring real hardware but transparently
 /// retrying with a **software rasterizer** (Mesa llvmpipe / lavapipe, or WARP on
 /// Windows) when no hardware adapter is available. Before this, all four adapter
@@ -5224,10 +5321,17 @@ async fn resolve_adapter(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'_>,
     cfg: &Config,
+    escalation: AdapterEscalation,
+    avoid: Option<(u32, u32)>,
     context: &str,
 ) -> Result<wgpu::Adapter> {
-    if cfg.gpu_force_software {
-        log::info!("{context}: gpu-force-software set — requesting the software adapter");
+    // GPU auto-recovery, top escalation level (or `gpu-force-software`): go
+    // straight to the software rasterizer. This is the guaranteed-usable UI
+    // path under RDP / headless / a wedged hardware driver.
+    if cfg.gpu_force_software || escalation == AdapterEscalation::ForceSoftware {
+        log::info!(
+            "{context}: requesting the software adapter (force-software / recovery escalation)"
+        );
         let opts = wgpu::RequestAdapterOptions {
             power_preference: power_preference_of(cfg.gpu_power_preference),
             compatible_surface: Some(surface),
@@ -5237,6 +5341,57 @@ async fn resolve_adapter(
             .request_adapter(&opts)
             .await
             .map_err(|e| anyhow!("{context}: software adapter unavailable: {e:?}"));
+    }
+    // GPU auto-recovery, middle escalation level: ignore the config pin (it may
+    // be the adapter that just died) and take any *other* surface-capable
+    // hardware adapter, preferring discrete over integrated and skipping the
+    // dead one. If none qualifies, drop through to the historic
+    // power-preference → software path below.
+    if escalation == AdapterEscalation::AnyHardware {
+        let cands: Vec<wgpu::Adapter> = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .filter(|a| a.is_surface_supported(surface))
+            .collect();
+        let rank = |t: wgpu::DeviceType| match t {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            wgpu::DeviceType::VirtualGpu => 2,
+            _ => 3, // Cpu / Other — not "hardware"; handled by the software path.
+        };
+        let best = cands
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                let i = a.get_info();
+                // Real hardware only, and not the adapter we're recovering from.
+                i.device_type != wgpu::DeviceType::Cpu && avoid != Some((i.vendor, i.device))
+            })
+            .min_by_key(|(_, a)| rank(a.get_info().device_type))
+            .map(|(idx, _)| idx);
+        if let Some(idx) = best {
+            let mut cands = cands;
+            let chosen = cands.swap_remove(idx);
+            let i = chosen.get_info();
+            log::info!(
+                "{context}: recovery picked hardware GPU {} ({}, {}) — ignoring config pin",
+                i.name,
+                device_kind_str(i.device_type),
+                backend_str(i.backend)
+            );
+            return Ok(chosen);
+        }
+        log::warn!(
+            "{context}: recovery found no alternate hardware adapter; \
+             falling through to power-preference / software"
+        );
+        let opts = wgpu::RequestAdapterOptions {
+            power_preference: power_preference_of(cfg.gpu_power_preference),
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+        };
+        return request_adapter_or_fallback(instance, &opts, context).await;
     }
     let pinned =
         (cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0) || !cfg.gpu_name.trim().is_empty();
@@ -9264,6 +9419,68 @@ mod glyph_cell_lock_tests {
         assert!(
             src.contains("buffer: &annotate_buf,"),
             "the annotation chrome must still render via glyphon"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gpu_recovery_tests {
+    use super::{AdapterEscalation, escalation_for_attempt};
+
+    /// GPU auto-recovery escalation policy: re-try the configured GPU first (a
+    /// transient TDR usually clears), then any other hardware, then force
+    /// software so the UI is always restored. Pin the schedule so a future edit
+    /// can't silently skip the hardware retries or never reach software.
+    #[test]
+    fn escalation_steps_hardware_then_software() {
+        assert_eq!(escalation_for_attempt(0), AdapterEscalation::Preferred);
+        assert_eq!(escalation_for_attempt(1), AdapterEscalation::Preferred);
+        assert_eq!(escalation_for_attempt(2), AdapterEscalation::AnyHardware);
+        assert_eq!(escalation_for_attempt(3), AdapterEscalation::AnyHardware);
+        assert_eq!(escalation_for_attempt(4), AdapterEscalation::ForceSoftware);
+        // Once at the software level it must STAY there (no oscillation back to
+        // hardware that just failed).
+        assert_eq!(escalation_for_attempt(99), AdapterEscalation::ForceSoftware);
+    }
+}
+
+#[cfg(test)]
+mod text_layout_damage_tests {
+    use super::{Config, PaneSnapshot, PaneView, text_layout_damage_key};
+
+    /// Stale-text fix regression: the layout damage key must change when a pane's
+    /// rect shifts even if the window size, cell size, and row text are all
+    /// unchanged (e.g. bottom chrome / a banner appears). Otherwise the cached
+    /// cell-locked glyph instances keep drawing at the old positions — the
+    /// "leftover text" symptom. (Cursor blink, by contrast, must NOT change it —
+    /// see `grid_upload_damage_excludes_cursor_blink`.)
+    #[test]
+    fn pane_rect_shift_invalidates_layout_key() {
+        let cfg = Config::default();
+        let snap = PaneSnapshot::default();
+        let mk = |rect: (f32, f32, f32, f32)| PaneView {
+            id: 1,
+            rect,
+            snap: &snap,
+            focused: true,
+            images: &[],
+            title: "",
+            title_prefix: "",
+            title_path: None,
+            size_cols: 80,
+            size_rows: 24,
+            bell: false,
+            group_name: None,
+        };
+        let surface = (800.0, 600.0);
+        let cell = (8.0, 16.0);
+        let full =
+            text_layout_damage_key(&[mk((0.0, 0.0, 800.0, 600.0))], &cfg, surface, cell, 0.0);
+        let shifted =
+            text_layout_damage_key(&[mk((0.0, 0.0, 800.0, 560.0))], &cfg, surface, cell, 0.0);
+        assert_ne!(
+            full, shifted,
+            "a pane-rect change must invalidate the text layout damage key"
         );
     }
 }

@@ -4,6 +4,33 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  ### Added
+  - **GPU auto-recovery — kettle self-heals from a lost graphics device.** When
+    the GPU device is lost (a driver TDR/reset, a Remote Desktop console↔session
+    transition, or VRAM exhaustion) kettle no longer freezes with a "please
+    reopen" title. It now rebuilds the render stack on a short backoff,
+    escalating the adapter choice: re-try the configured GPU (a transient TDR
+    usually clears), then any *other* hardware adapter (a second GPU / integrated
+    graphics), then the software rasterizer (WARP / llvmpipe) so the UI is always
+    restored — even inside an RDP session where the physical GPU isn't exposed.
+    The terminal panes and their PTYs keep running throughout, so a long-running
+    session (e.g. Claude Code) survives the rebuild untouched. When the fallback
+    lands on software rendering, the window title shows a "software rendering
+    (GPU unavailable)" notice.
+
+  ### Fixed
+  - **No more stale "leftover" text in synchronized-update regions.** Apps that
+    bracket a repaint in a DEC 2026 synchronized update (`?2026h…?2026l`) — such
+    as Claude Code's bottom input box — could leave pre-update content frozen on
+    screen if the closing sequence was delayed/split across reads and no further
+    output arrived: vte's parser buffers the update and only applies it on the
+    close, a full buffer, or an explicit flush, but the blocking PTY reader never
+    woke at the 150 ms cap to flush it. The reader now waits on the
+    synchronized-update deadline and force-flushes the buffered update on expiry,
+    matching alacritty's behavior, so the grid always reflects the latest state.
+
 ## [2.32.4] — 2026-06-25
 
   ### Fixed
