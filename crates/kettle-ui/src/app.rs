@@ -1003,6 +1003,31 @@ fn sanitize_title(t: &str) -> String {
         .collect()
 }
 
+/// Native window-manager titlebars use the desktop UI font, not kettle's
+/// terminal font stack. Strip Unicode Private Use glyphs (Nerd Font icons,
+/// Powerline variants, etc.) from the OS title only so GNOME/Ubuntu titlebars
+/// do not show tofu boxes while in-app tabs/pane titlebars can still render
+/// those glyphs through kettle's embedded font path.
+fn sanitize_native_window_title(t: &str) -> String {
+    let out = t
+        .chars()
+        .filter(|&c| !is_private_use_char(c))
+        .collect::<String>();
+    let out = out.trim();
+    if out.is_empty() {
+        "kettle".to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+fn is_private_use_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    )
+}
+
 /// Unicode bidirectional formatting / override code points. These are NOT
 /// `char::is_control()` (they are general category Cf) but enable right-to-left
 /// titlebar / Alt-Tab spoofing, so a sanitized title must neutralize them too.
@@ -4954,7 +4979,7 @@ impl App {
         // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
         let want = recording_window_title(want, self.recorder.is_some());
-        want
+        sanitize_native_window_title(&want)
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
@@ -16450,9 +16475,9 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
-        find_menu_row_y, modal_swallows_pointer, rank_layouts, sanitize_title, selection_kind,
-        should_restore_session, should_reveal_after_renderer_init, startup_inner_size_px,
-        typeahead_match,
+        find_menu_row_y, modal_swallows_pointer, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, should_restore_session, should_reveal_after_renderer_init,
+        startup_inner_size_px, typeahead_match,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -16475,6 +16500,25 @@ mod tests {
         // Length is capped at 512 chars.
         let long = "x".repeat(5000);
         assert_eq!(sanitize_title(&long).chars().count(), 512);
+    }
+
+    /// Native OS titlebars do not reliably use kettle's terminal font fallback,
+    /// so Private Use / Nerd Font glyphs are stripped there only.
+    #[test]
+    fn native_window_title_strips_private_use_glyphs_only() {
+        assert_eq!(
+            sanitize_native_window_title("\u{f015} kevim — kettle"),
+            "kevim — kettle"
+        );
+        assert_eq!(
+            sanitize_native_window_title("\u{f0000} build \u{100000} — kettle"),
+            "build  — kettle"
+        );
+        assert_eq!(
+            sanitize_native_window_title("世界 😀 — kettle"),
+            "世界 😀 — kettle"
+        );
+        assert_eq!(sanitize_native_window_title("\u{f015}\u{e0b0}"), "kettle");
     }
 
     /// D1 (audit v2.32.0) source-drift guard: the `WindowEvent::Focused(f)` arm
