@@ -448,6 +448,7 @@ fn content_rect_for(
         surface,
         tab_bar_h,
         status_bar_h,
+        0.0,
         tab_bar_pos,
         status_bar_mode,
         VERTICAL_TAB_STRIP_W,
@@ -463,6 +464,7 @@ fn content_rect_for_with_strip(
     surface: (u32, u32),
     tab_bar_h: f32,
     status_bar_h: f32,
+    update_banner_h: f32,
     tab_bar_pos: kettle_config::TabBarPos,
     status_bar_mode: kettle_config::StatusBarMode,
     strip_w: f32,
@@ -480,7 +482,8 @@ fn content_rect_for_with_strip(
     let top_offset =
         (if tb_on_top { tab_bar_h } else { 0.0 }) + (if sb_on_top { status_bar_h } else { 0.0 });
     let bot_offset = (if tb_on_bottom { tab_bar_h } else { 0.0 })
-        + (if sb_on_bottom { status_bar_h } else { 0.0 });
+        + (if sb_on_bottom { status_bar_h } else { 0.0 })
+        + update_banner_h.max(0.0);
     let left_offset = if tb_on_left { strip_w } else { 0.0 };
     let right_offset = if tb_on_right { strip_w } else { 0.0 };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
@@ -3263,11 +3266,21 @@ impl App {
         cursor_in_status_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
     }
 
+    fn cursor_in_update_banner(&self, ws: &WindowState) -> bool {
+        let Some((x, y, w, h)) = self.update_banner_rect(ws) else {
+            return false;
+        };
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        px >= x && px < x + w && py >= y && py < y + h
+    }
+
     /// Cycle 320: combined chrome-band hit-test. True when the
     /// cursor is over either the tab bar or the status bar — both
     /// belong in the "OS arrow cursor" group.
     fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
-        self.cursor_in_tab_bar(ws) || self.cursor_in_status_bar(ws)
+        self.cursor_in_tab_bar(ws)
+            || self.cursor_in_status_bar(ws)
+            || self.cursor_in_update_banner(ws)
     }
 
     fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
@@ -3484,8 +3497,42 @@ impl App {
         }
     }
 
-    /// Content area for panes (excludes both the tab bar and the
-    /// cycle-296 status bar), in physical pixels.
+    /// Height of the passive update banner while it is visible. The renderer
+    /// uses the same `cell_h + 10px` formula, so the PTY grid, pixels, and
+    /// hit-test agree instead of letting the banner cover the bottom row.
+    fn update_banner_h(&self, ws: &WindowState) -> f32 {
+        if self.update_available.is_some() {
+            ws.renderer
+                .as_ref()
+                .map(|r| r.cell_h + 10.0)
+                .unwrap_or(26.0)
+        } else {
+            0.0
+        }
+    }
+
+    fn update_banner_rect(&self, ws: &WindowState) -> Option<Rect> {
+        self.update_available.as_ref()?;
+        let (sw, sh) = ws.renderer.as_ref()?.surface_size();
+        let banner_h = self.update_banner_h(ws);
+        let bottom_tabbar_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Bottom) {
+            self.tab_bar_h(ws)
+        } else {
+            0.0
+        };
+        let bottom_status_h = if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom)
+        {
+            self.status_bar_h(ws)
+        } else {
+            0.0
+        };
+        let y =
+            kettle_render::update_banner_top(sh as f32, banner_h, bottom_tabbar_h, bottom_status_h);
+        Some((0.0, y, sw as f32, banner_h))
+    }
+
+    /// Content area for panes (excludes the tab bar, cycle-296 status bar, and
+    /// passive update banner), in physical pixels.
     /// Cycle 389 (Terminator parity, titlebar Bucket-D sub-cycle 5):
     /// hit-test for a click in any pane's per-pane titlebar region.
     /// Returns the pane id whose titlebar was clicked, or None if
@@ -3521,6 +3568,7 @@ impl App {
             surface,
             self.tab_bar_h(ws),
             self.status_bar_h(ws),
+            self.update_banner_h(ws),
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -7416,6 +7464,7 @@ impl App {
         }
         crate::update_check::record_dismissed(&tag);
         self.update_available = None;
+        self.resize_all(ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -14573,6 +14622,7 @@ impl App {
                     &format!("{tag} — click the banner in kettle to open the release page"),
                 );
                 self.update_available = Some((tag, url));
+                self.resize_all(ws);
                 if let Some(w) = &ws.window {
                     // Cycle 879: only raise OS attention (+ latch the tracker)
                     // when unfocused — mirroring the bell path — so
@@ -15145,47 +15195,18 @@ impl App {
                 // it won't re-nag); right-click dismisses without opening. Only
                 // reachable with no modal open (the gate above returned for
                 // those) — exactly when the banner is actually on screen.
-                if self.update_available.is_some() {
-                    let sh = ws
-                        .window
-                        .as_ref()
-                        .map(|w| w.inner_size().height as f32)
-                        .unwrap_or(0.0);
-                    let banner_h = self.cell_px(ws).1 as f32 + 10.0;
-                    // Cycle 808 (audit): the banner stacks ABOVE a bottom-
-                    // anchored tab / status bar (matching the renderer through
-                    // the shared `update_banner_top`), so hit-test its ACTUAL
-                    // rect rather than the whole bottom band — otherwise a
-                    // click meant for a bottom tab / status bar got swallowed
-                    // by the banner.
-                    let bottom_tabbar_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Bottom) {
-                        bar.height
-                    } else {
-                        0.0
-                    };
-                    let bottom_status_h =
-                        if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
-                            self.status_bar_h(ws)
-                        } else {
-                            0.0
-                        };
-                    let banner_top = kettle_render::update_banner_top(
-                        sh,
-                        banner_h,
-                        bottom_tabbar_h,
-                        bottom_status_h,
-                    );
-                    if sh > 0.0
-                        && py >= banner_top
-                        && py < banner_top + banner_h
-                        && (bcode == 0 || bcode == 2)
-                    {
-                        // Left-click opens + dismisses; right-click only
-                        // dismisses. Shared with the keyboard `OpenUpdate` /
-                        // `DismissUpdate` actions (cycle 809).
-                        self.act_on_update_banner(ws, bcode == 0);
-                        return;
-                    }
+                if let Some((bx, by, bw, bh)) = self.update_banner_rect(ws)
+                    && px >= bx
+                    && px < bx + bw
+                    && py >= by
+                    && py < by + bh
+                    && (bcode == 0 || bcode == 2)
+                {
+                    // Left-click opens + dismisses; right-click only
+                    // dismisses. Shared with the keyboard `OpenUpdate` /
+                    // `DismissUpdate` actions (cycle 809).
+                    self.act_on_update_banner(ws, bcode == 0);
+                    return;
                 }
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
@@ -19622,6 +19643,52 @@ mod tests {
             r.2 >= 1.0,
             "narrow window with vertical strip clamps content_w"
         );
+    }
+
+    #[test]
+    fn content_rect_for_carves_out_update_banner_band() {
+        use super::content_rect_for_with_strip;
+        use kettle_config::{StatusBarMode, TabBarPos};
+
+        // Top tab bar plus update banner: normal top chrome remains at the top;
+        // the passive update banner reserves a bottom band so the terminal grid
+        // does not render underneath it.
+        let r = content_rect_for_with_strip(
+            (800, 600),
+            24.0,
+            16.0,
+            26.0,
+            TabBarPos::Top,
+            StatusBarMode::Off,
+            180.0,
+        );
+        assert_eq!(r, (0.0, 24.0, 800.0, 550.0));
+
+        // Bottom tab + bottom status + update banner stack together at the
+        // bottom; the content height loses all three bands.
+        let r = content_rect_for_with_strip(
+            (800, 600),
+            24.0,
+            16.0,
+            26.0,
+            TabBarPos::Bottom,
+            StatusBarMode::Bottom,
+            180.0,
+        );
+        assert_eq!(r, (0.0, 0.0, 800.0, 534.0));
+
+        // Vertical tab strips still carve the x-axis, while the banner claims
+        // only a y-axis band.
+        let r = content_rect_for_with_strip(
+            (800, 600),
+            24.0,
+            0.0,
+            26.0,
+            TabBarPos::Left,
+            StatusBarMode::Off,
+            180.0,
+        );
+        assert_eq!(r, (180.0, 0.0, 620.0, 574.0));
     }
 
     /// Cycle 650 drift guard. `session_screenshot_path` is the

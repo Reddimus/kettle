@@ -2653,7 +2653,9 @@ impl Renderer {
         } else if let Some((tag, url)) = &overlay.update_available {
             // Cycle 794: passive "newer release available" banner — lowest
             // priority, so any real modal above takes the bar and this returns
-            // when they close. Green accent (palette[2]) = good news.
+            // when they close. The full strip uses readable chrome; a small
+            // green accent carries the update cue without making foreground text
+            // fight a bright background.
             have_search = true;
             let bar_h = ch + 10.0;
             // Cycle 808 (audit): stack above a bottom-anchored tab / status bar
@@ -2672,7 +2674,10 @@ impl Renderer {
             };
             let bar_y = update_banner_top(sh, bar_h, bottom_tabbar_h, bottom_status_h);
             search_rect = (0.0, bar_y, sw, bar_h);
-            quads.push(rect(0.0, bar_y, sw, bar_h, theme.palette[2], 0.96));
+            let (banner_bg, banner_accent) = update_banner_chrome_colors(theme);
+            quads.push(rect(0.0, bar_y, sw, bar_h, banner_bg, 0.96));
+            quads.push(rect(0.0, bar_y, sw, 2.0, banner_accent, 1.0));
+            quads.push(rect(0.0, bar_y, 4.0, bar_h, banner_accent, 1.0));
             let label = format!(
                 "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
             );
@@ -6109,6 +6114,12 @@ pub fn update_banner_top(
     surface_h - banner_h - bottom_tabbar_h - bottom_status_h
 }
 
+fn update_banner_chrome_colors(theme: &kettle_config::Theme) -> (Rgb, Rgb) {
+    let bg = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
+    let accent = color::with_min_contrast(theme.palette[2], bg, 3.0);
+    (bg, accent)
+}
+
 /// Back-compat wrapper for the cycle-168 `capture_png` callers (the CLI
 /// smoke + the cycle-236 `--screenshot` end-to-end CI step). Always
 /// renders [`DebugScene::Default`].
@@ -8828,7 +8839,7 @@ mod settings_hit_test_tests {
 
 #[cfg(test)]
 mod update_banner_top_tests {
-    use super::update_banner_top;
+    use super::{color, update_banner_chrome_colors, update_banner_top};
 
     /// Cycle 808 drift guard (audit). The passive update banner must stack
     /// above any BOTTOM-anchored tab / status bar so it neither paints over
@@ -8844,6 +8855,27 @@ mod update_banner_top_tests {
         assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
         // Both at the bottom → banner clears the stack of both.
         assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
+    }
+
+    #[test]
+    fn chrome_colors_are_readable_without_full_green_background() {
+        let theme = kettle_config::Theme::default();
+        let (bg, accent) = update_banner_chrome_colors(&theme);
+
+        assert_ne!(
+            bg, theme.palette[2],
+            "the full banner background must not be the bright green update accent"
+        );
+        assert!(
+            color::contrast_ratio(bg, theme.foreground) + 1e-6 >= 4.5,
+            "banner text contrast should meet WCAG AA; bg={bg:?} fg={:?} ratio={}",
+            theme.foreground,
+            color::contrast_ratio(bg, theme.foreground)
+        );
+        assert!(
+            color::contrast_ratio(accent, bg) + 1e-6 >= 3.0,
+            "the accent strip should remain visible against the banner background"
+        );
     }
 }
 
