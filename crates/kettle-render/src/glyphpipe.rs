@@ -667,7 +667,12 @@ impl GlyphPipeline {
     /// pane rect via a scissor (so glyphs can't bleed across panes / into chrome).
     /// An empty `clips` draws everything unclipped (used when there's a single
     /// full-surface region).
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, clips: &[GlyphClip]) {
+    pub fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        clips: &[GlyphClip],
+        target_size: [u32; 2],
+    ) {
         if self.count == 0 {
             return;
         }
@@ -678,7 +683,7 @@ impl GlyphPipeline {
             pass.draw(0..4, 0..self.count);
             return;
         }
-        let (sw, sh) = (self.screen[0], self.screen[1]);
+        let (sw, sh) = (target_size[0].max(1) as f32, target_size[1].max(1) as f32);
         for c in clips {
             if c.count == 0 {
                 continue;

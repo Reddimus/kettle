@@ -3778,6 +3778,8 @@ impl Renderer {
                 return Ok(());
             }
         };
+        let target_extent = frame.texture.size();
+        let target_size = [target_extent.width.max(1), target_extent.height.max(1)];
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -3839,7 +3841,8 @@ impl Renderer {
             // images and below chrome text (titlebars / menus) and the cursor
             // glyph. A no-op (count 0) in legacy mode, where pane text rides the
             // glyphon `text_renderer` below.
-            self.glyph_pipeline.draw(&mut pass, &self.glyph_clips);
+            self.glyph_pipeline
+                .draw(&mut pass, &self.glyph_clips, target_size);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
             // Dimming + scrollbar sit on top of glyphs.
@@ -6904,7 +6907,7 @@ pub fn capture_png_with_annotation(
             // carries the annotation chrome. Legacy mode left all pane text in
             // `text_renderer` and `grid_clips` is empty (no-op draw). Same pass
             // order as the live `Renderer::render_frame`: quads, then glyphs.
-            grid_glyphs.draw(&mut pass, &grid_clips);
+            grid_glyphs.draw(&mut pass, &grid_clips, [w, h]);
             text_renderer.render(&atlas, &vp, &mut pass)?;
             // Cycle 251: menu chrome + menu text, same pass order as
             // the live `Renderer::render_frame`. Cheap no-ops for the
@@ -7446,7 +7449,7 @@ mod gpu_tests {
                 multiview_mask: None,
             });
             quads.draw(&mut pass);
-            glyph_pipe.draw(&mut pass, clips);
+            glyph_pipe.draw(&mut pass, clips, [w, h]);
         }
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -9190,8 +9193,11 @@ mod glyph_cell_lock_tests {
             "pane TextArea must be pushed to glyphon ONLY in legacy mode"
         );
         assert!(
-            src.contains("self.glyph_pipeline.draw(&mut pass);"),
-            "the cell-locked glyph pipeline must draw in the render pass"
+            src.contains(
+                "let target_size = [target_extent.width.max(1), target_extent.height.max(1)];"
+            ) && src.contains("self.glyph_pipeline")
+                && src.contains(".draw(&mut pass, &self.glyph_clips, target_size);"),
+            "the cell-locked glyph pipeline must draw against the acquired target size"
         );
         assert!(
             src.contains("if cfg.text_renderer == TextRendererMode::Grid {")
@@ -9289,7 +9295,7 @@ mod glyph_cell_lock_tests {
             "Grid screenshot path must build a GlyphPipeline"
         );
         assert!(
-            src.contains("grid_glyphs.draw(&mut pass, &grid_clips);"),
+            src.contains("grid_glyphs.draw(&mut pass, &grid_clips, [w, h]);"),
             "Grid screenshot path must draw the cell-locked pane glyphs in the pass"
         );
         // The annotation buffer (chrome) still goes through glyphon in both modes.
