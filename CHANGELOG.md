@@ -4,6 +4,32 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  ### Added
+  - **GPU device-loss recovery.** Kettle now attempts to rebuild the renderer
+    after a GPU reset/device loss without restarting panes or PTYs. Recovery
+    retries the configured GPU, then another hardware adapter, then software
+    rendering if no hardware path is usable.
+  - **Version-history reference.** Added a compact version-history guide that
+    summarizes the release eras and points maintainers at the authoritative tag,
+    release, changelog, and packaging lockstep sources.
+
+  ### Fixed
+  - **DEC 2026 synchronized updates flush on timeout.** A quiet or split
+    synchronized update can no longer leave stale terminal text buffered
+    indefinitely; the PTY reader now wakes at the vte sync deadline and flushes
+    the pending grid update.
+  - **RustSec `ttf-parser` advisory is scoped and documented.** The avoidable
+    `winit` Adwaita-CSD path was removed; the remaining `glyphon`/`fontdb`
+    path is tracked as an upstream-bound exception until a compatible
+    replacement stack is available.
+
+  ### Changed
+  - CI workflows now use `actions/checkout@v7`.
+  - Refreshed patch/minor Cargo dependencies: `log`, `env_logger`,
+    `notify-rust`, `open`, and `clap_complete`.
+
 ## [2.33.0] — 2026-06-29
 
   ### Added

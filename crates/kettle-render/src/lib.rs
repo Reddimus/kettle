@@ -557,16 +557,30 @@ pub struct GpuContext {
     /// `panic = "abort"`, hard-killed kettle on a GPU reset with no crash log. The
     /// App checks this (a refcount-shared `Arc`, so every window's clone sees it)
     /// to stop rendering on a dead device and surface a "GPU device lost" state
-    /// rather than spin or crash. Reset only by relaunching kettle.
+    /// rather than spin or crash. Reset by rebuilding the renderer on a fresh
+    /// context.
     pub gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GpuContext {
     /// v2.31.0: has the GPU device been lost (driver reset / TDR) or hit an
     /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
-    /// succeed until kettle is relaunched.
+    /// succeed against this context.
     pub fn is_lost(&self) -> bool {
         self.gpu_lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn is_software(&self) -> bool {
+        matches!(self.adapter.get_info().device_type, wgpu::DeviceType::Cpu)
+    }
+
+    pub fn adapter_name(&self) -> String {
+        self.adapter.get_info().name
+    }
+
+    pub fn adapter_ids(&self) -> (u32, u32) {
+        let info = self.adapter.get_info();
+        (info.vendor, info.device)
     }
 }
 
@@ -979,6 +993,30 @@ impl Renderer {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
+        Self::new_with_escalation(
+            window,
+            width,
+            height,
+            scale,
+            cfg,
+            AdapterEscalation::Preferred,
+            None,
+        )
+        .await
+    }
+
+    pub async fn new_with_escalation<W>(
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        escalation: AdapterEscalation,
+        avoid: Option<(u32, u32)>,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
         // v2.23.0: resolve the adapter per config — an explicitly pinned GPU
@@ -986,8 +1024,10 @@ impl Renderer {
         // `gpu-power-preference` policy, which defaults to `Auto`: let wgpu /
         // the platform choose unless the user explicitly asks for low-power or
         // high-performance. `resolve_adapter` falls through to that policy (and
-        // finally a software adapter) whenever no pin matches.
-        let adapter = resolve_adapter(&instance, &surface, cfg, "Renderer::new").await?;
+        // finally a software adapter) whenever no pin matches. Recovery can
+        // escalate past the configured adapter after a device loss.
+        let adapter =
+            resolve_adapter(&instance, &surface, cfg, escalation, avoid, "Renderer::new").await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
@@ -5054,6 +5094,21 @@ fn power_preference_of(pref: kettle_config::GpuPowerPreference) -> wgpu::PowerPr
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterEscalation {
+    Preferred,
+    AnyHardware,
+    ForceSoftware,
+}
+
+pub fn escalation_for_attempt(attempt: u32) -> AdapterEscalation {
+    match attempt {
+        0 | 1 => AdapterEscalation::Preferred,
+        2 | 3 => AdapterEscalation::AnyHardware,
+        _ => AdapterEscalation::ForceSoftware,
+    }
+}
+
 /// Cycle 753: request a GPU adapter, preferring real hardware but transparently
 /// retrying with a **software rasterizer** (Mesa llvmpipe / lavapipe, or WARP on
 /// Windows) when no hardware adapter is available. Before this, all four adapter
@@ -5232,10 +5287,12 @@ async fn resolve_adapter(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'_>,
     cfg: &Config,
+    escalation: AdapterEscalation,
+    avoid: Option<(u32, u32)>,
     context: &str,
 ) -> Result<wgpu::Adapter> {
-    if cfg.gpu_force_software {
-        log::info!("{context}: gpu-force-software set — requesting the software adapter");
+    if cfg.gpu_force_software || escalation == AdapterEscalation::ForceSoftware {
+        log::info!("{context}: requesting the software adapter");
         let opts = wgpu::RequestAdapterOptions {
             power_preference: power_preference_of(cfg.gpu_power_preference),
             compatible_surface: Some(surface),
@@ -5245,6 +5302,51 @@ async fn resolve_adapter(
             .request_adapter(&opts)
             .await
             .map_err(|e| anyhow!("{context}: software adapter unavailable: {e:?}"));
+    }
+    if escalation == AdapterEscalation::AnyHardware {
+        let cands: Vec<wgpu::Adapter> = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .filter(|a| a.is_surface_supported(surface))
+            .collect();
+        let rank = |device_type: wgpu::DeviceType| match device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            wgpu::DeviceType::VirtualGpu => 2,
+            _ => 3,
+        };
+        let best = cands
+            .iter()
+            .enumerate()
+            .filter(|(_, adapter)| {
+                let info = adapter.get_info();
+                info.device_type != wgpu::DeviceType::Cpu
+                    && avoid != Some((info.vendor, info.device))
+            })
+            .min_by_key(|(_, adapter)| rank(adapter.get_info().device_type))
+            .map(|(idx, _)| idx);
+        if let Some(idx) = best {
+            let mut cands = cands;
+            let chosen = cands.swap_remove(idx);
+            let info = chosen.get_info();
+            log::info!(
+                "{context}: recovery picked hardware GPU {} ({}, {})",
+                info.name,
+                device_kind_str(info.device_type),
+                backend_str(info.backend)
+            );
+            return Ok(chosen);
+        }
+        log::warn!(
+            "{context}: recovery found no alternate hardware adapter; falling back to policy"
+        );
+        let opts = wgpu::RequestAdapterOptions {
+            power_preference: power_preference_of(cfg.gpu_power_preference),
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+        };
+        return request_adapter_or_fallback(instance, &opts, context).await;
     }
     let pinned =
         (cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0) || !cfg.gpu_name.trim().is_empty();
@@ -9302,6 +9404,34 @@ mod glyph_cell_lock_tests {
         assert!(
             src.contains("buffer: &annotate_buf,"),
             "the annotation chrome must still render via glyphon"
+        );
+    }
+
+    #[test]
+    fn gpu_recovery_escalates_to_software() {
+        assert_eq!(
+            super::escalation_for_attempt(0),
+            super::AdapterEscalation::Preferred
+        );
+        assert_eq!(
+            super::escalation_for_attempt(1),
+            super::AdapterEscalation::Preferred
+        );
+        assert_eq!(
+            super::escalation_for_attempt(2),
+            super::AdapterEscalation::AnyHardware
+        );
+        assert_eq!(
+            super::escalation_for_attempt(3),
+            super::AdapterEscalation::AnyHardware
+        );
+        assert_eq!(
+            super::escalation_for_attempt(4),
+            super::AdapterEscalation::ForceSoftware
+        );
+        assert_eq!(
+            super::escalation_for_attempt(99),
+            super::AdapterEscalation::ForceSoftware
         );
     }
 }

@@ -79,7 +79,12 @@ serde_json = "1.0.149"
 # cross-build trivial. default-features off drops `gzip`/`json`/`cookies` we
 # don't use; we parse with the serde_json already above.
 ureq = { version = "2", default-features = false, features = ["tls"] }
-winit = "0.30.13"
+winit = { version = "0.30.13", default-features = false, features = [
+    "rwh_06",
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+] }
 
 # Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D
 # sub-cycle 3. Unix-only (Linux + macOS + BSDs); Windows + Wayland

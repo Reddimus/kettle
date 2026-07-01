@@ -38,7 +38,14 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+  # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains through
+  # `glyphon → cosmic-text → fontdb`. The avoidable `winit →
+  # sctk-adwaita → ab_glyph` path is disabled in kettle-ui's winit
+  # feature list; remove this once glyphon ships a compatible
+  # fontdb-free stack.
+  "RUSTSEC-2026-0192",
+]
 # Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
 # here while it reached kettle via `image → rav1e → paste` (AVIF
 # decoder). Verified gone with `cargo tree -i paste` / `cargo tree

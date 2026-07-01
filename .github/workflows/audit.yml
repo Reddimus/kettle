@@ -56,13 +56,12 @@ jobs:
       # is the standard GITHUB_TOKEN; permissions come from the
       # workflow-level `permissions:` block above.
       #
-      # Cycle 444 removed the RUSTSEC-2024-0436 ignore — `paste`
-      # (and the `image → rav1e → paste` chain through which it
-      # reached kettle) is no longer in our Cargo.lock. `cargo deny`
-      # was warning that the ignore matched no crate; the audit job
-      # ran clean once the path dropped out, so an explicit ignore
-      # would just lie about a vulnerability we don't have. Add a
-      # new entry here only if an unfixable advisory re-surfaces.
+      # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains only through
+      # upstream text-rendering stacks (`glyphon → cosmic-text → fontdb`).
+      # We removed the avoidable `winit → sctk-adwaita → ab_glyph` route by
+      # disabling winit's Adwaita CSD feature; remove this ignore once glyphon
+      # publishes a compatible stack without `fontdb`/`ttf-parser`.
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0192

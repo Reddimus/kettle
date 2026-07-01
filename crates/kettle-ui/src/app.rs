@@ -2578,6 +2578,12 @@ pub struct App {
     /// frame) and cached for the session; `categories()` reads it. Empty until
     /// the overlay is first opened (the picker then shows just "Automatic").
     gpu_choices: Vec<(String, String)>,
+    /// Consecutive renderer rebuild attempts after a GPU device loss.
+    gpu_recovery_attempts: u32,
+    /// Next time a renderer rebuild should be attempted after device loss.
+    gpu_recovery_next_at: Option<std::time::Instant>,
+    /// True once recovery had to fall back to software rendering.
+    gpu_software_fallback: bool,
     /// C4: set by any "this window is done" path (last tab closed, X button,
     /// reap drained the panes) while its WindowState is checked out of the
     /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
@@ -3041,6 +3047,9 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             gpu_choices: Vec::new(),
+            gpu_recovery_attempts: 0,
+            gpu_recovery_next_at: None,
+            gpu_software_fallback: false,
             pending_window_close: false,
             quit_requested: false,
             #[cfg(feature = "dev-record")]
@@ -5003,7 +5012,89 @@ impl App {
         // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
         let want = recording_window_title(want, self.recorder.is_some());
-        sanitize_native_window_title(&want)
+        let want = sanitize_native_window_title(&want);
+        if self.gpu_software_fallback {
+            format!("{want} - software rendering (GPU unavailable)")
+        } else {
+            want
+        }
+    }
+
+    fn try_recover_gpu(&mut self, ws: &mut WindowState) -> bool {
+        let Some(window) = ws.window.clone() else {
+            return false;
+        };
+        let escalation = kettle_render::escalation_for_attempt(self.gpu_recovery_attempts);
+        let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_ids());
+        log::warn!(
+            "GPU recovery attempt {} ({escalation:?})",
+            self.gpu_recovery_attempts + 1
+        );
+
+        ws.renderer = None;
+        for other in self.windows.values_mut() {
+            other.renderer = None;
+        }
+
+        let cfg = self.cfg.clone();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let new_renderer = match pollster::block_on(kettle_render::Renderer::new_with_escalation(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &cfg,
+            escalation,
+            avoid,
+        )) {
+            Ok(renderer) => renderer,
+            Err(err) => {
+                log::error!("GPU recovery: renderer rebuild failed: {err}");
+                return false;
+            }
+        };
+        let new_gpu = new_renderer.gpu().clone();
+        self.gpu_software_fallback = new_gpu.is_software();
+        log::info!(
+            "GPU recovery succeeded on {} (software={})",
+            new_gpu.adapter_name(),
+            self.gpu_software_fallback
+        );
+
+        ws.renderer = Some(new_renderer);
+        for other in self.windows.values_mut() {
+            let Some(other_window) = other.window.clone() else {
+                continue;
+            };
+            let size = other_window.inner_size();
+            let scale = other_window.scale_factor() as f32;
+            match kettle_render::Renderer::new_with_gpu(
+                &new_gpu,
+                other_window,
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &cfg,
+            ) {
+                Ok(renderer) => other.renderer = Some(renderer),
+                Err(err) => log::error!(
+                    "GPU recovery: window {} could not rebind to the new device: {err}",
+                    other.seq
+                ),
+            }
+        }
+        self.gpu = Some(new_gpu);
+
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        for other in self.windows.values() {
+            if let Some(window) = &other.window {
+                window.request_redraw();
+            }
+        }
+        true
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
@@ -5560,11 +5651,10 @@ impl App {
         // against the dead device cannot succeed. The new wgpu error handlers
         // (kettle_render::install_gpu_error_handlers) already turned the fault
         // into a logged event + this flag instead of a `panic=abort` crash; here
-        // we stop painting (so we don't spin the surface-reconfigure loop),
-        // surface the state in the title bar, and keep the event loop alive so
-        // the user can close + reopen. (Full auto-recovery is a deferred follow-up.)
+        // we stop painting (so we don't spin the surface-reconfigure loop), and
+        // about_to_wait_inner drives renderer recovery on a bounded backoff.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
-            const MSG: &str = "kettle — ⚠ GPU device lost — please reopen kettle";
+            const MSG: &str = "kettle - GPU device lost - recovering";
             if ws.last_title != MSG {
                 if let Some(w) = &ws.window {
                     w.set_title(MSG);
@@ -12810,6 +12900,18 @@ fn should_restore_session(startup_restore: bool, cfg_restore_session: bool) -> b
 /// to a clean diagnostic exit instead of an infinite invisible-window hang.
 const GPU_INIT_TIMEOUT_SECS: u64 = 30;
 
+const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_millis(700);
+
+fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
+    let ms = match attempt {
+        0 | 1 => 500,
+        2 => 1000,
+        3 => 2000,
+        _ => 4000,
+    };
+    std::time::Duration::from_millis(ms)
+}
+
 /// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
 /// until `timeout` elapses. Returns `true` if the timeout was reached without
 /// `done` ever being observed set — i.e. the caller should treat the init as
@@ -16270,14 +16372,30 @@ impl App {
             self.pending_window_close = true;
             return None;
         }
-        // C1 (audit v2.32.0): once the GPU device is lost we no longer paint
-        // (see the redraw guard), so do NOT schedule cursor-blink / animated-bg
-        // / resize-chip wakes — they would wake the loop only to early-return,
-        // re-spinning at the animation frame rate. Returning None parks the loop
-        // on ControlFlow::Wait until a real event (e.g. the user closing the
-        // window) arrives. The reap above still runs so an exited pane can close.
+        // Once the GPU device is lost we no longer paint (see the redraw guard).
+        // Drive renderer recovery from here instead of scheduling animation
+        // wakes that would only re-enter the dead-device redraw path.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
-            return None;
+            let now = std::time::Instant::now();
+            let due = match self.gpu_recovery_next_at {
+                None => {
+                    self.gpu_recovery_next_at = Some(now + GPU_RECOVERY_SETTLE);
+                    return Some(GPU_RECOVERY_SETTLE.as_millis() as u64);
+                }
+                Some(due) => due,
+            };
+            if now < due {
+                return Some((due.saturating_duration_since(now).as_millis() as u64).max(1));
+            }
+            if self.try_recover_gpu(ws) {
+                self.gpu_recovery_attempts = 0;
+                self.gpu_recovery_next_at = None;
+            } else {
+                self.gpu_recovery_attempts = self.gpu_recovery_attempts.saturating_add(1);
+                let backoff = gpu_recovery_backoff(self.gpu_recovery_attempts);
+                self.gpu_recovery_next_at = Some(now + backoff);
+                return Some(backoff.as_millis() as u64);
+            }
         }
         let now = std::time::Instant::now();
         // Drive cursor blink + visual-bell decay without busy-looping: only
@@ -16569,12 +16687,12 @@ mod tests {
         );
     }
 
-    /// C1 (audit v2.32.0) source-drift guard: while the GPU device is lost the
-    /// redraw guard must clear `coalescing_paint` + snapshot `seen_output_gen`
-    /// (so a streaming pane can't spin the loop), and `about_to_wait_inner` must
-    /// early-return on `is_lost()` (so animation wakes don't re-spin it).
+    /// Source-drift guard: while the GPU device is lost the redraw guard must
+    /// clear `coalescing_paint` + snapshot `seen_output_gen` so a streaming pane
+    /// can't spin the loop. Recovery itself is driven from `about_to_wait_inner`
+    /// on a bounded backoff.
     #[test]
-    fn gpu_lost_quiesces_the_event_loop() {
+    fn gpu_lost_quiesces_and_schedules_recovery() {
         let src = include_str!("app.rs");
         let guard = src
             .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {")
@@ -16596,9 +16714,25 @@ mod tests {
             .map(|i| i + 2)
             .unwrap_or(wait_body.len());
         assert!(
-            wait_body[..end].contains("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {"),
-            "about_to_wait_inner must short-circuit animation wakes when the GPU is lost"
+            wait_body[..end].contains("self.try_recover_gpu(ws)")
+                && wait_body[..end].contains("gpu_recovery_backoff("),
+            "about_to_wait_inner must drive GPU recovery while the device is lost"
         );
+    }
+
+    #[test]
+    fn gpu_recovery_backoff_grows_and_caps() {
+        let ms = |attempt| super::gpu_recovery_backoff(attempt).as_millis();
+        assert_eq!(ms(1), 500);
+        assert_eq!(ms(2), 1000);
+        assert_eq!(ms(3), 2000);
+        assert_eq!(ms(4), 4000);
+        assert_eq!(ms(50), 4000);
+        for attempt in 1..20 {
+            assert!(
+                super::gpu_recovery_backoff(attempt) <= super::gpu_recovery_backoff(attempt + 1)
+            );
+        }
     }
 
     /// Startup drift guard: the window is hidden only while renderer init runs,
@@ -18320,11 +18454,11 @@ mod tests {
             .find("ws.coalescing_paint = false")
             .expect("the coalesce_due flush must exist in about_to_wait");
         let clamp = body
-            .find(".max(1)")
-            .expect("the wait-ms clamp must exist in about_to_wait");
+            .find("let ms = (remaining.as_millis() as u64).max(1);")
+            .expect("the coalesced-output wait clamp must exist in about_to_wait");
         assert!(
             flush < clamp,
-            "coalescing_paint flush must precede the .max(1) wait clamp (anti-busy-spin)"
+            "coalescing_paint flush must precede the coalesced-output wait clamp"
         );
     }
 

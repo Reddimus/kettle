@@ -1309,17 +1309,73 @@ impl Terminal {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
                     let mut buf = [0u8; 65536];
+                    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+                    {
+                        let pump_stop = stop.clone();
+                        let _ = std::thread::Builder::new()
+                            .name("kettle-pty-pump".into())
+                            .spawn(move || {
+                                let mut rbuf = [0u8; 65536];
+                                loop {
+                                    if pump_stop.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    match reader.read(&mut rbuf) {
+                                        Ok(0) | Err(_) => {
+                                            let _ = raw_tx.send(None);
+                                            break;
+                                        }
+                                        Ok(n) => {
+                                            if raw_tx.send(Some(rbuf[..n].to_vec())).is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                    }
                     loop {
-                        // Cycle 742: bail out during teardown (Drop sets
-                        // `stop`). This can't interrupt a *currently* blocked
-                        // read — only the pseudoconsole closing does that —
-                        // but it stops us re-entering a fresh blocking read
-                        // after the close, so the detached thread winds down
-                        // immediately instead of processing stale output.
+                        // Cycle 742: bail out during teardown (Drop sets `stop`).
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        match reader.read(&mut buf) {
+                        let read_result: std::io::Result<usize> = loop {
+                            match processor.sync_timeout().sync_timeout() {
+                                Some(deadline) => {
+                                    let wait = deadline
+                                        .saturating_duration_since(std::time::Instant::now());
+                                    match raw_rx.recv_timeout(wait) {
+                                        Ok(Some(bytes)) => {
+                                            let n = bytes.len().min(buf.len());
+                                            buf[..n].copy_from_slice(&bytes[..n]);
+                                            break Ok(n);
+                                        }
+                                        Ok(None) => break Ok(0),
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                            if let Ok(mut t) = term.lock() {
+                                                processor.stop_sync(&mut *t);
+                                            }
+                                            out_gen_reader
+                                                .fetch_add(1, std::sync::atomic::Ordering::Release);
+                                            (waker)();
+                                            continue;
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                            break Ok(0);
+                                        }
+                                    }
+                                }
+                                None => match raw_rx.recv() {
+                                    Ok(Some(bytes)) => {
+                                        let n = bytes.len().min(buf.len());
+                                        buf[..n].copy_from_slice(&bytes[..n]);
+                                        break Ok(n);
+                                    }
+                                    Ok(None) | Err(_) => break Ok(0),
+                                },
+                            }
+                        };
+                        match read_result {
                             Ok(0) | Err(_) => {
                                 proxy.send_event_exit();
                                 break;
@@ -4879,5 +4935,29 @@ mod pty_dim_tests {
     fn zero_inputs_are_benign() {
         assert_eq!(clamp_pty_dim(0, 80), 0);
         assert_eq!(clamp_pty_dim(8, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod sync_update_flush_guard {
+    #[test]
+    fn reader_force_flushes_pending_sync_update() {
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let start = src
+            .find("let reader_thread = {")
+            .expect("reader_thread present");
+        let body = &src[start..start + 6500];
+        assert!(
+            body.contains("processor.sync_timeout().sync_timeout()"),
+            "reader must consult the synchronized-update deadline"
+        );
+        assert!(
+            body.contains("recv_timeout"),
+            "reader must bound its wait on the sync deadline"
+        );
+        assert!(
+            body.contains("processor.stop_sync(&mut *t)"),
+            "reader must force-flush the buffered sync update on timeout"
+        );
     }
 }
