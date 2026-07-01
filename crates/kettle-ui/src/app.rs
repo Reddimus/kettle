@@ -3625,6 +3625,30 @@ impl App {
             TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
             TabBarPos::Bottom => sh - height,
         };
+        if ws.editing_title.is_some() {
+            let strip_w = if is_vertical {
+                self.cfg.tab_bar_width
+            } else {
+                0.0
+            };
+            let strip_x = match self.cfg.tab_bar_pos {
+                TabBarPos::Right => sw - strip_w,
+                _ => 0.0,
+            };
+            return TabBar {
+                height,
+                y,
+                segments: Vec::new(),
+                new_tab: (strip_x, y, strip_w, height),
+                new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+                broadcast: ws.mux.is_broadcast_on(),
+                hovered_close_idx: None,
+                drag_cursor_x: None,
+                insert_marker: None,
+                scroll_left: (0.0, 0.0, 0.0, 0.0),
+                scroll_right: (0.0, 0.0, 0.0, 0.0),
+            };
+        }
         let labels = ws.mux.tab_labels();
         let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
@@ -16509,6 +16533,14 @@ mod tests {
         assert_eq!(
             sanitize_native_window_title("\u{f015} kevim — kettle"),
             "kevim — kettle"
+        );
+        assert_eq!(
+            sanitize_native_window_title("\u{f120} SPI-1 — kettle"),
+            "SPI-1 — kettle"
+        );
+        assert_eq!(
+            sanitize_native_window_title("\u{e795} projects \u{e0b0} kettle"),
+            "projects  kettle"
         );
         assert_eq!(
             sanitize_native_window_title("\u{f0000} build \u{100000} — kettle"),

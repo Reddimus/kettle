@@ -100,6 +100,8 @@ and **WezTerm** into one tool.
   working directories, and each window's position and size (clamped to your
   current monitor layout) — on launch.
   New tabs/splits always inherit the focused pane's current directory (OSC 7).
+  Splitting direct agent/editor panes opens a usable shell in that directory;
+  duplicate actions preserve the exact launch command.
 - **SSH multiplexing** — `Ctrl+Shift+S` opens an SSH launcher (configured
   `ssh-host` names with fuzzy tab-complete, or any `user@host`); SSH tabs
   persist across sessions.

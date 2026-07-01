@@ -1527,6 +1527,20 @@ def run_interaction(kettle: str, root: Path) -> Path:
                         f"interaction smoke: {label} title edit overlaps terminal content: "
                         f"title={title_edit['rect']} content={content}"
                     )
+                tab_bar = modal_geo.get("tab_bar")
+                if not isinstance(tab_bar, dict):
+                    raise SystemExit(f"interaction smoke: {label} has no tab_bar geometry")
+                if tab_bar.get("segments"):
+                    raise SystemExit(
+                        f"interaction smoke: {label} title edit overlaps tab text: "
+                        f"segments={tab_bar.get('segments')}"
+                    )
+                for button_name in ("new_tab", "new_tab_menu", "scroll_left", "scroll_right"):
+                    button = tab_bar.get(button_name)
+                    if isinstance(button, dict) and float(button.get("width", 0.0)) > 0.0:
+                        raise SystemExit(
+                            f"interaction smoke: {label} title edit exposes {button_name}: {button}"
+                        )
             changed = len(changed_pixels(previous_shot, modal_shot, 0.0, float(previous_geo["surface"]["height"])))  # type: ignore[index]
             if changed < 100:
                 raise SystemExit(f"interaction smoke: {label} changed too few pixels ({changed})")

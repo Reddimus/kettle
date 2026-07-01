@@ -316,8 +316,9 @@ pane's argv + cwd into a new tab — `ssh prod` clones to a second
 **Splits**: `new_split:right` (also `split_right` / `split_vert`),
 `new_split:down` (also `split_down` / `split_horiz`), `split_auto`
 (pick by aspect ratio), `close_pane` (also `close_surface` /
-`close_term`), `duplicate_pane` (clone the focused pane's argv + cwd
-into a right-side split).
+`close_term`). New splits inherit the focused cwd; direct agent/editor
+launches split to a shell prompt there, while `duplicate_pane` clones the
+focused pane's exact argv + cwd into a right-side split.
 
 **Focus + resize**: `focus_next`, `focus_prev`,
 `goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
