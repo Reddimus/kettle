@@ -1283,6 +1283,26 @@ impl Mux {
         launch_cwd(argv, raw_cwd)
     }
 
+    /// Resolve the command a split should spawn when no interactive foreground
+    /// shell was detected by the process scanner. Duplicate actions need exact
+    /// launch cloning, but Split should stay a "give me another usable prompt"
+    /// action. Direct agent/editor launches (`kettle -e codex`, `-e nvim`, etc.)
+    /// often have transient helper shells underneath them; if we clone the
+    /// direct launch argv, the new pane can immediately exit or open another
+    /// full-screen app instead of becoming a prompt. Use the configured shell in
+    /// the focused cwd for those direct launchers, while preserving exact cloning
+    /// for shells, WSL, SSH, and ordinary explicit commands.
+    fn split_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
+        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
+            Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
+            None => (Vec::new(), None),
+        };
+        if argv.is_empty() || direct_launch_splits_to_shell(&argv) {
+            argv = shell_argv(cfg);
+        }
+        launch_cwd(argv, raw_cwd)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn split(
         &mut self,
@@ -1297,12 +1317,10 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        // Cycle 886/887: clone the focused pane's launch command + cwd (WSL-aware
-        // dir) so splitting a pane launched as WSL / ssh / a specific shell gives
-        // another of the same in the same dir — the least-astonishing behavior.
-        // A default-shell pane's argv IS the configured shell, so the common case
-        // is unchanged. See `clone_focused_launch`.
-        let (argv, cwd) = self.clone_focused_launch(cfg);
+        // Cycle 886/887 + v2.33.1: clone shell-like launches, but keep direct
+        // agent/editor panes split-friendly by falling back to a shell in the
+        // focused cwd. See `split_focused_launch`.
+        let (argv, cwd) = self.split_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         let grafted = self
@@ -2545,6 +2563,25 @@ fn shell_argv(cfg: &Config) -> Vec<String> {
     }
 }
 
+fn argv0_base_lower(argv: &[String]) -> String {
+    let base = argv
+        .first()
+        .map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s))
+        .unwrap_or("");
+    let lower = base.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+/// Direct agent/editor launches are poor split templates: cloning them can
+/// create a second full-screen app or a short-lived helper-backed pane. Split
+/// should produce a usable prompt; Duplicate still preserves exact argv cloning.
+fn direct_launch_splits_to_shell(argv: &[String]) -> bool {
+    matches!(
+        argv0_base_lower(argv).as_str(),
+        "codex" | "claude" | "nvim" | "vim"
+    )
+}
+
 /// Keep a candidate cwd only if it still names an existing directory — a
 /// pane may have been `cd`'d into a since-removed path, in which case a new
 /// tab/split should fall back to the default rather than fail to spawn.
@@ -3421,6 +3458,32 @@ mod node_tests {
         assert!(!argv_is_wsl(&["pwsh.exe".to_string()]));
         assert!(!argv_is_wsl(&["bash".to_string()]));
         assert!(!argv_is_wsl(&[]));
+    }
+
+    #[test]
+    fn direct_agent_editor_launches_split_to_shell() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        assert!(direct_launch_splits_to_shell(&s(&["codex"])));
+        assert!(direct_launch_splits_to_shell(&s(&["/usr/bin/claude"])));
+        assert!(direct_launch_splits_to_shell(&s(&[
+            "C:\\Users\\me\\bin\\CODEX.EXE"
+        ])));
+        assert!(direct_launch_splits_to_shell(&s(&["nvim", "file.rs"])));
+        assert!(direct_launch_splits_to_shell(&s(&["vim", "file.rs"])));
+
+        // Shell/session launchers remain exact split templates.
+        assert!(!direct_launch_splits_to_shell(&s(&["bash"])));
+        assert!(!direct_launch_splits_to_shell(&s(&["zsh", "-l"])));
+        assert!(!direct_launch_splits_to_shell(&s(&["wsl.exe"])));
+        assert!(!direct_launch_splits_to_shell(&s(&["ssh", "box"])));
+        // Ordinary explicit commands keep the pre-existing split clone behavior.
+        assert!(!direct_launch_splits_to_shell(&s(&["htop"])));
+        assert!(!direct_launch_splits_to_shell(&s(&[
+            "python3",
+            "script.py"
+        ])));
+        assert!(!direct_launch_splits_to_shell(&[]));
     }
 
     /// Cycle 886/887: splitting/duplicating clones the focused pane's command;
