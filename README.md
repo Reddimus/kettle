@@ -34,7 +34,9 @@ and **WezTerm** into one tool.
 > visual regression → MSRV (Rust 1.89) verify → `cargo audit` →
 > `cargo deny` (licenses + sources + bans) → `cargo machete` (unused
 > deps) → `actionlint` (workflow YAML). See
-> [docs/ROADMAP.md](docs/ROADMAP.md) for what is landing next.
+> [docs/ROADMAP.md](docs/ROADMAP.md) for what is landing next and
+> [docs/VERSION-HISTORY.md](docs/VERSION-HISTORY.md) for the release-history
+> overview.
 
 ## Highlights
 
