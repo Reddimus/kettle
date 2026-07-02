@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.34.0] — 2026-07-02
+
   ### Fixed
   - **GNOME Wayland titlebar decorations are Adwaita-styled again.** v2.33.1's
     RustSec scoping turned off winit's default features, which silently dropped
