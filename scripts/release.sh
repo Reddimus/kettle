@@ -160,6 +160,16 @@ if [ -f flake.nix ]; then
     sed -i.bak "0,/^          version = \"${PREV_RE}\";\$/s//          version = \"${VERSION}\";/" flake.nix
     rm -f flake.nix.bak
 fi
+if [ -f packaging/homebrew/kettle.rb ]; then
+    echo "bumping packaging/homebrew/kettle.rb: ${PREV} → ${VERSION}"
+    sed -i.bak "0,/^  version \"${PREV_RE}\"\$/s//  version \"${VERSION}\"/" packaging/homebrew/kettle.rb
+    rm -f packaging/homebrew/kettle.rb.bak
+fi
+if [ -f packaging/arch/PKGBUILD ]; then
+    echo "bumping packaging/arch/PKGBUILD: ${PREV} → ${VERSION}"
+    sed -i.bak "0,/^pkgver=${PREV_RE}\$/s//pkgver=${VERSION}/" packaging/arch/PKGBUILD
+    rm -f packaging/arch/PKGBUILD.bak
+fi
 
 # Cycle 790 — durable lockstep for the user-facing install docs. README.md's
 # status banner and docs/INSTALL.md's "current latest" line + example
@@ -253,6 +263,11 @@ ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
 if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)
 fi
+for pkg in packaging/homebrew/kettle.rb packaging/arch/PKGBUILD; do
+    if [ -f "$pkg" ] && ! git diff --quiet -- "$pkg"; then
+        ADD_FILES+=("$pkg")
+    fi
+done
 # Cycle 790: stage the install docs whose version strings were bumped above
 # (only if the bump actually changed them, so a clean tree stays clean).
 for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
