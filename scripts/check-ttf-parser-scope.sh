@@ -20,7 +20,7 @@ kettle
 EOF
 )
 
-if ! tree=$(cargo tree -i ttf-parser --prefix none --format '{p}' 2>&1); then
+if ! tree=$(CARGO_TERM_COLOR=never cargo tree -q -i ttf-parser --prefix none --format '{p}' 2>&1); then
     if grep -q "did not match any packages" <<<"$tree"; then
         echo "ttf-parser is no longer in the dependency graph."
         echo "Remove the RUSTSEC-2026-0192 ignores from deny.toml and audit.yml, then close #36."
@@ -30,7 +30,7 @@ if ! tree=$(cargo tree -i ttf-parser --prefix none --format '{p}' 2>&1); then
     exit 1
 fi
 
-actual=$(awk '{ print $1 }' <<<"$tree")
+actual=$(awk '/^[A-Za-z0-9_.-]+ v[0-9]/ { print $1 }' <<<"$tree")
 
 if [ "$actual" != "$expected" ]; then
     cat >&2 <<EOF
