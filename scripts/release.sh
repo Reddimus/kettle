@@ -18,7 +18,7 @@
 #   4. Builds once to refresh Cargo.lock.
 #   5. Commits the bump + lock + (presumably already-staged)
 #      CHANGELOG changes.
-#   6. Annotated-tags the release commit.
+#   6. Signed annotated-tags the release commit.
 #
 # Push is left to the caller (so a sanity check can happen
 # between local tag creation and remote push).
@@ -30,6 +30,15 @@
 #   2. Run: scripts/release.sh 1.7.4
 #   3. Verify: git log -1, git tag -l v1.7.4
 #   4. Push:   git push origin main && git push origin v1.7.4
+#
+# Release tags are signed by default so GitHub can show the tag as verified.
+# Configure either GPG signing or SSH signing before running:
+#
+#   git config gpg.format ssh
+#   git config user.signingkey ~/.ssh/id_ed25519.pub
+#
+# Set KETTLE_RELEASE_UNSIGNED_TAG=1 only for local dry runs that will never be
+# pushed as public releases.
 
 set -euo pipefail
 
@@ -160,13 +169,34 @@ fi
 # `vPREV` → `vVERSION` occurrence here, atomically with the Cargo/flake bumps.
 # These files only ever write `vX.Y.Z` as a release reference, so a global
 # replace is safe.
-for doc in README.md docs/INSTALL.md; do
+for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
     if [ -f "$doc" ] && grep -q "v${PREV}" "$doc"; then
         echo "bumping ${doc}: v${PREV} → v${VERSION}"
         sed -i.bak "s/v${PREV_RE}/v${VERSION}/g" "$doc"
         rm -f "${doc}.bak"
     fi
 done
+if [ -f docs/VERSION-HISTORY.md ] && grep -q "Current workspace version: \`${PREV}\`" docs/VERSION-HISTORY.md; then
+    echo "bumping docs/VERSION-HISTORY.md workspace version: ${PREV} → ${VERSION}"
+    sed -i.bak "s/Current workspace version: \`${PREV_RE}\`/Current workspace version: \`${VERSION}\`/" docs/VERSION-HISTORY.md
+    rm -f docs/VERSION-HISTORY.md.bak
+fi
+if [ -f docs/VERSION-HISTORY.md ]; then
+    RELEASE_DATE=$(awk -v ver="$VERSION" '$0 ~ "^## \\[" ver "\\] — " { print $4; exit }' CHANGELOG.md)
+    TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
+    NEXT_TAG_COUNT=$((TAG_COUNT + 1))
+    echo "refreshing docs/VERSION-HISTORY.md release count/date"
+    sed -i.bak -E \
+        "s/Release records inspected: [0-9]+ Git tags and [0-9]+ changelog headings/Release records inspected: ${NEXT_TAG_COUNT} Git tags and ${NEXT_TAG_COUNT} changelog headings/" \
+        docs/VERSION-HISTORY.md
+    rm -f docs/VERSION-HISTORY.md.bak
+    if [ -n "$RELEASE_DATE" ]; then
+        sed -i.bak -E \
+            "s/(\`v2\.29\.0\` to \`v${VERSION}\` \(2026-06-19 to )[0-9]{4}-[0-9]{2}-[0-9]{2}\)/\1${RELEASE_DATE})/" \
+            docs/VERSION-HISTORY.md
+        rm -f docs/VERSION-HISTORY.md.bak
+    fi
+fi
 
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
@@ -225,7 +255,7 @@ if [ -f flake.nix ]; then
 fi
 # Cycle 790: stage the install docs whose version strings were bumped above
 # (only if the bump actually changed them, so a clean tree stays clean).
-for doc in README.md docs/INSTALL.md; do
+for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
     if [ -f "$doc" ] && ! git diff --quiet -- "$doc"; then
         ADD_FILES+=("$doc")
     fi
@@ -236,9 +266,16 @@ git commit -m "release: v${VERSION}
 See CHANGELOG.md [${VERSION}]."
 
 # Tag.
-git tag -a "v${VERSION}" -m "kettle v${VERSION}
+if [ "${KETTLE_RELEASE_UNSIGNED_TAG:-0}" = "1" ]; then
+    echo "::warning::creating unsigned release tag because KETTLE_RELEASE_UNSIGNED_TAG=1"
+    git tag -a "v${VERSION}" -m "kettle v${VERSION}
 
 See CHANGELOG.md [${VERSION}]."
+else
+    git tag -s "v${VERSION}" -m "kettle v${VERSION}
+
+See CHANGELOG.md [${VERSION}]."
+fi
 
 cat <<EOF
 

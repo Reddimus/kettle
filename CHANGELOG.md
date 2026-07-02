@@ -6,11 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.33.1] — 2026-07-02
+
   ### Added
+  - **Scoped `ttf-parser` dependency guard.** CI now verifies that the temporary
+    RustSec exception remains limited to the upstream-bound
+    `glyphon`/`cosmic-text`/`fontdb` path, and tells maintainers to remove the
+    ignore once `ttf-parser` disappears.
   - **GPU device-loss recovery.** Kettle now attempts to rebuild the renderer
     after a GPU reset/device loss without restarting panes or PTYs. Recovery
     retries the configured GPU, then another hardware adapter, then software
     rendering if no hardware path is usable.
+  - **Signed release-tag path.** `scripts/release.sh` now creates signed
+    annotated tags by default and keeps `docs/VERSION-HISTORY.md` in version
+    lockstep during release bumps.
   - **Version-history reference.** Added a compact version-history guide that
     summarizes the release eras and points maintainers at the authoritative tag,
     release, changelog, and packaging lockstep sources.
@@ -22,8 +31,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     the pending grid update.
   - **RustSec `ttf-parser` advisory is scoped and documented.** The avoidable
     `winit` Adwaita-CSD path was removed; the remaining `glyphon`/`fontdb`
-    path is tracked as an upstream-bound exception until a compatible
-    replacement stack is available.
+    path is guarded and tracked as an upstream-bound exception until a
+    compatible replacement stack is available.
 
   ### Changed
   - CI workflows now use `actions/checkout@v7`.

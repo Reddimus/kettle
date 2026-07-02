@@ -100,6 +100,12 @@ deny:
 machete:
     cargo machete
 
+# Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
+# open, and should print the "remove ignores" instruction once upstream makes
+# `ttf-parser` disappear from the tree.
+ttf-parser-scope:
+    ./scripts/check-ttf-parser-scope.sh
+
 # === Builds ========================================================
 
 # Dev build (fast incremental) — what `cargo build` would do anyway,

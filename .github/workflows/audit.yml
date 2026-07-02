@@ -18,11 +18,13 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "scripts/check-ttf-parser-scope.sh"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "scripts/check-ttf-parser-scope.sh"
       - ".github/workflows/audit.yml"
   schedule:
     # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
@@ -50,6 +52,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Guard scoped ttf-parser exception
+        run: ./scripts/check-ttf-parser-scope.sh
       # Official RustSec action. Vendors `cargo-audit`, runs against the
       # advisory DB, posts a Checks-API annotation per finding, and on
       # `push` to `main` syncs a per-advisory tracking issue. The token
