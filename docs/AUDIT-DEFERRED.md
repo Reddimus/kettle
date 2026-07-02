@@ -10,6 +10,14 @@ tracked here so they are not lost.
 
 ## Large / structural
 
+- **RUSTSEC-2026-0192 upstream exit for `ttf-parser`.** Issue
+  Reddimus/kettle#36 stays open until `ttf-parser` disappears from the dependency
+  graph. The only accepted temporary path is `glyphon → cosmic-text → fontdb`;
+  `scripts/check-ttf-parser-scope.sh` guards that scope in CI. Upstream tracking:
+  RazrFalcon/fontdb#90, pop-os/cosmic-text#352, and grovesNL/glyphon#123. Close
+  this only after updating the text-rendering stack, confirming
+  `cargo tree -i ttf-parser` reports no matches, and removing
+  RUSTSEC-2026-0192 ignores from `deny.toml` and `.github/workflows/audit.yml`.
 - **In-process GPU device-loss auto-recovery.** v2.31.0 + v2.32.0 make a GPU TDR
   a safe, logged, non-spinning "reopen kettle" state. Full recovery —
   re-`request_device`, rebuild every window's surface / pipelines / atlases on the
