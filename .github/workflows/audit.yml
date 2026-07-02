@@ -63,10 +63,20 @@ jobs:
       #
       # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains only through
       # upstream text-rendering stacks (`glyphon → cosmic-text → fontdb`).
-      # We removed the avoidable `winit → sctk-adwaita → ab_glyph` route by
-      # disabling winit's Adwaita CSD feature; remove this ignore once glyphon
-      # publishes a compatible stack without `fontdb`/`ttf-parser`.
+      # The avoidable `winit → sctk-adwaita → ab_glyph` route stays removed:
+      # v2.34.0 uses winit's `wayland-csd-adwaita-notitle` feature (GNOME
+      # Wayland titlebar decorations, sctk-adwaita WITHOUT a text renderer),
+      # which adds no ttf-parser edge — the scope guard above proves it on
+      # every run. Remove this ignore once glyphon publishes a compatible
+      # stack without `fontdb`/`ttf-parser`.
+      #
+      # RUSTSEC-2026-0194 / 0195 (`quick-xml` DoS issues): the runtime
+      # Windows-notification path was upgraded to `tauri-winrt-notification`
+      # 0.7.3, which removes quick-xml 0.37. The only remaining quick-xml
+      # path is build-time Wayland protocol codegen (`wayland-scanner` over
+      # bundled protocol XML) until wayland-scanner releases with
+      # quick-xml >= 0.41.
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2026-0192
+          ignore: RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195

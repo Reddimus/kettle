@@ -79,11 +79,29 @@ serde_json = "1.0.149"
 # cross-build trivial. default-features off drops `gzip`/`json`/`cookies` we
 # don't use; we parse with the serde_json already above.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# v2.33.1 scoped RUSTSEC-2026-0192 by turning winit default features off,
+# which also (unacknowledged at the time) dropped `wayland-csd-adwaita` — so
+# GNOME/Wayland users got smithay-client-toolkit's FallbackFrame ("the
+# default ugly frame": flat gray bar, filled-square close button, no title).
+# Mutter implements no server-side decorations (xdg-decoration protocol,
+# GNOME/mutter#217), so on GNOME the frame winit draws IS the titlebar.
+#
+# v2.34.0 restores Adwaita-style decorations via `wayland-csd-adwaita-notitle`:
+# it enables `sctk-adwaita` WITHOUT a text renderer, so the ab_glyph →
+# owned_ttf_parser → ttf-parser route stays out of the graph (the RUSTSEC
+# scope guard `scripts/check-ttf-parser-scope.sh` keeps proving that) and the
+# aarch64 cross-build stays free of C font libs (the crossfont variant needs
+# FreeType). Trade-off: the CSD bar renders buttons but no title text — the
+# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title, and
+# kettle's own tab bar labels the window content. Do NOT switch this to
+# `wayland-csd-adwaita` (ab_glyph) while RUSTSEC-2026-0192 is open — the
+# `winit_wayland_csd_stays_notitle` drift guard in src/app.rs pins it.
 winit = { version = "0.30.13", default-features = false, features = [
     "rwh_06",
     "x11",
     "wayland",
     "wayland-dlopen",
+    "wayland-csd-adwaita-notitle",
 ] }
 
 # Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D

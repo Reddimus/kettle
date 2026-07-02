@@ -69,6 +69,7 @@ impl Trigger {
             Key::Char('+') => "Plus".into(),
             Key::Char('-') => "Minus".into(),
             Key::Char('=') => "Equal".into(),
+            Key::Char(' ') => "Space".into(),
             Key::Char(c) => c.to_ascii_uppercase().to_string(),
             Key::Up => "Up".into(),
             Key::Down => "Down".into(),
@@ -1000,6 +1001,7 @@ fn parse_key(s: &str) -> Option<Key> {
         "plus" => Key::Char('+'),
         "minus" => Key::Char('-'),
         "equal" => Key::Char('='),
+        "space" => Key::Char(' '),
         _ => {
             // Cycle 857 (audit): only F1..=F12 are real. The winit→Key bridge
             // (app.rs) maps F1..F12 only; F0 and F13+ can never arrive, so a
@@ -1311,6 +1313,7 @@ mod tests {
             Trigger::new(Mods::ALT, Key::Char('1')),
             Trigger::new(cs, Key::Enter),
             Trigger::new(Mods::CTRL, Key::Up),
+            Trigger::new(cs, Key::Char(' ')),
         ];
         for t in cases {
             let label = t.label();
@@ -1347,6 +1350,10 @@ mod tests {
         assert_eq!(Trigger::new(c, Key::Char('+')).label(), "Ctrl+Plus");
         assert_eq!(Trigger::new(c, Key::Char('-')).label(), "Ctrl+Minus");
         assert_eq!(Trigger::new(c, Key::Char('=')).label(), "Ctrl+Equal");
+        assert_eq!(
+            Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char(' ')).label(),
+            "Ctrl+Shift+Space"
+        );
         // Other punctuation that isn't a named-parse token still uses
         // the raw char (uppercased where applicable).
         assert_eq!(Trigger::new(c, Key::Char(',')).label(), "Ctrl+,");

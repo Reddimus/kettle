@@ -5,6 +5,18 @@
 # upstreams work through RazrFalcon/fontdb#90. This script keeps that exception
 # narrow: if another dependency path appears, CI fails and the audit ignore must
 # be re-reviewed.
+#
+# v2.34.0 note: every check below runs against `cargo tree -i ttf-parser` —
+# the inverse tree of packages that REACH ttf-parser — not the whole graph.
+# `sctk-adwaita` itself is back (winit's `wayland-csd-adwaita-notitle`
+# feature, restoring GNOME Wayland titlebar decorations) but without its
+# `ab_glyph` text renderer it does not depend on ttf-parser, so it never
+# appears in this tree and correctly does not trip the guard. If someone
+# upgrades to the full `wayland-csd-adwaita` (ab_glyph) feature, the
+# sctk-adwaita → ab_glyph → owned_ttf_parser path DOES enter this tree and
+# both the exact-path check and the forbidden-crate loop fail — exactly the
+# review trigger we want. The manifest side is pinned by the
+# `winit_wayland_csd_stays_notitle` test in kettle-ui.
 
 set -euo pipefail
 

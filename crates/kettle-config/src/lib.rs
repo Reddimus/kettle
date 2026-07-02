@@ -1713,7 +1713,7 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     if !parent.exists() {
         std::fs::create_dir_all(parent)?;
     }
-    let existing: String = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = read_existing_config_text(path)?;
     // First-write backup: only when `.bak` doesn't already exist.
     let bak_ext = path
         .extension()
@@ -1818,7 +1818,7 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     if !parent.exists() {
         std::fs::create_dir_all(parent)?;
     }
-    let existing: String = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = read_existing_config_text(path)?;
     let bak_ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -1880,6 +1880,23 @@ fn parse_line_key(line: &str) -> Option<&str> {
     let (k, _) = trimmed.split_once('=')?;
     let k = k.trim_end();
     if k.is_empty() { None } else { Some(k) }
+}
+
+/// Read an existing config file for in-place editors. Missing files are a
+/// first-write empty config; unreadable or non-UTF-8 files are hard errors so
+/// toggles/keybind edits never replace a user's existing bytes with an empty
+/// file or empty `.bak`.
+fn read_existing_config_text(path: &Path) -> std::io::Result<String> {
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("config file is not valid UTF-8: {}", e.utf8_error()),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Cycle 716: normalize a config-key name for comparison: lowercase
@@ -2541,9 +2558,14 @@ impl Config {
                 // <f32>()` succeeds, so the diagnostic said OK while the
                 // runtime silently kept the default — the exact mismatch
                 // the clamped-numeric arms exist to prevent.
-                "padding-x" | "window-padding-x" | "padding-y" | "window-padding-y" => {
-                    v.parse::<f32>().is_ok_and(|n| n.is_finite())
-                }
+                "padding-x"
+                | "padding_x"
+                | "window-padding-x"
+                | "window_padding_x"
+                | "padding-y"
+                | "padding_y"
+                | "window-padding-y"
+                | "window_padding_y" => v.parse::<f32>().is_ok_and(|n| n.is_finite()),
                 // Numerics with a *runtime clamp* — parse AND land
                 // inside the clamp range, otherwise the user's
                 // `--check-config` value disagreed with what the
@@ -7501,9 +7523,12 @@ cell-height = 1.2\n";
              tab-silence-threshold-ms = 700000\n\
              command-notify-threshold-ms = 99999999999\n\
              padding-x = inf\n\
-             padding-y = nan\n",
+             padding_x = inf\n\
+             window_padding_x = nan\n\
+             padding-y = nan\n\
+             padding_y = inf\n",
         );
-        assert_eq!(bad.len(), 12, "all twelve should flag: {bad:?}");
+        assert_eq!(bad.len(), 15, "all fifteen should flag: {bad:?}");
 
         // The matching valid values must NOT flag — including `ibeam`/`i-beam`
         // (apply accepts them; the diagnostic used to false-positive), the
@@ -7521,6 +7546,8 @@ cell-height = 1.2\n";
              command-notify-threshold-ms = 0\n\
              command-notify-threshold-ms = 86400000\n\
              padding-x = 8\n\
+             padding_x = 8\n\
+             window_padding_x = 8\n\
              padding-y = 0\n",
         );
         assert!(ok.is_empty(), "all valid forms pass: {ok:?}");
@@ -8843,6 +8870,25 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn append_keybind_refuses_non_utf8_existing_config() {
+        let dir = tempdir_for("keybind-non-utf8");
+        let path = dir.join("config");
+        std::fs::write(&path, [0xff, 0xfe, b'k', b'e', b'y']).unwrap();
+        let err = super::append_keybind(&path, "Ctrl+Alt+R", "split_right")
+            .expect_err("non-UTF-8 config must not be overwritten");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            [0xff, 0xfe, b'k', b'e', b'y']
+        );
+        assert!(
+            !path.with_extension("bak").exists(),
+            "must not create an empty backup for unreadable existing bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Cycle 913 (audit): `append_keybind` de-dups SEMANTICALLY — re-binding the
     /// same chord written in a different case (or a literal `=` chord) overwrites
     /// the old line instead of stacking a stale duplicate. The old first-`=`
@@ -8894,6 +8940,25 @@ cell-height = 1.2\n";
         // First write creates the backup of the (empty) original.
         assert!(bak.exists());
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_config_toggle_refuses_non_utf8_existing_config() {
+        let dir = tempdir_for("toggle-non-utf8");
+        let path = dir.join("config");
+        std::fs::write(&path, [0xff, 0xfe, b'f', b'o', b'o']).unwrap();
+        let err = super::persist_config_toggle(&path, "cursor-blink", "false")
+            .expect_err("non-UTF-8 config must not be overwritten");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            [0xff, 0xfe, b'f', b'o', b'o']
+        );
+        assert!(
+            !path.with_extension("bak").exists(),
+            "must not create an empty backup for unreadable existing bytes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
