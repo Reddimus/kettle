@@ -6,6 +6,49 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **GNOME Wayland titlebar decorations are Adwaita-styled again.** v2.33.1's
+    RustSec scoping turned off winit's default features, which silently dropped
+    the Adwaita client-side-decoration frame — on GNOME (whose Mutter offers no
+    server-side decorations) the minimize/maximize/close buttons regressed to
+    smithay-client-toolkit's fallback frame: a flat gray strip with a
+    filled-square close button and no hover polish. Kettle now enables winit's
+    `wayland-csd-adwaita-notitle` feature: proper Adwaita-style buttons return
+    without reintroducing the scoped `ttf-parser` advisory path (the notitle
+    variant carries no text renderer, so `ab_glyph`/`owned_ttf_parser` stay out
+    of the graph — `scripts/check-ttf-parser-scope.sh` still proves it, and a
+    new drift-guard test pins the winit feature list). The CSD bar shows
+    buttons but no title text; the window title still reaches the taskbar,
+    Alt-Tab, and dock via the usual title channel.
+  - Config-file persistence no longer overwrites unreadable/non-UTF-8 existing
+    configs with an empty file or empty `.bak`; menu toggles and keybind edits
+    now fail loudly before touching the file.
+  - `Ctrl+Shift+Space` now round-trips through the keybind grammar as
+    `Ctrl+Shift+Space`, so the default vi-mode toggle is listable and
+    re-bindable from config.
+  - `padding_x`/`padding_y` and `window_padding_x`/`window_padding_y` now share
+    the same malformed-value validation as the dash-form padding aliases.
+  - Failed `custom-url-handler` launches now really fall back to the system URL
+    opener instead of logging that fallback would happen and then returning.
+  - Agent `run_command` orphan detection now checks panes across all windows,
+    so a pending command in another window is not mistaken for a closed pane.
+  - The Windows notification dependency chain now uses
+    `tauri-winrt-notification` 0.7.3, removing the runtime `quick-xml` advisory
+    path. The remaining `quick-xml` RustSec ignore is scoped to build-time
+    Wayland protocol code generation until `wayland-scanner` ships a fixed
+    dependency.
+
+  ### Added
+  - **Native titlebar follows the active theme.** The OS titlebar (Windows DWM
+    caption dark/light mode; the new Wayland Adwaita frame) now matches the
+    darkness of the active kettle theme instead of always tracking the OS-wide
+    setting: a forced dark theme on a light desktop gets a dark titlebar (and
+    vice versa). `theme-mode = auto` without a schedule keeps deferring to the
+    OS so the palette auto-switcher continues to work. Decided by WCAG relative
+    background luminance (`Theme::is_dark`, contrast-crossover threshold) and
+    re-synced lazily on redraw, so every theme-change path — actions, context
+    menu, Lua, settings, schedule, live reload — is covered by one chokepoint.
+
 ## [2.33.1] — 2026-07-02
 
   ### Added

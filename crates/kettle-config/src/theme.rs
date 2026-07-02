@@ -105,6 +105,28 @@ impl Theme {
         "Night Owl",
     ];
 
+    /// v2.34.0: whether this theme reads as a dark theme, judged by the WCAG
+    /// relative luminance of its `background`. The 0.179 threshold is the
+    /// contrast crossover point (backgrounds below it have more contrast
+    /// against white than black), so the answer matches which button/title
+    /// tint a titlebar over this background needs — the exact question the
+    /// native-window-theme hint asks. Purely a function of the palette:
+    /// per-pane transparency / background images don't reach the titlebar.
+    pub fn is_dark(&self) -> bool {
+        // sRGB channel -> linear-light (IEC 61966-2-1).
+        fn linear(channel: u8) -> f64 {
+            let c = f64::from(channel) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        let bg = self.background;
+        let luminance = 0.2126 * linear(bg.r) + 0.7152 * linear(bg.g) + 0.0722 * linear(bg.b);
+        luminance < 0.179
+    }
+
     /// Parse a theme from Ghostty-syntax text (`palette = N=#hex`, etc.).
     /// Unspecified fields keep the default (Catppuccin Mocha) value.
     pub fn parse(text: &str) -> Theme {
@@ -262,6 +284,47 @@ mod tests {
             format!("{:?}", Theme::default()),
             format!("{:?}", Theme::by_name("Catppuccin Mocha")),
             "Theme::default() must equal the bundled Catppuccin Mocha palette"
+        );
+    }
+
+    /// v2.34.0: `is_dark` classifies by WCAG relative luminance of the
+    /// background with the 0.179 contrast-crossover threshold. Pin the
+    /// classification for the shipped default plus well-known bundled
+    /// light/dark pairs, and the pure-black/white/mid-gray boundaries, so a
+    /// tweak to the formula can't silently flip native titlebar theming.
+    #[test]
+    fn is_dark_classifies_bundled_and_boundary_backgrounds() {
+        // Shipped default (TokyoNight Night, #1a1b26) and the fallback
+        // (Catppuccin Mocha, #1e1e2e) are dark.
+        assert!(Theme::by_name("TokyoNight Night").is_dark());
+        assert!(Theme::default().is_dark());
+        // Well-known light/dark bundled pairs land on opposite sides.
+        assert!(Theme::by_name("Gruvbox Dark").is_dark());
+        assert!(!Theme::by_name("Gruvbox Light").is_dark());
+        assert!(Theme::by_name("iTerm2 Solarized Dark").is_dark());
+        assert!(!Theme::by_name("iTerm2 Solarized Light").is_dark());
+        // Boundaries: pure black is dark, pure white is light, and #808080
+        // (relative luminance ~0.216, above the 0.179 crossover) reads light.
+        assert!(
+            Theme {
+                background: Rgb::new(0x00, 0x00, 0x00),
+                ..Theme::default()
+            }
+            .is_dark()
+        );
+        assert!(
+            !Theme {
+                background: Rgb::new(0xff, 0xff, 0xff),
+                ..Theme::default()
+            }
+            .is_dark()
+        );
+        assert!(
+            !Theme {
+                background: Rgb::new(0x80, 0x80, 0x80),
+                ..Theme::default()
+            }
+            .is_dark()
         );
     }
 

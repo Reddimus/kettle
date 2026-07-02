@@ -693,6 +693,34 @@ fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<Stri
     }
 }
 
+/// v2.34.0: decide the native window-theme hint (winit
+/// `WindowAttributes::preferred_theme` / `Window::set_theme`) so the OS
+/// titlebar — the Windows DWM caption, the Wayland Adwaita CSD frame —
+/// matches the palette kettle is actually rendering, instead of staying on
+/// the OS-wide setting under a forced dark/light theme.
+///
+///   - `Auto` without a schedule → `None`: the palette follows the OS, so
+///     let the titlebar follow the OS natively too. Forcing a value here
+///     would also stop winit's `ThemeChanged` events on some backends,
+///     which the palette auto-switcher depends on.
+///   - everything else (Explicit / Light / Dark / Auto+schedule) → the
+///     titlebar matches the active theme's background darkness.
+///
+/// Pure — unit-testable without a window.
+fn native_theme_hint(
+    mode: kettle_config::ThemeMode,
+    has_schedule: bool,
+    theme_is_dark: bool,
+) -> Option<WindowTheme> {
+    if mode == kettle_config::ThemeMode::Auto && !has_schedule {
+        None
+    } else if theme_is_dark {
+        Some(WindowTheme::Dark)
+    } else {
+        Some(WindowTheme::Light)
+    }
+}
+
 /// Cap an OSC 52 clipboard payload so a hostile program can't make the
 /// terminal allocate/set an unbounded clipboard. Truncates on a UTF-8
 /// char boundary at or below `max` bytes (xterm/kitty also bound this).
@@ -2584,6 +2612,14 @@ pub struct App {
     gpu_recovery_next_at: Option<std::time::Instant>,
     /// True once recovery had to fall back to software rendering.
     gpu_software_fallback: bool,
+    /// v2.34.0: the last native window-theme hint pushed to every window via
+    /// `Window::set_theme` (None = never synced). The hint keeps the OS
+    /// titlebar — Windows DWM caption, Wayland Adwaita CSD — matching the
+    /// active palette. Cached so the redraw-time check is a compare, and
+    /// `set_theme` only fires when the answer actually changes; a lazy sync
+    /// at redraw (vs. per-mutation-site calls) can't drift when a new
+    /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
+    native_theme_synced: Option<Option<WindowTheme>>,
     /// C4: set by any "this window is done" path (last tab closed, X button,
     /// reap drained the panes) while its WindowState is checked out of the
     /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
@@ -3050,6 +3086,7 @@ impl App {
             gpu_recovery_attempts: 0,
             gpu_recovery_next_at: None,
             gpu_software_fallback: false,
+            native_theme_synced: None,
             pending_window_close: false,
             quit_requested: false,
             #[cfg(feature = "dev-record")]
@@ -4267,10 +4304,9 @@ impl App {
                 .stderr(std::process::Stdio::null())
                 .spawn()
             {
-                Ok(_) => {}
+                Ok(_) => return,
                 Err(e) => log::warn!("custom-url-handler {cmd:?}: {e}; falling through to system"),
             }
-            return;
         }
         if let Err(e) = open::that_detached(uri) {
             log::warn!("failed to open {uri}: {e}");
@@ -5646,6 +5682,10 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // v2.34.0: keep the OS titlebar in step with the active palette.
+        // Compare-only when nothing changed; independent of GPU health, so it
+        // runs before the device-lost early-return below.
+        self.maybe_sync_native_theme(ws);
         // v2.31.0: if the GPU device was lost (a driver TDR/reset) or hit an
         // uncaptured error (VRAM exhaustion under memory pressure), rendering
         // against the dead device cannot succeed. The new wgpu error handlers
@@ -9398,6 +9438,37 @@ impl App {
         }
     }
 
+    /// v2.34.0: the native window-theme hint for the current config — see
+    /// [`native_theme_hint`] for the decision table.
+    fn native_theme_hint(&self) -> Option<WindowTheme> {
+        native_theme_hint(
+            self.cfg.theme_mode,
+            self.cfg.theme_schedule.is_some(),
+            self.cfg.theme.is_dark(),
+        )
+    }
+
+    /// v2.34.0: push the native window-theme hint to every live window when
+    /// it changed since the last sync. Called at the top of `redraw` — every
+    /// theme mutation ends in a repaint, so one lazy chokepoint covers all
+    /// mutation sites (actions, context menu, Lua, settings persist+reload,
+    /// schedule, OS auto-switch) without each needing to remember a call.
+    /// `ws` is the checked-out window (see the `windows` field contract);
+    /// the map holds only the others during dispatch.
+    fn maybe_sync_native_theme(&mut self, ws: &WindowState) {
+        let hint = self.native_theme_hint();
+        if self.native_theme_synced == Some(hint) {
+            return;
+        }
+        self.native_theme_synced = Some(hint);
+        for w in std::iter::once(ws)
+            .chain(self.windows.values())
+            .filter_map(|s| s.window.as_ref())
+        {
+            w.set_theme(hint);
+        }
+    }
+
     /// Cycle 660 (sub-cycle 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
     /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): dispatch
     /// the `ConfirmAction` after the user accepts the modal. Skips
@@ -11199,11 +11270,10 @@ impl App {
         }
         // A pending run whose pane no longer exists (closed/reaped) is resolved
         // at once with an error, freeing the blocked connection thread.
-        let orphaned: Vec<u64> = self
-            .pending_runs
-            .keys()
-            .copied()
-            .filter(|pane| !ws.mux.panes.contains_key(pane))
+        let pending_panes: Vec<u64> = self.pending_runs.keys().copied().collect();
+        let orphaned: Vec<u64> = pending_panes
+            .into_iter()
+            .filter(|pane| Self::ctl_pane_ref(ws, &self.windows, *pane).is_none())
             .collect();
         for pane in orphaned {
             if let Some(run) = self.pending_runs.remove(&pane) {
@@ -13301,7 +13371,11 @@ impl App {
             .with_title("kettle")
             // Cycle 752: show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
-            .with_window_icon(load_window_icon());
+            .with_window_icon(load_window_icon())
+            // v2.34.0: seed the native titlebar (Windows DWM caption, Wayland
+            // Adwaita CSD) to match the active palette from the first frame;
+            // runtime changes go through `maybe_sync_native_theme`.
+            .with_theme(self.native_theme_hint());
         // Cycle 332 (Terminator parity, terminatorlib/config.py:75 +
         // 78). `borderless` removes OS chrome; `always-on-top` keeps
         // the window above other windows. Best-effort per OS; failure
@@ -20117,6 +20191,119 @@ mod tests {
         let single = vec!["only".to_string()];
         assert_eq!(pick_next_profile(Some("only"), &single, true), "only");
         assert_eq!(pick_next_profile(Some("only"), &single, false), "only");
+    }
+
+    /// v2.34.0: `native_theme_hint` is the pure policy behind the native
+    /// titlebar theme (window creation + `maybe_sync_native_theme`). Pin the
+    /// decision table: plain Auto defers to the OS (`None`, keeping winit's
+    /// `ThemeChanged` flowing for the palette auto-switcher); every other
+    /// mode — and Auto with a schedule — forces the titlebar to the active
+    /// theme's darkness.
+    #[test]
+    fn native_theme_hint_decision_table() {
+        use super::{WindowTheme, native_theme_hint};
+        use kettle_config::ThemeMode;
+        // Plain Auto: follow the OS regardless of the active palette.
+        assert_eq!(native_theme_hint(ThemeMode::Auto, false, true), None);
+        assert_eq!(native_theme_hint(ThemeMode::Auto, false, false), None);
+        // Auto + schedule: the schedule drives the palette, so the titlebar
+        // matches the palette, not the OS.
+        assert_eq!(
+            native_theme_hint(ThemeMode::Auto, true, true),
+            Some(WindowTheme::Dark)
+        );
+        // Explicit / Light / Dark: titlebar matches the active theme.
+        for mode in [ThemeMode::Explicit, ThemeMode::Light, ThemeMode::Dark] {
+            assert_eq!(
+                native_theme_hint(mode, false, true),
+                Some(WindowTheme::Dark)
+            );
+            assert_eq!(
+                native_theme_hint(mode, false, false),
+                Some(WindowTheme::Light)
+            );
+        }
+    }
+
+    /// v2.34.0 drift guard: the winit dependency must enable Wayland CSD via
+    /// `wayland-csd-adwaita-notitle` — the sctk-adwaita variant with NO text
+    /// renderer — and never the `ab_glyph`/`crossfont` variants, while
+    /// RUSTSEC-2026-0192 keeps `ttf-parser` scoped to the glyphon stack
+    /// (scripts/check-ttf-parser-scope.sh proves the graph side; this pins
+    /// the manifest side so a feature edit is caught in `cargo test` before
+    /// CI). Dropping the feature entirely would regress GNOME Wayland to
+    /// smithay-client-toolkit's FallbackFrame (flat gray bar, filled-square
+    /// close button, no Adwaita styling) — the v2.33.1 regression.
+    #[test]
+    fn winit_wayland_csd_stays_notitle() {
+        let manifest = include_str!("../Cargo.toml");
+        let winit_features = manifest
+            .split("winit = {")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .expect("kettle-ui Cargo.toml declares winit with a feature list");
+        assert!(
+            winit_features.contains("\"wayland-csd-adwaita-notitle\""),
+            "winit must keep the wayland-csd-adwaita-notitle feature — \
+             without it GNOME Wayland falls back to the ugly FallbackFrame"
+        );
+        assert!(
+            !winit_features.contains("\"wayland-csd-adwaita\"\n")
+                && !winit_features.contains("\"wayland-csd-adwaita\",")
+                && !winit_features.contains("crossfont"),
+            "the ab_glyph/crossfont CSD variants reintroduce ttf-parser or a \
+             FreeType build dep — keep the notitle variant (RUSTSEC-2026-0192)"
+        );
+    }
+
+    #[test]
+    fn custom_url_handler_failure_falls_back_to_system_open() {
+        let src = include_str!("app.rs");
+        let open_url = src
+            .split("fn open_url(&self, uri: &str) {")
+            .nth(1)
+            .and_then(|s| s.split("fn paste_clipboard").next())
+            .expect("open_url helper present");
+        assert!(
+            open_url.contains("Ok(_) => return,"),
+            "a successful custom-url-handler spawn should own the URL"
+        );
+        assert!(
+            open_url.contains("falling through to system")
+                && open_url.contains("open::that_detached(uri)"),
+            "a failed custom-url-handler spawn must fall back to system open"
+        );
+        let failed_spawn_tail = open_url
+            .split("Err(e) => log::warn!")
+            .nth(1)
+            .expect("custom handler error arm present");
+        assert!(
+            !failed_spawn_tail
+                .split("open::that_detached(uri)")
+                .next()
+                .unwrap_or("")
+                .contains("return;"),
+            "custom-url-handler failure must not return before system open"
+        );
+    }
+
+    #[test]
+    fn pending_run_orphan_check_searches_all_windows() {
+        let src = include_str!("app.rs");
+        let check = src
+            .split("fn check_pending_run_deadlines(&mut self, ws: &mut WindowState) {")
+            .nth(1)
+            .and_then(|s| s.split("fn ctl_capture_output_since").next())
+            .expect("check_pending_run_deadlines present");
+        assert!(
+            check.contains("Self::ctl_pane_ref(ws, &self.windows, *pane).is_none()"),
+            "pending run orphan detection must search the checked-out window \
+             and the other windows, not only the current ws.mux"
+        );
+        assert!(
+            !check.contains("!ws.mux.panes.contains_key(pane)"),
+            "current-window-only orphan checks kill pending runs in other windows"
+        );
     }
 
     /// Cycle 616 drift guard. `pick_light_dark_target` is the
