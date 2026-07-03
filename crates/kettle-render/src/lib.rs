@@ -1125,13 +1125,24 @@ impl Renderer {
         } else {
             caps.alpha_modes[0]
         };
+        // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
+        // add COPY_SRC so the cycle-654 pending_screenshot path can read
+        // back the live surface. Gate it on the surface's advertised caps:
+        // most desktop adapters support it, but the Microsoft Remote Display
+        // adapter injected in a Windows RDP session advertises only
+        // RENDER_ATTACHMENT, so OR-ing COPY_SRC unconditionally made
+        // `Surface::configure` fail validation — the surface stayed
+        // unconfigured and the next `get_current_texture` panicked
+        // ("Surface is not configured for presentation"). When COPY_SRC is
+        // absent, the live-in-window screenshot readback degrades gracefully
+        // (see `render_frame_with_status`); offscreen `--screenshot` builds
+        // its own COPY_SRC texture and is unaffected.
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let config = wgpu::SurfaceConfiguration {
-            // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
-            // add COPY_SRC so the cycle-654 pending_screenshot path
-            // can read back the live surface. Most desktop adapters
-            // support this fine; mobile may need a fallback to a
-            // separate intermediate texture (deferred polish).
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage,
             format,
             width: width.max(1),
             height: height.max(1),
@@ -3913,10 +3924,24 @@ impl Renderer {
         // but don't fail the frame.
         let screenshot_req = self.pending_screenshot.take();
         if let Some(req) = &screenshot_req {
-            let result = self
-                .capture_live_surface(&frame, req)
-                .map(|_| req.out_path.clone())
-                .map_err(|e| e.to_string());
+            // The live-surface readback needs the surface to have been
+            // configured with COPY_SRC. On adapters that don't advertise it
+            // (e.g. the RDP Microsoft Remote Display adapter — see the surface
+            // config above) `self.config.usage` won't contain COPY_SRC, so
+            // skip the copy and degrade gracefully instead of hitting a
+            // validation error. Offscreen `--screenshot` is unaffected (it
+            // builds its own COPY_SRC texture).
+            let result = if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.capture_live_surface(&frame, req)
+                    .map(|_| req.out_path.clone())
+                    .map_err(|e| e.to_string())
+            } else {
+                Err(
+                    "live-surface screenshot unavailable: surface lacks COPY_SRC \
+                     (e.g. RDP remote display) — use offscreen `--screenshot` instead"
+                        .to_string(),
+                )
+            };
             if let Some(tx) = &req.completion {
                 let _ = tx.send(result.clone());
             }
