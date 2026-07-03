@@ -186,6 +186,30 @@ for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
         rm -f "${doc}.bak"
     fi
 done
+
+# v2.34.1 (audit) — durable fix for the exact drift the cycle-790 loop above
+# cannot catch. That loop only rewrites `v${PREV}`; a doc whose release-reference
+# version missed a bump is never healed. (docs/INSTALL.md's "current latest" +
+# download URLs and README.md's `KETTLE_VERSION=` example had stranded at
+# v2.31.0 while the workspace was already v2.34.0 — three releases back — because
+# `grep -q v2.34.0` never matched them.) Rewrite the well-defined release-
+# reference patterns keyed to the version being RELEASED, not PREV, so they land
+# on the current release no matter how far they drifted. Bounded, unambiguous
+# anchors — the "current latest" claim, GitHub release-download URLs, and the
+# `KETTLE_VERSION=` pin example. Historical / feature-era refs (e.g. "Every
+# release from v1.3.4 onward") never match these anchors, so they stay put.
+for doc in README.md docs/INSTALL.md; do
+    [ -f "$doc" ] || continue
+    sed -i.bak -E \
+        -e "s/current latest: v[0-9]+\.[0-9]+\.[0-9]+/current latest: v${VERSION}/g" \
+        -e "s#releases/download/v[0-9]+\.[0-9]+\.[0-9]+/#releases/download/v${VERSION}/#g" \
+        -e "s/KETTLE_VERSION=v[0-9]+\.[0-9]+\.[0-9]+/KETTLE_VERSION=v${VERSION}/g" \
+        "$doc"
+    rm -f "${doc}.bak"
+    if ! git diff --quiet -- "$doc"; then
+        echo "bumping ${doc}: release-reference version strings → v${VERSION}"
+    fi
+done
 if [ -f docs/VERSION-HISTORY.md ] && grep -q "Current workspace version: \`${PREV}\`" docs/VERSION-HISTORY.md; then
     echo "bumping docs/VERSION-HISTORY.md workspace version: ${PREV} → ${VERSION}"
     sed -i.bak "s/Current workspace version: \`${PREV_RE}\`/Current workspace version: \`${VERSION}\`/" docs/VERSION-HISTORY.md
