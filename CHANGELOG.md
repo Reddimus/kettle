@@ -6,6 +6,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.34.1] — 2026-07-03
+
+  ### Fixed
+  - **The live window no longer crashes over RDP (and other
+    RENDER_ATTACHMENT-only display adapters).** The wgpu surface was configured
+    with `RENDER_ATTACHMENT | COPY_SRC` unconditionally (COPY_SRC added in cycle
+    688 for in-window screenshot readback). The Microsoft Remote Display adapter
+    injected into a Windows RDP session advertises only `RENDER_ATTACHMENT`, so
+    `Surface::configure` failed validation, the surface stayed unconfigured, and
+    the next `get_current_texture` panicked ("Surface is not configured for
+    presentation") — crashing the live window over RDP. `COPY_SRC` is now gated
+    on the surface's advertised capabilities, and the in-window screenshot
+    readback degrades gracefully when it is absent (a clear error instead of a
+    validation panic). Offscreen `--screenshot` / `--gpu-info` are unaffected
+    (they build their own COPY_SRC textures), and the resize / GPU-recovery
+    reconfigure paths reuse the gated config so they inherit the fix.
+  - Install docs (`docs/INSTALL.md`, `README.md`) referenced a stale `v2.31.0`
+    for the "current latest" line, download URLs, and `KETTLE_VERSION=` pin
+    example; they now track the current release, and `scripts/release.sh` rewrites
+    those release-reference strings by pattern so they cannot silently strand
+    again when a release is missed (the cycle-790 bump only matched the
+    immediately-previous version).
+
 ## [2.34.0] — 2026-07-02
 
   ### Fixed
