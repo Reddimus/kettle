@@ -279,8 +279,9 @@ just agent-tui-smoke
 
 Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
-`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, tmux
-attach/send/capture when `tmux` is installed, and clean/configured
+`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
+deterministic Windows Codex status-row cursor fixture, tmux attach/send/capture
+when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
 workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
 run real authenticated `codex exec` / `claude --print` marker prompts inside

@@ -35,3 +35,4 @@ tempfile = "3"
 # `Term<EventProxy>`, whose `EventProxy::new` needs a crossbeam Sender.
 # Same version kettle-core already pins; test-only.
 crossbeam-channel = "0.5.15"
+serde_json = "1"
