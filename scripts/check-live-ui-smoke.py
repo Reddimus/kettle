@@ -31,6 +31,8 @@ def run(
     return subprocess.run(
         argv,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         timeout=timeout,
@@ -122,6 +124,22 @@ def bright_pixel_count(rgba_rows: List[bytes]) -> int:
     total = 0
     for row in rgba_rows:
         for off in range(0, len(row), 4):
+            r, g, b, a = row[off : off + 4]
+            if a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000:
+                total += 1
+    return total
+
+
+def bright_pixels_in_rect(rgba_rows: List[bytes], x0: float, y0: float, x1: float, y1: float) -> int:
+    total = 0
+    y_start = max(0, int(y0))
+    y_end = min(len(rgba_rows), int(y1))
+    for y in range(y_start, y_end):
+        row = rgba_rows[y]
+        x_start = max(0, int(x0))
+        x_end = min(len(row) // 4, int(x1))
+        for x in range(x_start, x_end):
+            off = x * 4
             r, g, b, a = row[off : off + 4]
             if a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000:
                 total += 1
@@ -223,6 +241,8 @@ class EventStream:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         self.lines: List[str] = []
@@ -927,6 +947,25 @@ def prompt_marker_command(marker: str) -> str:
     return f"printf '\\342\\236\\234  ~ %s\\n' {shell_quote(left)}{shell_quote(right)}"
 
 
+def codex_status_cursor_fixture_command() -> str:
+    row = 4
+    col = 30
+    if platform.system() == "Windows":
+        return (
+            "$esc=[char]27; "
+            "$body='OpenAI Codex (v0.142.5)' + \"`r`n`r`n\" + "
+            "'› Find and fix a bug in @filename' + \"`r`n\" + "
+            "'  gpt-5.5 high · ~'; "
+            f"[Console]::Write($esc + '[2J' + $esc + '[H' + $body + $esc + '[{row};{col}H' + $esc + '[?25h'); "
+            "Start-Sleep -Seconds 20"
+        )
+    return (
+        "printf '\\033[2J\\033[HOpenAI Codex (v0.142.5)\\r\\n\\r\\n"
+        "› Find and fix a bug in @filename\\r\\n  gpt-5.5 high · ~"
+        f"\\033[{row};{col}H\\033[?25h'; sleep 20"
+    )
+
+
 def notification_command(title: str, body: str, marker: str) -> str:
     if platform.system() == "Windows":
         return (
@@ -1056,6 +1095,7 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 "background = #090909",
                 "foreground = #f5f5f5",
                 "minimum-contrast = 0",
+                "cursor-blink = false",
                 "window-width = 120",
                 "window-height = 36",
             ]
@@ -1076,10 +1116,65 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         prompt_marker = "KETTLE_AGENT_TUI_PROMPT_SHAPE"
         live_shell_command(live, prompt_marker_command(prompt_marker), prompt_marker)
         prompt_screen = live.json_ctl("read_screen")
-        if f"\u279c  ~ {prompt_marker}" not in screen_text(prompt_screen):
+        prompt_text = screen_text(prompt_screen)
+        if platform.system() == "Windows":
+            prompt_visible = prompt_marker in prompt_text
+        else:
+            prompt_visible = f"\u279c  ~ {prompt_marker}" in prompt_text
+        if not prompt_visible:
             raise SystemExit("agent-tui smoke: prompt-shaped marker is not visible")
         states.append(capture_live_state(live, out, "prompt-shape"))
         probes.append({"name": "prompt-shape", "status": "ok"})
+
+        if platform.system() == "Windows":
+            live.ctl("send_text", params={"text": codex_status_cursor_fixture_command()}, timeout=8)
+            live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+            live.wait_for_text("gpt-5.5 high", timeout_ms=12000, quiet_ms=250)
+            fixture_screen = live.json_ctl("read_screen")
+            fixture_cursor = fixture_screen.get("cursor")
+            if fixture_cursor != [3, 29] or not fixture_screen.get("cursor_visible"):
+                raise SystemExit(
+                    "agent-tui smoke: Codex status cursor fixture did not leave the "
+                    f"terminal cursor on the model row: cursor={fixture_cursor} "
+                    f"visible={fixture_screen.get('cursor_visible')}"
+                )
+            state = capture_live_state(live, out, "codex-status-cursor-fixture")
+            geo = live.json_ctl("ui_geometry")
+            content = geo.get("content")
+            cell = geo.get("cell")
+            if not isinstance(content, dict) or not isinstance(cell, dict):
+                raise SystemExit(f"agent-tui smoke: missing geometry for Codex cursor fixture: {geo}")
+            shot = Path(str(state["screenshot"]))
+            _width, _height, rgba_rows = read_rgba_png(shot)
+            cell_w = float(cell.get("width", 8.0))
+            cell_h = float(cell.get("height", 16.0))
+            x0 = float(content.get("x", 0.0)) + 29 * cell_w + 1.0
+            y0 = float(content.get("y", 0.0)) + 3 * cell_h + 1.0
+            bright_cell = bright_pixels_in_rect(
+                rgba_rows,
+                x0,
+                y0,
+                x0 + cell_w - 2.0,
+                y0 + cell_h - 2.0,
+            )
+            threshold = max(24, int(cell_w * cell_h * 0.16))
+            if bright_cell > threshold:
+                raise SystemExit(
+                    "agent-tui smoke: Windows Codex model/status-row cursor is still visible "
+                    f"({bright_cell} bright pixels in blank cursor cell; threshold {threshold})"
+                )
+            probes.append(
+                {
+                    "name": "codex-status-cursor-fixture",
+                    "status": "ok",
+                    "cursor": fixture_cursor,
+                    "bright_pixels": bright_cell,
+                    "threshold": threshold,
+                }
+            )
+            states.append(state)
+            live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
+            time.sleep(0.3)
 
         for tool in ("codex", "claude"):
             if shutil.which(tool) is None:

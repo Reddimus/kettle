@@ -40,6 +40,7 @@
 
 mod bg_image;
 mod color;
+mod cursor_policy;
 mod glyphpipe;
 mod imgpipe;
 mod quad;
@@ -4217,15 +4218,22 @@ impl Renderer {
         // model. Identify that grid-absolute cell so the span builder recolors
         // exactly its glyph. Only the full Block shape covers the glyph (beam /
         // underline leave it visible, so they aren't recolored).
+        use alacritty_terminal::vte::ansi::CursorShape as EShape;
+        let cp = snap.cursor.point;
+        let shape = snap.cursor.shape;
+        let cvrow = cp.line.0 + display_off;
+        let base_draw_cursor = shape != EShape::Hidden
+            && (0..screen_rows).contains(&cvrow)
+            && pv.focused
+            && cursor_visible;
+        let draw_cursor = cursor_policy::cursor_draw_allowed(
+            snap,
+            cvrow,
+            base_draw_cursor,
+            cfg!(target_os = "windows"),
+        );
         let recolor_cursor_cell: Option<(i32, usize)> = {
-            let cp = snap.cursor.point;
-            let cvrow = cp.line.0 + display_off;
-            if pv.focused
-                && window_focused
-                && cursor_visible
-                && snap.cursor.shape == EShape::Block
-                && (0..screen_rows).contains(&cvrow)
-            {
+            if draw_cursor && window_focused && shape == EShape::Block {
                 Some((cp.line.0, cp.column.0))
             } else {
                 None
@@ -4461,9 +4469,6 @@ impl Renderer {
         // use this to flip between block/underline/beam for normal/insert/
         // replace modes. The engine is seeded from `cfg.cursor_style` at pane
         // creation so the default still matches the user's config.
-        use alacritty_terminal::vte::ansi::CursorShape as EShape;
-        let cp = snap.cursor.point;
-        let shape = snap.cursor.shape;
         // Cycle 150: also require cursor_visible. The old check fell
         // through to draw the hollow-outline branch on an unfocused
         // window even when DEC ?25l had hidden the cursor. So a
@@ -4482,11 +4487,6 @@ impl Renderer {
         // `cp.line.0 >= 0` guard was dead (a writing cursor's absolute line is
         // always >= 0); the real visibility test is whether its viewport row is
         // on screen.
-        let cvrow = cp.line.0 + display_off;
-        let draw_cursor = shape != EShape::Hidden
-            && (0..screen_rows).contains(&cvrow)
-            && pv.focused
-            && cursor_visible;
         if draw_cursor {
             // Cycle 942: a wide glyph under a solid block cursor widens the
             // block to both columns (and a spacer-parked cursor re-anchors to

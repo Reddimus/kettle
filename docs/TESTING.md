@@ -214,6 +214,12 @@ writes — and feeds its `o` (output) events through the harness, asserting grid
 text + SGR state. A scrubbed recording of a real agent session can therefore be
 committed as a regression fixture and re-fed without a PTY or auth.
 
+**Windows Codex status cursor.** Native Windows Codex goes through ConPTY, which
+can report a visible cursor parked on Codex's model/status row after a full-screen
+repaint. `kettle-render` keeps the parsed cursor state intact but suppresses that
+renderer-only cursor artifact on Codex status rows. The scrubbed Codex/ConPTY
+replay fixture covers the draw decision without committing a private session.
+
 ## Manual / interactive checks
 
 These need a real display and are run by hand (or on real hardware):
@@ -243,7 +249,8 @@ These need a real display and are run by hand (or on real hardware):
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
     grid-renderer Kettle window, drives a shell marker, a prompt-shaped `➜  ~`
-    marker, optional Codex/Claude CLI version probes plus `codex exec --help` /
+    marker, a deterministic Windows Codex status-row cursor fixture, optional
+    Codex/Claude CLI version probes plus `codex exec --help` /
     `claude --print --help` output captures, tmux attach/send/capture and a
     tmux-managed horizontal split workflow when `tmux` is installed,
     clean/configured Neovim marker buffers, and clean/configured

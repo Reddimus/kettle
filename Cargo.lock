@@ -1755,6 +1755,7 @@ dependencies = [
  "log",
  "pollster",
  "raw-window-handle",
+ "serde_json",
  "tempfile",
  "unicode-width",
  "wgpu",
