@@ -31,6 +31,29 @@ pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
     (t, sgr)
 }
 
+/// xterm alternate-scroll behavior (DEC private mode 1007): when the focused
+/// app is on the alternate screen and has NOT enabled mouse tracking, wheel
+/// notches are delivered as Up/Down cursor keys instead of scrolling terminal
+/// history. This is what makes `less`, `man`, and vim scroll with a wheel before
+/// they opt into mouse reports.
+pub fn alternate_scroll_key(lines: i32, mode: TermMode) -> Option<Vec<u8>> {
+    if lines == 0
+        || !mode.contains(TermMode::ALT_SCREEN)
+        || mouse_tracking(mode).0 != MouseTracking::Off
+    {
+        return None;
+    }
+
+    let key = if lines > 0 {
+        Key::Named(NamedKey::ArrowUp)
+    } else {
+        Key::Named(NamedKey::ArrowDown)
+    };
+    let bytes = encode(&key, None, ModifiersState::empty(), mode)?;
+    let repeat = usize::try_from(lines.unsigned_abs().min(8)).unwrap_or(8);
+    Some(bytes.repeat(repeat))
+}
+
 /// Encode a mouse event. `btn`: 0=left,1=middle,2=right,64=wheel-up,
 /// 65=wheel-down. `col`/`row` are 0-based grid coordinates.
 #[allow(clippy::too_many_arguments)]
@@ -749,6 +772,41 @@ mod tests {
             mouse_tracking(TermMode::MOUSE_MOTION),
             (MouseTracking::Motion, false)
         ));
+    }
+
+    #[test]
+    fn alternate_scroll_emits_cursor_keys_only_without_mouse_tracking() {
+        let alt = TermMode::ALT_SCREEN;
+        assert_eq!(
+            alternate_scroll_key(3, alt),
+            Some(b"\x1b[A\x1b[A\x1b[A".to_vec())
+        );
+        assert_eq!(
+            alternate_scroll_key(-3, alt),
+            Some(b"\x1b[B\x1b[B\x1b[B".to_vec())
+        );
+
+        let app_cursor = TermMode::ALT_SCREEN | TermMode::APP_CURSOR;
+        assert_eq!(
+            alternate_scroll_key(3, app_cursor),
+            Some(b"\x1bOA\x1bOA\x1bOA".to_vec())
+        );
+        assert_eq!(
+            alternate_scroll_key(-3, app_cursor),
+            Some(b"\x1bOB\x1bOB\x1bOB".to_vec())
+        );
+        assert_eq!(
+            alternate_scroll_key(i32::MIN, alt),
+            Some(b"\x1b[B".repeat(8))
+        );
+
+        assert_eq!(alternate_scroll_key(0, alt), None);
+        assert_eq!(alternate_scroll_key(3, TermMode::empty()), None);
+        assert_eq!(
+            alternate_scroll_key(3, TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK),
+            None,
+            "mouse-tracking apps must receive wheel reports, not synthesized arrows"
+        );
     }
 
     #[test]

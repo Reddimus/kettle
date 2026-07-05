@@ -39,9 +39,6 @@ tracked here so they are not lost.
 
 - **Kitty graphics `a=q` capability reply** (and the `Chunk::PtyReply` plumbing it
   needs) so probers like `kitten icat` don't conclude graphics are unsupported.
-- **Mouse-wheel alternate-scroll** (DEC 1007): translate wheel notches into
-  cursor-key arrows on the alternate screen so `less`/`man`/`vim` scroll. Medium;
-  touches both the GUI and ctl wheel paths.
 - **OSC 52 selection target** (`p`/`s` vs `c`): route PRIMARY writes/reads to the
   X11 PRIMARY selection on Linux instead of always CLIPBOARD.
 - **Vi-mode over scrollback**: vi navigation is currently viewport-only; make
@@ -52,8 +49,6 @@ tracked here so they are not lost.
 - **Surface malformed-config diagnostics in the GUI.** `detect_malformed_values`
   is wired only into the CLI; a typo saved to the live-reloaded config silently
   reverts. Fire a notification / dismissible banner on reload.
-- **Middle-click with a context menu open** should dismiss the menu rather than
-  paste PRIMARY / close a tab behind it.
 - Keybind-capture should warn when reassigning an in-use chord; Settings
   GPU/padding writes should surface a persist failure; overlay text inputs need
   caret movement / Home/End / paste.
