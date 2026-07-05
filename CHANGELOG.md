@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.34.2] — 2026-07-05
+
+  ### Fixed
+  - **Alternate-screen mouse wheel scrolling now works when the running TUI has
+    not enabled mouse tracking.** Wheel notches in `less`, `man`, vim, and
+    similar alternate-screen programs are translated to cursor-key input
+    (honoring application-cursor mode) instead of trying to scroll Kettle
+    scrollback. Shift+wheel remains the explicit local scrollback override, and
+    mouse-tracking apps still receive real wheel reports. The same behavior is
+    wired through `kettle ctl send_mouse` wheel events.
+  - **Context menus now consume middle-clicks.** A middle-click while a context
+    menu is open dismisses the menu instead of leaking through to paste PRIMARY
+    into the pane or close a tab behind the menu. Right-click still relocates the
+    menu.
+  - **Windows Codex CLI status-row cursor artifacts are suppressed in Kettle's
+    renderer.** Native Windows ConPTY/Codex sessions can report a visible cursor
+    parked on Codex's model/status row; Kettle now suppresses that renderer-only
+    artifact on native Windows while preserving terminal cursor state and leaving
+    Ubuntu/WSL behavior unchanged.
+
 ## [2.34.1] — 2026-07-03
 
   ### Fixed

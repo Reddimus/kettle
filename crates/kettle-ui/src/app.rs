@@ -10609,7 +10609,7 @@ impl App {
             self.dispatch_context_menu_click(ws, click, event_loop);
             return true;
         }
-        if ws.context_menu.is_some() && bcode == 0 {
+        if ws.context_menu.is_some() && bcode != 2 {
             ws.context_menu = None;
             return true;
         }
@@ -10739,11 +10739,18 @@ impl App {
             }
             return true;
         }
-        let (track, _) = input::mouse_tracking(self.focused_mode(ws));
+        let mode = self.focused_mode(ws);
+        let (track, _) = input::mouse_tracking(mode);
         if track != input::MouseTracking::Off && !ws.mods.shift_key() {
             let btn = if lines > 0 { 64 } else { 65 };
-            for _ in 0..lines.abs().min(8) {
+            for _ in 0..lines.unsigned_abs().min(8) {
                 self.send_mouse(ws, btn, true, false);
+            }
+        } else if !ws.mods.shift_key()
+            && let Some(bytes) = input::alternate_scroll_key(lines, mode)
+        {
+            if let Some(pane) = ws.mux.focused() {
+                pane.feed_input(&bytes);
             }
         } else if let Some(pane) = ws.mux.focused()
             && let Ok(mut t) = pane.term.term.lock()
@@ -15335,12 +15342,11 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                // Context menu (cycle 245): if the menu is open, a left-
-                // click either fires the row that was hit or — if the
-                // click landed outside the panel — closes the menu (the
-                // GNOME / browser convention; right-click on another
-                // location is handled as a re-open after this close
-                // because the right-click handler runs the open path).
+                // Context menu (cycle 245): if the menu is open, a left-click
+                // either fires the row that was hit or — if the click landed
+                // outside the panel — closes the menu. Middle-click outside
+                // dismisses too; only right-click falls through so it can
+                // reopen/relocate the menu.
                 if ws.context_menu.is_some()
                     && let Some(click) = self.context_menu_click_action(ws, bcode)
                 {
@@ -15352,9 +15358,9 @@ impl App {
                     self.dispatch_context_menu_click(ws, click, event_loop);
                     return;
                 }
-                if ws.context_menu.is_some() && bcode == 0 {
-                    // Left-click outside the panel — dismiss without
-                    // firing anything (matches every modern menu).
+                if ws.context_menu.is_some() && bcode != 2 {
+                    // Left/middle outside the panel — dismiss without firing
+                    // anything (matches every modern menu).
                     ws.context_menu = None;
                     if let Some(w) = &ws.window {
                         w.request_redraw();
@@ -15908,12 +15914,19 @@ impl App {
                 // Without this bypass, you can't scroll back through
                 // your tmux/htop session — the TUI swallows every wheel
                 // notch.
-                let (track, _) = input::mouse_tracking(self.focused_mode(ws));
+                let mode = self.focused_mode(ws);
+                let (track, _) = input::mouse_tracking(mode);
                 let track_active = track != input::MouseTracking::Off && !ws.mods.shift_key();
                 if track_active {
                     let btn = if lines > 0 { 64 } else { 65 };
-                    for _ in 0..lines.abs().min(8) {
+                    for _ in 0..lines.unsigned_abs().min(8) {
                         self.send_mouse(ws, btn, true, false);
+                    }
+                } else if !ws.mods.shift_key()
+                    && let Some(bytes) = input::alternate_scroll_key(lines, mode)
+                {
+                    if let Some(pane) = ws.mux.focused() {
+                        pane.feed_input(&bytes);
                     }
                 } else {
                     if let Some(pane) = ws.mux.focused()
@@ -18338,6 +18351,28 @@ mod tests {
                 && src.contains("PasteSource::Clipboard => self.paste_clipboard(ws)")
                 && src.contains("PasteSource::Primary => self.paste_primary(ws)"),
             "PuTTY right-click paste must honor putty_paste_style_source_clipboard"
+        );
+    }
+
+    #[test]
+    fn context_menu_middle_click_dismisses_before_paste_or_tab_close() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        assert!(
+            src.matches("if ws.context_menu.is_some() && bcode != 2")
+                .count()
+                >= 2,
+            "GUI and ctl mouse paths must dismiss an open context menu on left/middle click; \
+             only right-click may fall through to relocate it"
+        );
+        let gui_menu_gate = src
+            .find("if ws.context_menu.is_some() && bcode != 2")
+            .expect("GUI context-menu dismiss gate present");
+        let middle_paste = src
+            .find("if bcode == 1 && !self.cfg.disable_mouse_paste")
+            .expect("middle paste path present");
+        assert!(
+            gui_menu_gate < middle_paste,
+            "open context menu must preempt middle-click paste behind it"
         );
     }
 
