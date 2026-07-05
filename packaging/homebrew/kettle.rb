@@ -31,7 +31,7 @@ class Kettle < Formula
   desc "Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/Reddimus/kettle"
   license "MIT"
-  version "2.34.1"
+  version "2.34.2"
 
   on_macos do
     # macOS ships the universal2 .app bundle — same binary covers
