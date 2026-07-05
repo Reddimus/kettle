@@ -90,14 +90,26 @@ fetch_hash() {
   local url="https://github.com/${repo}/releases/download/${tag}/${asset}.sha256"
   local line
   local hash
-  line=$(curl -fsSL "$url") || fail "could not fetch $url"
+  if ! line=$(curl -fsSL "$url"); then
+    if [ "$MODE" = "require-release" ]; then
+      fail "could not fetch $url"
+    fi
+    # A main-branch release bump and tag push can land before every release
+    # matrix leg has uploaded its .sha256 sidecar. In auto mode, keep CI from
+    # failing on that transient race; --require-release remains strict.
+    echo "package-template check: ${tag} exists but ${asset}.sha256 is not reachable yet; skipping remote hash check" >&2
+    printf '\n'
+    return 0
+  fi
   read -r hash _ <<< "$line"
   [ "${#hash}" -eq 64 ] || fail "bad sha256 sidecar for ${asset}: ${line}"
   printf '%s\n' "$hash"
 }
 
 published_mac=$(fetch_hash kettle-macos-universal.zip)
+[ -n "$published_mac" ] || exit 0
 published_linux=$(fetch_hash kettle-linux-x86_64.tar.gz)
+[ -n "$published_linux" ] || exit 0
 
 [ "$mac_hash" = "$published_mac" ] \
   || fail "Homebrew macOS hash $mac_hash does not match published $published_mac"

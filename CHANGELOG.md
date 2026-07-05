@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **Package-template CI no longer fails a fresh release race.** The automatic
+    check still validates published hashes when the sidecars are available, but
+    it now skips the remote hash comparison while a newly pushed tag's release
+    assets are still uploading. `--require-release` remains strict.
+
 ## [2.34.2] — 2026-07-05
 
   ### Fixed
