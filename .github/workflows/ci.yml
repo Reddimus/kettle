@@ -55,6 +55,12 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Live UI helper self-test (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/check-live-ui-smoke.py self-test
+      - name: Live UI helper self-test (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/check-live-ui-smoke.py self-test
       # Cycle 876: the developer-only session recorder lives behind the
       # `dev-record` Cargo feature (compiled OUT of shipped builds), so the
       # default build/clippy/test above never exercise it. Build, lint and test

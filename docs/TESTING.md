@@ -291,8 +291,12 @@ These need a real display and are run by hand (or on real hardware):
     `nvim-split-clean` and `nvim-split-configured` states.
     `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
     serialized authenticated `codex exec` / `claude --print` marker prompts
-    inside the Kettle pane and records `*-auth-session` probes. The wait key is
-    the emitted `DONE:<exit-code>` token, not command-echo text. External auth failures are
+    inside the Kettle pane and records `*-auth-session` probes. Success requires
+    an exit code of zero **and** an exact response marker between a generated
+    output boundary and the emitted `DONE:<exit-code>` token; prompt text echoed
+    by the shell is outside that frame and cannot satisfy the probe. The helper
+    self-test runs in the normal CI matrix and pins this distinction, including
+    a failed-command/stale-exit-code transcript. External auth failures are
     captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
     credentials should fail the run.
   - **Live interaction window**: `just interaction-smoke` opens a real
