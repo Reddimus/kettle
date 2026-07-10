@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Changed
+  - **The renderer now uses one coherent wgpu 30 stack.** `glyphon` 0.12 and
+    `cosmic-text` 0.19 replace the incompatible wgpu 29 text-rendering graph.
+    Kettle presents usable suboptimal surface frames before reconfiguring and
+    propagates fallible GPU readback mappings with context instead of assuming
+    that a mapped range is always available.
+
 ## [2.34.4] — 2026-07-09
 
   ### Fixed
