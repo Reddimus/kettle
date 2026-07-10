@@ -69,7 +69,9 @@ param(
     [switch] $Uninstall,
     [switch] $NoPath,
     [switch] $WithShellIntegration,
-    [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle")
+    [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle"),
+    [Parameter(DontShow = $true)]
+    [string] $IntegrationTestRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,10 +80,12 @@ $ErrorActionPreference = 'Stop'
 # this script; in-repo mode has it under `target/release/`.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $prefixMarker = Join-Path $scriptDir ".kettle-install-prefix"
+$prefixFromMarker = $false
 if (-not $PSBoundParameters.ContainsKey('Prefix') -and (Test-Path $prefixMarker)) {
     $savedPrefix = (Get-Content $prefixMarker -Raw -ErrorAction SilentlyContinue).Trim()
     if ($savedPrefix) {
         $Prefix = $savedPrefix
+        $prefixFromMarker = $true
     }
 }
 $zipModeExe = Join-Path $scriptDir "kettle.exe"
@@ -99,10 +103,28 @@ if (Test-Path $zipModeExe) {
     $sourceMode = $null
 }
 
-$startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+$integrationTest = -not [string]::IsNullOrWhiteSpace($IntegrationTestRoot)
+if ($integrationTest) {
+    # The Windows installer smoke uses isolated filesystem and registry roots to
+    # exercise the real default-install path without touching the developer's
+    # installed app, Start menu, PATH, or Add/Remove Programs entry.
+    $IntegrationTestRoot = [System.IO.Path]::GetFullPath($IntegrationTestRoot)
+    $testDefaultPrefix = Join-Path $IntegrationTestRoot "Programs\kettle"
+    if (-not $PSBoundParameters.ContainsKey('Prefix') -and -not $prefixFromMarker) {
+        $Prefix = $testDefaultPrefix
+    }
+    $startMenuDir = Join-Path $IntegrationTestRoot "Start Menu\Programs"
+    $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\kettle-installer-smoke-$PID"
+    $profilePath = Join-Path $IntegrationTestRoot "WindowsPowerShell\profile.ps1"
+    $portable = ($Prefix -ne $testDefaultPrefix)
+    $NoPath = $true
+} else {
+    $startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+    $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\kettle"
+    $profilePath = $PROFILE
+    $portable = ($Prefix -ne (Join-Path $env:LOCALAPPDATA "Programs\kettle"))
+}
 $shortcutPath = Join-Path $startMenuDir "kettle.lnk"
-$uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\kettle"
-$portable = ($Prefix -ne (Join-Path $env:LOCALAPPDATA "Programs\kettle"))
 
 function Update-UserPath {
     param([string] $Dir, [switch] $Remove)
@@ -131,41 +153,37 @@ if ($Uninstall) {
     } else {
         Write-Output "  install dir already absent: $Prefix"
     }
-    if (Test-Path $shortcutPath) {
-        Remove-Item -Force $shortcutPath
-        Write-Output "  removed Start menu shortcut"
-    }
-    if (Test-Path $uninstallKey) {
-        Remove-Item -Recurse -Force $uninstallKey
-        Write-Output "  removed Add/Remove Programs entry"
-    }
     if (-not $portable) {
+        if (Test-Path $shortcutPath) {
+            Remove-Item -Force $shortcutPath
+            Write-Output "  removed Start menu shortcut"
+        }
+        if (Test-Path $uninstallKey) {
+            Remove-Item -Recurse -Force $uninstallKey
+            Write-Output "  removed Add/Remove Programs entry"
+        }
         if (Update-UserPath -Dir $Prefix -Remove) {
             Write-Output "  removed $Prefix from user PATH"
         }
-    }
-    # Cycle 736: also strip any -WithShellIntegration block we
-    # appended to $PROFILE. The install path wraps the snippet
-    # between explicit BEGIN/END marker lines (same pattern oh-my-posh,
-    # conda init, nvm, etc. use) so the uninstall can find + remove
-    # the exact block we added without touching surrounding user
-    # customization. Leaves the user's $PROFILE intact except for
-    # the marker-delimited region.
-    if (Test-Path $PROFILE) {
-        $content = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-        $beginMarker = '# >>> kettle shell-integration (managed by install.ps1)'
-        $endMarker   = '# <<< kettle shell-integration (managed by install.ps1)'
-        if ($content -and $content.Contains($beginMarker) -and $content.Contains($endMarker)) {
-            $startIdx = $content.IndexOf($beginMarker)
-            $endIdx   = $content.IndexOf($endMarker, $startIdx) + $endMarker.Length
-            $before = $content.Substring(0, $startIdx).TrimEnd()
-            $after  = $content.Substring($endIdx).TrimStart()
-            $newContent = if ($before -and $after) { "$before`r`n`r`n$after`r`n" }
-                          elseif ($before) { "$before`r`n" }
-                          elseif ($after) { $after }
-                          else { '' }
-            Set-Content -Path $PROFILE -Value $newContent -NoNewline
-            Write-Output "  removed kettle.ps1 snippet from `$PROFILE"
+        # Cycle 736: also strip any -WithShellIntegration block we
+        # appended to $PROFILE. Portable installs never add this block, so their
+        # uninstall path must not remove integration owned by a default install.
+        if (Test-Path $profilePath) {
+            $content = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+            $beginMarker = '# >>> kettle shell-integration (managed by install.ps1)'
+            $endMarker   = '# <<< kettle shell-integration (managed by install.ps1)'
+            if ($content -and $content.Contains($beginMarker) -and $content.Contains($endMarker)) {
+                $startIdx = $content.IndexOf($beginMarker)
+                $endIdx   = $content.IndexOf($endMarker, $startIdx) + $endMarker.Length
+                $before = $content.Substring(0, $startIdx).TrimEnd()
+                $after  = $content.Substring($endIdx).TrimStart()
+                $newContent = if ($before -and $after) { "$before`r`n`r`n$after`r`n" }
+                              elseif ($before) { "$before`r`n" }
+                              elseif ($after) { $after }
+                              else { '' }
+                Set-Content -Path $profilePath -Value $newContent -NoNewline
+                Write-Output "  removed kettle.ps1 snippet from `$PROFILE"
+            }
         }
     }
     Write-Output ""
@@ -256,8 +274,16 @@ if ($portable) {
 # Windows Search indexes it without admin.
 New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 $ws = New-Object -ComObject WScript.Shell
+# CreateShortcut opens an existing .lnk and preserves every property the caller
+# does not overwrite. Replace our managed shortcut so an older launcher's
+# arguments (for example, a PowerShell dev-record wrapper) cannot survive an
+# upgrade and be passed to kettle.exe.
+if (Test-Path -LiteralPath $shortcutPath) {
+    Remove-Item -LiteralPath $shortcutPath -Force
+}
 $lnk = $ws.CreateShortcut($shortcutPath)
 $lnk.TargetPath = Join-Path $Prefix "kettle.exe"
+$lnk.Arguments = ''
 $lnk.WorkingDirectory = $Prefix
 $lnk.IconLocation = Join-Path $Prefix "kettle.ico"
 $lnk.Description = "Fast, GPU-accelerated terminal emulator"
@@ -272,7 +298,9 @@ Write-Output "  created Start menu shortcut: $shortcutPath"
 # wrapped so a failure (older/newer Windows flag differences) never aborts the
 # install. A full rebuild (clear %LOCALAPPDATA%\IconCache.db + restart Explorer)
 # is only needed in the rare case this doesn't take.
-try { & (Join-Path $env:SystemRoot 'System32\ie4uinit.exe') -show 2>$null } catch {}
+if (-not $integrationTest) {
+    try { & (Join-Path $env:SystemRoot 'System32\ie4uinit.exe') -show 2>$null } catch {}
+}
 
 # Add/Remove Programs entry. Per-user (HKCU); no admin required.
 New-Item -Path $uninstallKey -Force | Out-Null
@@ -335,12 +363,12 @@ if ($WithShellIntegration) {
     if (-not (Test-Path $snippetSrc)) {
         Write-Output "  -WithShellIntegration: snippet not found at $snippetSrc (skipping)"
     } else {
-        if (-not (Test-Path $PROFILE)) {
-            $profileDir = Split-Path $PROFILE -Parent
+        if (-not (Test-Path $profilePath)) {
+            $profileDir = Split-Path $profilePath -Parent
             if (-not (Test-Path $profileDir)) {
                 New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
             }
-            New-Item -ItemType File -Force -Path $PROFILE | Out-Null
+            New-Item -ItemType File -Force -Path $profilePath | Out-Null
         }
         # Wrap the snippet in distinctive BEGIN/END markers so the
         # uninstall path can find + remove the exact block we added
@@ -348,7 +376,7 @@ if ($WithShellIntegration) {
         # the marker already exists in $PROFILE, skip the append.
         $beginMarker = '# >>> kettle shell-integration (managed by install.ps1)'
         $endMarker   = '# <<< kettle shell-integration (managed by install.ps1)'
-        $current = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+        $current = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
         if ($current -and $current.Contains($beginMarker)) {
             Write-Output "  -WithShellIntegration: snippet already in `$PROFILE (no change)"
         } else {
@@ -356,12 +384,12 @@ if ($WithShellIntegration) {
             # Prepend a blank-line separator for readability if the
             # profile already has content.
             if ($current -and $current.Trim().Length -gt 0) {
-                Add-Content $PROFILE "`r`n"
+                Add-Content $profilePath "`r`n"
             }
-            Add-Content $PROFILE $beginMarker
-            Add-Content $PROFILE $snippet
-            Add-Content $PROFILE $endMarker
-            Write-Output "  -WithShellIntegration: appended kettle.ps1 to `$PROFILE ($PROFILE)"
+            Add-Content $profilePath $beginMarker
+            Add-Content $profilePath $snippet
+            Add-Content $profilePath $endMarker
+            Write-Output "  -WithShellIntegration: appended kettle.ps1 to `$PROFILE ($profilePath)"
             Write-Output "    (open a fresh PowerShell session to pick up the prompt marks)"
         }
     }

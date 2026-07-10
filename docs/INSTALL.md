@@ -139,14 +139,17 @@ GitHub runners for every platform:
   The installer copies kettle into `%LOCALAPPDATA%\Programs\kettle`,
   creates a Start menu shortcut (so **Win-key → type "kettle"** finds
   it), adds it to your user PATH, and registers an Add/Remove
-  Programs entry. No admin / UAC prompt — everything is per-user.
+  Programs entry. Re-running the installer replaces its managed shortcut, so
+  obsolete launcher targets or arguments cannot survive an upgrade. No admin /
+  UAC prompt — everything is per-user.
   Uses ConPTY + your default shell (PowerShell/cmd) at runtime.
 
   Or if you'd rather skip the installer and keep it portable: just
   run `.\kettle.exe` from the extracted folder. Pass `-Prefix
   "D:\PortableApps\kettle"` to `install.ps1` for a portable install
   to a custom location (skips PATH + registry + Start menu — pure
-  copy).
+  copy). Its saved uninstaller removes only that custom prefix and leaves any
+  normal Kettle installation untouched.
 
   Uninstall later via Add/Remove Programs (`appwiz.cpl`), or
   `.\install.ps1 -Uninstall` from the install dir.
