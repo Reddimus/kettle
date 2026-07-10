@@ -182,7 +182,12 @@ Guarded by `selection_while_scrolled_reads_visible_row_not_active_screen`,
 `simple_drag_selection_while_scrolled_copies_visible_rows` (kettle-core) and the
 pure `viewport_point_to_grid_applies_display_offset` (kettle-ui). The same
 conversion now also feeds smart double-click selection and its grid-row text
-read, so word-select works while scrolled too.
+read, so word-select works while scrolled too. The live interaction harness
+also generates 140 numbered history lines and reproduces the complete
+Shift+Home → first-line click → Shift+End → Shift+click-last-character flow.
+It asserts the exact selected text through the additive `read_screen.selection`
+field and dispatches Copy. The test also guards that no-op action resizes do not
+erase the selection.
 
 **Agent/editor file links.** `links_with_cwd_detects_file_paths_without_splitting_urls`
 drives the same grid harness with Codex/Claude-style `path/to/file.rs:line:col`
@@ -214,11 +219,31 @@ writes — and feeds its `o` (output) events through the harness, asserting grid
 text + SGR state. A scrubbed recording of a real agent session can therefore be
 committed as a regression fixture and re-fed without a PTY or auth.
 
-**Windows Codex status cursor.** Native Windows Codex goes through ConPTY, which
-can report a visible cursor parked on Codex's model/status row after a full-screen
-repaint. `kettle-render` keeps the parsed cursor state intact but suppresses that
-renderer-only cursor artifact on Codex status rows. The scrubbed Codex/ConPTY
-replay fixture covers the draw decision without committing a private session.
+**Windows Codex footer cursor.** Native Windows Codex goes through ConPTY. Its
+active repaint can finish with a visible cursor on the status row and then move
+the cursor over the DIM empty composer placeholder in a separate PTY read.
+`kettle-render` keeps parsed visibility, shape, and blink state intact, but
+suppresses those two renderer-only artifacts when the surrounding active Codex
+footer proves the context. A non-DIM queued-input caret remains visible. A
+scrubbed two-read Codex/ConPTY replay and negative fixtures cover the policy
+without committing a private recording.
+
+**Synchronized-update timeout and PTY bounds.** The reader tests open a real DEC
+2026 synchronized update, omit its close sequence, wait through the parser's
+deadline, and assert one forced flush/wakeup. A split close sequence arriving
+before the deadline must not force-flush. A separate capacity assertion pins the
+four-slot PTY pump queue; recycled 64 KiB buffers bound flood memory instead of
+growing an unbounded channel. The raw-output sender tests separately prove a
+full best-effort plugin queue drops without blocking and a full lossless queue
+backpressures only until its receiver drains. `kettle exec` uses the latter with
+a four-slot queue.
+
+**Tracked-file ledger.** `just tracked-audit` walks `git ls-files --stage` and
+audits every entry for path/case collisions, index/worktree hashes, UTF-8 and LF
+hygiene, parseable TOML/JSON, local Markdown link targets, and bounded SFNT/PNG
+tables. It writes the full per-file SHA-256 ledger to
+`target/diagnostics/tracked-files-audit.json`. Add `--require-clean-index` when
+auditing a staged release tree.
 
 ## Manual / interactive checks
 
@@ -249,7 +274,8 @@ These need a real display and are run by hand (or on real hardware):
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
     grid-renderer Kettle window, drives a shell marker, a prompt-shaped `➜  ~`
-    marker, a deterministic Windows Codex status-row cursor fixture, optional
+    marker, deterministic Windows Codex active-placeholder and queued-input
+    cursor fixtures with cell-level pixel assertions, optional
     Codex/Claude CLI version probes plus `codex exec --help` /
     `claude --print --help` output captures, tmux attach/send/capture and a
     tmux-managed horizontal split workflow when `tmux` is installed,
@@ -262,13 +288,15 @@ These need a real display and are run by hand (or on real hardware):
     JSON, and matching cells JSON. When Neovim is present, it includes both
     `nvim-split-clean` and `nvim-split-configured` states.
     `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
-    authenticated `codex exec` / `claude --print` marker prompts inside the
-    Kettle pane and records `*-auth-session` probes. External auth failures are
+    serialized authenticated `codex exec` / `claude --print` marker prompts
+    inside the Kettle pane and records `*-auth-session` probes. The wait key is
+    the emitted `DONE:<exit-code>` token, not command-echo text. External auth failures are
     captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
     credentials should fail the run.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
-    mouse wheel movement, local selection drag, tab-bar `+` tab creation,
+    mouse wheel movement, local selection drag, the exact keyboard/Shift-click
+    whole-history selection workflow, tab-bar `+` tab creation,
     right-click context-menu opening, Settings modal open/close from that menu,
     context-menu `Split Right` dispatch, split-window resize, and Command
     palette opening from the new-tab dropdown through `kettle ctl`, plus Search

@@ -22,6 +22,50 @@ use crate::images::{
     relative_origin, resolve_chain,
 };
 
+const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
+const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+
+/// Delivery policy for the optional raw PTY-output side channel.
+///
+/// Plugins are allowed to drop chunks when their bounded queue is full. A
+/// recorder or `kettle exec` requires byte-for-byte output and therefore uses
+/// lossless delivery; a bounded receiver then applies backpressure before the
+/// terminal lock is acquired.
+pub enum PtyOutputSender {
+    BestEffort(crossbeam_channel::Sender<Vec<u8>>),
+    Lossless(crossbeam_channel::Sender<Vec<u8>>),
+}
+
+impl PtyOutputSender {
+    pub fn best_effort(sender: crossbeam_channel::Sender<Vec<u8>>) -> Self {
+        Self::BestEffort(sender)
+    }
+
+    pub fn lossless(sender: crossbeam_channel::Sender<Vec<u8>>) -> Self {
+        Self::Lossless(sender)
+    }
+
+    fn send(&self, chunk: Vec<u8>) {
+        match self {
+            Self::BestEffort(sender) => {
+                let _ = sender.try_send(chunk);
+            }
+            Self::Lossless(sender) => {
+                let _ = sender.send(chunk);
+            }
+        }
+    }
+}
+
+fn terminal_resize_changes(
+    current_grid: (usize, usize),
+    current_cell: (u16, u16),
+    next_grid: (usize, usize),
+    next_cell: (u16, u16),
+) -> (bool, bool) {
+    (current_grid != next_grid, current_cell != next_cell)
+}
+
 /// A `Write` sink that discards everything. Cycle 742: on `Terminal`
 /// teardown the PTY writer (the child's stdin / conin) is swapped for this
 /// so dropping the real writer closes the input handle immediately — an EOF
@@ -35,6 +79,36 @@ impl std::io::Write for NullWrite {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Receive one bounded pump chunk, force-ending a DEC 2026 synchronized
+/// update if its parser deadline expires while the PTY is otherwise idle.
+fn receive_pty_chunk(
+    processor: &mut Processor,
+    term: &SharedTerm,
+    raw_rx: &std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+    out_gen: &std::sync::atomic::AtomicU64,
+    waker: &Waker,
+) -> Option<Vec<u8>> {
+    loop {
+        match processor.sync_timeout().sync_timeout() {
+            Some(deadline) => {
+                let wait = deadline.saturating_duration_since(std::time::Instant::now());
+                match raw_rx.recv_timeout(wait) {
+                    Ok(chunk) => return chunk,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if let Ok(mut term) = term.lock() {
+                            processor.stop_sync(&mut *term);
+                        }
+                        out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+                        (waker)();
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                }
+            }
+            None => return raw_rx.recv().ok().flatten(),
+        }
     }
 }
 
@@ -258,6 +332,60 @@ fn find_on_path(exe: &str) -> Option<std::path::PathBuf> {
                 .map(|m| !m.is_dir())
                 .unwrap_or(false)
         })
+}
+
+/// `portable-pty` refreshes Windows' system/user registry environment after it
+/// snapshots the current process. That is useful for desktop launches, but it
+/// overwrites session-local values inherited from a shell (virtualenvs, package
+/// manager shims, and temporary PATH prefixes). Restore the actual parent
+/// environment, then append registry-only PATH entries behind the parent's
+/// ordering. Explicit Kettle config env is applied after this helper.
+#[cfg(windows)]
+fn overlay_windows_parent_env(
+    cmd: &mut CommandBuilder,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) {
+    let registry_path = cmd.get_env("PATH").map(std::ffi::OsStr::to_os_string);
+    let mut parent_path = None;
+    for (name, value) in parent {
+        if name.to_string_lossy().eq_ignore_ascii_case("PATH") {
+            parent_path = Some(value.clone());
+        }
+        cmd.env(name, value);
+    }
+    if let Some(path) = merge_windows_paths(parent_path.as_deref(), registry_path.as_deref()) {
+        cmd.env("PATH", path);
+    }
+}
+
+#[cfg(windows)]
+fn merge_windows_paths(
+    parent: Option<&std::ffi::OsStr>,
+    registry: Option<&std::ffi::OsStr>,
+) -> Option<std::ffi::OsString> {
+    use std::collections::HashSet;
+
+    let fallback = parent.or(registry).map(std::ffi::OsStr::to_os_string);
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for path in parent
+        .into_iter()
+        .chain(registry)
+        .flat_map(std::env::split_paths)
+    {
+        let mut key = path.to_string_lossy().replace('/', "\\").to_lowercase();
+        while key.len() > 3 && key.ends_with('\\') {
+            key.pop();
+        }
+        if !key.is_empty() && seen.insert(key) {
+            entries.push(path);
+        }
+    }
+    if entries.is_empty() {
+        fallback
+    } else {
+        std::env::join_paths(entries).ok().or(fallback)
+    }
 }
 
 /// Cycle 748: is `prog` the WSL launcher (`wsl` / `wsl.exe`, possibly given as
@@ -1041,7 +1169,7 @@ impl Terminal {
         shell_integration: bool,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
-        output_tx: Option<crossbeam_channel::Sender<Vec<u8>>>,
+        output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
         let pty = portable_pty::native_pty_system();
         // Cycle 760: clamp the same way `resize()` does. The raw casts
@@ -1091,6 +1219,8 @@ impl Terminal {
                 c
             }
         };
+        #[cfg(windows)]
+        overlay_windows_parent_env(&mut cmd, std::env::vars_os());
         // Apply user pane env before terminal identity env so `term` /
         // `colorterm` stay authoritative for those protocol-critical values.
         for (name, value) in extra_env {
@@ -1308,25 +1438,36 @@ impl Terminal {
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
-                    let mut buf = [0u8; 65536];
-                    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+                    // A blocking PTY read must remain on a pump thread so the
+                    // parser's DEC 2026 timeout can wake independently. Bound
+                    // the handoff and recycle buffers: under output flood this
+                    // applies backpressure instead of retaining an unbounded
+                    // queue of fresh 64 KiB allocations.
+                    let (raw_tx, raw_rx) =
+                        std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(PTY_PUMP_QUEUE_DEPTH);
+                    let (recycle_tx, recycle_rx) =
+                        std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
                     {
                         let pump_stop = stop.clone();
                         let _ = std::thread::Builder::new()
                             .name("kettle-pty-pump".into())
                             .spawn(move || {
-                                let mut rbuf = [0u8; 65536];
                                 loop {
                                     if pump_stop.load(Ordering::Relaxed) {
                                         break;
                                     }
-                                    match reader.read(&mut rbuf) {
+                                    let mut buffer = recycle_rx
+                                        .try_recv()
+                                        .unwrap_or_else(|_| vec![0; PTY_READ_BUFFER_BYTES]);
+                                    buffer.resize(PTY_READ_BUFFER_BYTES, 0);
+                                    match reader.read(&mut buffer) {
                                         Ok(0) | Err(_) => {
                                             let _ = raw_tx.send(None);
                                             break;
                                         }
                                         Ok(n) => {
-                                            if raw_tx.send(Some(rbuf[..n].to_vec())).is_err() {
+                                            buffer.truncate(n);
+                                            if raw_tx.send(Some(buffer)).is_err() {
                                                 break;
                                             }
                                         }
@@ -1339,48 +1480,18 @@ impl Terminal {
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        let read_result: std::io::Result<usize> = loop {
-                            match processor.sync_timeout().sync_timeout() {
-                                Some(deadline) => {
-                                    let wait = deadline
-                                        .saturating_duration_since(std::time::Instant::now());
-                                    match raw_rx.recv_timeout(wait) {
-                                        Ok(Some(bytes)) => {
-                                            let n = bytes.len().min(buf.len());
-                                            buf[..n].copy_from_slice(&bytes[..n]);
-                                            break Ok(n);
-                                        }
-                                        Ok(None) => break Ok(0),
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                            if let Ok(mut t) = term.lock() {
-                                                processor.stop_sync(&mut *t);
-                                            }
-                                            out_gen_reader
-                                                .fetch_add(1, std::sync::atomic::Ordering::Release);
-                                            (waker)();
-                                            continue;
-                                        }
-                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                            break Ok(0);
-                                        }
-                                    }
-                                }
-                                None => match raw_rx.recv() {
-                                    Ok(Some(bytes)) => {
-                                        let n = bytes.len().min(buf.len());
-                                        buf[..n].copy_from_slice(&bytes[..n]);
-                                        break Ok(n);
-                                    }
-                                    Ok(None) | Err(_) => break Ok(0),
-                                },
-                            }
-                        };
-                        match read_result {
-                            Ok(0) | Err(_) => {
+                        match receive_pty_chunk(
+                            &mut processor,
+                            &term,
+                            &raw_rx,
+                            &out_gen_reader,
+                            &waker,
+                        ) {
+                            None => {
                                 proxy.send_event_exit();
                                 break;
                             }
-                            Ok(n) => {
+                            Some(buffer) => {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
@@ -1398,26 +1509,23 @@ impl Terminal {
                                     use std::io::Write as _;
                                     let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
                                     if strip {
-                                        let cleaned = strip_ansi_bytes(&buf[..n]);
+                                        let cleaned = strip_ansi_bytes(&buffer);
                                         let _ = f.write_all(&cleaned);
                                     } else {
-                                        let _ = f.write_all(&buf[..n]);
+                                        let _ = f.write_all(&buffer);
                                     }
                                 }
                                 // Cycle 378: ship raw PTY bytes to the
                                 // App via the output_tx sidechannel
                                 // (if any plugin subscriber is listening).
                                 // Skips the alloc entirely when no
-                                // subscriber. send-or-drop on a full
-                                // channel — slow plugins shouldn't
-                                // back-pressure the PTY reader.
+                                // subscriber. The sender's explicit policy
+                                // determines whether a full queue drops this
+                                // chunk or applies lossless backpressure.
                                 if let Some(tx) = &output_tx {
-                                    // Drop on full channel — slow
-                                    // plugins shouldn't back-pressure
-                                    // the PTY reader.
-                                    let _ = tx.try_send(buf[..n].to_vec());
+                                    tx.send(buffer.clone());
                                 }
-                                for chunk in extractor.feed(&buf[..n]) {
+                                for chunk in extractor.feed(&buffer) {
                                     match chunk {
                                         Chunk::Pass(bytes) => {
                                             if let Ok(mut t) = term.lock() {
@@ -1650,6 +1758,7 @@ impl Terminal {
                                         }
                                     }
                                 }
+                                let _ = recycle_tx.try_send(buffer);
                                 // C4: bump BEFORE the wakeup so the UI's
                                 // generation check (Acquire) observes this
                                 // read's output when the wakeup lands.
@@ -2089,20 +2198,31 @@ impl Terminal {
         if cols == 0 || rows == 0 {
             return;
         }
+        let next_cell = (cell_w.max(1), cell_h.max(1));
+        let current_cell = self.cell_px.lock().map(|cell| *cell).unwrap_or((0, 0));
+        let (grid_changed, cell_changed) = terminal_resize_changes(
+            (self.cols, self.rows),
+            current_cell,
+            (cols, rows),
+            next_cell,
+        );
+        if !grid_changed && !cell_changed {
+            return;
+        }
         self.cols = cols;
         self.rows = rows;
         if let Some(master) = self.master.as_ref() {
             let _ = master.resize(PtySize {
                 rows: clamp_pty_dim(1, rows),
                 cols: clamp_pty_dim(1, cols),
-                pixel_width: clamp_pty_dim(cell_w, cols),
-                pixel_height: clamp_pty_dim(cell_h, rows),
+                pixel_width: clamp_pty_dim(next_cell.0, cols),
+                pixel_height: clamp_pty_dim(next_cell.1, rows),
             });
         }
         if let Ok(mut p) = self.cell_px.lock() {
-            *p = (cell_w.max(1), cell_h.max(1));
+            *p = next_cell;
         }
-        if let Ok(mut t) = self.term.lock() {
+        if grid_changed && let Ok(mut t) = self.term.lock() {
             t.resize(TermSize {
                 columns: cols,
                 screen_lines: rows,
@@ -4585,7 +4705,7 @@ mod teardown_tests {
             true, // shell_integration → inject for pwsh
             tx,
             waker,
-            Some(otx),
+            Some(PtyOutputSender::best_effort(otx)),
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -4795,8 +4915,10 @@ mod login_flag_tests {
 mod default_shell_tests {
     use super::{
         POWERSHELL_INTEGRATION, base64_standard, encode_utf16le_base64, is_powershell,
-        pick_windows_default_shell,
+        merge_windows_paths, overlay_windows_parent_env, pick_windows_default_shell,
     };
+    use portable_pty::CommandBuilder;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
 
     const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
@@ -4872,6 +4994,50 @@ mod default_shell_tests {
     fn none_when_neither_present() {
         assert_eq!(pick_windows_default_shell(|_| None), None);
     }
+
+    #[test]
+    fn parent_path_stays_first_and_registry_only_entries_are_retained() {
+        let merged = merge_windows_paths(
+            Some(OsStr::new(r"C:\runtime;C:\Shared")),
+            Some(OsStr::new(r"C:\registry;C:\shared\")),
+        )
+        .unwrap();
+        let entries: Vec<_> = std::env::split_paths(&merged).collect();
+        assert_eq!(
+            entries,
+            [r"C:\runtime", r"C:\Shared", r"C:\registry"].map(std::path::PathBuf::from)
+        );
+        assert_eq!(merge_windows_paths(None, None), None);
+    }
+
+    #[test]
+    fn parent_environment_overrides_portable_pty_registry_values() {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env("PATH", r"C:\registry;C:\shared");
+        cmd.env("KETTLE_PARENT_TEST", "registry");
+        overlay_windows_parent_env(
+            &mut cmd,
+            [
+                (
+                    OsString::from("Path"),
+                    OsString::from(r"C:\runtime;C:\shared"),
+                ),
+                (
+                    OsString::from("KETTLE_PARENT_TEST"),
+                    OsString::from("runtime"),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            cmd.get_env("KETTLE_PARENT_TEST"),
+            Some(OsStr::new("runtime"))
+        );
+        assert_eq!(
+            cmd.get_env("PATH"),
+            Some(OsStr::new(r"C:\runtime;C:\shared;C:\registry"))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4909,7 +5075,7 @@ mod wsl_launcher_tests {
 
 #[cfg(test)]
 mod pty_dim_tests {
-    use super::clamp_pty_dim;
+    use super::{clamp_pty_dim, terminal_resize_changes};
 
     #[test]
     fn ordinary_sizes_pass_through() {
@@ -4936,28 +5102,169 @@ mod pty_dim_tests {
         assert_eq!(clamp_pty_dim(0, 80), 0);
         assert_eq!(clamp_pty_dim(8, 0), 0);
     }
+
+    #[test]
+    fn no_op_and_pixel_only_resizes_do_not_touch_the_grid() {
+        assert_eq!(
+            terminal_resize_changes((120, 40), (8, 16), (120, 40), (8, 16)),
+            (false, false)
+        );
+        assert_eq!(
+            terminal_resize_changes((120, 40), (8, 16), (120, 40), (10, 20)),
+            (false, true)
+        );
+        assert_eq!(
+            terminal_resize_changes((120, 40), (8, 16), (121, 40), (8, 16)),
+            (true, false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod output_sender_tests {
+    use std::time::Duration;
+
+    use super::PtyOutputSender;
+
+    #[test]
+    fn best_effort_delivery_drops_when_its_bounded_queue_is_full() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let output = PtyOutputSender::best_effort(tx);
+        output.send(vec![1]);
+        output.send(vec![2]);
+
+        assert_eq!(rx.recv().unwrap(), vec![1]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn lossless_delivery_backpressures_until_the_receiver_drains() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let output = PtyOutputSender::lossless(tx);
+        output.send(vec![1]);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            output.send(vec![2]);
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(rx.recv().unwrap(), vec![1]);
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(rx.recv().unwrap(), vec![2]);
+        sender.join().unwrap();
+    }
 }
 
 #[cfg(test)]
 mod sync_update_flush_guard {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use alacritty_terminal::Term;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    use super::{PTY_PUMP_QUEUE_DEPTH, SharedTerm, receive_pty_chunk};
+    use crate::{EventProxy, Waker};
+
+    struct Size;
+
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            4
+        }
+
+        fn screen_lines(&self) -> usize {
+            4
+        }
+
+        fn columns(&self) -> usize {
+            40
+        }
+    }
+
+    fn shared_term() -> SharedTerm {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        Arc::new(std::sync::Mutex::new(Term::new(
+            TermConfig::default(),
+            &Size,
+            proxy,
+        )))
+    }
+
     #[test]
-    fn reader_force_flushes_pending_sync_update() {
-        let src = include_str!("term.rs").replace("\r\n", "\n");
-        let start = src
-            .find("let reader_thread = {")
-            .expect("reader_thread present");
-        let body = &src[start..start + 6500];
-        assert!(
-            body.contains("processor.sync_timeout().sync_timeout()"),
-            "reader must consult the synchronized-update deadline"
+    fn omitted_sync_terminator_flushes_and_wakes_at_deadline() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hstale bottom text");
+        }
+        let deadline = processor
+            .sync_timeout()
+            .sync_timeout()
+            .expect("DEC 2026 opened a synchronized update");
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let delay = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .saturating_add(std::time::Duration::from_millis(20));
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            tx.send(None).unwrap();
+        });
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker).is_none());
+        sender.join().unwrap();
+        assert!(processor.sync_timeout().sync_timeout().is_none());
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            term.lock().unwrap().grid()[Point::new(Line(1), Column(2))].c,
+            's'
         );
-        assert!(
-            body.contains("recv_timeout"),
-            "reader must bound its wait on the sync deadline"
-        );
-        assert!(
-            body.contains("processor.stop_sync(&mut *t)"),
-            "reader must force-flush the buffered sync update on timeout"
-        );
+    }
+
+    #[test]
+    fn split_sync_terminator_arriving_before_deadline_does_not_force_flush() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hupdated");
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        tx.send(Some(b"\x1b[?2026l".to_vec())).unwrap();
+        let generation = AtomicU64::new(0);
+        let waker: Waker = Arc::new(|| panic!("no timeout wake expected"));
+
+        let close = receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker)
+            .expect("close sequence received");
+        processor.advance(&mut *term.lock().unwrap(), &close);
+
+        assert!(processor.sync_timeout().sync_timeout().is_none());
+        assert_eq!(generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn pty_pump_queue_has_a_hard_capacity() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        for _ in 0..PTY_PUMP_QUEUE_DEPTH {
+            tx.try_send(Some(vec![0; 1])).unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(Some(vec![0; 1])),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
     }
 }

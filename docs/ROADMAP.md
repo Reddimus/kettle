@@ -1437,9 +1437,12 @@ features list. What's left is genuinely-multi-week threads + polish.
       pixels survive a block-cursor blink. The Ubuntu live smoke passed on
       2026-06-18 against `kettle 2.25.1 (5596f3aabbb7)`: 6 frames, worst
       blink pair changed 128 pixels in an 8x16 cursor-sized box, and frame ink
-      stayed nonblank. Remaining work: run the live smoke on the Windows 11 /
-      Windows 11 WSL paths before changing renderer defaults again, and keep
-      adding fixtures when a new prompt shape exposes a renderer edge case.
+      stayed nonblank. Native Windows grid/cursor pixels passed on 2026-07-09 in
+      `interaction-20260709-175310`, including the current Codex active
+      placeholder (zero cursor pixels) and queued input (visible caret).
+      Remaining work: run the dedicated live-render recipe in Windows 11 WSL
+      before changing renderer defaults again, and keep adding fixtures when a
+      new prompt shape exposes a renderer edge case.
 - [ ] **Tab click and underline-scroll diagnostics.** `just tabbar-click-smoke`
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag
@@ -1460,10 +1463,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       underline pixels are present on the same rows as the `read_cells`
       underlined sentinel text and absent from neighboring plain sentinel rows,
       using the renderer's reported cell metrics rather than deriving row height
-      from the full screenshot. Native Windows recipes now run the Python stdlib driver
-      (`scripts/check-live-ui-smoke.py`); WSL uses the Unix shell scripts.
-      Remaining work: run both diagnostics on native Windows 11 and Windows 11
-      WSL hardware.
+      from the full screenshot. Native Windows recipes now run the Python stdlib
+      driver (`scripts/check-live-ui-smoke.py`); WSL uses the Unix shell scripts.
+      The tab-click recipe passed on native Windows on 2026-07-09. After adding
+      `git-delta` 0.19.2 and Git for Windows' `less`, the underline recipe also
+      passed all eight down/up frames in `underline-scroll-20260709-175218`,
+      including SGR, URL, POSIX-relative-path, and Windows-path pixel alignment.
+      Remaining work: run both diagnostics in Windows 11 WSL.
 - [ ] **Interactive agent/TUI validation sweep.** The noninteractive smoke
       covers `kettle exec`, MCP self-test, Codex CLI, Claude Code CLI, clean
       Neovim, and configured Neovim/AstroNvim command paths. `just
@@ -1504,9 +1510,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       Codex version/help/auth, Claude version/help, tmux attach/split, clean
       Neovim marker/split, and configured Neovim/AstroNvim marker/split all
       passed; only the real Claude provider call remained `auth_failed`.
-      Remaining work is deeper live-window validation: restore/prove Claude credentials,
-      configured AstroNvim workflows beyond marker and split buffers, tmux
-      workflows beyond attach/send/split, Windows/WSL runs, and richer
+      Native Windows was refreshed on 2026-07-09 in
+      `target/diagnostics/agent-tui-20260709-175227`: shell/prompt fixtures,
+      Codex and Claude version/help, both minimal authenticated provider calls,
+      and clean/configured Neovim marker/split workflows passed. tmux was not on
+      native PATH. Remaining work is deeper live-window validation: configured
+      AstroNvim workflows beyond marker and split buffers, tmux workflows
+      beyond attach/send/split, Windows 11 WSL runs, and richer
       screenshot-state comparisons inside Kettle with `text-renderer = grid`.
       Use `send_mouse`, `send_keys`, `perform_action`, `ui_geometry`,
       `read_cells`, and `screenshot` so the pass is reproducible instead of a
@@ -1543,10 +1553,13 @@ features list. What's left is genuinely-multi-week threads + polish.
       then continue glyph-atlas bounds and GPU buffer residency.
 - [ ] **Cross-platform release validation gap.** CI now proves Linux, macOS,
       Windows, MSRV, nightly, aarch64 build, package templates, screenshot
-      smokes, and CLI smokes, but the durable release gate still needs manual
-      Windows 11 and Windows 11 WSL interactive passes on real desktops,
-      including integrated-GPU default selection (`gpu-power-preference = auto`)
-      and multi-shell launch behavior.
+      smokes, and CLI smokes. A native Windows 11 interactive pass completed on
+      2026-07-09: the aggregate tab/title/split/zoom, authenticated agent/TUI,
+      and interaction suites passed; `--gpu-info` reported the NVIDIA RTX 2080,
+      and an isolated `gpu-force-software = true` run selected Microsoft Basic
+      Render Driver and rendered a controllable nonblank live window. The
+      durable release gate still needs the equivalent Windows 11 WSL desktop
+      pass and integrated-GPU auto-selection evidence on dual-GPU hardware.
       Ubuntu release-gate evidence was refreshed on 2026-06-18 against
       `kettle 2.25.1 (09cab88fc36d)`: `just gauntlet` passed (fmt, clippy,
       build-all-targets, workspace tests, and rustdoc), `cargo deny check`
@@ -1564,9 +1577,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       nightly early-warning, and aarch64 early-warning all passed. The Windows
       leg included release-profile build + piped `--version` CLI smoke and
       `scripts/check-windows-installer.ps1`; macOS and Ubuntu included their
-      platform build/test/package-smoke paths. This is CI evidence only; it
-      still does not replace manual Windows 11 / Windows 11 WSL interactive
-      desktop validation.
+      platform build/test/package-smoke paths. This CI evidence now complements
+      the native Windows pass above but still does not replace Windows 11 WSL
+      interactive desktop validation.
 - [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
       Keybinds category lists each action's current chord; Enter captures a new
       chord, binds it live, and appends a `keybind` line (via

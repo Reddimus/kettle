@@ -561,6 +561,16 @@ pub struct GpuContext {
     /// rather than spin or crash. Reset by rebuilding the renderer on a fresh
     /// context.
     pub gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// First fatal wgpu error for this device. Error callbacks only latch this
+    /// bounded in-memory value; the UI thread owns durable diagnostics so a
+    /// driver callback never blocks on filesystem I/O.
+    gpu_fault: std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuFault {
+    pub kind: String,
+    pub message: String,
 }
 
 impl GpuContext {
@@ -568,7 +578,16 @@ impl GpuContext {
     /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
     /// succeed against this context.
     pub fn is_lost(&self) -> bool {
-        self.gpu_lost.load(std::sync::atomic::Ordering::Relaxed)
+        self.gpu_lost.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Return the first fatal error reported for this device. The value stays
+    /// available throughout recovery and is reset with a new [`GpuContext`].
+    pub fn fault(&self) -> Option<GpuFault> {
+        self.gpu_fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn is_software(&self) -> bool {
@@ -593,9 +612,10 @@ impl GpuContext {
 fn install_gpu_error_handlers(
     device: &wgpu::Device,
     gpu_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_fault: &std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
 ) {
-    use std::sync::atomic::Ordering;
     let flag = gpu_lost.clone();
+    let fault = gpu_fault.clone();
     // The uncaptured-error path catches errors NOT routed to an error scope.
     // NOTE (adversarial review): in wgpu 29 a genuine DEVICE-LOSS is delivered
     // via `set_device_lost_callback` below, NOT here — this handler only ever
@@ -610,20 +630,53 @@ fn install_gpu_error_handlers(
         wgpu::Error::Validation { .. } => {
             log::error!("wgpu validation error (a kettle bug, NOT device loss): {e}");
         }
-        _ => {
-            log::error!("wgpu fatal GPU error (out of memory / internal): {e}");
-            flag.store(true, Ordering::Relaxed);
+        wgpu::Error::OutOfMemory { .. } => {
+            log::error!("wgpu fatal GPU error (out of memory): {e}");
+            latch_gpu_fault(&flag, &fault, "out_of_memory", e.to_string());
+        }
+        wgpu::Error::Internal { .. } => {
+            log::error!("wgpu fatal GPU error (internal): {e}");
+            latch_gpu_fault(&flag, &fault, "internal", e.to_string());
         }
     }));
     let flag2 = gpu_lost.clone();
+    let fault2 = gpu_fault.clone();
     device.set_device_lost_callback(move |reason, msg| {
         // `Destroyed` fires on our own clean shutdown (`device.destroy()` at drop)
         // — that is not a crash. Only an `Unknown` loss (driver TDR/reset) flags.
         if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
             log::error!("wgpu device lost ({reason:?}): {msg}");
-            flag2.store(true, Ordering::Relaxed);
+            latch_gpu_fault(&flag2, &fault2, "device_lost", msg);
         }
     });
+}
+
+fn latch_gpu_fault(
+    gpu_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_fault: &std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
+    kind: &str,
+    message: String,
+) {
+    let mut fault = gpu_fault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fault.is_none() {
+        *fault = Some(GpuFault {
+            kind: kind.to_string(),
+            message: bounded_gpu_message(&message),
+        });
+    }
+    drop(fault);
+    gpu_lost.store(true, std::sync::atomic::Ordering::Release);
+}
+
+fn bounded_gpu_message(message: &str) -> String {
+    const MAX_CHARS: usize = 2048;
+    let mut out = String::with_capacity(message.len().min(MAX_CHARS));
+    for ch in message.chars().take(MAX_CHARS) {
+        out.push(if ch.is_control() { ' ' } else { ch });
+    }
+    out
 }
 
 impl GpuContext {
@@ -1040,13 +1093,15 @@ impl Renderer {
         // observable event instead of wgpu's default panic (which `panic=abort`
         // turned into a hard crash). Installed once on the shared device.
         let gpu_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        install_gpu_error_handlers(&device, &gpu_lost);
+        let gpu_fault = std::sync::Arc::new(std::sync::Mutex::new(None));
+        install_gpu_error_handlers(&device, &gpu_lost, &gpu_fault);
         let gpu = GpuContext {
             instance,
             adapter,
             device,
             queue,
             gpu_lost,
+            gpu_fault,
         };
         Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg)
     }
@@ -5425,6 +5480,66 @@ async fn resolve_adapter(
     request_adapter_or_fallback(instance, &opts, context).await
 }
 
+/// Resolve the configured adapter policy without a presentation surface.
+/// `--gpu-info` uses this path so it can mirror a live window's software,
+/// pinned-adapter, and power-preference choices without creating a window.
+async fn resolve_headless_adapter(
+    instance: &wgpu::Instance,
+    cfg: &Config,
+    context: &str,
+) -> Result<wgpu::Adapter> {
+    if cfg.gpu_force_software {
+        return instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: power_preference_of(cfg.gpu_power_preference),
+                compatible_surface: None,
+                force_fallback_adapter: true,
+            })
+            .await
+            .map_err(|e| anyhow!("{context}: software adapter unavailable: {e:?}"));
+    }
+
+    let pinned =
+        (cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0) || !cfg.gpu_name.trim().is_empty();
+    if pinned {
+        let cands = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        let infos: Vec<wgpu::AdapterInfo> = cands.iter().map(wgpu::Adapter::get_info).collect();
+        let infos_t: Vec<(u32, u32, &str, &str)> = infos
+            .iter()
+            .map(|i| (i.vendor, i.device, backend_str(i.backend), i.name.as_str()))
+            .collect();
+        if let Some(idx) = pick_pinned_adapter(
+            &infos_t,
+            cfg.gpu_vendor_id,
+            cfg.gpu_device_id,
+            config_backend_str(cfg.gpu_backend),
+            cfg.gpu_name.trim(),
+        ) {
+            let mut cands = cands;
+            return Ok(cands.swap_remove(idx));
+        }
+        log::warn!(
+            "{context}: pinned GPU (vendor={:#06x} device={:#06x} name={:?}) not found among \
+             {} adapter(s); falling back to gpu-power-preference",
+            cfg.gpu_vendor_id,
+            cfg.gpu_device_id,
+            cfg.gpu_name,
+            cands.len()
+        );
+    }
+
+    request_adapter_or_fallback(
+        instance,
+        &wgpu::RequestAdapterOptions {
+            power_preference: power_preference_of(cfg.gpu_power_preference),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        },
+        context,
+    )
+    .await
+}
+
 /// Cycle 756: number of header display-lines before the field rows in the
 /// settings panel (title, category tabs, blank). The focused-row highlight
 /// quad and the per-line text areas both index off this.
@@ -6263,30 +6378,19 @@ pub fn capture_png(
 }
 
 /// Resolve the wgpu adapter kettle would use on this machine and
-/// return a human-readable diagnostic string. Same setup as
-/// [`capture_png_with`] — `wgpu::Instance::default()` + a default
-/// `RequestAdapterOptions` — so the reported adapter is what the
-/// live renderer / `--screenshot` / `--screenshot-menu` paths would
-/// pick on this host.
+/// return a human-readable diagnostic string. It uses the live renderer's
+/// configured adapter policy, except no presentation surface is required
+/// because this path does not create a window.
 ///
 /// Used by `kettle --gpu-info` so a user filing a "blank window" /
 /// "no GPU adapter" bug report can attach the adapter / backend /
 /// driver / texture-limit details without a windowed run. The same
 /// answer would otherwise require launching the binary, hitting the
 /// failure mode, and digging through `RUST_LOG=info` output.
-pub fn gpu_info() -> Result<String> {
+pub fn gpu_info(cfg: &Config) -> Result<String> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
-        let adapter = request_adapter_or_fallback(
-            &instance,
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::None,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            },
-            "gpu_info",
-        )
-        .await?;
+        let adapter = resolve_headless_adapter(&instance, cfg, "gpu_info").await?;
         let info = adapter.get_info();
         let limits = adapter.limits();
         Ok(format!(
@@ -9458,5 +9562,22 @@ mod glyph_cell_lock_tests {
             super::escalation_for_attempt(99),
             super::AdapterEscalation::ForceSoftware
         );
+    }
+
+    #[test]
+    fn gpu_fault_latch_keeps_first_error_and_bounds_message() {
+        let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fault = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let long = format!("first\n{}", "x".repeat(3000));
+
+        super::latch_gpu_fault(&lost, &fault, "device_lost", long);
+        super::latch_gpu_fault(&lost, &fault, "internal", "second".to_string());
+
+        assert!(lost.load(std::sync::atomic::Ordering::Acquire));
+        let actual = fault.lock().unwrap().clone().expect("fault latched");
+        assert_eq!(actual.kind, "device_lost");
+        assert!(!actual.message.contains('\n'));
+        assert_eq!(actual.message.chars().count(), 2048);
+        assert!(!actual.message.contains("second"));
     }
 }

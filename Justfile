@@ -100,6 +100,17 @@ deny:
 machete:
     cargo machete
 
+# Audit every Git-tracked path: index/worktree object identity, path/case
+# uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
+# bounds. The JSON ledger is written under ignored target/diagnostics.
+[unix]
+tracked-audit:
+    python3 scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
+
+[windows]
+tracked-audit:
+    python scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
+
 # Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
 # open, and should print the "remove ignores" instruction once upstream makes
 # `ttf-parser` disappear from the tree.
@@ -139,7 +150,7 @@ gauntlet:
 # changes). Run `just gauntlet-strict` before a release-cut so all
 # CI gates pass locally first. Requires `cargo install cargo-deny
 # cargo-machete` (one-time).
-gauntlet-strict: gauntlet deny machete
+gauntlet-strict: gauntlet deny machete tracked-audit
     @echo ""
     @echo "STRICT GAUNTLET PASSED — every CI workflow green locally."
 

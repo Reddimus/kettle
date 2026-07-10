@@ -20,6 +20,7 @@ use winit::window::{
     CursorIcon, Fullscreen, Theme as WindowTheme, UserAttentionType, Window, WindowId,
 };
 
+use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
 use crate::window_state::WindowState;
@@ -53,6 +54,33 @@ struct PendingRun {
     reply: crate::ctl_server::ReplyTx,
 }
 
+struct GpuRecoveryOutcome {
+    adapter: kettle_render::GpuAdapterInfo,
+    secondary_window_failures: usize,
+}
+
+type RecoveryBuilds<T> = Vec<(u64, T)>;
+type RecoveryBuildErrors<E> = Vec<(u64, E)>;
+
+fn build_recovery_set<T, O, E>(
+    targets: impl IntoIterator<Item = (u64, T)>,
+    mut build: impl FnMut(T) -> std::result::Result<O, E>,
+) -> std::result::Result<RecoveryBuilds<O>, RecoveryBuildErrors<E>> {
+    let mut built = Vec::new();
+    let mut errors = Vec::new();
+    for (seq, target) in targets {
+        match build(target) {
+            Ok(output) => built.push((seq, output)),
+            Err(error) => errors.push((seq, error)),
+        }
+    }
+    if errors.is_empty() {
+        Ok(built)
+    } else {
+        Err(errors)
+    }
+}
+
 /// Cycle 904 (audit): grab tolerance (px) for the thin split divider line, so
 /// it's easy to hit with the mouse without pixel-perfect aim.
 const SPLIT_SEAM_TOL: f32 = 5.0;
@@ -67,6 +95,19 @@ const CELL_FLAG_ALL_UNDERLINES: u16 = CELL_FLAG_UNDERLINE
     | CELL_FLAG_UNDERCURL
     | CELL_FLAG_DOTTED_UNDERLINE
     | CELL_FLAG_DASHED_UNDERLINE;
+const MAX_CTL_SELECTION_BYTES: usize = 256 * 1024;
+
+fn cap_ctl_selection(mut text: String) -> (String, bool) {
+    if text.len() <= MAX_CTL_SELECTION_BYTES {
+        return (text, false);
+    }
+    let mut end = MAX_CTL_SELECTION_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    (text, true)
+}
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
@@ -2606,10 +2647,12 @@ pub struct App {
     /// frame) and cached for the session; `categories()` reads it. Empty until
     /// the overlay is first opened (the picker then shows just "Automatic").
     gpu_choices: Vec<(String, String)>,
-    /// Consecutive renderer rebuild attempts after a GPU device loss.
-    gpu_recovery_attempts: u32,
-    /// Next time a renderer rebuild should be attempted after device loss.
-    gpu_recovery_next_at: Option<std::time::Instant>,
+    /// Pure settle/backoff state after a GPU device loss.
+    gpu_recovery: RecoveryState,
+    /// Fault-only local record for the current device-loss incident.
+    gpu_incident: Option<IncidentLog>,
+    /// Prevent repeated filesystem attempts if diagnostics cannot be created.
+    gpu_incident_started_for_loss: bool,
     /// True once recovery had to fall back to software rendering.
     gpu_software_fallback: bool,
     /// v2.34.0: the last native window-theme hint pushed to every window via
@@ -2657,15 +2700,18 @@ pub struct App {
     /// construction (and after live reload). Invalid patterns are logged via
     /// `log::warn!` and dropped.
     compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
-    /// Cycle 290: per-trigger last-fire timestamps. Dedupes a fast-arriving
-    /// match flood; cleared when any trigger fires past a 2-second window.
-    last_trigger_fire: std::time::Instant,
+    /// Cycle 290: last trigger fire, or `None` before the first fire / after a
+    /// config reload. Dedupes a fast-arriving match flood without fabricating
+    /// an `Instant` before the OS monotonic clock's origin.
+    last_trigger_fire: Option<std::time::Instant>,
     /// Cycle 656/851: shared snapshot scanner — refreshes the OS process list
     /// and parent→children index once per poll tick, then answers every pane
     /// from it. Used by the per-pane remote-session detector.
     remote_scanner: kettle_remote::RemoteScanner,
-    /// Cycle 656: throttle the remote-detect poll to ~5 Hz.
-    last_remote_poll: std::time::Instant,
+    /// Cycle 656: throttle the remote-detect poll to ~5 Hz. `None` makes the
+    /// first poll immediately eligible, including during the first minute
+    /// after Windows boots.
+    last_remote_poll: Option<std::time::Instant>,
     /// Cycle 666: the most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
@@ -3083,8 +3129,9 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             gpu_choices: Vec::new(),
-            gpu_recovery_attempts: 0,
-            gpu_recovery_next_at: None,
+            gpu_recovery: RecoveryState::default(),
+            gpu_incident: None,
+            gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
             native_theme_synced: None,
             pending_window_close: false,
@@ -3115,9 +3162,9 @@ impl App {
                 }
             },
             compiled_triggers: initial_triggers,
-            last_trigger_fire: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            last_trigger_fire: None,
             remote_scanner: kettle_remote::RemoteScanner::new(),
-            last_remote_poll: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            last_remote_poll: None,
             last_schedule_decision: None,
             config_path: startup.config.clone(),
             startup,
@@ -5056,16 +5103,42 @@ impl App {
         }
     }
 
-    fn try_recover_gpu(&mut self, ws: &mut WindowState) -> bool {
-        let Some(window) = ws.window.clone() else {
-            return false;
+    fn start_gpu_incident_if_needed(&mut self) {
+        if self.gpu_incident_started_for_loss {
+            return;
+        }
+        self.gpu_incident_started_for_loss = true;
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
         };
-        let escalation = kettle_render::escalation_for_attempt(self.gpu_recovery_attempts);
+        let cache = cache_dir_from_env(|key| std::env::var(key).ok());
+        match IncidentLog::start(
+            cache.as_deref(),
+            &self.version_line,
+            gpu.adapter_info(),
+            gpu.fault(),
+        ) {
+            Ok(log) => {
+                log::warn!("GPU fault diagnostics: {}", log.path().display());
+                self.gpu_incident = Some(log);
+            }
+            Err(error) => {
+                log::warn!("GPU fault diagnostics unavailable: {error}");
+            }
+        }
+    }
+
+    fn try_recover_gpu(
+        &mut self,
+        ws: &mut WindowState,
+        escalation: kettle_render::AdapterEscalation,
+        attempt: u32,
+    ) -> Result<GpuRecoveryOutcome, String> {
+        let Some(window) = ws.window.clone() else {
+            return Err("primary window is unavailable".to_string());
+        };
         let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_ids());
-        log::warn!(
-            "GPU recovery attempt {} ({escalation:?})",
-            self.gpu_recovery_attempts + 1
-        );
+        log::warn!("GPU recovery attempt {attempt} ({escalation:?})");
 
         ws.renderer = None;
         for other in self.windows.values_mut() {
@@ -5087,39 +5160,59 @@ impl App {
             Ok(renderer) => renderer,
             Err(err) => {
                 log::error!("GPU recovery: renderer rebuild failed: {err}");
-                return false;
+                return Err(err.to_string());
             }
         };
         let new_gpu = new_renderer.gpu().clone();
+        let targets = self.windows.values().filter_map(|other| {
+            let window = other.window.clone()?;
+            let size = window.inner_size();
+            let scale = window.scale_factor() as f32;
+            Some((other.seq, (window, size, scale)))
+        });
+        let secondary_renderers = build_recovery_set(targets, |(window, size, scale)| {
+            kettle_render::Renderer::new_with_gpu(
+                &new_gpu,
+                window,
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &cfg,
+            )
+        })
+        .map_err(|errors| {
+            for (seq, error) in &errors {
+                log::error!(
+                    "GPU recovery: window {seq} could not rebind to the new device: {error}"
+                );
+            }
+            format!(
+                "{} secondary window renderer(s) could not rebind: {}",
+                errors.len(),
+                errors
+                    .into_iter()
+                    .map(|(seq, error)| format!("window {seq}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+
+        // Commit the replacement only after every live window can present on
+        // the candidate adapter. A partial commit would leave some windows
+        // permanently blank and stop the escalation loop on a "success".
+        ws.renderer = Some(new_renderer);
+        for (seq, renderer) in secondary_renderers {
+            if let Some(other) = self.windows.get_mut(&seq) {
+                other.renderer = Some(renderer);
+            }
+        }
         self.gpu_software_fallback = new_gpu.is_software();
         log::info!(
             "GPU recovery succeeded on {} (software={})",
             new_gpu.adapter_name(),
             self.gpu_software_fallback
         );
-
-        ws.renderer = Some(new_renderer);
-        for other in self.windows.values_mut() {
-            let Some(other_window) = other.window.clone() else {
-                continue;
-            };
-            let size = other_window.inner_size();
-            let scale = other_window.scale_factor() as f32;
-            match kettle_render::Renderer::new_with_gpu(
-                &new_gpu,
-                other_window,
-                size.width.max(1),
-                size.height.max(1),
-                scale,
-                &cfg,
-            ) {
-                Ok(renderer) => other.renderer = Some(renderer),
-                Err(err) => log::error!(
-                    "GPU recovery: window {} could not rebind to the new device: {err}",
-                    other.seq
-                ),
-            }
-        }
+        let adapter = new_gpu.adapter_info();
         self.gpu = Some(new_gpu);
 
         if let Some(window) = &ws.window {
@@ -5130,7 +5223,10 @@ impl App {
                 window.request_redraw();
             }
         }
-        true
+        Ok(GpuRecoveryOutcome {
+            adapter,
+            secondary_window_failures: 0,
+        })
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
@@ -5657,7 +5753,10 @@ impl App {
                 .mux
                 .focused()
                 .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
-            let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
+            let cwd = ws
+                .mux
+                .focused()
+                .and_then(|p| p.term.current_dir_or_native());
             (self.focus_key(ws), out_gen, off, cwd)
         };
         if ws.links_scan_key.as_ref() == Some(&key) {
@@ -9546,10 +9645,15 @@ impl App {
     /// is left alone (the shell that re-shows after `ssh exit` is
     /// already the right OSC-1/2-set title).
     fn poll_remote_contexts(&mut self, ws: &mut WindowState) {
-        if self.last_remote_poll.elapsed().as_millis() < 200 {
+        let now = std::time::Instant::now();
+        if !throttle_elapsed(
+            self.last_remote_poll,
+            now,
+            std::time::Duration::from_millis(200),
+        ) {
             return;
         }
-        self.last_remote_poll = std::time::Instant::now();
+        self.last_remote_poll = Some(now);
         let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
         // Cycle 851: refresh the OS process snapshot + parent→children index
         // ONCE per tick, then query every pane against the shared index.
@@ -9621,11 +9725,10 @@ impl App {
         }
         // Cycle 290: re-compile triggers from the freshly-loaded config
         // BEFORE assigning, while `new` is still owned. Recompile
-        // catches added/removed/changed patterns. Throttle stamp
-        // resets to "60s ago" so a fresh edit can fire immediately
-        // even mid-throttle.
+        // catches added/removed/changed patterns. Clearing the throttle stamp
+        // lets a fresh edit fire immediately even mid-throttle.
         self.compiled_triggers = compile_triggers(&new.triggers);
-        self.last_trigger_fire = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        self.last_trigger_fire = None;
         // Cycle 937: the accent seed is a runtime per-window value (not in the
         // config file), so carry it across a reload + re-apply the --accent
         // override (launch-time intent survives a reload).
@@ -9955,9 +10058,46 @@ impl App {
             .get("scrollback_lines")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
+        let include_selection = req
+            .params
+            .get("include_selection")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
+        let (selection_present, selection, selection_truncated, selection_range) = p
+            .term
+            .term
+            .lock()
+            .ok()
+            .map(|term| {
+                let range = term
+                    .selection
+                    .as_ref()
+                    .and_then(|selection| selection.to_range(&term));
+                let (selection, selection_truncated) = if include_selection {
+                    term.selection_to_string()
+                        .map(cap_ctl_selection)
+                        .map(|(text, truncated)| (Some(text), truncated))
+                        .unwrap_or((None, false))
+                } else {
+                    (None, false)
+                };
+                (
+                    term.selection.is_some(),
+                    selection,
+                    selection_truncated,
+                    range.map(|range| {
+                        serde_json::json!({
+                            "start": [range.start.line.0, range.start.column.0],
+                            "end": [range.end.line.0, range.end.column.0],
+                            "block": range.is_block,
+                        })
+                    }),
+                )
+            })
+            .unwrap_or((false, None, false, None));
         match p.term.screen_text(scrollback) {
             Some(s) => Response::ok(
                 req.id,
@@ -9972,6 +10112,13 @@ impl App {
                     // v2.20.0 (agent plane): DEC ?25 — vim/fzf/less hide the
                     // cursor; agents must know when `cursor` is meaningless.
                     "cursor_visible": s.cursor_visible,
+                    // Additive diagnostic surface: read_screen already exposes
+                    // the pane text; this lets end-to-end tests assert the exact
+                    // range selected by real keyboard/mouse workflows.
+                    "selection_present": selection_present,
+                    "selection": selection,
+                    "selection_truncated": selection_truncated,
+                    "selection_range": selection_range,
                 }),
             ),
             None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
@@ -10230,6 +10377,7 @@ impl App {
             "window": target.seq,
             "surface": {"width": surface.0, "height": surface.1},
             "cell": cell,
+            "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
             "content": rect_json(self.area(target)),
             "modals": {
                 "search": target.mux.search.open,
@@ -10508,6 +10656,40 @@ impl App {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'event' string");
         };
         let event = event.to_ascii_lowercase();
+        if !matches!(
+            event.as_str(),
+            "move" | "press" | "release" | "click" | "wheel"
+        ) {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "event must be move, press, release, click, or wheel",
+            );
+        }
+        let button = if matches!(event.as_str(), "press" | "release" | "click") {
+            match ctl_mouse_button(&req.params) {
+                Ok(button) => Some(button),
+                Err(error) => return Response::err(req.id, ec::BAD_PARAMS, error),
+            }
+        } else {
+            None
+        };
+        let wheel_lines = if event == "wheel" {
+            let Some(lines) = req.params.get("wheel_lines").and_then(|v| v.as_i64()) else {
+                return Response::err(req.id, ec::BAD_PARAMS, "missing 'wheel_lines' integer");
+            };
+            Some(lines.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+        } else {
+            None
+        };
+        let event_mods = if req.params.get("mods").is_some() {
+            match parse_ctl_mods(req.params.get("mods")) {
+                Ok(mods) => mods,
+                Err(error) => return Response::err(req.id, ec::BAD_PARAMS, error),
+            }
+        } else {
+            ws.mods
+        };
         let x = req.params.get("x").and_then(|v| v.as_f64());
         let y = req.params.get("y").and_then(|v| v.as_f64());
         if !matches!(event.as_str(), "wheel") || x.is_some() || y.is_some() {
@@ -10523,49 +10705,32 @@ impl App {
             ws.cursor = winit::dpi::PhysicalPosition::new(x, y);
         }
 
+        // Synthetic modifiers apply only to this control event; real winit
+        // modifier state resumes immediately afterward.
+        let previous_mods = std::mem::replace(&mut ws.mods, event_mods);
         let mut handled = true;
         match event.as_str() {
             "move" => {
                 self.ctl_mouse_move(ws);
             }
             "press" => {
-                let bcode = match ctl_mouse_button(&req.params) {
-                    Ok(b) => b,
-                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
-                };
-                handled = self.ctl_mouse_press(ws, event_loop, bcode);
+                handled = self.ctl_mouse_press(ws, event_loop, button.expect("validated button"));
             }
             "release" => {
-                let bcode = match ctl_mouse_button(&req.params) {
-                    Ok(b) => b,
-                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
-                };
-                handled = self.ctl_mouse_release(ws, bcode);
+                handled = self.ctl_mouse_release(ws, button.expect("validated button"));
             }
             "click" => {
-                let bcode = match ctl_mouse_button(&req.params) {
-                    Ok(b) => b,
-                    Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
-                };
+                let bcode = button.expect("validated button");
                 let pressed = self.ctl_mouse_press(ws, event_loop, bcode);
                 let released = self.ctl_mouse_release(ws, bcode);
                 handled = pressed || released;
             }
             "wheel" => {
-                let Some(lines) = req.params.get("wheel_lines").and_then(|v| v.as_i64()) else {
-                    return Response::err(req.id, ec::BAD_PARAMS, "missing 'wheel_lines' integer");
-                };
-                let lines = lines.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                handled = self.ctl_mouse_wheel(ws, lines);
+                handled = self.ctl_mouse_wheel(ws, wheel_lines.expect("validated wheel delta"));
             }
-            _ => {
-                return Response::err(
-                    req.id,
-                    ec::BAD_PARAMS,
-                    "event must be move, press, release, click, or wheel",
-                );
-            }
+            _ => unreachable!("event validated above"),
         }
+        ws.mods = previous_mods;
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -11456,9 +11621,14 @@ impl App {
         if self.compiled_triggers.is_empty() {
             return;
         }
-        // Throttle. `last_trigger_fire` is pre-set to "60 seconds ago"
-        // at construct/reload time so the first match always fires.
-        if self.last_trigger_fire.elapsed().as_millis() < 2000 {
+        // An unset throttle means no trigger has fired since construct/reload,
+        // so the first match is immediately eligible.
+        let now = std::time::Instant::now();
+        if !throttle_elapsed(
+            self.last_trigger_fire,
+            now,
+            std::time::Duration::from_secs(2),
+        ) {
             return;
         }
         // Don't pulse the user's own window when it's already focused.
@@ -11522,7 +11692,7 @@ impl App {
                         spawn_trigger_command(&argv);
                     }
                 }
-                self.last_trigger_fire = std::time::Instant::now();
+                self.last_trigger_fire = Some(std::time::Instant::now());
                 break;
             }
         }
@@ -12979,6 +13149,14 @@ const GPU_INIT_TIMEOUT_SECS: u64 = 30;
 
 const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_millis(700);
 
+fn gpu_escalation_label(escalation: kettle_render::AdapterEscalation) -> &'static str {
+    match escalation {
+        kettle_render::AdapterEscalation::Preferred => "preferred",
+        kettle_render::AdapterEscalation::AnyHardware => "any_hardware",
+        kettle_render::AdapterEscalation::ForceSoftware => "force_software",
+    }
+}
+
 fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
     let ms = match attempt {
         0 | 1 => 500,
@@ -12987,6 +13165,19 @@ fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
         _ => 4000,
     };
     std::time::Duration::from_millis(ms)
+}
+
+/// Whether an optional monotonic-clock throttle is eligible at `now`.
+///
+/// `None` represents "never run" and is immediately eligible. Saturating
+/// subtraction also keeps tests and unusual clock implementations safe if a
+/// caller supplies a timestamp ordered before `last`.
+fn throttle_elapsed(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
 /// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
@@ -16463,25 +16654,50 @@ impl App {
         // Drive renderer recovery from here instead of scheduling animation
         // wakes that would only re-enter the dead-device redraw path.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
+            self.start_gpu_incident_if_needed();
             let now = std::time::Instant::now();
-            let due = match self.gpu_recovery_next_at {
-                None => {
-                    self.gpu_recovery_next_at = Some(now + GPU_RECOVERY_SETTLE);
-                    return Some(GPU_RECOVERY_SETTLE.as_millis() as u64);
+            match self.gpu_recovery.poll(now, GPU_RECOVERY_SETTLE) {
+                RecoveryAction::Wait(wait) => {
+                    return Some((wait.as_millis() as u64).max(1));
                 }
-                Some(due) => due,
-            };
-            if now < due {
-                return Some((due.saturating_duration_since(now).as_millis() as u64).max(1));
-            }
-            if self.try_recover_gpu(ws) {
-                self.gpu_recovery_attempts = 0;
-                self.gpu_recovery_next_at = None;
-            } else {
-                self.gpu_recovery_attempts = self.gpu_recovery_attempts.saturating_add(1);
-                let backoff = gpu_recovery_backoff(self.gpu_recovery_attempts);
-                self.gpu_recovery_next_at = Some(now + backoff);
-                return Some(backoff.as_millis() as u64);
+                RecoveryAction::Attempt { attempt_index } => {
+                    let attempt = attempt_index.saturating_add(1);
+                    let escalation = kettle_render::escalation_for_attempt(attempt_index);
+                    let escalation_label = gpu_escalation_label(escalation);
+                    if let Some(log) = self.gpu_incident.as_mut()
+                        && let Err(error) = log.record_attempt(attempt, escalation_label)
+                    {
+                        log::warn!("GPU fault diagnostic write failed: {error}");
+                    }
+                    match self.try_recover_gpu(ws, escalation, attempt) {
+                        Ok(outcome) => {
+                            if let Some(log) = self.gpu_incident.as_mut()
+                                && let Err(error) = log.record_recovered(
+                                    attempt,
+                                    escalation_label,
+                                    outcome.adapter,
+                                    outcome.secondary_window_failures,
+                                )
+                            {
+                                log::warn!("GPU fault diagnostic write failed: {error}");
+                            }
+                            self.gpu_incident = None;
+                            self.gpu_incident_started_for_loss = false;
+                            self.gpu_recovery.recovered();
+                        }
+                        Err(error) => {
+                            if let Some(log) = self.gpu_incident.as_mut()
+                                && let Err(write_error) =
+                                    log.record_failure(attempt, escalation_label, &error)
+                            {
+                                log::warn!("GPU fault diagnostic write failed: {write_error}");
+                            }
+                            let backoff = gpu_recovery_backoff(attempt);
+                            self.gpu_recovery.failed(now, backoff);
+                            return Some((backoff.as_millis() as u64).max(1));
+                        }
+                    }
+                }
             }
         }
         let now = std::time::Instant::now();
@@ -16801,7 +17017,7 @@ mod tests {
             .map(|i| i + 2)
             .unwrap_or(wait_body.len());
         assert!(
-            wait_body[..end].contains("self.try_recover_gpu(ws)")
+            wait_body[..end].contains("self.try_recover_gpu(ws,")
                 && wait_body[..end].contains("gpu_recovery_backoff("),
             "about_to_wait_inner must drive GPU recovery while the device is lost"
         );
@@ -16820,6 +17036,57 @@ mod tests {
                 super::gpu_recovery_backoff(attempt) <= super::gpu_recovery_backoff(attempt + 1)
             );
         }
+    }
+
+    #[test]
+    fn gpu_recovery_set_is_all_or_nothing_with_injected_factory() {
+        let mut calls = Vec::new();
+        let result = super::build_recovery_set([(2, "a"), (3, "b"), (4, "c")], |value| {
+            calls.push(value);
+            if value == "b" {
+                Err("unsupported surface")
+            } else {
+                Ok(value.to_ascii_uppercase())
+            }
+        });
+
+        assert_eq!(calls, ["a", "b", "c"]);
+        assert_eq!(result, Err(vec![(3, "unsupported surface")]));
+
+        let rebuilt = super::build_recovery_set([(2, 20), (3, 30)], Ok::<_, ()>).unwrap();
+        assert_eq!(rebuilt, [(2, 20), (3, 30)]);
+    }
+
+    #[test]
+    fn optional_throttle_is_safe_and_immediate_at_clock_origin() {
+        use std::time::{Duration, Instant};
+
+        let origin = Instant::now();
+        let interval = Duration::from_millis(200);
+        assert!(super::throttle_elapsed(None, origin, interval));
+        assert!(!super::throttle_elapsed(Some(origin), origin, interval));
+        assert!(!super::throttle_elapsed(
+            Some(origin + Duration::from_millis(1)),
+            origin,
+            interval
+        ));
+        assert!(super::throttle_elapsed(
+            Some(origin),
+            origin + interval,
+            interval
+        ));
+    }
+
+    #[test]
+    fn control_selection_cap_preserves_utf8_boundaries() {
+        let exact = "x".repeat(super::MAX_CTL_SELECTION_BYTES);
+        assert_eq!(super::cap_ctl_selection(exact.clone()), (exact, false));
+
+        let oversized = format!("{}é", "x".repeat(super::MAX_CTL_SELECTION_BYTES - 1));
+        let (capped, truncated) = super::cap_ctl_selection(oversized);
+        assert!(truncated);
+        assert_eq!(capped.len(), super::MAX_CTL_SELECTION_BYTES - 1);
+        assert!(capped.is_char_boundary(capped.len()));
     }
 
     /// Startup drift guard: the window is hidden only while renderer init runs,
@@ -17519,17 +17786,18 @@ mod tests {
     #[test]
     fn typed_echo_bypasses_the_output_coalescer() {
         use std::time::{Duration, Instant};
-        let now = Instant::now();
+        let base = Instant::now();
+        let now = base + Duration::from_millis(500);
         // Echo within the window → immediate (bypass).
         assert!(super::typed_recently(
             now,
-            Some(now - Duration::from_millis(30)),
+            Some(base + Duration::from_millis(470)),
             super::TYPING_ECHO_WINDOW
         ));
         // Stale keystroke → back to the coalescer.
         assert!(!super::typed_recently(
             now,
-            Some(now - Duration::from_millis(500)),
+            Some(base),
             super::TYPING_ECHO_WINDOW
         ));
         // Never typed → coalescer.
