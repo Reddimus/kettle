@@ -82,8 +82,23 @@ impl std::io::Write for NullWrite {
     }
 }
 
-/// Receive one bounded pump chunk, force-ending a DEC 2026 synchronized
-/// update if its parser deadline expires while the PTY is otherwise idle.
+/// Force-apply a pending DEC 2026 update, then publish exactly one redraw.
+fn force_sync_update_flush(
+    processor: &mut Processor,
+    term: &SharedTerm,
+    out_gen: &std::sync::atomic::AtomicU64,
+    waker: &Waker,
+) {
+    {
+        let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        processor.stop_sync(&mut *term);
+    }
+    out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+    (waker)();
+}
+
+/// Receive one bounded pump chunk while enforcing the DEC 2026 deadline ahead
+/// of ready data, and flushing immediately when EOF makes a terminator impossible.
 fn receive_pty_chunk(
     processor: &mut Processor,
     term: &SharedTerm,
@@ -94,17 +109,31 @@ fn receive_pty_chunk(
     loop {
         match processor.sync_timeout().sync_timeout() {
             Some(deadline) => {
-                let wait = deadline.saturating_duration_since(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    force_sync_update_flush(processor, term, out_gen, waker);
+                    continue;
+                }
+
+                let wait = deadline.saturating_duration_since(now);
                 match raw_rx.recv_timeout(wait) {
-                    Ok(chunk) => return chunk,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        if let Ok(mut term) = term.lock() {
-                            processor.stop_sync(&mut *term);
+                    Ok(chunk) => {
+                        // A ready chunk and the timeout can race at the wait
+                        // boundary. The expired synchronized update takes
+                        // priority so sustained output cannot starve its flush.
+                        // EOF also proves no closing sequence can still arrive.
+                        if chunk.is_none() || std::time::Instant::now() >= deadline {
+                            force_sync_update_flush(processor, term, out_gen, waker);
                         }
-                        out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-                        (waker)();
+                        return chunk;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        force_sync_update_flush(processor, term, out_gen, waker);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        force_sync_update_flush(processor, term, out_gen, waker);
+                        return None;
+                    }
                 }
             }
             None => return raw_rx.recv().ok().flatten(),
@@ -5232,6 +5261,73 @@ mod sync_update_flush_guard {
         assert_eq!(
             term.lock().unwrap().grid()[Point::new(Line(1), Column(2))].c,
             's'
+        );
+    }
+
+    #[test]
+    fn expired_sync_flushes_before_a_queued_chunk() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hexpired text");
+        }
+        let deadline = processor
+            .sync_timeout()
+            .sync_timeout()
+            .expect("DEC 2026 opened a synchronized update");
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .saturating_add(std::time::Duration::from_millis(20)),
+        );
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        tx.send(Some(b"next chunk".to_vec())).unwrap();
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let chunk = receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker)
+            .expect("queued chunk is preserved after the flush");
+        assert_eq!(chunk, b"next chunk");
+        assert!(processor.sync_timeout().sync_timeout().is_none());
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            term.lock().unwrap().grid()[Point::new(Line(1), Column(2))].c,
+            'e'
+        );
+    }
+
+    #[test]
+    fn sync_eof_flushes_without_waiting_for_the_deadline() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hfinal text");
+        }
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        tx.send(None).unwrap();
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker).is_none());
+        assert!(processor.sync_timeout().sync_timeout().is_none());
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            term.lock().unwrap().grid()[Point::new(Line(1), Column(2))].c,
+            'f'
         );
     }
 

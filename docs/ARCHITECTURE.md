@@ -150,8 +150,11 @@ The blocking PTY `read()` runs on a small pump thread so the parser can still
 wake at a DEC 2026 synchronized-update deadline while no bytes arrive. Its
 handoff is a four-slot synchronous channel with recycled 64 KiB buffers: output
 flood applies bounded backpressure instead of growing an unbounded queue. The
-reader force-ends an omitted synchronized update at the parser deadline, bumps
-the output generation, and wakes the UI for the now-visible frame.
+reader force-ends an omitted synchronized update at the parser deadline before
+returning any simultaneously ready chunk, so a sustained output queue cannot
+starve the flush. EOF/disconnect flushes immediately because no terminator can
+still arrive. The reader then bumps the output generation and wakes the UI for
+the now-visible frame after releasing the terminal lock.
 
 The optional raw-output tap has an explicit delivery policy. Lua output hooks
 use a bounded best-effort sender and may drop under plugin backpressure;
