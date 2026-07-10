@@ -135,7 +135,7 @@ release:
 # `just gauntlet` is what the GitHub Actions matrix runs on every
 # OS. Use this if you're about to push a feature; trust this if
 # it's green.
-gauntlet:
+gauntlet: live-ui-helper-selftest
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo build --workspace --all-targets
@@ -155,6 +155,17 @@ gauntlet-strict: gauntlet deny machete tracked-audit
     @echo "STRICT GAUNTLET PASSED — every CI workflow green locally."
 
 # === End-to-end smoke ==============================================
+
+# Headless parser/command-generation guards for the cross-platform live UI
+# harness. In particular, this rejects authenticated-agent false positives when
+# a shell command fails but an old native exit code and echoed prompt remain.
+[unix]
+live-ui-helper-selftest:
+    python3 scripts/check-live-ui-smoke.py self-test
+
+[windows]
+live-ui-helper-selftest:
+    python scripts/check-live-ui-smoke.py self-test
 
 # Render the canonical "kettle in a terminal" screenshot — exercises
 # the full GPU pipeline (wgpu adapter + offscreen Vulkan device +

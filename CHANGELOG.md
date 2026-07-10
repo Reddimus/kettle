@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **Authenticated Codex/Claude live smokes no longer accept shell echo as an
+    agent response.** Child output is explicitly framed, stale or absent native
+    exit codes fail closed, and Windows uses a version-independent .NET temp
+    path. A headless CI self-test covers the original command-failure false
+    positive.
+
   ### Changed
   - **The renderer now uses one coherent wgpu 30 stack.** `glyphon` 0.12 and
     `cosmic-text` 0.19 replace the incompatible wgpu 29 text-rendering graph.

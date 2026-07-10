@@ -1050,7 +1050,19 @@ def env_strict(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("required", "strict", "fail")
 
 
-def agent_auth_command(tool: str, marker: str, done_marker: str) -> str:
+def split_marker(marker: str) -> Tuple[str, str]:
+    midpoint = max(1, len(marker) // 2)
+    return marker[:midpoint], marker[midpoint:]
+
+
+def agent_auth_command(
+    tool: str,
+    marker: str,
+    output_marker: str,
+    done_marker: str,
+    *,
+    windows: Optional[bool] = None,
+) -> str:
     prompt = f"Reply exactly {marker} and nothing else."
     if tool == "codex":
         argv = [
@@ -1077,15 +1089,23 @@ def agent_auth_command(tool: str, marker: str, done_marker: str) -> str:
     else:
         raise ValueError(f"unsupported agent auth tool: {tool}")
 
-    if platform.system() == "Windows":
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    output_left, output_right = split_marker(output_marker)
+    if use_windows:
         ps_argv = " ".join(shell_quote(part) for part in argv)
         done = shell_quote(done_marker)
         return (
-            "$tmp=New-TemporaryFile; "
+            "$tmp=[System.IO.Path]::GetTempFileName(); $rc=125; "
+            "try { "
+            "$LASTEXITCODE=$null; "
             f"& {ps_argv} *> $tmp; "
-            "$rc=$LASTEXITCODE; "
-            "Get-Content $tmp; "
-            "Remove-Item $tmp -ErrorAction SilentlyContinue; "
+            "$rc=if ($null -eq $LASTEXITCODE) { 125 } else { [int]$LASTEXITCODE }; "
+            "} catch { "
+            "$rc=125; $_ | Out-File -LiteralPath $tmp -Append -Encoding utf8; "
+            "}; "
+            f"Write-Output ({shell_quote(output_left)} + {shell_quote(output_right)}); "
+            "Get-Content -LiteralPath $tmp; "
+            "Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; "
             f"Write-Output ({done} + ':' + $rc)"
         )
     sh_argv = " ".join(shlex.quote(part) for part in argv)
@@ -1093,6 +1113,7 @@ def agent_auth_command(tool: str, marker: str, done_marker: str) -> str:
         "tmp=$(mktemp); "
         f"{sh_argv} >\"$tmp\" 2>&1; "
         "rc=$?; "
+        f"printf '\\n%s%s\\n' {shlex.quote(output_left)} {shlex.quote(output_right)}; "
         "cat \"$tmp\"; "
         "rm -f \"$tmp\"; "
         f"printf '\\n%s:%s\\n' {shlex.quote(done_marker)} \"$rc\""
@@ -1101,13 +1122,80 @@ def agent_auth_command(tool: str, marker: str, done_marker: str) -> str:
 
 def done_marker_status(text: str, done_marker: str) -> Optional[int]:
     prefix = f"{done_marker}:"
-    for line in text.splitlines():
-        if line.startswith(prefix):
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith(prefix):
             try:
-                return int(line[len(prefix) :].strip())
+                return int(stripped[len(prefix) :].strip())
             except ValueError:
                 return None
     return None
+
+
+def agent_output_contains_marker(
+    text: str, output_marker: str, done_marker: str, expected_marker: str
+) -> bool:
+    lines = text.splitlines()
+    output_start = None
+    for index, line in enumerate(lines):
+        if line.strip() == output_marker:
+            output_start = index + 1
+    if output_start is None:
+        return False
+
+    done_prefix = f"{done_marker}:"
+    for line in lines[output_start:]:
+        stripped = line.strip()
+        if stripped.startswith(done_prefix):
+            return False
+        if stripped == expected_marker:
+            return True
+    return False
+
+
+def live_helper_selftest() -> None:
+    marker = "KETTLE_AGENT_AUTH_EXPECTED"
+    output_marker = "KETTLE_AGENT_AUTH_OUTPUT_BEGIN"
+    done_marker = "KETTLE_AGENT_AUTH_DONE"
+
+    windows_command = agent_auth_command(
+        "codex", marker, output_marker, done_marker, windows=True
+    )
+    unix_command = agent_auth_command(
+        "claude", marker, output_marker, done_marker, windows=False
+    )
+    assert "New-TemporaryFile" not in windows_command
+    assert "[System.IO.Path]::GetTempFileName()" in windows_command
+    assert "$LASTEXITCODE=$null" in windows_command
+    assert output_marker not in windows_command
+    assert output_marker not in unix_command
+
+    false_positive = "\n".join(
+        [
+            f"PS> command 'Reply exactly {marker} and nothing else.'",
+            output_marker,
+            "New-TemporaryFile: command not found",
+            f"{done_marker}:0",
+        ]
+    )
+    assert done_marker_status(false_positive, done_marker) == 0
+    assert not agent_output_contains_marker(
+        false_positive, output_marker, done_marker, marker
+    )
+
+    success = "\n".join(
+        [
+            f"PS> command 'Reply exactly {marker} and nothing else.'",
+            output_marker,
+            "agent diagnostic output",
+            marker,
+            f"{done_marker}:0",
+        ]
+    )
+    assert done_marker_status(success, done_marker) == 0
+    assert agent_output_contains_marker(success, output_marker, done_marker, marker)
+    assert done_marker_status(f"{done_marker}:17", done_marker) == 17
+    assert done_marker_status("no completion marker", done_marker) is None
 
 
 def nvim_marker_command(marker: str, configured: bool) -> str:
@@ -1294,10 +1382,15 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             if run_auth_smoke:
                 auth_label = f"{tool}-auth-session"
                 auth_marker = f"KETTLE_AGENT_TUI_{tool.upper()}_AUTH_SESSION"
+                output_marker = f"KETTLE_AGENT_TUI_{tool.upper()}_AUTH_OUTPUT_BEGIN"
                 done_marker = f"KETTLE_AGENT_TUI_{tool.upper()}_AUTH_DONE"
                 live.ctl(
                     "send_text",
-                    params={"text": agent_auth_command(tool, auth_marker, done_marker)},
+                    params={
+                        "text": agent_auth_command(
+                            tool, auth_marker, output_marker, done_marker
+                        )
+                    },
                     timeout=8,
                 )
                 live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
@@ -1308,16 +1401,22 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 auth_screen = live.json_ctl("read_screen", params={"scrollback_lines": 240})
                 auth_text = screen_text(auth_screen)
                 rc = done_marker_status(auth_text, done_marker)
-                status = "ok" if rc == 0 and auth_marker in auth_text else "auth_failed"
+                marker_emitted = agent_output_contains_marker(
+                    auth_text, output_marker, done_marker, auth_marker
+                )
+                status = "ok" if rc == 0 and marker_emitted else "auth_failed"
                 reason = None
                 if rc is None:
                     status = "marker_missing"
                     reason = "done marker exit status was not visible in read_screen"
                 elif rc != 0:
                     reason = f"{tool} exited {rc}; likely missing/expired external authentication"
-                elif auth_marker not in auth_text:
+                elif not marker_emitted:
                     status = "marker_missing"
-                    reason = f"{tool} exited 0 but expected auth marker was not visible"
+                    reason = (
+                        f"{tool} exited 0 but expected auth marker was not emitted "
+                        "inside the framed agent output"
+                    )
                 state = capture_live_state(live, out, auth_label)
                 states.append(state)
                 probe = {"name": auth_label, "status": status, "exit_code": rc}
@@ -2174,12 +2273,18 @@ def main() -> int:
             "underline",
             "agent-tui",
             "interaction",
+            "self-test",
             "all",
         ],
     )
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
     args = parser.parse_args()
+
+    if args.case == "self-test":
+        live_helper_selftest()
+        print("live-ui helper self-test: OK")
+        return 0
 
     if platform.system() != "Windows" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         print("live-ui smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)", file=sys.stderr)

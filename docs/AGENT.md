@@ -286,8 +286,11 @@ when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
 workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
 run serialized real authenticated `codex exec` / `claude --print` marker prompts inside
-the Kettle pane; use `KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired
-external credentials should fail the run. It saves PNG screenshots,
+the Kettle pane. A probe passes only when the child exits zero and emits the
+exact response inside its generated output frame, so command echo and a stale
+`$LASTEXITCODE` cannot create a false success. Use
+`KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired external credentials
+should fail the run. It saves PNG screenshots,
 `read_screen`, `read_cells`, and
 `analysis.json` under
 `target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
