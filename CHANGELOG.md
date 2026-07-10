@@ -11,6 +11,55 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     check still validates published hashes when the sidecars are available, but
     it now skips the remote hash comparison while a newly pushed tag's release
     assets are still uploading. `--require-release` remains strict.
+  - **Codex CLI's active placeholder no longer leaves a blinking block at the
+    bottom-left on native Windows.** Kettle now recognizes the active Codex
+    footer and suppresses only transient status cursors and the cursor over a
+    DIM empty placeholder. A real queued-input caret remains visible, and the
+    parsed DEC cursor state is unchanged.
+  - **Kettle no longer panics when launched during the first minute after
+    Windows boots.** Trigger and remote-poll throttles now represent "never
+    fired" explicitly instead of subtracting 60 seconds from a monotonic
+    `Instant` whose uptime origin may be newer than that.
+  - **Shift+Home/End selections survive action dispatch.** The common action
+    tail used to issue a no-op terminal resize after every action; Alacritty
+    clears selection state on resize, so the new keyboard selection was erased
+    immediately. Logical-grid and pixel-only resize changes are now separated,
+    avoiding redundant ConPTY resize work and preserving selection on no-ops.
+  - **PTY output handoff memory is bounded.** The blocking PTY pump now uses a
+    four-slot synchronous queue and recycled 64 KiB buffers instead of an
+    unbounded allocation-per-read channel. DEC 2026 timeout handling remains
+    independent and now has behavioral omitted/split-terminator tests.
+    `kettle exec` also uses a four-slot lossless output queue, so a slow stdout
+    consumer backpressures the child instead of growing process memory.
+  - **`kettle --gpu-info` now reflects the configured adapter policy.** It
+    honors `--config` / `--profile`, GPU pins, power preference, and
+    `gpu-force-software` instead of always querying default hardware.
+  - **Native Windows PTYs preserve session-local environment overrides.**
+    Kettle now overlays the actual parent environment after `portable-pty`'s
+    registry refresh and merges registry-only PATH entries behind it, keeping
+    virtualenvs and temporary package-manager/tool paths available to children.
+  - **Relative file links work with Windows working directories.** Drive-letter
+    cwd values are normalized into local `file:///C:/...` URIs, so relative
+    compiler paths are clickable and underlined like absolute Windows paths.
+  - **Closed CLI pipes no longer create false crash reports.** Crate-local
+    stdout/stderr writers suppress only broken/closed-pipe errors (including
+    Windows errors 109 and 232); other output failures remain fatal.
+
+  ### Added
+  - **Fault-only GPU recovery diagnostics.** Fatal wgpu errors latch a bounded
+    in-memory reason and the event-loop thread writes versioned JSONL under
+    `<cache>/kettle/diagnostics/`. Files contain adapter/recovery metadata but
+    never terminal text, commands, environment variables, or working
+    directories; each incident is capped at 256 KiB and only the newest ten are
+    retained.
+  - `kettle ctl read_screen` now reports `selection_present` and
+    `selection_range`; `include_selection: true` adds text capped at 256 KiB.
+    `send_mouse` accepts an optional synthetic `mods` value. These additive
+    protocol-v1 fields power an exact live
+    Shift+Home/Shift+End/Shift+click regression workflow.
+  - `just tracked-audit` verifies every Git-tracked path and emits a JSON
+    integrity ledger covering path/case collisions, object hashes, UTF-8/LF
+    hygiene, manifests, local Markdown links, and font/image bounds.
 
 ## [2.34.2] — 2026-07-05
 

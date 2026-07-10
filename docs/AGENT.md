@@ -150,7 +150,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq), `window_title` |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
-| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`) |
+| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` adds selected text capped at 256 KiB plus `selection_truncated`; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
 | `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, and tab drag armed/visible state |
 | `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
@@ -159,7 +159,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
-| `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`) |
+| `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`, optional event-local `mods`) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
@@ -280,11 +280,12 @@ just agent-tui-smoke
 Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
-deterministic Windows Codex status-row cursor fixture, tmux attach/send/capture
+deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
+tmux attach/send/capture
 when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
 workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
-run real authenticated `codex exec` / `claude --print` marker prompts inside
+run serialized real authenticated `codex exec` / `claude --print` marker prompts inside
 the Kettle pane; use `KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired
 external credentials should fail the run. It saves PNG screenshots,
 `read_screen`, `read_cells`, and
@@ -300,8 +301,10 @@ just interaction-smoke
 
 Starts a real grid-renderer Kettle window and drives broader UI states through
 `kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`
-creation, local selection drag, right-click context-menu opening, and screenshot
-capture. It also clicks the `Split Right` context-menu row and verifies a new
+creation, local selection drag, an exact 141-line
+Shift+Home/Shift+End/Shift+click selection and copy action, right-click
+context-menu opening, and screenshot capture. It also clicks the `Split Right`
+context-menu row and verifies a new
 pane, resizes the split window and verifies the focused pane grid changes, then
 emits OSC 777 from the live pane and verifies the subscribed `kettle ctl events`
 stream receives a `protocol_notification` event with the expected title/body. It saves

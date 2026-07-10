@@ -18,13 +18,6 @@ tracked here so they are not lost.
   this only after updating the text-rendering stack, confirming
   `cargo tree -i ttf-parser` reports no matches, and removing
   RUSTSEC-2026-0192 ignores from `deny.toml` and `.github/workflows/audit.yml`.
-- **In-process GPU device-loss auto-recovery.** v2.31.0 + v2.32.0 make a GPU TDR
-  a safe, logged, non-spinning "reopen kettle" state. Full recovery —
-  re-`request_device`, rebuild every window's surface / pipelines / atlases on the
-  shared `GpuContext`, with bounded retry/backoff — is a cross-window structural
-  change that needs a real TDR on a live GPU to validate. (`kettle-render` /
-  `kettle-ui`.) Also fold in the OOM-error-scope streak and "refuse `open_window`
-  while lost" here.
 - **`app.rs` god-file split + testability seams.** Extract dispatch / frame /
   modals / ctl-glue into focused subsystems and make per-event handlers return a
   typed `Outcome` command list (pure deciders + a thin applier), replacing the

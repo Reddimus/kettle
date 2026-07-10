@@ -245,6 +245,11 @@ kettle -e ssh -t host       # (-e consumes the rest of the args)
 kettle --screenshot OUT.png # render a representative frame offscreen and exit (no window)
 ```
 
+Fatal GPU errors are recovered in process without restarting panes. Fault-only
+JSONL diagnostics are retained under the per-user cache
+(`%LOCALAPPDATA%\kettle\diagnostics\` on Windows); they contain adapter and
+recovery metadata, never terminal contents.
+
 ## Default keybindings (Terminator-compatible)
 
 | Action | Bind | Action | Bind |
@@ -348,6 +353,7 @@ model.
 - [docs/INSTALL.md](docs/INSTALL.md) — install per-OS / from source
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
+- [docs/AUDIT-2026-07.md](docs/AUDIT-2026-07.md) — Windows reliability investigation + tracked-tree audit
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use kettle_config::{Config, CursorStyle};
-use kettle_core::{CursorShape, TermEvent, Terminal, Waker};
+use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
 
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells use the placeholder "kettle" — cycle 89's
@@ -886,7 +886,11 @@ impl Mux {
             crossbeam_channel::bounded(64)
         };
         let output_tx = if self.lua_output_subscribed {
-            Some(out_tx)
+            Some(if self.record_lossless {
+                PtyOutputSender::lossless(out_tx)
+            } else {
+                PtyOutputSender::best_effort(out_tx)
+            })
         } else {
             None
         };
@@ -3991,9 +3995,10 @@ mod node_tests {
     #[test]
     fn classify_tab_activity_picks_the_right_indicator() {
         use std::time::{Duration, Instant};
-        let now = Instant::now();
-        let earlier = now - Duration::from_secs(5);
-        let later = now + Duration::from_secs(5);
+        let base = Instant::now();
+        let earlier = base;
+        let now = base + Duration::from_secs(5);
+        let later = base + Duration::from_secs(10);
         // Default 10 s silence threshold matches the config default;
         // the existing transitions still fire under it.
         let silence = Duration::from_secs(10);
@@ -4065,8 +4070,8 @@ mod node_tests {
         let silence = Duration::from_secs(10);
         // Tab last looked at 60 s ago; output arrived at 30 s ago
         // (so unseen — output > seen).
-        let last_seen = base - Duration::from_secs(60);
-        let last_out = base - Duration::from_secs(30);
+        let last_seen = base;
+        let last_out = base + Duration::from_secs(30);
         // Just-after-output: 5 s elapsed since output, below the 10 s
         // threshold → Output.
         let now_fresh = last_out + Duration::from_secs(5);
@@ -4126,7 +4131,7 @@ mod node_tests {
         // bug or clock-skew adjustment between calls): treat as fresh
         // Output rather than triggering Silent on a saturating-zero
         // duration.
-        let now_before = last_out - Duration::from_secs(1);
+        let now_before = base + Duration::from_secs(29);
         assert_eq!(
             classify_tab_activity(
                 false,

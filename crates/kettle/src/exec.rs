@@ -12,8 +12,9 @@
 //! Design notes:
 //!   - The engine is `kettle_core::Terminal`, which is fully GUI-decoupled: it
 //!     owns the PTY + the alacritty VT state machine and ships verbatim output
-//!     bytes on a sidechannel. We drive it with a no-op waker and unbounded
-//!     channels — the exact shape kettle-core's own headless tests use.
+//!     bytes on a sidechannel. We drive it with a no-op waker, a lossless
+//!     bounded output queue, and a lossless event channel. The output queue
+//!     backpressures a fast child when stdout is slow instead of growing heap.
 //!   - We MUST forward `TermEvent::PtyWrite` (and the other reply-bearing
 //!     events) back to the PTY. Those are the child's terminal-query answers
 //!     (DA1, DSR cursor-position, text-area size, OSC color queries). Without
@@ -34,7 +35,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use kettle_core::{CursorShape, TermEvent, Terminal, Waker};
+use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
 
 /// How long to keep draining output after the child exits before we stop and
 /// report the code. Doubles as the ConPTY late-repaint mitigation: ConPTY's
@@ -189,7 +190,7 @@ pub fn run_exec_with(
     opts.rows = opts.rows.clamp(1, u16::MAX);
 
     let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
-    let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
+    let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
     let waker: Waker = std::sync::Arc::new(|| {});
     let cwd = opts.cwd.as_ref().and_then(|p| p.to_str());
 
@@ -216,7 +217,7 @@ pub fn run_exec_with(
         false,
         tx,
         waker,
-        Some(otx),
+        Some(PtyOutputSender::lossless(otx)),
     ) {
         Ok(t) => t,
         Err(e) => {

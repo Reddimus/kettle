@@ -29,6 +29,7 @@ mod window_state;
 // main thread via `UserEvent::Ctl`. Always compiled (gated at runtime by the
 // `agent-server` config, default off).
 mod ctl_server;
+mod gpu_diagnostics;
 mod input;
 mod lua;
 mod mux;

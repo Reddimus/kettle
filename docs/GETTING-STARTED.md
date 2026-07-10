@@ -73,7 +73,10 @@ See the full list any time with `kettle --list-keybinds`, or press
   `kettle --config-path`) and relaunch.
 - **Found a bug?** Crash logs are written to
   `%LOCALAPPDATA%\kettle\crash\` (Windows) or
-  `~/.local/state/kettle/crash/` (Linux) — attach one to an issue.
+  `~/.local/state/kettle/crash/` (Linux). GPU device-loss records are written
+  separately to `%LOCALAPPDATA%\kettle\diagnostics\` or
+  `~/.cache/kettle/diagnostics/`; they contain adapter/recovery metadata and no
+  terminal contents. Attach the relevant file to an issue.
 
 Welcome aboard. For everything else, [CONFIG.md](CONFIG.md) is the full
 reference and [README.md](../README.md) has the feature tour.

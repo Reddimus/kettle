@@ -855,10 +855,8 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         // rather than pinning it at argv[1] (which silently returned None for
         // those). Scan for the first literal `exec` token; a container/namespace
         // named "exec" is contrived enough to ignore.
-        match argv.iter().skip(1).position(|a| a == "exec") {
-            Some(pos) => i = 1 + pos + 1,
-            None => return None,
-        }
+        let pos = argv.iter().skip(1).position(|a| a == "exec")?;
+        i = 1 + pos + 1;
     }
     // Skip flags + their values. Container CLIs share the same
     // shape — `-it` is a stacked short-flag bundle (no value),

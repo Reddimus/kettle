@@ -182,6 +182,10 @@ per-key audit against Terminator's source.
 | `gpu-name` | string | — | Display name of the pinned GPU; also a fallback match if the `(vendor,device)` pair no longer enumerates. Written by the settings picker |
 | `gpu-backend` | enum | `auto` | Pin the graphics backend: `auto` \| `dx12` \| `vulkan` \| `metal` \| `gl`. Mainly disambiguates the same GPU exposed under multiple backends on Windows. **Applies on next launch** |
 | `gpu-force-software` | bool | `false` | Force wgpu's software/fallback adapter (slow; for debugging GPU-driver issues). **Applies on next launch.** Kettle also auto-recovers from a lost GPU device by rebuilding the renderer on a backoff: configured GPU, then another hardware adapter, then software rendering while panes keep running |
+
+`kettle --gpu-info` honors these settings, including `--config` and
+`--profile`, without opening a window. Use it to verify an explicit pin or the
+software fallback before launching a normal session.
 | `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
 | `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
 | `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |
@@ -208,6 +212,14 @@ per-key audit against Terminator's source.
 | `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | See the `light-theme` / `dark-theme` row in the **Keys** table above — same fields. Terminator `auto_theme` parity: `Action::ToggleLightDark` swaps between the two (case-insensitive bundled-name lookup; an empty value no-ops that side of the swap and falls back to `theme`) |
 | `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (default; ripgrep/vim: case-insensitive until any uppercase), `always` / `sensitive` (force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
+
+When a fatal GPU error occurs, Kettle writes fault-only recovery records under
+`%LOCALAPPDATA%\kettle\diagnostics\` on Windows or
+`$XDG_CACHE_HOME/kettle/diagnostics/` (normally
+`~/.cache/kettle/diagnostics/`) on Unix. The JSONL schema records Kettle and
+adapter versions, fault type, recovery escalation, and outcome. It never records
+terminal text, commands, environment variables, or working directories. Each
+incident is capped at 256 KiB and the newest ten are retained.
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `clipboard-paste-protection` | bool | `true` | Confirm multi-line pastes when any writable target would receive raw, non-bracketed paste. Single-line pastes and panes that enabled bracketed paste (editors/agent CLIs) paste immediately |
 | `putty-paste-style` | bool | `false` | Right-click pastes instead of opening the context menu. By default it uses the same PRIMARY-first source as middle-click paste on Linux and falls back to the regular clipboard on platforms without PRIMARY |

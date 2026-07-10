@@ -23,6 +23,86 @@
 
 use clap::Parser;
 
+// Rust's standard print macros panic on write failure. That turns an expected
+// early-closing pipeline into a crash report, especially for this Windows
+// GUI-subsystem binary when PowerShell releases a short-lived capture pipe.
+// Keep call sites readable while making crate-local CLI output fallible.
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        $crate::write_cli_stdout(format_args!($($arg)*), false)
+    }};
+}
+
+macro_rules! println {
+    () => {{
+        $crate::write_cli_stdout(format_args!(""), true)
+    }};
+    ($($arg:tt)*) => {{
+        $crate::write_cli_stdout(format_args!($($arg)*), true)
+    }};
+}
+
+macro_rules! eprintln {
+    () => {{
+        $crate::write_cli_stderr(format_args!(""), true)
+    }};
+    ($($arg:tt)*) => {{
+        $crate::write_cli_stderr(format_args!($($arg)*), true)
+    }};
+}
+
+static STDOUT_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STDERR_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn pipe_was_closed(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(109 | 232)))
+}
+
+fn finish_cli_write(
+    result: std::io::Result<()>,
+    closed: &std::sync::atomic::AtomicBool,
+    stream: &str,
+) {
+    if let Err(error) = result {
+        if pipe_was_closed(&error) {
+            closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            panic!("failed writing to {stream}: {error}");
+        }
+    }
+}
+
+fn write_cli_stdout(args: std::fmt::Arguments<'_>, newline: bool) {
+    use std::io::Write as _;
+
+    if STDOUT_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut output = std::io::stdout().lock();
+    let result = if newline {
+        writeln!(output, "{args}")
+    } else {
+        write!(output, "{args}")
+    };
+    finish_cli_write(result, &STDOUT_CLOSED, "stdout");
+}
+
+fn write_cli_stderr(args: std::fmt::Arguments<'_>, newline: bool) {
+    use std::io::Write as _;
+
+    if STDERR_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut output = std::io::stderr().lock();
+    let result = if newline {
+        writeln!(output, "{args}")
+    } else {
+        write!(output, "{args}")
+    };
+    finish_cli_write(result, &STDERR_CLOSED, "stderr");
+}
+
 // Cycle 922 (agent-first A1): headless `kettle exec` engine. Bin-side, no
 // kettle-ui/winit dependency (a source-scan drift guard pins that).
 mod exec;
@@ -198,7 +278,7 @@ struct Cli {
 
     /// Use this config file instead of the default path. Honored by every
     /// introspection command (`--check-config`, `--list-keybinds`,
-    /// `--list-ssh-hosts`, `--screenshot`, `--config-path`) as well as the
+    /// `--list-ssh-hosts`, `--gpu-info`, `--screenshot`, `--config-path`) as well as the
     /// windowed run. The path must be an existing, regular, readable
     /// file: a missing path is a hard error, a directory is a hard error
     /// (typing `--config ~/.config/kettle` when you meant the file inside
@@ -1064,9 +1144,13 @@ fn main() -> anyhow::Result<()> {
     }
     if cli.gpu_info {
         // Resolves the same adapter / backend the live renderer +
-        // --screenshot path would pick, so the output is faithful
-        // to what the windowed run would see. No GUI / PTY needed.
-        let info = kettle_render::gpu_info()?;
+        // recovery path would pick, so the output is faithful to the
+        // configured windowed run. No GUI / PTY needed.
+        let cfg = match resolve_config_path(&cli) {
+            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
+            _ => kettle_config::Config::default(),
+        };
+        let info = kettle_render::gpu_info(&cfg)?;
         println!("{info}");
         return Ok(());
     }
@@ -1726,7 +1810,7 @@ mod record_target_tests {
 
 #[cfg(test)]
 mod crash_log_tests {
-    use super::crash_log_path;
+    use super::{crash_log_path, pipe_was_closed};
 
     /// Build an env lookup closure from `(name, value)` pairs.
     fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -1793,6 +1877,21 @@ mod crash_log_tests {
         let s = p.to_string_lossy().to_string();
         assert!(s.contains("kettle"), "{s}");
         assert!(s.ends_with("kettle-crash-1-2.log"), "{s}");
+    }
+
+    #[test]
+    fn only_closed_pipe_errors_are_suppressed_for_cli_output() {
+        assert!(pipe_was_closed(&std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe
+        )));
+        assert!(!pipe_was_closed(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        #[cfg(windows)]
+        {
+            assert!(pipe_was_closed(&std::io::Error::from_raw_os_error(109)));
+            assert!(pipe_was_closed(&std::io::Error::from_raw_os_error(232)));
+        }
     }
 }
 

@@ -195,9 +195,12 @@ fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
         format!("{}/{}", home.trim_end_matches('/'), rest)
     } else {
         let cwd = cwd?;
-        let cwd = cwd.replace('\\', "/");
+        let mut cwd = cwd.replace('\\', "/");
         if cwd.is_empty() || cwd.starts_with("//") || has_parent_component(&cwd) {
             return None;
+        }
+        if is_windows_drive_path(&cwd) {
+            cwd.insert(0, '/');
         }
         let rel = normalized.strip_prefix("./").unwrap_or(&normalized);
         if rel.starts_with('/') || rel.is_empty() {
@@ -396,6 +399,14 @@ mod tests {
         assert_eq!(
             path_match_to_file_uri("C:/Users/me/src/main.rs:9:2", None).as_deref(),
             Some("file:///C:/Users/me/src/main.rs")
+        );
+        assert_eq!(
+            path_match_to_file_uri(
+                "crates/kettle-core/src/links.rs:12:3",
+                Some(r"C:\Users\me\kettle")
+            )
+            .as_deref(),
+            Some("file:///C:/Users/me/kettle/crates/kettle-core/src/links.rs")
         );
     }
 

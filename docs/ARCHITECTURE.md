@@ -99,6 +99,12 @@ state) lives in `WindowState`, while `App` keeps the process globals
   policy, so a stale pin never fails startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
   the next launch (the settings panel shows a "restart to apply" hint).
+  A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
+  then rebuilds every renderer on a pure settle/backoff state machine
+  (configured adapter → other hardware → software) without dropping PTYs.
+  Driver callbacks never perform filesystem I/O. The event-loop thread writes
+  capped, rotated, terminal-content-free JSONL incident records under the
+  per-user cache.
 - **PTY wakeups fan out** to all windows, gated per window by a per-pane
   output-generation counter — plain output emits no `TermEvent`, so the
   counter is the only reliable "this pane has new bytes" signal.
@@ -139,6 +145,19 @@ sequenceDiagram
     GPU->>UI: present
     UI->>PTY: key / mouse / paste / focus bytes
 ```
+
+The blocking PTY `read()` runs on a small pump thread so the parser can still
+wake at a DEC 2026 synchronized-update deadline while no bytes arrive. Its
+handoff is a four-slot synchronous channel with recycled 64 KiB buffers: output
+flood applies bounded backpressure instead of growing an unbounded queue. The
+reader force-ends an omitted synchronized update at the parser deadline, bumps
+the output generation, and wakes the UI for the now-visible frame.
+
+The optional raw-output tap has an explicit delivery policy. Lua output hooks
+use a bounded best-effort sender and may drop under plugin backpressure;
+recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
+policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
+it takes the terminal lock and bounds memory without creating a lock cycle.
 
 ## kitty graphics pipeline
 
@@ -336,13 +355,12 @@ text, so its bitmap is already resident).
   refactor of `ContextMenuRow.label` is the natural next step if
   this ever shows up in a profile; today it's not measurable
   against winit's per-frame work.
-- **Synchronization primitives audit**: ~13 `unsafe`
-  blocks total, all FFI (libc `sendmsg/recvmsg/SCM_RIGHTS`, signal
-  setup, `pre_exec` for fd-3 plumbing, `UnixStream::from_raw_fd`
-  adoption). Each is ≤10 lines, narrowly scoped, with a doc comment
-  citing the ownership contract. No `transmute`, no raw-pointer
-  abstractions, no `Send`/`Sync` impls outside the foreign-fd
-  protocols. Per-pane `Arc<Mutex<...>>` are contended only on PTY
+- **Synchronization and unsafe-code audit**: unsafe code is confined to narrow
+  OS FFI/handle ownership boundaries (Windows named pipes/window APIs, libc
+  `sendmsg`/`recvmsg`/SCM_RIGHTS, signal setup, `pre_exec`, and raw-fd
+  adoption) plus UTF-8 conversion after an explicit valid-prefix check. Each
+  site documents its ownership or validity contract. There is no `transmute`
+  and no custom `Send`/`Sync` implementation. Per-pane `Arc<Mutex<...>>` are contended only on PTY
   read or App snapshot; lock-hold times are O(bytes) — designed to
   stay well under one frame's budget per drain even on fast scrolling.
 

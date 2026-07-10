@@ -625,14 +625,10 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     } else {
         (s.strip_prefix("file://").unwrap_or(s), true)
     };
-    let (host, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        // No path component at all (e.g. `file://localhost` with no trailing
-        // slash). A valid OSC 7 cwd is always an absolute path beginning with
-        // `/` (or a `/C:/…` drive form), so a slash-less remainder is never a
-        // usable cwd — reject rather than emit a bogus one (audit, v2.25.0).
-        None => return None,
-    };
+    // No path component at all (e.g. `file://localhost` with no trailing
+    // slash) is invalid: an OSC 7 cwd starts with `/` (or `/C:/...`).
+    let path_start = rest.find('/')?;
+    let (host, path) = (&rest[..path_start], &rest[path_start..]);
     let host = host.trim();
     if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
         match local_host {
