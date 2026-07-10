@@ -231,7 +231,9 @@ without committing a private recording.
 **Synchronized-update timeout and PTY bounds.** The reader tests open a real DEC
 2026 synchronized update, omit its close sequence, wait through the parser's
 deadline, and assert one forced flush/wakeup. A split close sequence arriving
-before the deadline must not force-flush. A separate capacity assertion pins the
+before the deadline must not force-flush. Ready data queued after expiry must be
+preserved but only returned after the buffered update is applied, while EOF
+before expiry flushes immediately. A separate capacity assertion pins the
 four-slot PTY pump queue; recycled 64 KiB buffers bound flood memory instead of
 growing an unbounded channel. The raw-output sender tests separately prove a
 full best-effort plugin queue drops without blocking and a full lossless queue
