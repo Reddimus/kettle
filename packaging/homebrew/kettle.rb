@@ -37,12 +37,12 @@ class Kettle < Formula
     # macOS ships the universal2 .app bundle — same binary covers
     # arm64 and x86_64. No need to split by architecture.
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-macos-universal.zip"
-    sha256 "672e06bf25c7fd89b5d6217bb6679dcc2d2dcc226306f25b225472dcd2b6a0bc"
+    sha256 "1404d754f9ccc5e8687b2bdb0a4869fc6ce95e571774109392ce537cc907aa70"
   end
 
   on_linux do
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-linux-x86_64.tar.gz"
-    sha256 "4f60dd0d89f5e043df69754b6ea88a77813e37ec0e060aaaed1d891b443eceb1"
+    sha256 "21113c6e8a14b47a8f7aa7bc2f52a23a44ec8bfde479776751e8cf50cdca1415"
   end
 
   livecheck do
