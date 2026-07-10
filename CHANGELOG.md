@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.34.3] — 2026-07-09
+
   ### Fixed
   - **Package-template CI no longer fails a fresh release race.** The automatic
     check still validates published hashes when the sidecars are available, but
