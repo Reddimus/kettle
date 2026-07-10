@@ -91,7 +91,7 @@ unicode-width = "0.2"
 # `Lua` handle Send+Sync so it can be parked on App's struct
 # (mlua's default is single-threaded). `error-send` makes
 # `mlua::Error` Send+Sync so anyhow integration works cleanly.
-mlua = { version = "0.11", features = ["lua54", "vendored", "send", "error-send"] }
+mlua = { version = "0.12", features = ["lua54", "vendored", "send", "error-send"] }
 # Cycle 371: cross-platform desktop notifications for kettle.notify
 # (Lua plugin API). Backends: libnotify on Linux (D-Bus), NSUserNotification
 # on macOS, Toast on Windows. Pure-Rust + small. Fallback to log::info
