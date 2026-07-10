@@ -21,7 +21,7 @@ edition = "2024"
 # Y = ... && Z`) in kettle-vt / kettle-config / kettle-render /
 # kettle, which stabilized in Rust 1.88 (cycle 225 — the original
 # floor). Cycle 250: the *effective* MSRV is now 1.89 because two
-# transitive deps (`cosmic-text 0.18.2`, `smol_str 0.3.6`) bumped
+# transitive deps (`cosmic-text 0.19.0`, `smol_str 0.3.6`) bumped
 # their floors to 1.89; declaring 1.88 here misled `cargo install`
 # users into a confusing transitive-dep failure instead of the
 # clean cargo "package requires rustc 1.89" message. The cycle-250

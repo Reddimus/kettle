@@ -1200,6 +1200,7 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
             height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
@@ -1802,13 +1803,12 @@ impl Renderer {
                     budget,
                 );
                 let buf = &mut self.pane_titlebar_buffers[i];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(rw), Some(pane_titlebar_h));
+                buf.set_metrics(metrics);
+                buf.set_size(Some(rw), Some(pane_titlebar_h));
                 // v2.20.0 P1b: `Buffer::set_text` re-shapes unconditionally —
                 // gate it on text change so a steady title costs nothing.
                 if self.pane_titlebar_texts[i] != label {
                     buf.set_text(
-                        &mut self.font_system,
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Basic,
@@ -2581,12 +2581,9 @@ impl Renderer {
                 overlay.search_count,
                 nav_hint
             );
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2603,12 +2600,9 @@ impl Renderer {
                 "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
                 overlay.palette_hint
             );
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2628,12 +2622,9 @@ impl Renderer {
                 "  ▤ layout: {q}_   ▸ {}   (Enter spawn · Tab/↑↓ select · Esc cancel)",
                 overlay.layout_picker_hint
             );
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2650,12 +2641,9 @@ impl Renderer {
                 "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
                 overlay.ssh_hint
             );
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2683,15 +2671,10 @@ impl Renderer {
                 "  ✎ {} {}_   (Enter apply · Esc cancel)",
                 edit.label, edit.input
             );
+            self.search_buffer.set_metrics(metrics);
             self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer.set_size(
-                &mut self.font_system,
-                Some(edit.rect.2),
-                Some(edit.rect.3),
-            );
+                .set_size(Some(edit.rect.2), Some(edit.rect.3));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2744,12 +2727,9 @@ impl Renderer {
                 .saturating_sub(left.chars().count() + buttons_cols)
                 .max(1);
             let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2788,12 +2768,9 @@ impl Renderer {
             let label = format!(
                 "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
             );
-            self.search_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.search_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(bar_h));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
-                &mut self.font_system,
                 &label,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -2849,12 +2826,11 @@ impl Renderer {
                 // give it a real button chip background.
                 let label = body;
                 let buf = &mut self.tab_buffers[bi];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(title_w), Some(title_h));
+                buf.set_metrics(metrics);
+                buf.set_size(Some(title_w), Some(title_h));
                 // v2.20.0 P1b: re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
                     buf.set_text(
-                        &mut self.font_system,
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
@@ -2866,17 +2842,12 @@ impl Renderer {
             }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
+            self.tab_close_buffer.set_metrics(metrics);
             self.tab_close_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.tab_close_buffer.set_size(
-                &mut self.font_system,
-                Some(tabbar.height),
-                Some(tabbar.height),
-            );
+                .set_size(Some(tabbar.height), Some(tabbar.height));
             // v2.20.0 P1b: constant glyph — shaped once per font family.
             if self.tab_close_text != "✕" {
                 self.tab_close_buffer.set_text(
-                    &mut self.font_system,
                     "✕",
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
@@ -2887,17 +2858,12 @@ impl Renderer {
             self.tab_close_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // `+` button glyph.
+            self.tabbar_buffer.set_metrics(metrics);
             self.tabbar_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.tabbar_buffer.set_size(
-                &mut self.font_system,
-                Some(tabbar.new_tab.2),
-                Some(tabbar.height),
-            );
+                .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
             // v2.20.0 P1b: constant glyph — shaped once per font family.
             if self.tabbar_text != " +" {
                 self.tabbar_buffer.set_text(
-                    &mut self.font_system,
                     " +",
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
@@ -2910,17 +2876,12 @@ impl Renderer {
             // Cycle 805: the `▾` dropdown arrow, shaped in its own buffer so it
             // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
             if tabbar.new_tab_menu.2 > 0.0 {
+                self.new_tab_arrow_buffer.set_metrics(metrics);
                 self.new_tab_arrow_buffer
-                    .set_metrics(&mut self.font_system, metrics);
-                self.new_tab_arrow_buffer.set_size(
-                    &mut self.font_system,
-                    Some(tabbar.new_tab_menu.2),
-                    Some(tabbar.height),
-                );
+                    .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
                 // v2.20.0 P1b: constant glyph — shaped once per font family.
                 if self.new_tab_arrow_text != " ▾" {
                     self.new_tab_arrow_buffer.set_text(
-                        &mut self.font_system,
                         " ▾",
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
@@ -2935,16 +2896,11 @@ impl Renderer {
             // own buffer and sized to its button rect. Present only when the
             // horizontal tab bar overflows.
             if tabbar.scroll_left.2 > 0.0 {
+                self.scroll_left_buffer.set_metrics(metrics);
                 self.scroll_left_buffer
-                    .set_metrics(&mut self.font_system, metrics);
-                self.scroll_left_buffer.set_size(
-                    &mut self.font_system,
-                    Some(tabbar.scroll_left.2),
-                    Some(tabbar.height),
-                );
+                    .set_size(Some(tabbar.scroll_left.2), Some(tabbar.height));
                 if self.scroll_left_text != " ‹" {
                     self.scroll_left_buffer.set_text(
-                        &mut self.font_system,
                         " ‹",
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
@@ -2956,16 +2912,11 @@ impl Renderer {
                     .shape_until_scroll(&mut self.font_system, false);
             }
             if tabbar.scroll_right.2 > 0.0 {
+                self.scroll_right_buffer.set_metrics(metrics);
                 self.scroll_right_buffer
-                    .set_metrics(&mut self.font_system, metrics);
-                self.scroll_right_buffer.set_size(
-                    &mut self.font_system,
-                    Some(tabbar.scroll_right.2),
-                    Some(tabbar.height),
-                );
+                    .set_size(Some(tabbar.scroll_right.2), Some(tabbar.height));
                 if self.scroll_right_text != " ›" {
                     self.scroll_right_buffer.set_text(
-                        &mut self.font_system,
                         " ›",
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
@@ -2982,18 +2933,13 @@ impl Renderer {
         // line; sized to surface width so cosmic-text doesn't wrap
         // an overlong status string.
         if status.height > 0.0 && !status.text.is_empty() {
+            self.status_bar_buffer.set_metrics(metrics);
             self.status_bar_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.status_bar_buffer.set_size(
-                &mut self.font_system,
-                Some(sw - 16.0),
-                Some(status.height),
-            );
+                .set_size(Some(sw - 16.0), Some(status.height));
             // v2.20.0 P1b: the status line changes at most once a second (the
             // HH:MM:SS clock) — don't re-shape it on every painted frame.
             if self.status_bar_text != status.text {
                 self.status_bar_buffer.set_text(
-                    &mut self.font_system,
                     &status.text,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
@@ -3017,13 +2963,11 @@ impl Renderer {
             // gated form left the glyphs shaped at the old monitor's scale.
             // Both calls early-out when unchanged, like the other chrome
             // buffers.
+            self.resize_overlay_buffer.set_metrics(metrics);
             self.resize_overlay_buffer
-                .set_metrics(&mut self.font_system, metrics);
-            self.resize_overlay_buffer
-                .set_size(&mut self.font_system, Some(sw), Some(ch * 2.0));
+                .set_size(Some(sw), Some(ch * 2.0));
             if self.resize_overlay_text != label {
                 self.resize_overlay_buffer.set_text(
-                    &mut self.font_system,
                     &label,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Basic,
@@ -3078,10 +3022,9 @@ impl Renderer {
                     continue;
                 }
                 let buf = &mut self.context_menu_buffers[i];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                buf.set_metrics(metrics);
+                buf.set_size(Some(panel_w), Some(row_h));
                 buf.set_text(
-                    &mut self.font_system,
                     &row.label,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
@@ -3090,10 +3033,9 @@ impl Renderer {
                 buf.shape_until_scroll(&mut self.font_system, false);
                 if !row.hint.is_empty() {
                     let hb = &mut self.context_menu_hint_buffers[i];
-                    hb.set_metrics(&mut self.font_system, metrics);
-                    hb.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                    hb.set_metrics(metrics);
+                    hb.set_size(Some(panel_w), Some(row_h));
                     hb.set_text(
-                        &mut self.font_system,
                         &row.hint,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
@@ -3119,10 +3061,9 @@ impl Renderer {
             let row_h = ch + 6.0;
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(panel_w), Some(row_h));
+                buf.set_metrics(metrics);
+                buf.set_size(Some(panel_w), Some(row_h));
                 buf.set_text(
-                    &mut self.font_system,
                     line,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
@@ -3145,10 +3086,9 @@ impl Renderer {
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 let n = hint.label.chars().count().max(1) as f32;
                 let buf = &mut self.hint_buffers[i];
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(n * cw + 2.0), Some(ch));
+                buf.set_metrics(metrics);
+                buf.set_size(Some(n * cw + 2.0), Some(ch));
                 buf.set_text(
-                    &mut self.font_system,
                     &hint.label,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Basic,
@@ -3771,10 +3711,8 @@ impl Renderer {
             .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
         {
             let mut enc = [0u8; 4];
-            self.cursor_glyph_buffer
-                .set_metrics(&mut self.font_system, metrics);
+            self.cursor_glyph_buffer.set_metrics(metrics);
             self.cursor_glyph_buffer.set_text(
-                &mut self.font_system,
                 gch.encode_utf8(&mut enc),
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -3835,11 +3773,17 @@ impl Renderer {
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
 
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+        let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => {
                 self.surface_fail_streak = 0;
-                t
+                (t, false)
+            }
+            // The frame is usable, but no longer matches the underlying
+            // surface. Present it once, then refresh the swapchain before the
+            // next acquire as required by wgpu 30's explicit outcome model.
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface_fail_streak = 0;
+                (t, true)
             }
             // v2.31.0 (adversarial review): Occluded and Timeout are BENIGN
             // transient states, NOT device loss. CRITICAL: on macOS the Metal
@@ -4005,7 +3949,10 @@ impl Renderer {
                 log::warn!("take_screenshot capture failed: {e}");
             }
         }
-        frame.present();
+        self.gpu.queue.present(frame);
+        if reconfigure_after_present {
+            self.surface.configure(&self.gpu.device, &self.config);
+        }
         // Only trim when we prepared this frame (see the `need_prepare` gate):
         // trimming clears the glyph in-use set, so a trim with no following
         // prepare would let the next prepare evict glyphs the cached vertices
@@ -4088,7 +4035,9 @@ impl Renderer {
         if !done.load(Ordering::SeqCst) {
             return Err(anyhow!("screenshot readback timed out"));
         }
-        let mapped = buffer_slice.get_mapped_range();
+        let mapped = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("screenshot mapped range failed: {e:?}"))?;
 
         // Compact rows (strip wgpu's 256-byte row padding) +
         // convert BGRA → RGBA if needed. Surface format is
@@ -4663,9 +4612,8 @@ impl Renderer {
         // (cosmic-text's `set_metrics_and_size` early-outs on equality), so
         // steady-state frames don't relayout; a zoom / pane-resize relayouts
         // internally while PRESERVING each line's shaping cache.
-        buf.set_metrics(&mut self.font_system, pm);
+        buf.set_metrics(pm);
         buf.set_size(
-            &mut self.font_system,
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
             Some((rh - cfg.padding_y * 2.0).max(1.0)),
         );
@@ -4674,7 +4622,7 @@ impl Renderer {
         // line — both so a too-wide fallback glyph can't push the line onto a
         // phantom second visual row, AND so the cell-locked emit can rely on
         // `char index == grid column`. cosmic-text no-ops this when unchanged.
-        buf.set_wrap(&mut self.font_system, Wrap::None);
+        buf.set_wrap(Wrap::None);
         let ff = font_features(cfg);
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
@@ -5215,6 +5163,7 @@ async fn request_adapter_or_fallback(
         power_preference: options.power_preference,
         compatible_surface: options.compatible_surface,
         force_fallback_adapter: true,
+        apply_limit_buckets: false,
     };
     instance
         .request_adapter(&fallback)
@@ -5377,6 +5326,7 @@ async fn resolve_adapter(
             power_preference: power_preference_of(cfg.gpu_power_preference),
             compatible_surface: Some(surface),
             force_fallback_adapter: true,
+            apply_limit_buckets: false,
         };
         return instance
             .request_adapter(&opts)
@@ -5425,6 +5375,7 @@ async fn resolve_adapter(
             power_preference: power_preference_of(cfg.gpu_power_preference),
             compatible_surface: Some(surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         };
         return request_adapter_or_fallback(instance, &opts, context).await;
     }
@@ -5476,6 +5427,7 @@ async fn resolve_adapter(
         power_preference: power_preference_of(cfg.gpu_power_preference),
         compatible_surface: Some(surface),
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     };
     request_adapter_or_fallback(instance, &opts, context).await
 }
@@ -5494,6 +5446,7 @@ async fn resolve_headless_adapter(
                 power_preference: power_preference_of(cfg.gpu_power_preference),
                 compatible_surface: None,
                 force_fallback_adapter: true,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| anyhow!("{context}: software adapter unavailable: {e:?}"));
@@ -5534,6 +5487,7 @@ async fn resolve_headless_adapter(
             power_preference: power_preference_of(cfg.gpu_power_preference),
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         },
         context,
     )
@@ -6208,7 +6162,7 @@ fn measure_cell(
     family: &str,
     metrics: Metrics,
 ) -> (f32, f32) {
-    buf.set_metrics(fs, metrics);
+    buf.set_metrics(metrics);
     // Cycle 865 (audit): size the measure box relative to the (physical)
     // metrics, not a fixed 1000×100. At a large font on a high-DPI display the
     // physical font size can be ~200px, so the 10-glyph probe is ~1300px wide
@@ -6218,9 +6172,8 @@ fn measure_cell(
     // ample headroom that can never wrap regardless of size/scale.
     let box_w = metrics.font_size * 20.0 + 100.0;
     let box_h = metrics.line_height * 2.0 + 100.0;
-    buf.set_size(fs, Some(box_w), Some(box_h));
+    buf.set_size(Some(box_w), Some(box_h));
     buf.set_text(
-        fs,
         "MMMMMMMMMM",
         &Attrs::new().family(Family::Name(family)),
         Shaping::Advanced,
@@ -6475,6 +6428,7 @@ pub fn capture_png_with_annotation(
                 power_preference: wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             },
             "capture_png",
         )
@@ -6656,9 +6610,8 @@ pub fn capture_png_with_annotation(
             .color(gc(theme.foreground));
 
         let mut tab_buf = TextBuffer::new(&mut font_system, metrics);
-        tab_buf.set_size(&mut font_system, Some(wf), Some(tab_h));
+        tab_buf.set_size(Some(wf), Some(tab_h));
         tab_buf.set_rich_text(
-            &mut font_system,
             [
                 (tab0_label.as_str(), fg.clone()),
                 (tab1_label.as_str(), dim.clone()),
@@ -6675,9 +6628,8 @@ pub fn capture_png_with_annotation(
         // showcase screenshots track the real product version forever.
         let compile_line = format!("kettle v{SCREENSHOT_DEMO_VERSION}\n");
         let mut left = TextBuffer::new(&mut font_system, metrics);
-        left.set_size(&mut font_system, Some(split_x - pad), Some(lh));
+        left.set_size(Some(split_x - pad), Some(lh));
         left.set_rich_text(
-            &mut font_system,
             [
                 ("kevim@kettle", grn.clone()),
                 (":", fg.clone()),
@@ -6708,9 +6660,8 @@ pub fn capture_png_with_annotation(
         left.shape_until_scroll(&mut font_system, false);
 
         let mut right = TextBuffer::new(&mut font_system, metrics);
-        right.set_size(&mut font_system, Some(wf - split_x - pad), Some(lh));
+        right.set_size(Some(wf - split_x - pad), Some(lh));
         right.set_rich_text(
-            &mut font_system,
             [
                 ("  kettle — cross-platform terminal\n\n", mag.clone()),
                 ("CPU ", fg.clone()),
@@ -6746,8 +6697,8 @@ pub fn capture_png_with_annotation(
         let mut annotate_buf = TextBuffer::new(&mut font_system, metrics);
         let annotate_h = (ch + 8.0).max(24.0);
         if let Some(text) = annotation {
-            annotate_buf.set_size(&mut font_system, Some(wf - 16.0), Some(annotate_h));
-            annotate_buf.set_text(&mut font_system, text, &base, Shaping::Advanced, None);
+            annotate_buf.set_size(Some(wf - 16.0), Some(annotate_h));
+            annotate_buf.set_text(text, &base, Shaping::Advanced, None);
             annotate_buf.shape_until_scroll(&mut font_system, false);
             // Translucent panel + one-px top border.
             q.push(rect(
@@ -7007,10 +6958,9 @@ pub fn capture_png_with_annotation(
             for row in &menu.rows {
                 let mut buf = TextBuffer::new(&mut font_system, metrics);
                 if !row.separator {
-                    buf.set_metrics(&mut font_system, metrics);
-                    buf.set_size(&mut font_system, Some(panel_w), Some(row_h));
+                    buf.set_metrics(metrics);
+                    buf.set_size(Some(panel_w), Some(row_h));
                     buf.set_text(
-                        &mut font_system,
                         &row.label,
                         &Attrs::new().family(Family::Name(&fam)),
                         Shaping::Advanced,
@@ -7180,7 +7130,9 @@ pub fn capture_png_with_annotation(
             .map_err(|_| anyhow!("map channel closed"))?
             .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
 
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("capture mapped range failed: {e:?}"))?;
         let mut pixels = Vec::with_capacity((unpadded * h) as usize);
         for row in 0..h {
             let start = (row * padded) as usize;
@@ -7216,6 +7168,7 @@ pub fn offscreen_selftest() -> anyhow::Result<bool> {
                 power_preference: wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             },
             "offscreen_selftest",
         )
@@ -7326,6 +7279,7 @@ mod gpu_tests {
                     power_preference: wgpu::PowerPreference::None,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 },
                 "screenshot_grid_emit",
             )
@@ -7366,10 +7320,9 @@ mod gpu_tests {
             let (cw, _ch) = measure_cell(&mut font_system, &mut measure, &family, metrics);
 
             let mut buf = TextBuffer::new(&mut font_system, metrics);
-            buf.set_size(&mut font_system, Some(2048.0), Some(512.0));
-            buf.set_wrap(&mut font_system, Wrap::None);
+            buf.set_size(Some(2048.0), Some(512.0));
+            buf.set_wrap(Wrap::None);
             buf.set_text(
-                &mut font_system,
                 "kevim@kettle:~/Repos/kettle$ cargo test",
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -7477,6 +7430,7 @@ mod gpu_tests {
                     power_preference: wgpu::PowerPreference::None,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 },
                 "grid_prompt_blink",
             )
@@ -7543,11 +7497,10 @@ mod gpu_tests {
                 .collect();
 
             let mut buf = TextBuffer::new(&mut font_system, metrics);
-            buf.set_metrics(&mut font_system, metrics);
-            buf.set_size(&mut font_system, Some(w as f32), Some(h as f32));
-            buf.set_wrap(&mut font_system, Wrap::None);
+            buf.set_metrics(metrics);
+            buf.set_size(Some(w as f32), Some(h as f32));
+            buf.set_wrap(Wrap::None);
             buf.set_text(
-                &mut font_system,
                 &fixtures.join("\n"),
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
@@ -7713,7 +7666,9 @@ mod gpu_tests {
         rx.recv()
             .map_err(|_| anyhow!("map channel closed"))?
             .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("grid fixture mapped range failed: {e:?}"))?;
         let mut pixels = Vec::with_capacity((unpadded * h) as usize);
         for row in 0..h {
             let start = (row * padded) as usize;
@@ -7736,6 +7691,7 @@ mod gpu_tests {
                     power_preference: wgpu::PowerPreference::None,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 },
                 "srgb_quad_roundtrip",
             )
@@ -7841,7 +7797,9 @@ mod gpu_tests {
             if !done.load(Ordering::SeqCst) {
                 return Err(anyhow!("srgb readback timed out"));
             }
-            let mapped = slice.get_mapped_range();
+            let mapped = slice
+                .get_mapped_range()
+                .map_err(|e| anyhow!("sRGB mapped range failed: {e:?}"))?;
             let px = [mapped[0], mapped[1], mapped[2]];
             drop(mapped);
             staging.unmap();
@@ -9436,7 +9394,7 @@ mod glyph_cell_lock_tests {
             "glyph emission must be gated on grid mode"
         );
         assert!(
-            src.contains("buf.set_wrap(&mut self.font_system, Wrap::None);"),
+            src.contains("buf.set_wrap(Wrap::None);"),
             "pane buffers must be Wrap::None so a row is one run + char==column holds"
         );
     }

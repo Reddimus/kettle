@@ -16,7 +16,7 @@ workspace = true
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
-glyphon = "0.11.0"
+glyphon = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 kettle-config.workspace = true
 kettle-core.workspace = true
@@ -24,7 +24,7 @@ log.workspace = true
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 unicode-width.workspace = true
-wgpu = "29.0.3"
+wgpu = "30.0.0"
 
 [dev-dependencies]
 # Cycle 251: temp PNG output for the menu-visual integration test

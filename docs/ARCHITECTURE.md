@@ -104,7 +104,11 @@ state) lives in `WindowState`, while `App` keeps the process globals
   (configured adapter → other hardware → software) without dropping PTYs.
   Driver callbacks never perform filesystem I/O. The event-loop thread writes
   capped, rotated, terminal-content-free JSONL incident records under the
-  per-user cache.
+  per-user cache. Surface acquisition treats both `Success` and `Suboptimal`
+  outcomes as renderable; a suboptimal frame is submitted and presented before
+  the surface is reconfigured for the next acquisition. `Occluded` and
+  `Timeout` skip only that frame, while sustained fatal outcomes enter the
+  shared recovery path.
 - **PTY wakeups fan out** to all windows, gated per window by a per-pane
   output-generation counter — plain output emits no `TermEvent`, so the
   counter is the only reliable "this pane has new bytes" signal.
