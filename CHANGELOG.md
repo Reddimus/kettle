@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.34.4] — 2026-07-09
+
   ### Fixed
   - **DEC 2026 deadlines now take priority over queued PTY data and EOF.** A
     ready chunk at the 150 ms boundary can no longer starve synchronized-output
