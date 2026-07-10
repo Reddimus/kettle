@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **DEC 2026 deadlines now take priority over queued PTY data and EOF.** A
+    ready chunk at the 150 ms boundary can no longer starve synchronized-output
+    flushing, and a child exit flushes its final buffered update immediately.
+    Timeout recovery also consumes a poisoned terminal lock instead of spinning
+    on a zero-duration receive loop.
+
 ## [2.34.3] — 2026-07-09
 
   ### Fixed
