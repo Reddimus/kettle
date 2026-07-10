@@ -200,9 +200,10 @@ jobs:
           }
           Write-Host "Windows release build + piped --version smoke OK"
       - name: Windows installer smoke
-        # Exercise install.ps1 in portable/custom-prefix mode on real Windows.
-        # The saved helper must be able to uninstall without repeating -Prefix,
-        # which is the path documented for portable installs.
+        # Exercise install.ps1 in portable/custom-prefix mode and its isolated
+        # default-install integration mode on real Windows. The latter seeds an
+        # old shortcut with stale arguments and verifies an upgrade replaces it.
+        # The saved helper must uninstall without repeating -Prefix.
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/check-windows-installer.ps1

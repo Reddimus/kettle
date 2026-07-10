@@ -7,6 +7,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **Windows Search launches survive upgrades from older custom shortcuts.**
+    The installer now replaces its managed Start-menu shortcut and explicitly
+    clears arguments instead of allowing WScript.Shell to retain stale
+    PowerShell recorder flags that make `kettle.exe` exit before opening.
+    Custom-prefix uninstalls also leave the default installation's shortcut,
+    registry entry, PATH, and PowerShell profile integration untouched.
   - **Authenticated Codex/Claude live smokes no longer accept shell echo as an
     agent response.** Child output is explicitly framed, stale or absent native
     exit codes fail closed, and Windows uses a version-independent .NET temp
