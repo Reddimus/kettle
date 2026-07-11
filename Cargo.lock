@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "kettle"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-config"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "bitflags 2.13.0",
  "log",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-core"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ctl"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "libc",
  "serde",
@@ -1825,14 +1825,14 @@ dependencies = [
 
 [[package]]
 name = "kettle-remote"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "sysinfo",
 ]
 
 [[package]]
 name = "kettle-render"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ui"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-update"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-vt"
-version = "2.34.4"
+version = "2.35.0"
 dependencies = [
  "base64",
  "criterion",
