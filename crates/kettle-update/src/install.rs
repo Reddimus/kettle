@@ -1,17 +1,29 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+#[cfg(any(windows, target_os = "linux"))]
+use std::fs::OpenOptions;
+#[cfg(any(windows, target_os = "linux"))]
+use std::io::Read;
+#[cfg(any(windows, target_os = "linux"))]
+use std::path::Component;
+#[cfg(any(windows, target_os = "linux"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(windows, target_os = "linux"))]
 use sha2::{Digest as _, Sha256};
 
 use crate::current_target;
 use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
 
 const MARKER_SCHEMA: u32 = 1;
+#[cfg(any(windows, target_os = "linux"))]
 const JOURNAL_SCHEMA: u32 = 1;
+#[cfg(any(windows, target_os = "linux"))]
 const MAX_ARCHIVE_ENTRIES: usize = 512;
+#[cfg(any(windows, target_os = "linux"))]
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,11 +64,18 @@ pub fn marker_json(version: &str) -> Result<String, UpdateError> {
     Ok(serde_json::to_string_pretty(&marker)? + "\n")
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
     let executable = std::env::current_exe()?;
     detect_managed_install_at(&executable)
 }
 
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
+    Err(UpdateError::UnsupportedPlatform)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, UpdateError> {
     let executable = executable.canonicalize().map_err(|e| {
         UpdateError::UnmanagedInstall(format!("cannot resolve {}: {e}", executable.display()))
@@ -98,11 +117,6 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         (prefix, marker)
     };
 
-    #[cfg(not(any(windows, target_os = "linux")))]
-    let (prefix, marker_path): (PathBuf, PathBuf) = {
-        return Err(UpdateError::UnsupportedPlatform);
-    };
-
     let bytes = fs::read(&marker_path).map_err(|e| {
         UpdateError::UnmanagedInstall(format!(
             "{} is missing or unreadable ({e}); update through the package manager or installer that owns this executable",
@@ -133,6 +147,7 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
     })
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 pub fn install_update(
     client: &FeedClient,
     update: &AvailableUpdate,
@@ -141,6 +156,15 @@ pub fn install_update(
     install_update_into(client, update, &install)
 }
 
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn install_update(
+    _client: &FeedClient,
+    _update: &AvailableUpdate,
+) -> Result<InstallOutcome, UpdateError> {
+    Err(UpdateError::UnsupportedPlatform)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn install_update_into(
     client: &FeedClient,
     update: &AvailableUpdate,
@@ -204,6 +228,7 @@ fn install_update_into(
     })
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), UpdateError> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
@@ -347,11 +372,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), UpdateError
     Ok(())
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-fn extract_archive(_archive: &Path, _destination: &Path) -> Result<(), UpdateError> {
-    Err(UpdateError::UnsupportedPlatform)
-}
-
+#[cfg(any(windows, target_os = "linux"))]
 fn validate_archive_path(path: &Path) -> Result<(), UpdateError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(UpdateError::UnsafeArchive(path.display().to_string()));
@@ -531,16 +552,6 @@ fn apply_staged_update(
     Ok(())
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-fn apply_staged_update(
-    _transaction: &mut Transaction,
-    _staging: &Path,
-    _install: &ManagedInstall,
-    _update: &AvailableUpdate,
-) -> Result<(), UpdateError> {
-    Err(UpdateError::UnsupportedPlatform)
-}
-
 #[cfg(target_os = "linux")]
 fn render_linux_desktop(source: &Path, prefix: &Path) -> Result<String, UpdateError> {
     let text = fs::read_to_string(source)?;
@@ -561,6 +572,7 @@ fn render_linux_desktop(source: &Path, prefix: &Path) -> Result<String, UpdateEr
     Ok(rendered)
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn require_file(path: &Path, label: impl std::fmt::Display) -> Result<(), UpdateError> {
     if !path.is_file() {
         return Err(UpdateError::MissingArchiveFile(label.to_string()));
@@ -568,6 +580,7 @@ fn require_file(path: &Path, label: impl std::fmt::Display) -> Result<(), Update
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     if !root.is_dir() {
         return Err(UpdateError::MissingArchiveFile(root.display().to_string()));
@@ -594,6 +607,7 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     Ok(files)
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Debug, Serialize, Deserialize)]
 struct Journal {
     schema: u32,
@@ -601,6 +615,7 @@ struct Journal {
     entries: Vec<JournalEntry>,
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalEntry {
     relative: String,
@@ -609,6 +624,7 @@ struct JournalEntry {
     previous_unix_mode: Option<u32>,
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 struct Transaction {
     prefix: PathBuf,
     journal_path: PathBuf,
@@ -616,6 +632,7 @@ struct Transaction {
     journal: Journal,
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 impl Transaction {
     fn begin(prefix: &Path) -> Result<Self, UpdateError> {
         let suffix = unique_suffix();
@@ -719,6 +736,7 @@ impl Transaction {
     }
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     let journal_path = prefix.join(".kettle-update-journal.json");
     let bytes = match fs::read(&journal_path) {
@@ -746,6 +764,7 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn rollback_journal(prefix: &Path, journal: &Journal) -> Result<(), UpdateError> {
     let backup_dir = prefix.join(&journal.backup_dir);
     for entry in journal.entries.iter().rev() {
@@ -765,6 +784,7 @@ fn rollback_journal(prefix: &Path, journal: &Journal) -> Result<(), UpdateError>
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn validate_relative(path: &Path) -> Result<(), UpdateError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -780,6 +800,7 @@ fn validate_relative(path: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn relative_to_string(path: &Path) -> Result<String, UpdateError> {
     let parts = path
         .components()
@@ -837,13 +858,13 @@ fn set_mode(path: &Path, mode: Option<u32>) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(any(windows, target_os = "linux"), unix))]
 fn unix_mode_of(path: &Path) -> Result<Option<u32>, UpdateError> {
     use std::os::unix::fs::PermissionsExt as _;
     Ok(Some(fs::metadata(path)?.permissions().mode() & 0o7777))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(any(windows, target_os = "linux"), not(unix)))]
 fn unix_mode_of(_path: &Path) -> Result<Option<u32>, UpdateError> {
     Ok(None)
 }
@@ -912,6 +933,7 @@ fn sync_parent(_parent: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn remove_dir_all_checked(prefix: &Path, path: &Path) -> Result<(), UpdateError> {
     if path.parent() != Some(prefix)
         || !path
@@ -931,6 +953,7 @@ fn remove_dir_all_checked(prefix: &Path, path: &Path) -> Result<(), UpdateError>
     }
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn unique_suffix() -> String {
     format!(
         "{}-{}",
@@ -969,13 +992,11 @@ fn refresh_platform_integration(install: &ManagedInstall) {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-fn refresh_platform_integration(_install: &ManagedInstall) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(any(windows, target_os = "linux"))]
     fn fake_update() -> AvailableUpdate {
         AvailableUpdate {
             version: semver::Version::new(99, 0, 0),
@@ -1007,6 +1028,16 @@ mod tests {
         }
     }
 
+    #[cfg(not(any(windows, target_os = "linux")))]
+    #[test]
+    fn unsupported_platform_has_no_managed_installer() {
+        assert!(matches!(
+            detect_managed_install(),
+            Err(UpdateError::UnsupportedPlatform)
+        ));
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn archive_paths_reject_traversal_and_platform_tricks() {
         for bad in [
@@ -1024,6 +1055,7 @@ mod tests {
         assert!(validate_archive_path(Path::new("kettle/shell-integration/kettle.ps1")).is_ok());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn transaction_rolls_back_replaced_and_created_files() {
         let root = tempfile::tempdir().unwrap();
@@ -1039,6 +1071,7 @@ mod tests {
         assert!(!root.path().join(".kettle-update-journal.json").exists());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn interrupted_transaction_recovers_from_journal() {
         let root = tempfile::tempdir().unwrap();
