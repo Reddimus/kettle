@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.35.0] — 2026-07-11
+
   ### Fixed
   - **Unfocused windows no longer show a hollow terminal cursor.** Kettle now
     suppresses cursor rendering while the OS window lacks focus without
