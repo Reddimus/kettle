@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/release.sh — atomic bump + tag for kettle releases.
+# scripts/release.sh — prepare a protected-main release pull request.
 #
 # Solves the cycle-307 race condition: tagging BEFORE the
 # CHANGELOG.md `[X.Y.Z] — YYYY-MM-DD` section was committed.
@@ -16,29 +16,25 @@
 #   2. Asserts CHANGELOG.md has the target [VERSION] section.
 #   3. Bumps Cargo.toml's workspace `version`.
 #   4. Builds once to refresh Cargo.lock.
-#   5. Commits the bump + lock + (presumably already-staged)
-#      CHANGELOG changes.
-#   6. Signed annotated-tags the release commit.
+#   5. Commits the bump + lock + already-committed CHANGELOG section.
+#   6. Leaves the release commit on the current branch for a pull request.
 #
-# Push is left to the caller (so a sanity check can happen
-# between local tag creation and remote push).
+# `main` is intentionally never pushed or tagged by this script. Merge the
+# generated commit through required CI, then run `scripts/tag-release.sh` from
+# the synchronized main branch.
 #
 # Usage:
 #
-#   1. Add the new [VERSION] — YYYY-MM-DD section to CHANGELOG.md.
-#      Leave it staged or committed — script accepts either.
+#   1. Add and commit the new [VERSION] — YYYY-MM-DD section to CHANGELOG.md.
 #   2. Run: scripts/release.sh 1.7.4
-#   3. Verify: git log -1, git tag -l v1.7.4
-#   4. Push:   git push origin main && git push origin v1.7.4
+#   3. Push the branch and merge its pull request after CI.
+#   4. On synchronized main: scripts/tag-release.sh 1.7.4
 #
-# Release tags are signed by default so GitHub can show the tag as verified.
-# Configure either GPG signing or SSH signing before running:
+# `tag-release.sh` requires the configured GPG or SSH signing identity so
+# GitHub can verify the resulting annotated tag:
 #
 #   git config gpg.format ssh
 #   git config user.signingkey ~/.ssh/id_ed25519.pub
-#
-# Set KETTLE_RELEASE_UNSIGNED_TAG=1 only for local dry runs that will never be
-# pushed as public releases.
 
 set -euo pipefail
 
@@ -49,7 +45,7 @@ usage: $0 <VERSION>
   VERSION:  semver without leading 'v', e.g. 1.7.4
 
 Prerequisites:
-  - Working tree clean (changes already committed or staged).
+  - Working tree clean (all changes already committed).
   - CHANGELOG.md has a '## [<VERSION>] — YYYY-MM-DD' section.
 EOF
     exit 2
@@ -58,7 +54,7 @@ fi
 VERSION=$1
 
 # Strict semver match — refuse 'v1.7.4', 'release-1.7.4', etc.
-if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "::error::not a valid semver: $VERSION" >&2
     echo "  expected: X.Y.Z (e.g. 1.7.4), got: $VERSION" >&2
     exit 1
@@ -72,12 +68,41 @@ fi
 # its own commit; any uncommitted changes belong in either that
 # commit's scope OR a separate prior commit — the script refuses
 # to silently bundle them.
-if ! git diff-index --quiet HEAD --; then
+BRANCH=$(git branch --show-current)
+if [ -z "$BRANCH" ] || [ "$BRANCH" = main ]; then
+    echo "::error::prepare releases on a topic branch, not main or detached HEAD" >&2
+    exit 1
+fi
+if [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
     echo "::error::working tree has uncommitted changes" >&2
     echo "  commit (or stash) your changes first, then re-run" >&2
     git status --short >&2
     exit 1
 fi
+
+# Every path the script may mutate. The clean-tree precondition makes it safe
+# to restore these files if any command fails before the release commit lands.
+RESTORE_FILES=(
+    Cargo.toml Cargo.lock CHANGELOG.md flake.nix
+    README.md docs/INSTALL.md docs/VERSION-HISTORY.md
+)
+MUTATIONS_STARTED=0
+cleanup_release_attempt() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ] && [ "$MUTATIONS_STARTED" -eq 1 ]; then
+        existing=()
+        for path in "${RESTORE_FILES[@]}"; do
+            [ -e "$path" ] && existing+=("$path")
+        done
+        if [ "${#existing[@]}" -gt 0 ]; then
+            git restore --source=HEAD --staged --worktree -- "${existing[@]}" 2>/dev/null || true
+        fi
+        echo "release preparation failed; script-owned changes were restored" >&2
+    fi
+    exit "$status"
+}
+trap cleanup_release_attempt EXIT
 
 # Pre-flight: CHANGELOG.md must have a section for this version.
 # Mirrors the cycle-286 CI-time guard so a release.sh user gets
@@ -129,6 +154,7 @@ PREV=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
 # keeps the match exact regardless of the version shape.
 PREV_RE=$(printf '%s' "${PREV}" | sed 's/[.[\*^$/]/\\&/g')
 echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
+MUTATIONS_STARTED=1
 sed -i.bak "0,/^version = \"${PREV_RE}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
@@ -160,17 +186,6 @@ if [ -f flake.nix ]; then
     sed -i.bak "0,/^          version = \"${PREV_RE}\";\$/s//          version = \"${VERSION}\";/" flake.nix
     rm -f flake.nix.bak
 fi
-if [ -f packaging/homebrew/kettle.rb ]; then
-    echo "bumping packaging/homebrew/kettle.rb: ${PREV} → ${VERSION}"
-    sed -i.bak "0,/^  version \"${PREV_RE}\"\$/s//  version \"${VERSION}\"/" packaging/homebrew/kettle.rb
-    rm -f packaging/homebrew/kettle.rb.bak
-fi
-if [ -f packaging/arch/PKGBUILD ]; then
-    echo "bumping packaging/arch/PKGBUILD: ${PREV} → ${VERSION}"
-    sed -i.bak "0,/^pkgver=${PREV_RE}\$/s//pkgver=${VERSION}/" packaging/arch/PKGBUILD
-    rm -f packaging/arch/PKGBUILD.bak
-fi
-
 # Cycle 790 — durable lockstep for the user-facing install docs. README.md's
 # status banner and docs/INSTALL.md's "current latest" line + example
 # `KETTLE_VERSION=` / download URLs spell the version as `vX.Y.Z`, and kept
@@ -265,10 +280,8 @@ echo "refreshing Cargo.lock"
 # files dirty and no commit, leaving the maintainer to clean up by hand.
 # Restore them so a failed release attempt leaves the tree exactly as it was.
 if ! "$CARGO" build --workspace --quiet; then
-    echo "::error::cargo build failed — rolling back the version bump" >&2
-    git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true
-    [ -f flake.nix ] && git checkout -- flake.nix 2>/dev/null || true
-    echo "  working tree restored; fix the build error and re-run" >&2
+    echo "::error::cargo build failed" >&2
+    echo "  fix the build error and re-run" >&2
     exit 1
 fi
 
@@ -287,11 +300,6 @@ ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
 if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)
 fi
-for pkg in packaging/homebrew/kettle.rb packaging/arch/PKGBUILD; do
-    if [ -f "$pkg" ] && ! git diff --quiet -- "$pkg"; then
-        ADD_FILES+=("$pkg")
-    fi
-done
 # Cycle 790: stage the install docs whose version strings were bumped above
 # (only if the bump actually changed them, so a clean tree stays clean).
 for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
@@ -303,41 +311,19 @@ git add "${ADD_FILES[@]}"
 git commit -m "release: v${VERSION}
 
 See CHANGELOG.md [${VERSION}]."
-
-# Tag.
-if [ "${KETTLE_RELEASE_UNSIGNED_TAG:-0}" = "1" ]; then
-    echo "::warning::creating unsigned release tag because KETTLE_RELEASE_UNSIGNED_TAG=1"
-    git tag -a "v${VERSION}" -m "kettle v${VERSION}
-
-See CHANGELOG.md [${VERSION}]."
-else
-    git tag -s "v${VERSION}" -m "kettle v${VERSION}
-
-See CHANGELOG.md [${VERSION}]."
-fi
+MUTATIONS_STARTED=0
+trap - EXIT
 
 cat <<EOF
 
-✓ Tagged v${VERSION} locally.
+Prepared the v${VERSION} release commit on $(git branch --show-current).
 
 Next steps:
-  1. Verify the commit + tag look right:
+  1. Verify the commit:
        git log -1
-       git tag -l "v${VERSION}"
-       git show "v${VERSION}" | head -20
 
-  2. Push when ready:
-       git push origin main
-       git push origin "v${VERSION}"
+  2. Push this branch, open a pull request, and merge only after required CI.
 
-  3. Watch the release workflow (resolve the run AFTER the push
-     lands — the \`run list\` is racy if you copy this command
-     before pushing because it returns the previous run, not the
-     one you just triggered):
-       sleep 5  # let GitHub register the push-triggered run
-       RUN=\$(gh run list --workflow=release.yml --branch "v${VERSION}" --limit 1 --json databaseId --jq '.[0].databaseId')
-       gh run watch "\$RUN"
-       # ALWAYS verify the conclusion — \`gh run watch\`'s exit code has given a
-       # false-green on a FAILED run here (cycle 910). This must print success:
-       gh run view "\$RUN" --json conclusion,jobs --jq '.conclusion'
+  3. Synchronize local main, then create the verified release tag:
+       scripts/tag-release.sh ${VERSION}
 EOF

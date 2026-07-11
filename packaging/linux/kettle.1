@@ -339,10 +339,13 @@ redirect on Windows PowerShell, whose
 writes UTF-16.
 .TP
 .B \-\-check\-update
-Check the GitHub releases API once for a newer kettle version, print the result,
-and exit. Honors the
-.B update\-check = false
-opt-out and never runs on first launch.
+Check the authenticated stable release feed once for a newer kettle version,
+print the result, and exit. This explicit command bypasses the background
+throttle and update policy.
+.TP
+.B \-\-update
+Interactive convenience alias for
+.BR "kettle update" .
 .
 .SH SUBCOMMANDS
 The bare
@@ -414,6 +417,15 @@ runs an in-process handshake +
 + one
 .B kettle_run
 and exits, for CI.
+.TP
+.B kettle update \fR[\fB\-\-yes\fR]
+Download and install the latest authenticated stable release. Supported for
+official installer-owned Windows x86_64 and Linux x86_64/aarch64 layouts; other
+installs are refused with package-manager guidance. Verifies an Ed25519-signed
+manifest, exact archive size, and SHA-256 before transactional replacement.
+Running windows are not restarted. Without
+.BR \-\-yes ,
+an interactive confirmation is required.
 .
 .SH KEY BINDINGS
 Defaults (every binding remappable via

@@ -1,0 +1,491 @@
+use std::io::Read;
+use std::time::Duration;
+
+use base64::Engine as _;
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use semver::Version;
+use serde::{Deserialize, Serialize};
+
+use crate::{MANIFEST_URL, SIGNATURE_URL, SIGNING_CONTEXT, UPDATE_PUBLIC_KEY, current_target};
+
+const MAX_MANIFEST_BYTES: usize = 128 * 1024;
+const MAX_SIGNATURE_BYTES: usize = 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
+const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Reddimus/kettle/releases/download";
+
+#[derive(Debug, thiserror::Error)]
+pub enum UpdateError {
+    #[error("update request failed: {0}")]
+    Request(String),
+    #[error("update response exceeded the {0}-byte safety limit")]
+    ResponseTooLarge(usize),
+    #[error("the update manifest signature is malformed")]
+    MalformedSignature,
+    #[error("the update manifest signature is invalid")]
+    InvalidSignature,
+    #[error("the update manifest is malformed: {0}")]
+    MalformedManifest(String),
+    #[error("unsupported update manifest schema {0}")]
+    UnsupportedSchema(u32),
+    #[error("the signed manifest has no artifact for {0}")]
+    MissingTarget(String),
+    #[error("self-update is not supported on this platform")]
+    UnsupportedPlatform,
+    #[error("invalid current kettle version {0:?}")]
+    InvalidCurrentVersion(String),
+    #[error("this kettle executable is not owned by the official installer: {0}")]
+    UnmanagedInstall(String),
+    #[error("another kettle update is already running")]
+    UpdateLocked,
+    #[error(
+        "downloaded artifact did not match its signed size (expected {expected}, got {actual})"
+    )]
+    SizeMismatch { expected: u64, actual: u64 },
+    #[error("downloaded artifact failed SHA-256 verification")]
+    HashMismatch,
+    #[error("unsafe or unsupported archive entry: {0}")]
+    UnsafeArchive(String),
+    #[error("the release archive is missing required file {0}")]
+    MissingArchiveFile(String),
+    #[error("update transaction failed: {0}")]
+    Transaction(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Zip(#[from] zip::result::ZipError),
+}
+
+/// Signed stable-channel metadata. Unknown/new layouts require a schema bump so
+/// an old updater fails closed instead of guessing at security-sensitive fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub schema: u32,
+    pub product: String,
+    pub channel: String,
+    pub version: String,
+    pub tag: String,
+    pub published_at: String,
+    pub assets: Vec<ManifestAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestAsset {
+    pub target: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableUpdate {
+    pub version: Version,
+    pub tag: String,
+    pub release_url: String,
+    pub download_url: Option<String>,
+    pub asset: Option<ManifestAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckOutcome {
+    UpdateAvailable(AvailableUpdate),
+    UpToDate { latest: Version },
+}
+
+/// Production client. Its source and trust root deliberately have no environment
+/// override; tests exercise custom feeds through a private constructor below.
+pub struct FeedClient {
+    manifest_url: String,
+    signature_url: String,
+    download_prefix: String,
+    public_key: [u8; 32],
+    agent: ureq::Agent,
+}
+
+impl Default for FeedClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FeedClient {
+    pub fn new() -> Self {
+        Self::from_parts(
+            MANIFEST_URL.to_string(),
+            SIGNATURE_URL.to_string(),
+            RELEASE_DOWNLOAD_PREFIX.to_string(),
+            UPDATE_PUBLIC_KEY,
+        )
+    }
+
+    fn from_parts(
+        manifest_url: String,
+        signature_url: String,
+        download_prefix: String,
+        public_key: [u8; 32],
+    ) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(IO_TIMEOUT)
+            .timeout_write(IO_TIMEOUT)
+            .timeout(TOTAL_TIMEOUT)
+            .redirects(5)
+            .build();
+        Self {
+            manifest_url,
+            signature_url,
+            download_prefix,
+            public_key,
+            agent,
+        }
+    }
+
+    pub fn fetch_manifest(&self) -> Result<Manifest, UpdateError> {
+        let manifest = self.get_limited(&self.manifest_url, MAX_MANIFEST_BYTES)?;
+        let signature = self.get_limited(&self.signature_url, MAX_SIGNATURE_BYTES)?;
+        verify_manifest(&manifest, &signature, &self.public_key)
+    }
+
+    pub fn check(&self, current: &str) -> Result<CheckOutcome, UpdateError> {
+        let manifest = self.fetch_manifest()?;
+        evaluate_manifest(manifest, current, current_target(), &self.download_prefix)
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    pub(crate) fn download_to<W: std::io::Write>(
+        &self,
+        update: &AvailableUpdate,
+        mut output: W,
+    ) -> Result<(), UpdateError> {
+        let asset = update
+            .asset
+            .as_ref()
+            .ok_or(UpdateError::UnsupportedPlatform)?;
+        let download_url = update
+            .download_url
+            .as_deref()
+            .ok_or(UpdateError::UnsupportedPlatform)?;
+        if asset.size == 0 || asset.size > 512 * 1024 * 1024 {
+            return Err(UpdateError::MalformedManifest(
+                "artifact size is outside the accepted range".to_string(),
+            ));
+        }
+        let response = self
+            .agent
+            .get(download_url)
+            .set("User-Agent", user_agent())
+            .set("Accept", "application/octet-stream")
+            .call()
+            .map_err(|e| UpdateError::Request(e.to_string()))?;
+        if let Some(length) = response.header("Content-Length")
+            && let Ok(length) = length.parse::<u64>()
+            && length != asset.size
+        {
+            return Err(UpdateError::SizeMismatch {
+                expected: asset.size,
+                actual: length,
+            });
+        }
+        let mut reader = response.into_reader().take(asset.size + 1);
+        let actual = std::io::copy(&mut reader, &mut output)?;
+        if actual != asset.size {
+            return Err(UpdateError::SizeMismatch {
+                expected: asset.size,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    fn get_limited(&self, url: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
+        let response = self
+            .agent
+            .get(url)
+            .set("User-Agent", user_agent())
+            .set("Accept", "application/octet-stream")
+            .call()
+            .map_err(|e| UpdateError::Request(e.to_string()))?;
+        if let Some(length) = response.header("Content-Length")
+            && let Ok(length) = length.parse::<usize>()
+            && length > limit
+        {
+            return Err(UpdateError::ResponseTooLarge(limit));
+        }
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(UpdateError::ResponseTooLarge(limit));
+        }
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    fn for_test(base: &str, public_key: [u8; 32]) -> Self {
+        let base = base.trim_end_matches('/');
+        Self::from_parts(
+            format!("{base}/manifest"),
+            format!("{base}/signature"),
+            format!("{base}/download"),
+            public_key,
+        )
+    }
+}
+
+fn evaluate_manifest(
+    manifest: Manifest,
+    current: &str,
+    target: Option<&str>,
+    download_prefix: &str,
+) -> Result<CheckOutcome, UpdateError> {
+    let latest = Version::parse(&manifest.version)
+        .map_err(|e| UpdateError::MalformedManifest(format!("invalid version: {e}")))?;
+    let current = Version::parse(current)
+        .map_err(|_| UpdateError::InvalidCurrentVersion(current.to_string()))?;
+    if latest <= current {
+        return Ok(CheckOutcome::UpToDate { latest });
+    }
+
+    let asset = target
+        .map(|target| {
+            manifest
+                .assets
+                .iter()
+                .find(|asset| asset.target == target)
+                .cloned()
+                .ok_or_else(|| UpdateError::MissingTarget(target.to_string()))
+        })
+        .transpose()?;
+    let prefix = download_prefix.trim_end_matches('/');
+    let download_url = asset
+        .as_ref()
+        .map(|asset| format!("{}/{}/{}", prefix, manifest.tag, asset.name));
+    Ok(CheckOutcome::UpdateAvailable(AvailableUpdate {
+        version: latest,
+        release_url: format!(
+            "https://github.com/Reddimus/kettle/releases/tag/{}",
+            manifest.tag
+        ),
+        download_url,
+        tag: manifest.tag,
+        asset,
+    }))
+}
+
+fn user_agent() -> &'static str {
+    concat!(
+        "kettle/",
+        env!("CARGO_PKG_VERSION"),
+        " (+https://github.com/Reddimus/kettle)"
+    )
+}
+
+pub fn verify_manifest(
+    manifest_bytes: &[u8],
+    signature_text: &[u8],
+    public_key: &[u8; 32],
+) -> Result<Manifest, UpdateError> {
+    if manifest_bytes.is_empty() || manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(UpdateError::ResponseTooLarge(MAX_MANIFEST_BYTES));
+    }
+    let signature_text = std::str::from_utf8(signature_text)
+        .map_err(|_| UpdateError::MalformedSignature)?
+        .trim();
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_text)
+        .map_err(|_| UpdateError::MalformedSignature)?;
+    let signature =
+        Signature::from_slice(&signature_bytes).map_err(|_| UpdateError::MalformedSignature)?;
+    let key = VerifyingKey::from_bytes(public_key).map_err(|_| UpdateError::InvalidSignature)?;
+    let mut signed = Vec::with_capacity(SIGNING_CONTEXT.len() + manifest_bytes.len());
+    signed.extend_from_slice(SIGNING_CONTEXT);
+    signed.extend_from_slice(manifest_bytes);
+    key.verify(&signed, &signature)
+        .map_err(|_| UpdateError::InvalidSignature)?;
+
+    let manifest: Manifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|e| UpdateError::MalformedManifest(e.to_string()))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<(), UpdateError> {
+    if manifest.schema != 1 {
+        return Err(UpdateError::UnsupportedSchema(manifest.schema));
+    }
+    if manifest.product != "kettle" || manifest.channel != "stable" {
+        return Err(UpdateError::MalformedManifest(
+            "unexpected product or channel".to_string(),
+        ));
+    }
+    let version = Version::parse(&manifest.version)
+        .map_err(|e| UpdateError::MalformedManifest(format!("invalid version: {e}")))?;
+    if !version.pre.is_empty() || !version.build.is_empty() || manifest.tag != format!("v{version}")
+    {
+        return Err(UpdateError::MalformedManifest(
+            "stable version and tag do not agree".to_string(),
+        ));
+    }
+    if manifest.published_at.trim().is_empty() || manifest.assets.is_empty() {
+        return Err(UpdateError::MalformedManifest(
+            "published_at and assets are required".to_string(),
+        ));
+    }
+    let mut targets = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    for asset in &manifest.assets {
+        if !targets.insert(asset.target.as_str()) || !names.insert(asset.name.as_str()) {
+            return Err(UpdateError::MalformedManifest(
+                "asset targets and names must be unique".to_string(),
+            ));
+        }
+        if asset.size == 0 || asset.size > 512 * 1024 * 1024 {
+            return Err(UpdateError::MalformedManifest(
+                "artifact size is outside the accepted range".to_string(),
+            ));
+        }
+        if asset.name.contains('/')
+            || asset.name.contains('\\')
+            || asset.name.contains("..")
+            || !asset.name.starts_with("kettle-")
+        {
+            return Err(UpdateError::MalformedManifest(
+                "artifact name is unsafe".to_string(),
+            ));
+        }
+        if asset.sha256.len() != 64
+            || !asset
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(UpdateError::MalformedManifest(
+                "artifact SHA-256 must be lowercase hexadecimal".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    use super::*;
+
+    const TEST_SECRET: [u8; 32] = [7; 32];
+
+    fn manifest() -> Manifest {
+        Manifest {
+            schema: 1,
+            product: "kettle".into(),
+            channel: "stable".into(),
+            version: "99.0.0".into(),
+            tag: "v99.0.0".into(),
+            published_at: "2026-07-11T00:00:00Z".into(),
+            assets: vec![ManifestAsset {
+                target: current_target().unwrap_or("unsupported-test").into(),
+                name: "kettle-test.tar.gz".into(),
+                size: 4,
+                sha256: "a".repeat(64),
+            }],
+        }
+    }
+
+    fn signed_manifest() -> (Vec<u8>, Vec<u8>, [u8; 32]) {
+        let bytes = serde_json::to_vec(&manifest()).unwrap();
+        let key = SigningKey::from_bytes(&TEST_SECRET);
+        let mut payload = SIGNING_CONTEXT.to_vec();
+        payload.extend_from_slice(&bytes);
+        let signature = key.sign(&payload);
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(signature.to_bytes())
+            .into_bytes();
+        (bytes, encoded, key.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn authentic_manifest_verifies_before_parsing() {
+        let (bytes, signature, public) = signed_manifest();
+        assert_eq!(
+            verify_manifest(&bytes, &signature, &public).unwrap(),
+            manifest()
+        );
+
+        let mut tampered = bytes;
+        tampered[0] ^= 1;
+        assert!(matches!(
+            verify_manifest(&tampered, &signature, &public),
+            Err(UpdateError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_ambiguous_assets() {
+        let mut bad = manifest();
+        bad.assets.push(bad.assets[0].clone());
+        assert!(validate_manifest(&bad).is_err());
+        bad = manifest();
+        bad.assets[0].name = "../kettle.exe".into();
+        assert!(validate_manifest(&bad).is_err());
+        bad = manifest();
+        bad.tag = "v99.0.1".into();
+        assert!(validate_manifest(&bad).is_err());
+    }
+
+    #[test]
+    fn unsupported_platform_still_discovers_a_signed_release() {
+        let outcome =
+            evaluate_manifest(manifest(), "1.0.0", None, "https://example.invalid").unwrap();
+        let CheckOutcome::UpdateAvailable(update) = outcome else {
+            panic!("expected newer release");
+        };
+        assert!(update.asset.is_none());
+        assert!(update.download_url.is_none());
+    }
+
+    #[test]
+    fn signed_feed_check_is_hermetic() {
+        let (manifest, signature, public) = signed_manifest();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let manifest = Arc::new(manifest);
+        let signature = Arc::new(signature);
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let n = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("GET /manifest ") {
+                    manifest.as_slice()
+                } else {
+                    signature.as_slice()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let client = FeedClient::for_test(&format!("http://{addr}"), public);
+        let outcome = client.check("1.0.0").unwrap();
+        assert!(matches!(outcome, CheckOutcome::UpdateAvailable(_)));
+        server.join().unwrap();
+    }
+}

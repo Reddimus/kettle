@@ -6,17 +6,31 @@
 //! back from the bottom (`0` = at the prompt). `total = rows + hist`.
 
 /// The thumb as `(y_offset_within_track, height)` in track pixels, or `None`
-/// when everything fits (no scrollbar needed). The thumb is at least 12 px
-/// tall and never overflows the track.
+/// when everything fits (no scrollbar needed). The compatibility wrapper uses
+/// a 12-pixel minimum; DPI-aware callers should use [`thumb_with_min`].
 pub fn thumb(rows: usize, hist: usize, off: usize, track: f32) -> Option<(f32, f32)> {
+    thumb_with_min(rows, hist, off, track, 12.0)
+}
+
+/// DPI-aware thumb geometry. `minimum` is in the same physical-pixel space as
+/// `track`, allowing the UI and renderer to agree at every scale factor.
+pub fn thumb_with_min(
+    rows: usize,
+    hist: usize,
+    off: usize,
+    track: f32,
+    minimum: f32,
+) -> Option<(f32, f32)> {
     let total = rows + hist;
     if total <= rows || track <= 0.0 {
         return None;
     }
-    let h = (track * rows as f32 / total as f32).max(12.0).min(track);
-    // `off` lines back from the bottom → `hist - off` lines from the top.
-    let from_top = (hist.saturating_sub(off)) as f32 / total as f32;
-    let y = (from_top * track).clamp(0.0, track - h);
+    let h = (track * rows as f32 / total as f32)
+        .max(minimum.max(1.0))
+        .min(track);
+    let travel = (track - h).max(0.0);
+    let progress = off.min(hist) as f32 / hist as f32;
+    let y = (1.0 - progress) * travel;
     Some((y, h))
 }
 
@@ -34,14 +48,33 @@ pub fn should_scroll_on_output(enabled: bool, prev: Option<usize>, current: usiz
 /// to: the clicked fraction becomes the top of the viewport. Clamped to
 /// `0..=hist`.
 pub fn target_offset(yrel: f32, track: f32, rows: usize, hist: usize) -> usize {
+    let Some((_, height)) = thumb(rows, hist, 0, track) else {
+        return 0;
+    };
+    target_offset_for_drag(yrel, 0.0, track, height, hist)
+}
+
+/// Convert pointer Y to scroll offset while preserving where the user grabbed
+/// the thumb. `grab` is the distance from the pointer to the thumb's top edge.
+pub fn target_offset_for_drag(
+    pointer_y: f32,
+    grab: f32,
+    track: f32,
+    thumb_height: f32,
+    hist: usize,
+) -> usize {
     if hist == 0 || track <= 0.0 {
         return 0;
     }
-    let total = (rows + hist) as f32;
-    let frac = (yrel / track).clamp(0.0, 1.0);
-    // from_top = (hist - off) / total  ⇒  off = hist - frac*total.
-    let off = hist as f32 - frac * total;
-    off.round().clamp(0.0, hist as f32) as usize
+    let travel = (track - thumb_height).max(0.0);
+    if travel == 0.0 {
+        return 0;
+    }
+    let top = (pointer_y - grab).clamp(0.0, travel);
+    let progress_from_top = top / travel;
+    ((1.0 - progress_from_top) * hist as f32)
+        .round()
+        .clamp(0.0, hist as f32) as usize
 }
 
 #[cfg(test)]
@@ -94,13 +127,39 @@ mod tests {
         assert_eq!(target_offset(0.0, 400.0, 40, 160), 160);
         // Bottom of track → newest → offset 0.
         assert_eq!(target_offset(400.0, 400.0, 40, 160), 0);
-        // Mid track → ~half the history scrolled back.
+        // Mid track maps near the middle of history (the old top-edge helper
+        // uses a zero grab offset, so account for thumb travel).
         let mid = target_offset(200.0, 400.0, 40, 160);
-        assert_eq!(mid, 60, "160 - 0.5*200 = 60");
+        assert_eq!(mid, 60);
         // Out-of-range y is clamped, not panicking.
         assert_eq!(target_offset(-50.0, 400.0, 40, 160), 160);
         assert_eq!(target_offset(9999.0, 400.0, 40, 160), 0);
         // No history → always 0.
         assert_eq!(target_offset(100.0, 400.0, 40, 0), 0);
+    }
+
+    #[test]
+    fn drag_preserves_pointer_grab_offset() {
+        let (top, height) = thumb_with_min(40, 160, 80, 400.0, 24.0).unwrap();
+        assert_eq!(top, 160.0);
+        assert_eq!(height, 80.0);
+        // Grabbing 20px into the thumb and not moving leaves the offset intact.
+        assert_eq!(
+            target_offset_for_drag(top + 20.0, 20.0, 400.0, height, 160),
+            80
+        );
+        assert_eq!(target_offset_for_drag(20.0, 20.0, 400.0, height, 160), 160);
+        assert_eq!(
+            target_offset_for_drag(400.0 + 20.0, 20.0, 400.0, height, 160),
+            0
+        );
+    }
+
+    #[test]
+    fn thumb_minimum_scales_with_caller() {
+        let (_, one_x) = thumb_with_min(1, 100_000, 0, 500.0, 24.0).unwrap();
+        let (_, two_x) = thumb_with_min(1, 100_000, 0, 1000.0, 48.0).unwrap();
+        assert_eq!(one_x, 24.0);
+        assert_eq!(two_x, 48.0);
     }
 }

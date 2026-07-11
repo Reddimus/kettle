@@ -13,7 +13,7 @@
 //! Keeping the catalogue here (free functions over `&Config`) makes it unit
 //! testable without a window or renderer.
 
-use kettle_config::{BellMode, Config, CursorStyle, FocusMode, ScrollbarMode};
+use kettle_config::{BellMode, Config, CursorStyle, FocusMode, ScrollbarMode, UpdatePolicy};
 
 /// How a setting is edited. The overlay maps ←/→ (or Space/Enter) onto these.
 #[derive(Debug, Clone)]
@@ -283,8 +283,12 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB"),
                 toggle("Copy on select", "copy-on-select"),
                 toggle("Hide mouse while typing", "mouse-hide-while-typing"),
-                // Cycle 794: opt out of the in-app update checker.
-                toggle("Check for updates", "update-check"),
+                choice(
+                    "Updates",
+                    "update-policy",
+                    &["off", "notify", "auto"],
+                    &["off", "notify", "install automatically"],
+                ),
                 // v2.20.0: hjkl navigation in menus/overlays (default ON).
                 toggle("Vim menu navigation", "vim-menu-nav"),
                 choice(
@@ -545,7 +549,6 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "copy-on-select" => cfg.copy_on_select,
-        "update-check" => cfg.update_check,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
         "gpu-force-software" => cfg.gpu_force_software,
@@ -562,6 +565,12 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             ScrollbarMode::Never => "never",
             ScrollbarMode::Auto => "auto",
             ScrollbarMode::Always => "always",
+        }
+        .to_string(),
+        "update-policy" => match cfg.update_policy {
+            UpdatePolicy::Off => "off",
+            UpdatePolicy::Notify => "notify",
+            UpdatePolicy::Auto => "auto",
         }
         .to_string(),
         "bell" => match cfg.bell {

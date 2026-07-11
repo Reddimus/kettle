@@ -132,6 +132,15 @@ pub enum UserEvent {
         tag: String,
         url: String,
     },
+    /// An opt-in automatic update completed. Existing windows keep running the
+    /// current image; the next kettle launch uses the installed release.
+    UpdateInstalled {
+        tag: String,
+    },
+    /// An opt-in automatic update failed after a newer signed release was found.
+    UpdateFailed {
+        message: String,
+    },
 }
 
 /// Cycle 752: decode kettle's embedded PNG into a winit window icon for the
@@ -4021,18 +4030,21 @@ impl App {
             .map(|(_, r)| r)
     }
 
-    /// If `(px, py)` is on the focused pane's scrollbar (right edge, ~8 px)
-    /// and the bar is visible, jump the viewport to the clicked position.
-    /// Returns `true` if it handled the click (so it won't start a
-    /// selection).
-    fn scrollbar_jump(&mut self, ws: &mut WindowState, area: Rect, px: f32, py: f32) -> bool {
-        self.scrollbar_at(ws, area, px, py, true)
+    /// Start a scrollbar drag and return the pointer's offset inside the thumb.
+    fn scrollbar_jump(
+        &mut self,
+        ws: &mut WindowState,
+        area: Rect,
+        px: f32,
+        py: f32,
+    ) -> Option<f32> {
+        self.scrollbar_at(ws, area, px, py, true, None)
     }
 
     /// Map a pointer position to a viewport jump on the focused pane's
-    /// scrollbar. With `require_zone`, only the right-edge ~8 px strip
-    /// counts (initial click); during a drag the x is ignored so the
-    /// grab follows the pointer's y anywhere.
+    /// scrollbar. With `require_zone`, only the DPI-scaled invisible hit strip
+    /// counts. During a drag X is ignored and `grab_offset` keeps the pointer at
+    /// the same position inside the thumb instead of snapping to its top edge.
     fn scrollbar_at(
         &mut self,
         ws: &mut WindowState,
@@ -4040,24 +4052,25 @@ impl App {
         px: f32,
         py: f32,
         require_zone: bool,
-    ) -> bool {
+        grab_offset: Option<f32>,
+    ) -> Option<f32> {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
-            return false;
+            return None;
         }
-        let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
-            return false;
-        };
-        // v2.26.0: the grab zone matches the painted bar width, floored at 10 px
-        // so even a thin configured bar stays easy to hit with the mouse.
-        let zone = self.cfg.scrollbar_width.clamp(2.0, 40.0).max(10.0);
+        let (rx, ry, rw, rh) = self.focused_rect(ws, area)?;
+        let scale = ws
+            .window
+            .as_ref()
+            .map(|window| window.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let painted = self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale;
+        let zone = painted.max(12.0 * scale);
         if require_zone && (px < rx + rw - zone || px > rx + rw || py < ry || py > ry + rh) {
-            return false;
+            return None;
         }
-        let Some(p) = ws.mux.focused() else {
-            return false;
-        };
+        let p = ws.mux.focused()?;
         let Ok(mut t) = p.term.term.lock() else {
-            return false;
+            return None;
         };
         use kettle_core::Dimensions;
         let g = t.grid();
@@ -4066,19 +4079,31 @@ impl App {
         // the bar with history present (not only while scrolled back), so a
         // click anywhere on the gutter jumps the viewport.
         if rows + hist <= rows {
-            return false;
+            return None;
         }
-        let target = kettle_core::scrollbar::target_offset(py - ry, rh, rows, hist);
+        let (thumb_y, thumb_h) =
+            kettle_core::scrollbar::thumb_with_min(rows, hist, off, rh, 24.0 * scale)?;
+        let pointer_y = py - ry;
+        let grab = grab_offset.unwrap_or_else(|| {
+            if (thumb_y..=thumb_y + thumb_h).contains(&pointer_y) {
+                pointer_y - thumb_y
+            } else {
+                thumb_h / 2.0
+            }
+        });
+        let grab = grab.clamp(0.0, thumb_h);
+        let target =
+            kettle_core::scrollbar::target_offset_for_drag(pointer_y, grab, rh, thumb_h, hist);
         let delta = target as i32 - off as i32;
         if delta != 0 {
             t.scroll_display(kettle_core::Scroll::Delta(delta));
         }
-        true
+        Some(grab)
     }
 
     /// v2.26.0: whether `(px, py)` is within the focused pane's scrollbar grab
-    /// zone (right edge, `scrollbar_width` px floored at 10). Pure geometry — no
-    /// term lock — so it is cheap to call on every `CursorMoved` to drive the
+    /// zone (right edge, painted width floored at 12 logical px). Pure geometry
+    /// so it is cheap to call on every `CursorMoved` to drive the
     /// overlay scrollbar's hover-brighten without affecting the scroll state.
     fn scrollbar_zone_contains(&self, ws: &WindowState, area: Rect, px: f32, py: f32) -> bool {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
@@ -4087,7 +4112,12 @@ impl App {
         let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
             return false;
         };
-        let zone = self.cfg.scrollbar_width.clamp(2.0, 40.0).max(10.0);
+        let scale = ws
+            .window
+            .as_ref()
+            .map(|window| window.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let zone = (self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale).max(12.0 * scale);
         px >= rx + rw - zone && px <= rx + rw && py >= ry && py <= ry + rh
     }
 
@@ -5562,7 +5592,7 @@ impl App {
         // v2.26.0: brighten the focused pane's scrollbar while the pointer is on
         // the gutter or the thumb is being dragged (overlay-scrollbar feel). The
         // scrolled-back case is decided per-pane in the renderer from the snapshot.
-        let scrollbar_active = ws.scrollbar_hover || ws.dragging_scrollbar;
+        let scrollbar_active = ws.scrollbar_hover || ws.scrollbar_drag_offset.is_some();
         // Cursor blink is the *intersection* of the user config and the
         // running app's wishes — programs flip it via DEC private mode 12
         // (`CSI ?12 h/l`), which the engine tracks per-pane on its
@@ -10880,7 +10910,7 @@ impl App {
                 self.copy_selection(ws);
             }
             ws.selecting = false;
-            ws.dragging_scrollbar = false;
+            ws.scrollbar_drag_offset = None;
             ws.dragging_split = None;
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
@@ -14972,14 +15002,13 @@ impl App {
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
-        // Cycle 794: kick off the update check on a background thread — AFTER
-        // the first paint so it never blocks startup. It's opt-out
-        // (`update-check`), skips the very first launch, throttles to once/24h
-        // via a cache file, and no-ops in packaged builds; the cache throttle
-        // also dedups a Wayland re-resume or multiple windows hitting GitHub.
-        if self.cfg.update_check {
-            crate::update_check::maybe_spawn_check(self.proxy.clone(), env!("CARGO_PKG_VERSION"));
-        }
+        // Check only after first paint. The signed-feed worker skips the first
+        // launch, applies the 24-hour shared throttle, and honors off/notify/auto.
+        crate::update_check::maybe_spawn_check(
+            self.proxy.clone(),
+            env!("CARGO_PKG_VERSION"),
+            self.cfg.update_policy,
+        );
         // Dropdown-parity cycle: warm the shell-detection cache (wsl.exe /
         // vswhere probes, bounded ~2s each) off the UI thread so the first
         // dropdown open / Ctrl+Shift+N press doesn't pay it.
@@ -15059,6 +15088,16 @@ impl App {
                     }
                     w.request_redraw();
                 }
+            }
+            UserEvent::UpdateInstalled { tag } => {
+                fire_notify(
+                    "kettle update installed",
+                    &format!("{tag} is ready and will be used the next time kettle starts"),
+                );
+            }
+            UserEvent::UpdateFailed { message } => {
+                log::warn!("automatic update failed: {message}");
+                fire_notify("kettle update failed", &message);
             }
         }
     }
@@ -15355,7 +15394,7 @@ impl App {
                 if matches!(self.cfg.focus, kettle_config::FocusMode::Sloppy)
                     && !ws.tab_drag_active
                     && !ws.selecting
-                    && !ws.dragging_scrollbar
+                    && ws.scrollbar_drag_offset.is_none()
                     // Cycle 786 (audit A4): don't let focus-follows-mouse
                     // reassign pane focus while a modal is open — typing into
                     // search/palette while the cursor drifts over another pane
@@ -15445,10 +15484,10 @@ impl App {
                         return;
                     }
                 }
-                if ws.dragging_scrollbar {
+                if let Some(grab) = ws.scrollbar_drag_offset {
                     let area = self.area(ws);
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    self.scrollbar_at(ws, area, px, py, false);
+                    self.scrollbar_at(ws, area, px, py, false, Some(grab));
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15830,8 +15869,10 @@ impl App {
                     return;
                 }
                 // Click the scrollbar to jump the viewport, then drag it.
-                if bcode == 0 && self.scrollbar_jump(ws, area, px, py) {
-                    ws.dragging_scrollbar = true;
+                if bcode == 0
+                    && let Some(grab) = self.scrollbar_jump(ws, area, px, py)
+                {
+                    ws.scrollbar_drag_offset = Some(grab);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -15939,7 +15980,7 @@ impl App {
                         self.copy_selection(ws);
                     }
                     ws.selecting = false;
-                    ws.dragging_scrollbar = false;
+                    ws.scrollbar_drag_offset = None;
                     // Cycle 904: end any split-divider drag on left-button up.
                     ws.dragging_split = None;
                     // Cycle 249: end the drag-to-reorder gesture on
@@ -16207,7 +16248,7 @@ impl App {
                 }
                 // Cycle 897 (audit): a focus loss can swallow the button-UP that
                 // ends an in-progress drag (the release lands on whatever window
-                // took focus), latching `selecting` / `dragging_scrollbar` /
+                // took focus), latching `selecting` / `scrollbar_drag_offset` /
                 // `tab_drag_active` / a held `mouse_btn`. The next CursorMoved
                 // then kept extending the selection or dragging a tab with no
                 // button down. Disarm them on focus loss, committing any pending
@@ -16217,7 +16258,7 @@ impl App {
                         self.copy_selection(ws);
                     }
                     ws.selecting = false;
-                    ws.dragging_scrollbar = false;
+                    ws.scrollbar_drag_offset = None;
                     ws.scrollbar_hover = false;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;

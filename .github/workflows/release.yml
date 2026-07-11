@@ -6,7 +6,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # Cycle 723 (2026-05-23): test-before-release gate. Before
@@ -24,6 +28,35 @@ jobs:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require a GitHub-verified annotated tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")
+          type=$(jq -r '.object.type' <<<"$ref")
+          sha=$(jq -r '.object.sha' <<<"$ref")
+          if [ "$type" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is lightweight; releases require a signed annotated tag"
+            exit 1
+          fi
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq '.verification.verified')
+          if [ "$verified" != true ]; then
+            echo "::error::$GITHUB_REF_NAME does not have a GitHub-verified signature"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          tagged_commit=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          main_commit=$(git rev-parse origin/main)
+          if [ "$tagged_commit" != "$main_commit" ]; then
+            echo "::error::$GITHUB_REF_NAME points to $tagged_commit, not origin/main $main_commit"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is an annotated tag with a verified signature"
       # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
       # consistency gate runs HERE in the single-Linux pretest — before any
       # per-OS package build — so a version mismatch fails fast and BLOCKS all
@@ -89,10 +122,6 @@ jobs:
     # progress concurrency — a release must always complete, never
     # be canceled mid-upload (cycle-558 incident recovery).
     timeout-minutes: 75
-    # Cycle 767: the aarch64-linux cross-build entry is `experimental` —
-    # `continue-on-error` so a hiccup in the (newer, cross-compiled) ARM64
-    # artifact never blocks the established x86_64/macOS/Windows artifacts.
-    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +139,6 @@ jobs:
           - os: ubuntu-latest
             artifact: kettle-linux-aarch64.tar.gz
             rust_target: aarch64-unknown-linux-gnu
-            experimental: true
     steps:
       - uses: actions/checkout@v7
       # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
@@ -234,6 +262,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/kettle | Out-Null
           Copy-Item target/release/kettle.exe dist/kettle/
+          # Windows resolves .com before .exe for a bare command. This console
+          # shim waits for CLI prompts and exit codes; Start Menu still targets
+          # the no-console GUI executable directly.
+          Copy-Item target/release/kettle-console.exe dist/kettle/kettle.com
           # The .ico file is embedded into the .exe by build.rs +
           # winresource (see crates/kettle/Cargo.toml + build.rs); we
           # also ship the standalone .ico in the zip so Windows Start
@@ -281,62 +313,161 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
+          retention-days: 7
           path: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
 
-      # Cycle 912 (audit): generate the auto release-notes on EXACTLY ONE leg.
-      # Previously all 4 matrix legs passed generate_release_notes:true, so the
-      # release body (incl. the "Full Changelog" line) was duplicated 4x. The
-      # linux-x86_64 leg owns the notes; the other legs attach assets only
-      # (softprops leaves an existing body untouched when notes are off). Gate on
-      # the artifact name, not runner.os — `Linux` matches BOTH ubuntu legs
-      # (x86_64 + aarch64). The release is created by whichever leg runs first.
-      - name: Attach to release (notes, primary leg)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.artifact == 'kettle-linux-x86_64.tar.gz'
-        uses: softprops/action-gh-release@v3
+  finalize:
+    name: sign and publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pretest, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
-          files: |
-            ${{ matrix.artifact }}
-            ${{ matrix.artifact }}.sha256
-          generate_release_notes: true
-      - name: Attach to release (assets only)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.artifact != 'kettle-linux-x86_64.tar.gz'
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            ${{ matrix.artifact }}
-            ${{ matrix.artifact }}.sha256
-          generate_release_notes: false
+          path: dist
+          merge-multiple: true
 
-      # Cycle 285 defense-in-depth. softprops/action-gh-release@v3
-      # uploads via Octokit with no built-in retry — a transient
-      # `uploads.github.com:443` Connect Timeout (which hit the v1.3.11
-      # Linux runner and dropped the .sha256 sidecar) fails the whole
-      # step. This follow-on step uses `gh release upload --clobber`
-      # in a retry loop to fill any missing assets. If softprops
-      # already uploaded everything, every upload no-ops (the
-      # `--clobber` flag refreshes existing assets idempotently). If
-      # softprops dropped one, this step retries it 3 times with 5s
-      # backoff before giving up. Net effect: a single transient
-      # timeout per artifact no longer drops a sidecar.
-      - name: Verify + retry-upload missing assets
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Verify complete platform artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          required=(
+            kettle-linux-x86_64.tar.gz
+            kettle-linux-aarch64.tar.gz
+            kettle-windows-x86_64.zip
+            kettle-macos-universal.zip
+          )
+          for artifact in "${required[@]}"; do
+            test -s "$artifact"
+            test -s "$artifact.sha256"
+            sha256sum -c "$artifact.sha256"
+          done
+
+      - name: Build deterministic signed update feed
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KETTLE_UPDATE_SIGNING_KEY_PEM: ${{ secrets.KETTLE_UPDATE_SIGNING_KEY_PEM }}
         run: |
-          for file in "${{ matrix.artifact }}" "${{ matrix.artifact }}.sha256"; do
-            for attempt in 1 2 3; do
-              if gh release upload "$GITHUB_REF_NAME" "$file" --clobber; then
-                echo "ensured $file is attached"
-                break
-              fi
-              echo "upload of $file failed (attempt $attempt/3) — retrying in 5s"
-              sleep 5
-              if [ "$attempt" = "3" ]; then
-                echo "::error::failed to upload $file after 3 attempts"
-                exit 1
-              fi
-            done
+          set -euo pipefail
+          if [ -z "$KETTLE_UPDATE_SIGNING_KEY_PEM" ]; then
+            echo "::error::release-signing environment is missing KETTLE_UPDATE_SIGNING_KEY_PEM"
+            exit 1
+          fi
+          published_at=$(git show -s --format=%cI "$GITHUB_SHA")
+          python3 scripts/make-update-manifest.py \
+            --tag "$GITHUB_REF_NAME" \
+            --published-at "$published_at" \
+            --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
+            --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
+            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
+            --output dist/kettle-update-manifest.json
+
+          key=$(mktemp)
+          payload=$(mktemp)
+          signature=$(mktemp)
+          trap 'rm -f "$key" "$payload" "$signature"' EXIT
+          chmod 600 "$key"
+          printf '%s\n' "$KETTLE_UPDATE_SIGNING_KEY_PEM" > "$key"
+          printf 'kettle-update-manifest-v1\0' > "$payload"
+          cat dist/kettle-update-manifest.json >> "$payload"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in "$payload" -out "$signature"
+          base64 -w 0 "$signature" > dist/kettle-update-manifest.json.sig
+          printf '\n' >> dist/kettle-update-manifest.json.sig
+
+          openssl pkey -in "$key" -pubout > update-public.pem
+          openssl pkeyutl -verify -rawin -pubin -inkey update-public.pem \
+            -in "$payload" -sigfile "$signature"
+          rm -f update-public.pem
+          sha256sum dist/kettle-update-manifest.json > dist/kettle-update-manifest.json.sha256
+          sha256sum dist/kettle-update-manifest.json.sig > dist/kettle-update-manifest.json.sig.sha256
+
+      - name: Render package-manager metadata from verified archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/render-package-templates.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --macos-archive dist/kettle-macos-universal.zip \
+            --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
+            --output-dir dist/package-metadata
+          grep -q "^  version \"${GITHUB_REF_NAME#v}\"$" dist/package-metadata/kettle.rb
+          grep -q "^pkgver=${GITHUB_REF_NAME#v}$" dist/package-metadata/PKGBUILD
+
+      - name: Upload a complete draft, verify it, then publish once
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
+            if [ "$draft" != true ]; then
+              echo "::error::release $tag already exists and is public"
+              exit 1
+            fi
+          else
+            gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
+          fi
+
+          files=(
+            dist/kettle-linux-x86_64.tar.gz
+            dist/kettle-linux-x86_64.tar.gz.sha256
+            dist/kettle-linux-aarch64.tar.gz
+            dist/kettle-linux-aarch64.tar.gz.sha256
+            dist/kettle-windows-x86_64.zip
+            dist/kettle-windows-x86_64.zip.sha256
+            dist/kettle-macos-universal.zip
+            dist/kettle-macos-universal.zip.sha256
+            dist/kettle-update-manifest.json
+            dist/kettle-update-manifest.json.sig
+            dist/kettle-update-manifest.json.sha256
+            dist/kettle-update-manifest.json.sig.sha256
+            dist/package-metadata/kettle.rb
+            dist/package-metadata/PKGBUILD
+          )
+          for attempt in 1 2 3; do
+            if gh release upload "$tag" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::release asset upload failed after 3 attempts"
+              exit 1
+            fi
+            sleep 5
           done
+
+          gh release view "$tag" --json assets > release-assets.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = {path.name: path.stat().st_size for path in map(Path, [
+              "dist/kettle-linux-x86_64.tar.gz",
+              "dist/kettle-linux-x86_64.tar.gz.sha256",
+              "dist/kettle-linux-aarch64.tar.gz",
+              "dist/kettle-linux-aarch64.tar.gz.sha256",
+              "dist/kettle-windows-x86_64.zip",
+              "dist/kettle-windows-x86_64.zip.sha256",
+              "dist/kettle-macos-universal.zip",
+              "dist/kettle-macos-universal.zip.sha256",
+              "dist/kettle-update-manifest.json",
+              "dist/kettle-update-manifest.json.sig",
+              "dist/kettle-update-manifest.json.sha256",
+              "dist/kettle-update-manifest.json.sig.sha256",
+              "dist/package-metadata/kettle.rb",
+              "dist/package-metadata/PKGBUILD",
+          ])}
+          actual = {asset["name"]: asset["size"] for asset in json.load(open("release-assets.json"))["assets"]}
+          if actual != expected:
+              raise SystemExit(f"release asset mismatch\nexpected={expected}\nactual={actual}")
+          PY
+          gh release edit "$tag" --draft=false --latest

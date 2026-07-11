@@ -309,6 +309,14 @@ pub fn encode(
     // Character keys.
     if let Key::Character(s) = key {
         let c = s.chars().next()?;
+        // Preserve xterm's Meta+Control form for the WSL image-paste chord.
+        // The generic Ctrl+Alt path historically treated every character as
+        // printable Meta input (ESC + `v`), losing Control. Keep this scoped to
+        // C-M-v so AltGr-produced characters on international layouts retain
+        // their existing text behavior.
+        if ctrl && alt && c.eq_ignore_ascii_case(&'v') {
+            return Some(vec![0x1b, 0x16]);
+        }
         if ctrl && !alt {
             // Full xterm control-code table for Ctrl+<punctuation> — the
             // letters are the obvious A→0x01..Z→0x1A range, the rest is
@@ -423,6 +431,31 @@ mod tests {
         assert_eq!(paste_payload("a\r\nb\n", false), b"a\rb\r");
         let p = paste_payload("x\n", true);
         assert!(p.starts_with(b"\x1b[200~") && p.ends_with(b"\x1b[201~"));
+    }
+
+    #[test]
+    fn client_image_paste_chords_pass_through_to_the_pty() {
+        let key = Key::Character("v".into());
+        assert_eq!(
+            encode(&key, Some("v"), ModifiersState::CONTROL, TermMode::empty()),
+            Some(vec![0x16]),
+            "Ctrl+V must reach Codex and Linux/WSL Claude as C-v"
+        );
+        assert_eq!(
+            encode(&key, Some("v"), ModifiersState::ALT, TermMode::empty()),
+            Some(vec![0x1b, b'v']),
+            "Alt+V must reach native-Windows Claude as M-v"
+        );
+        assert_eq!(
+            encode(
+                &key,
+                Some("v"),
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                TermMode::empty()
+            ),
+            Some(vec![0x1b, 0x16]),
+            "Ctrl+Alt+V must reach Codex under WSL as M-C-v"
+        );
     }
 
     #[test]

@@ -1,0 +1,34 @@
+[package]
+name = "kettle-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Signed release-feed verification and transactional self-update support for kettle"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "3", default-features = false, features = ["fast"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+fs4 = "1.1"
+hex = "0.4"
+semver = "1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tar = "0.4"
+tempfile = "3"
+thiserror.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }

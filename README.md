@@ -113,15 +113,14 @@ and **WezTerm** into one tool.
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
 - **Live theme switching** — cycle the 500+ bundled themes at runtime
   (palette: "Next/Previous theme", or `next_theme`/`prev_theme` binds).
-- **Update check** — on by default, a quiet once-a-day check against GitHub
-  releases shows a dismissable in-app banner when a newer version ships (it
-  never auto-downloads anything). Run `kettle --check-update` to check on
-  demand, or set `update-check = false` to turn it off. The check is compiled
-  out entirely only when a build sets `KETTLE_PACKAGED` — intended for distros
-  that build kettle from source and ship their own update channel. The official
-  prebuilt binaries (and the Homebrew/AUR packages, which repackage those same
-  binaries) are *not* built that way, so they do check by default; the runtime
-  `update-check = false` opt-out applies to them.
+- **Authenticated updates** — `kettle update` verifies a dedicated Ed25519-
+  signed stable manifest plus the selected archive's exact size and SHA-256,
+  then transactionally updates an official Windows or Linux installer layout.
+  It never elevates or restarts running windows. The default `update-policy =
+  notify` performs a quiet once-a-day check; use `off` or opt into background
+  installation with `auto`, and use `kettle --check-update` for an explicit
+  check. Package-manager and manually managed binaries are refused rather than
+  overwritten. See [Updating Kettle](docs/UPDATES.md).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 
@@ -150,7 +149,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.34.4 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.35.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -292,6 +291,12 @@ tear-off while keeping tab switching and in-window reordering.
 > current keybinds (computed from the live keymap, so rebinds show
 > your actual chord) — see [docs/CONFIG.md](docs/CONFIG.md)
 > "Editing the config from inside kettle" for the full toggle map.
+
+Clipboard images are attached by the interactive client, not by a Kettle-only
+protocol: use `Ctrl+V` in native Codex CLI and in Claude Code on Linux/WSL,
+`Ctrl+Alt+V` in Codex under WSL, or `Alt+V` in native-Windows Claude Code. See
+[terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md) for tmux
+behavior and the exact PTY sequences.
 
 ## Configuration
 

@@ -113,6 +113,7 @@ mod ctl_cli;
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
 mod mcp_tools;
+mod update_cli;
 
 /// Version string shown by `kettle --version`. Concatenates the
 /// `Cargo.toml` version with the git SHA captured by `build.rs` (or
@@ -170,12 +171,17 @@ struct Cli {
     #[arg(long)]
     gpu_info: bool,
 
-    /// Check GitHub for a newer kettle release and print the result, then exit.
-    /// Bypasses the once/24h throttle the background check uses. Notify-only —
-    /// kettle never downloads or installs; update via your package manager or
-    /// the release page it points you to.
+    /// Check the authenticated stable feed for a newer kettle release and print
+    /// the result, then exit. Bypasses the background throttle and policy; use
+    /// `kettle update` to install an eligible official build.
     #[arg(long)]
     check_update: bool,
+
+    /// Download and install the latest authenticated stable release. This is a
+    /// convenience alias for `kettle update`; interactive confirmation is still
+    /// required. Automation should use `kettle update --yes`.
+    #[arg(long)]
+    update: bool,
 
     /// Validate the config (resolved settings + unknown-key warnings).
     #[arg(long)]
@@ -510,6 +516,16 @@ enum Cmd {
     /// Run a Model Context Protocol server over stdio, exposing kettle as native
     /// agent tools. Register with Claude Code: `claude mcp add kettle -- kettle mcp`.
     Mcp(McpArgs),
+    /// Install the latest authenticated stable release into an official
+    /// installer-owned kettle layout.
+    Update(UpdateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct UpdateArgs {
+    /// Confirm installation non-interactively.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -904,7 +920,14 @@ fn main() -> anyhow::Result<()> {
                     mcp::run_mcp()
                 });
             }
+            Cmd::Update(args) => {
+                std::process::exit(update_cli::run(args.yes, env!("CARGO_PKG_VERSION")));
+            }
         }
+    }
+
+    if cli.update {
+        std::process::exit(update_cli::run(false, env!("CARGO_PKG_VERSION")));
     }
 
     // Explicit `--config PATH` must point at a regular file. Every

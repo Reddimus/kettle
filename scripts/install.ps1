@@ -36,6 +36,10 @@
     from the Start menu shortcut, but you'll need the full
     `%LOCALAPPDATA%\Programs\kettle\kettle.exe` path from the shell.
 
+.PARAMETER RefreshIntegration
+    Refresh the managed Start menu shortcut and Add/Remove Programs metadata
+    without copying files. Used internally after an authenticated self-update.
+
 .PARAMETER Prefix
     Override the install location. Default: `%LOCALAPPDATA%\Programs\kettle`.
     For a portable install on a USB stick, pass e.g.
@@ -69,6 +73,7 @@ param(
     [switch] $Uninstall,
     [switch] $NoPath,
     [switch] $WithShellIntegration,
+    [switch] $RefreshIntegration,
     [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle"),
     [Parameter(DontShow = $true)]
     [string] $IntegrationTestRoot
@@ -209,12 +214,80 @@ build the release binary first:
     exit 1
 }
 
+$consoleLauncher = if ($sourceMode -eq 'zip') {
+    Join-Path $sourceDir "kettle.com"
+} else {
+    Join-Path $sourceDir "target\release\kettle-console.exe"
+}
+if (-not (Test-Path -LiteralPath $consoleLauncher -PathType Leaf)) {
+    Write-Error "Could not find the required kettle console launcher: $consoleLauncher"
+    exit 1
+}
+
+if ($RefreshIntegration) {
+    if ($portable) {
+        Write-Output "Portable install: no Windows integration to refresh."
+        return
+    }
+    $installedExe = Join-Path $Prefix "kettle.exe"
+    $installedIcon = Join-Path $Prefix "kettle.ico"
+    $installMarker = Join-Path $Prefix ".kettle-install.json"
+    if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+        Write-Error "Cannot refresh integration: $installedExe is missing."
+        exit 1
+    }
+    $installedVersion = "unknown"
+    if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
+        try {
+            $marker = Get-Content -LiteralPath $installMarker -Raw | ConvertFrom-Json
+            if ($marker.version -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
+                $installedVersion = $marker.version
+            }
+        } catch {}
+    }
+
+    New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
+    if (Test-Path -LiteralPath $shortcutPath) {
+        Remove-Item -LiteralPath $shortcutPath -Force
+    }
+    $ws = New-Object -ComObject WScript.Shell
+    $lnk = $ws.CreateShortcut($shortcutPath)
+    $lnk.TargetPath = $installedExe
+    $lnk.Arguments = ''
+    $lnk.WorkingDirectory = $Prefix
+    $lnk.IconLocation = $installedIcon
+    $lnk.Description = "Fast, GPU-accelerated terminal emulator"
+    $lnk.Save()
+
+    New-Item -Path $uninstallKey -Force | Out-Null
+    Set-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value "kettle"
+    Set-ItemProperty -Path $uninstallKey -Name "DisplayVersion" -Value $installedVersion
+    Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "kettle contributors"
+    Set-ItemProperty -Path $uninstallKey -Name "InstallLocation" -Value $Prefix
+    Set-ItemProperty -Path $uninstallKey -Name "DisplayIcon" -Value $installedIcon
+    Set-ItemProperty -Path $uninstallKey -Name "URLInfoAbout" -Value "https://github.com/Reddimus/kettle"
+    Set-ItemProperty -Path $uninstallKey -Name "NoModify" -Value 1 -Type DWord
+    Set-ItemProperty -Path $uninstallKey -Name "NoRepair" -Value 1 -Type DWord
+    $uninstallCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Prefix 'install.ps1')`" -Uninstall"
+    Set-ItemProperty -Path $uninstallKey -Name "UninstallString" -Value $uninstallCmd
+    if (-not $integrationTest) {
+        try { & (Join-Path $env:SystemRoot 'System32\ie4uinit.exe') -show 2>$null } catch {}
+    }
+    Write-Output "Refreshed kettle Windows integration for version $installedVersion."
+    return
+}
+
 Write-Output "Installing kettle (source: $sourceMode mode, from $sourceDir)"
 Write-Output ""
 
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 Copy-Item -Force $sourceExe (Join-Path $Prefix "kettle.exe")
 Write-Output "  installed kettle.exe -> $Prefix"
+
+# Windows resolves .com before .exe for a bare `kettle` command. The console
+# launcher waits for CLI operations and starts GUI invocations asynchronously.
+Copy-Item -Force $consoleLauncher (Join-Path $Prefix "kettle.com")
+Write-Output "  installed kettle.com console launcher"
 
 # Icon: zip mode ships kettle.ico next to the .exe; repo mode pulls
 # from packaging/windows/.
@@ -257,6 +330,39 @@ Copy-Item -Force $MyInvocation.MyCommand.Definition (Join-Path $Prefix "install.
 # without requiring the user to repeat `-Prefix`; release zip/source-tree copies
 # do not have this marker, so they keep the normal default-prefix behavior.
 Set-Content -Path (Join-Path $Prefix ".kettle-install-prefix") -Value $Prefix -NoNewline
+
+# Capture the installed version once for both the ownership marker and the
+# Add/Remove Programs entry. Start-Process is required because kettle.exe uses
+# the Windows GUI subsystem and PowerShell otherwise does not wait for stdout.
+$exeForVersion = Join-Path $Prefix "kettle.exe"
+$versionTmp = Join-Path $env:TEMP "kettle-install-ver-$PID.txt"
+Remove-Item -ErrorAction SilentlyContinue $versionTmp
+try {
+    Start-Process -FilePath $exeForVersion -ArgumentList '--version' `
+        -NoNewWindow -Wait -RedirectStandardOutput $versionTmp `
+        -ErrorAction Stop
+} catch {}
+$kettleVersion = if (Test-Path $versionTmp) {
+    $line = (Get-Content $versionTmp -Raw -ErrorAction SilentlyContinue)
+    $m = if ($line) { [regex]::Match($line, '^kettle ([0-9.]+)') } else { $null }
+    if ($m -and $m.Success) { $m.Groups[1].Value } else { "unknown" }
+} else { "unknown" }
+Remove-Item -ErrorAction SilentlyContinue $versionTmp
+
+# Explicit ownership marker consumed by `kettle update`. Package-manager,
+# cargo-install, and manually copied binaries do not carry this marker and are
+# therefore never overwritten by the self-updater.
+$installMarker = [ordered]@{
+    schema = 1
+    product = "kettle"
+    managed_by = "kettle-installer"
+    channel = "stable"
+    target = "x86_64-pc-windows-msvc"
+    version = $kettleVersion
+} | ConvertTo-Json
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $Prefix ".kettle-install.json"), $installMarker + "`n", $utf8NoBom)
+Write-Output "  wrote authenticated-update ownership marker"
 
 # Portable mode short-circuits the system-touching steps.
 if ($portable) {
@@ -304,28 +410,6 @@ if (-not $integrationTest) {
 
 # Add/Remove Programs entry. Per-user (HKCU); no admin required.
 New-Item -Path $uninstallKey -Force | Out-Null
-$exeForVersion = Join-Path $Prefix "kettle.exe"
-# Cycle 734: kettle.exe is now SUBSYSTEM:WINDOWS, so `& kettle.exe
-# --version` returns nothing under PowerShell (PS doesn't wait for
-# GUI processes). Use Start-Process + redirect to a temp file to
-# reliably capture the version even under SUBSYSTEM:WINDOWS. Falls
-# back to "unknown" if the call fails (cycle-734 install tested
-# this path).
-$versionTmp = Join-Path $env:TEMP "kettle-install-ver.txt"
-Remove-Item -ErrorAction SilentlyContinue $versionTmp
-try {
-    Start-Process -FilePath $exeForVersion -ArgumentList '--version' `
-        -NoNewWindow -Wait -RedirectStandardOutput $versionTmp `
-        -ErrorAction Stop
-} catch {}
-$kettleVersion = if (Test-Path $versionTmp) {
-    $line = (Get-Content $versionTmp -Raw -ErrorAction SilentlyContinue)
-    if ($line) {
-        $m = [regex]::Match($line, '^kettle ([0-9.]+)')
-        if ($m.Success) { $m.Groups[1].Value } else { "unknown" }
-    } else { "unknown" }
-} else { "unknown" }
-Remove-Item -ErrorAction SilentlyContinue $versionTmp
 Set-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value "kettle"
 Set-ItemProperty -Path $uninstallKey -Name "DisplayVersion" -Value $kettleVersion
 Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "kettle contributors"
@@ -400,7 +484,7 @@ Write-Output "Install complete."
 Write-Output ""
 Write-Output "Try:"
 Write-Output "  - Press Win, type 'kettle', hit Enter."
-Write-Output "  - Or from a fresh shell: kettle.exe --version"
+Write-Output "  - Or from a fresh shell: kettle --version"
 if (-not $WithShellIntegration) {
     Write-Output ""
     Write-Output "Tip: re-run with -WithShellIntegration to enable OSC 133"

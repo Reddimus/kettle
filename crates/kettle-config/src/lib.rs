@@ -890,6 +890,18 @@ pub enum ScrollbarMode {
     Always,
 }
 
+/// Stable-channel update behavior for official installer-owned builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePolicy {
+    /// Never contact the release feed automatically.
+    Off,
+    /// Check at most once per day and show a passive notification.
+    Notify,
+    /// Check at most once per day and install an authenticated update in the
+    /// background. The running process is never restarted automatically.
+    Auto,
+}
+
 /// v2.20.0 (Ghostty `resize-overlay` parity): when the transient
 /// `cols×rows` chip is shown during a live window resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1500,10 +1512,9 @@ pub struct Config {
     pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
-    /// Cycle 794: check GitHub once/day for a newer kettle release and show a
-    /// dismissable notification. Opt-out (`update-check = false`); never runs on
-    /// the first launch or in packaged builds. Notify-only — never installs.
-    pub update_check: bool,
+    /// Stable update policy. `notify` is the privacy-preserving default; the
+    /// first launch only stamps the throttle and performs no network request.
+    pub update_policy: UpdatePolicy,
     /// Cycle 918: restore the previous session's tabs/splits/working-dirs on
     /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
     /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
@@ -2034,7 +2045,7 @@ impl Default for Config {
             agent_badge: "[agent] ".to_string(),
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
-            scrollbar_width: 14.0,
+            scrollbar_width: 6.0,
             resize_overlay: ResizeOverlayMode::AfterFirst,
             split_divider_color: None,
             focused_split_color: None,
@@ -2048,7 +2059,7 @@ impl Default for Config {
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
-            update_check: true,
+            update_policy: UpdatePolicy::Notify,
             restore_session: false, // cycle 918: fresh-by-default; opt in to restore
             scroll_on_keystroke: true,
             scroll_on_output: false,
@@ -2974,6 +2985,10 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
                 ),
+                "update-policy" | "update_policy" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "off" | "notify" | "auto"
+                ),
                 "resize-overlay" | "resize_overlay" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "always" | "on" | "true" | "after-first"
@@ -3095,7 +3110,13 @@ impl Config {
         // aliases — same precedence rule kettle has elsewhere for
         // canonical key vs Terminator-spelled alias.
         let mut explicit_canonical_bell = false;
-        for e in parse::parse(text) {
+        let entries = parse::parse(text);
+        // A canonical policy wins regardless of line order. This matters for
+        // migrated configs that still carry the legacy boolean below it.
+        let has_update_policy = entries
+            .iter()
+            .any(|entry| matches!(entry.key.as_str(), "update-policy" | "update_policy"));
+        for e in entries {
             match e.key.as_str() {
                 // Empty `font-family =` (and the per-style variants)
                 // silently emptied the family string, breaking the
@@ -4160,10 +4181,22 @@ impl Config {
                         cfg.copy_on_select = b;
                     }
                 }
-                // Cycle 794: opt out of the in-app update checker.
+                "update-policy" | "update_policy" => {
+                    cfg.update_policy = match e.value.trim().to_ascii_lowercase().as_str() {
+                        "off" => UpdatePolicy::Off,
+                        "auto" => UpdatePolicy::Auto,
+                        _ => UpdatePolicy::Notify,
+                    };
+                }
+                // Backward compatibility for pre-v2.35 boolean configs. The
+                // canonical key above wins even when this alias appears later.
                 "update-check" | "check-for-updates" => {
-                    if let Some(b) = parse_bool(&e.value) {
-                        cfg.update_check = b;
+                    if !has_update_policy && let Some(b) = parse_bool(&e.value) {
+                        cfg.update_policy = if b {
+                            UpdatePolicy::Notify
+                        } else {
+                            UpdatePolicy::Off
+                        };
                     }
                 }
                 // Cycle 918: opt IN to restoring the last session on launch
@@ -4417,7 +4450,10 @@ mod config_tests {
             le.extend_from_slice(&u.to_le_bytes());
         }
         assert_eq!(decode_config_text(&le), line);
-        assert!(!Config::parse_text(&decode_config_text(&le)).update_check);
+        assert_eq!(
+            Config::parse_text(&decode_config_text(&le)).update_policy,
+            UpdatePolicy::Off
+        );
 
         // UTF-16 BE (FE FF) also decodes.
         let mut be = vec![0xFEu8, 0xFF];
@@ -4431,7 +4467,35 @@ mod config_tests {
         assert_eq!(decode_config_text(line.as_bytes()), line);
         let utf8_bom = [&[0xEFu8, 0xBB, 0xBF], line.as_bytes()].concat();
         assert_eq!(decode_config_text(&utf8_bom), format!("\u{feff}{line}"));
-        assert!(!Config::parse_text(&decode_config_text(&utf8_bom)).update_check);
+        assert_eq!(
+            Config::parse_text(&decode_config_text(&utf8_bom)).update_policy,
+            UpdatePolicy::Off
+        );
+    }
+
+    #[test]
+    fn update_policy_migrates_legacy_boolean_and_canonical_key_wins() {
+        assert_eq!(
+            Config::parse_text("update-check = true").update_policy,
+            UpdatePolicy::Notify
+        );
+        assert_eq!(
+            Config::parse_text("update-check = false").update_policy,
+            UpdatePolicy::Off
+        );
+        assert_eq!(
+            Config::parse_text("update-policy = auto\nupdate-check = false").update_policy,
+            UpdatePolicy::Auto
+        );
+        assert_eq!(
+            Config::parse_text("update-check = false\nupdate-policy = notify").update_policy,
+            UpdatePolicy::Notify
+        );
+        assert!(
+            Config::detect_malformed_values("update-policy = sometimes")
+                .iter()
+                .any(|issue| issue.contains("update-policy"))
+        );
     }
 
     #[test]
@@ -4587,13 +4651,9 @@ cell-height = 1.2\n";
 
     #[test]
     fn update_checker_is_documented_for_users() {
-        // Cycle 811 (audit): the update checker (cycle 794) is a shipped,
-        // on-by-default feature that phones home once a day. Users need to be
-        // able to find the `--check-update` on-demand flag and the
-        // `update-check` opt-out, so pin that the README + example config
-        // actually document them — a future doc drift (or feature removal that
-        // forgets the docs) then fails here instead of silently leaving the
-        // privacy control undiscoverable.
+        // The automatic checker is a shipped network feature. Pin the explicit
+        // command, canonical privacy policy, and migration alias so future
+        // documentation edits cannot make those controls undiscoverable.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let readme = std::fs::read_to_string(manifest.join("../../README.md")).expect("README");
         assert!(
@@ -4601,14 +4661,18 @@ cell-height = 1.2\n";
             "README must document the --check-update flag"
         );
         assert!(
-            readme.contains("update-check"),
-            "README must document the update-check opt-out"
+            readme.contains("update-policy"),
+            "README must document the update-policy control"
         );
         let example = std::fs::read_to_string(manifest.join("../../docs/kettle.example.config"))
             .expect("example config");
         assert!(
+            example.contains("update-policy"),
+            "example config must document the update-policy key"
+        );
+        assert!(
             example.contains("update-check"),
-            "example config must document the update-check key"
+            "example config must document the legacy update-check key"
         );
     }
 

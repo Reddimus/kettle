@@ -1442,6 +1442,19 @@ mod tests {
     }
 
     #[test]
+    fn client_owned_image_paste_chords_are_not_terminal_bindings() {
+        let defaults = defaults();
+        assert!(!defaults.contains_key(&Trigger::new(Mods::CTRL, Key::Char('v'))));
+        assert!(!defaults.contains_key(&Trigger::new(Mods::ALT, Key::Char('v'))));
+        assert!(!defaults.contains_key(&Trigger::new(Mods::CTRL | Mods::ALT, Key::Char('v'))));
+        assert_eq!(
+            defaults.get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('v'))),
+            Some(&Action::Paste),
+            "Kettle's own text paste remains Ctrl+Shift+V"
+        );
+    }
+
+    #[test]
     fn readme_documented_chords_are_actually_bound() {
         // Cycle 125 promoted 9 default bindings into the README
         // keybind table (SSH launcher, command palette, hint mode,

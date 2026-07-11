@@ -63,8 +63,10 @@ $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     Tee-Object -FilePath (Join-Path $tempRoot 'kettle-windows-install.out')
 
 Assert-PathExists (Join-Path $prefix 'kettle.exe') 'kettle.exe'
+Assert-PathExists (Join-Path $prefix 'kettle.com') 'kettle.com console launcher'
 Assert-PathExists (Join-Path $prefix 'install.ps1') 'saved install.ps1'
 Assert-PathExists (Join-Path $prefix '.kettle-install-prefix') 'prefix marker'
+Assert-PathExists (Join-Path $prefix '.kettle-install.json') 'self-update ownership marker'
 Assert-PathExists (Join-Path $prefix 'kettle.ico') 'icon'
 Assert-PathExists (Join-Path $prefix 'shell-integration\kettle.ps1') 'PowerShell shell integration'
 
@@ -83,6 +85,22 @@ if ($version -notmatch '^kettle \d+\.\d+\.\d+') {
     throw "unexpected installed kettle version output: $version"
 }
 Write-Output "windows-installer check: installed $version"
+
+# A bare command must resolve to the console shim before kettle.exe so
+# PowerShell waits and propagates CLI exit codes.
+$processPathBefore = $env:Path
+try {
+    $env:Path = "$prefix;$processPathBefore"
+    $resolvedKettle = (Get-Command kettle -CommandType Application | Select-Object -First 1).Source
+    Assert-Equal $resolvedKettle (Join-Path $prefix 'kettle.com') 'bare kettle command resolution'
+    $shimVersion = (& kettle --version | Out-String).Trim()
+    Assert-Equal $LASTEXITCODE 0 'kettle.com version exit code'
+    if ($shimVersion -notmatch '^kettle [0-9]+\.[0-9]+\.[0-9]+') {
+        throw "unexpected kettle.com --version output: $shimVersion"
+    }
+} finally {
+    $env:Path = $processPathBefore
+}
 
 # Run the saved helper without -Prefix; it should infer $prefix from the marker.
 & (Join-Path $prefix 'install.ps1') -Uninstall -IntegrationTestRoot $integrationRoot |
@@ -125,10 +143,17 @@ try {
 
     Assert-PathExists $shortcutPath 'Start menu shortcut'
     Assert-PathExists $testUninstallKey 'isolated Add/Remove Programs entry'
+    Assert-PathExists (Join-Path $integrationPrefix '.kettle-install.json') 'default self-update ownership marker'
     $shortcut = $ws.CreateShortcut($shortcutPath)
     Assert-Equal $shortcut.TargetPath (Join-Path $integrationPrefix 'kettle.exe') 'shortcut target'
     Assert-Equal $shortcut.Arguments '' 'shortcut arguments'
     Assert-Equal $shortcut.WorkingDirectory $integrationPrefix 'shortcut working directory'
+    # Exercise the updater-only metadata refresh path while the installed
+    # executable remains in place. This must not attempt a self-copy.
+    & (Join-Path $integrationPrefix 'install.ps1') -RefreshIntegration -IntegrationTestRoot $integrationRoot |
+        Tee-Object -FilePath (Join-Path $tempRoot 'kettle-windows-refresh-integration.out')
+    Assert-PathExists $shortcutPath 'refreshed Start menu shortcut'
+    Assert-PathExists $testUninstallKey 'refreshed Add/Remove Programs entry'
     if ((Get-Content $profilePath -Raw) -notmatch 'kettle shell-integration \(managed by install\.ps1\)') {
         throw 'default install did not write isolated PowerShell profile integration'
     }

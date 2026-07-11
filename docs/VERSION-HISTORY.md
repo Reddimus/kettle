@@ -6,12 +6,14 @@ artifacts.
 
 ## Current baseline
 
-- Latest release: `v2.34.4`
-- Current workspace version: `2.34.4`
-- Release records inspected: 130 Git tags and 130 changelog headings, from
-  `v0.1.0` through `v2.34.4`
-- Version-bearing files that must stay in lockstep: workspace `Cargo.toml`,
-  `flake.nix`, Homebrew formula, Arch `PKGBUILD`, and the changelog
+- Latest release: `v2.35.0`
+- Current workspace version: `2.35.0`
+- Release records inspected: 131 Git tags and 131 changelog headings, from
+  `v0.1.0` through `v2.35.0`
+- Version-bearing source files that must stay in lockstep: workspace
+  `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
+  formula and Arch `PKGBUILD` from verified archives so their checksums cannot
+  refer to a different version.
 
 ## Release eras
 
@@ -29,7 +31,7 @@ artifacts.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.34.4` (2026-06-19 to 2026-07-09): cwd-aware titles and
+- `v2.29.0` to `v2.35.0` (2026-06-19 to 2026-07-11): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
   keyboard text selection, package-template lockstep, and dev-record launcher
   sync.
@@ -39,9 +41,11 @@ artifacts.
 Before cutting a public release, verify:
 
 - `cargo metadata --no-deps` reports the intended workspace package version.
-- `rg -n 'version = "|pkgver=|sha256|## \\[' Cargo.toml flake.nix packaging CHANGELOG.md`
-  shows only the intended version/hash changes.
-- `scripts/check-package-templates.sh --require-release` passes against the
-  release artifacts and `.sha256` sidecars.
-- GitHub release assets, Homebrew hashes, and Arch checksums match the exact
-  tag being published.
+- `rg -n 'version = "|## \\[' Cargo.toml flake.nix CHANGELOG.md` shows only
+  the intended version changes.
+- `scripts/check-package-templates.sh --local` validates the package renderer
+  before the tag exists.
+
+After publication, run `scripts/check-package-templates.sh --require-release`
+to prove the generated Homebrew/AUR metadata matches the exact tagged archive
+sidecars.
