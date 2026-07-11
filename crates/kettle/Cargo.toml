@@ -1,5 +1,6 @@
 [package]
 name = "kettle"
+default-run = "kettle"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +12,14 @@ authors.workspace = true
 description.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[[bin]]
+name = "kettle"
+path = "src/main.rs"
+
+[[bin]]
+name = "kettle-console"
+path = "src/bin/kettle-console.rs"
 
 [lints]
 workspace = true
@@ -42,6 +51,7 @@ crossbeam-channel = "0.5.15"
 # to a running kettle's control server over this crate's protocol + transport.
 kettle-ctl.workspace = true
 kettle-render.workspace = true
+kettle-update.workspace = true
 kettle-ui.workspace = true
 log.workspace = true
 # Cycle 923 (agent-first A1): `kettle exec --json` NDJSON event stream; also

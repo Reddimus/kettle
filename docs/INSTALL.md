@@ -5,16 +5,35 @@
 | Platform | Arch | Support |
 |---|---|---|
 | Linux | x86_64 | **Tier 1** — prebuilt binary + one-line installer |
-| Linux | aarch64 | **Tier 1.5** — prebuilt binary + one-line installer, but the CI build is *best-effort* (`continue-on-error`); an occasional release may ship without the ARM tarball, in which case use the source-build path |
+| Linux | aarch64 | **Tier 1** — prebuilt binary + one-line installer |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
-Tier-1 targets are built and SHA-256-signed in CI for every release (the
-Tier-1.5 aarch64 leg is too, but its CI build is non-blocking, so its presence
-in any given release isn't guaranteed). Tier-2
-targets have no prebuilt binary; `scripts/install-online.sh` points you at a
-source build (or `nix run github:Reddimus/kettle` to try it in a sandbox first).
+Tier-1 targets are required before a release can publish. Every archive has a
+SHA-256 sidecar; Windows and Linux update metadata is additionally signed by a
+dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;
+`scripts/install-online.sh` points you at a source build (or `nix run
+github:Reddimus/kettle` to try it in a sandbox first).
+
+## Updating
+
+Official Windows and Linux installer layouts can update themselves:
+
+```sh
+kettle --check-update
+kettle update
+# Non-interactive automation only:
+kettle update --yes
+```
+
+`kettle --update` is an interactive convenience alias. Kettle verifies the
+signed stable manifest, archive size, and SHA-256 before a transactional
+replacement. It never requests elevation and never restarts open windows. A
+Windows Kettle executable launched from WSL updates the same Windows install;
+a native WSL/Linux Kettle updates its Linux prefix. Package-manager, Cargo,
+Homebrew, Nix, AUR, and manually copied installs are refused so their owner
+remains authoritative. See [UPDATES.md](UPDATES.md) for policy and recovery.
 
 ## Linux — easy desktop install (Ubuntu / Fedora / Arch / GNOME / KDE)
 
@@ -119,8 +138,8 @@ GitHub runners for every platform:
   see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)
   for the one-time tap-repo setup that lets users install with
   `brew tap reddimus/kettle && brew install kettle`.
-- **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe` +
-  `install.ps1`. Unzip anywhere, then run the bundled installer for
+- **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`, the
+  `kettle.com` console launcher, and `install.ps1`. Unzip anywhere, then run the bundled installer for
   Start menu + PATH integration:
 
   ```powershell
@@ -143,6 +162,9 @@ GitHub runners for every platform:
   obsolete launcher targets or arguments cannot survive an upgrade. No admin /
   UAC prompt — everything is per-user.
   Uses ConPTY + your default shell (PowerShell/cmd) at runtime.
+  A bare `kettle` command resolves to the console launcher so PowerShell and cmd
+  wait for CLI prompts and preserve exit codes; Windows Search continues to
+  target `kettle.exe`, which opens without a console flash.
 
   Or if you'd rather skip the installer and keep it portable: just
   run `.\kettle.exe` from the extracted folder. Pass `-Prefix
@@ -200,6 +222,12 @@ size. Reload config with `Ctrl+Shift+M`; cycle themes from the command
 palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with
 `Ctrl+Up` / `Ctrl+Down` after enabling [shell integration](SHELL-INTEGRATION.md)
 (bash / zsh / fish / **PowerShell**).
+
+For clipboard screenshots and images, use the client-owned chord: `Ctrl+V` in
+native Codex CLI and in Claude Code on Linux/WSL, `Ctrl+Alt+V` in Codex under
+WSL, or `Alt+V` in native-Windows Claude Code. Kettle forwards those chords to
+the PTY; `Ctrl+Shift+V` remains Kettle's text paste. See
+[TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md).
 
 ### AI agents / MCP
 

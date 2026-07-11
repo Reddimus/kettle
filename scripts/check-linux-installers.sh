@@ -39,6 +39,12 @@ assert_installed_prefix() {
   [ -x "${prefix}/bin/kettle" ] || fail "missing installed binary in ${prefix}"
   [ -x "${prefix}/share/kettle/install.sh" ] \
     || fail "missing saved uninstall helper in ${prefix}"
+  [ -f "${prefix}/share/kettle/install.json" ] \
+    || fail "missing self-update ownership marker in ${prefix}"
+  grep -q '"managed_by": "kettle-installer"' "${prefix}/share/kettle/install.json" \
+    || fail "invalid self-update ownership marker in ${prefix}"
+  [ -f "${prefix}/share/kettle/shell-integration/kettle.bash" ] \
+    || fail "missing installed shell integration in ${prefix}"
   [ -f "${prefix}/share/man/man1/kettle.1" ] || fail "missing installed man page"
   [ -f "${prefix}/share/icons/hicolor/scalable/apps/kettle.svg" ] \
     || fail "missing installed SVG icon"
@@ -57,6 +63,8 @@ assert_uninstalled_prefix() {
   [ ! -e "${prefix}/share/kettle/install.sh" ] || fail "helper survived uninstall"
   [ ! -e "${prefix}/share/kettle/install-real.sh" ] \
     || fail "online real helper survived uninstall"
+  [ ! -e "${prefix}/share/kettle/install.json" ] \
+    || fail "self-update ownership marker survived uninstall"
 }
 
 direct_prefix="${tmp_root}/direct"

@@ -32,6 +32,7 @@ anyhow.workspace = true
 # kettle-vt feature narrowing.
 arboard = { version = "3.6.1", default-features = false }
 crossbeam-channel = "0.5.15"
+fs4 = "1.1"
 # Cycle 752: decode the embedded PNG app icon into a winit window icon so
 # the title bar (system-menu glyph), taskbar button, and Alt-Tab show
 # kettle's icon for the *running* window. Only the `png` feature — the icon
@@ -49,6 +50,7 @@ kettle-core.workspace = true
 # future kettle-muxd daemon can re-host the same server side.
 kettle-ctl.workspace = true
 kettle-render.workspace = true
+kettle-update.workspace = true
 # Cycle 655 (sub-cycle 6 of TERMINATOR-REMOTE-DESIGN.md): SSH /
 # Docker / Podman / kubectl session detection. Carries the sysinfo
 # dep into kettle-ui where the App's poll loop will live; non-UI
@@ -72,13 +74,6 @@ pollster = "0.4.0"
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.149"
-# Cycle 794: in-app update checker (notify-only) — one unauthenticated HTTPS GET
-# of the GitHub "latest release" endpoint on a background thread. `ureq` is a
-# blocking, pure-Rust HTTP client that matches kettle's thread-based model (no
-# tokio); `rustls` (pure-Rust TLS, no system OpenSSL) keeps the aarch64
-# cross-build trivial. default-features off drops `gzip`/`json`/`cookies` we
-# don't use; we parse with the serde_json already above.
-ureq = { version = "2", default-features = false, features = ["tls"] }
 # v2.33.1 scoped RUSTSEC-2026-0192 by turning winit default features off,
 # which also (unacknowledged at the time) dropped `wayland-csd-adwaita` — so
 # GNOME/Wayland users got smithay-client-toolkit's FallbackFrame ("the
@@ -131,6 +126,9 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
 ] }
+
+[dev-dependencies]
+tempfile = "3"
 
 # Cycle 768: objc2 / objc2-app-kit for the macOS `sticky = true` window
 # behavior (NSWindowCollectionBehavior::CanJoinAllSpaces) that winit 0.30 no

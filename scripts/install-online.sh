@@ -276,7 +276,8 @@ for arg in "$@"; do
 done
 if [[ "${UNINSTALL}" -eq 1 ]]; then
   "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
-  rm -f "${SCRIPT_DIR}/install-real.sh" "${SCRIPT_DIR}/install.sh"
+  rm -f "${SCRIPT_DIR}/install-real.sh" "${SCRIPT_DIR}/install.sh" "${SCRIPT_DIR}/install.json"
+  rm -rf "${SCRIPT_DIR}/shell-integration"
   rmdir "${SCRIPT_DIR}" 2>/dev/null || true
 else
   exec "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
@@ -284,6 +285,29 @@ fi
 EOF
 chmod +x "$INSTALL_HELPER"
 chmod +x "$INSTALL_REAL"
+if [ -d "$TMP/kettle/shell-integration" ]; then
+  mkdir -p "${INSTALL_PREFIX}/share/kettle/shell-integration"
+  cp "$TMP/kettle/shell-integration/"* "${INSTALL_PREFIX}/share/kettle/shell-integration/"
+  chmod 644 "${INSTALL_PREFIX}/share/kettle/shell-integration/"*
+fi
+
+# Current online installs become explicit self-update-owned layouts even when
+# the selected release predates the marker-aware bundled install.sh.
+case "$ASSET" in
+  kettle-linux-x86_64.tar.gz) UPDATE_TARGET="x86_64-unknown-linux-gnu" ;;
+  kettle-linux-aarch64.tar.gz) UPDATE_TARGET="aarch64-unknown-linux-gnu" ;;
+esac
+cat > "${INSTALL_PREFIX}/share/kettle/install.json" <<EOF
+{
+  "schema": 1,
+  "product": "kettle",
+  "managed_by": "kettle-installer",
+  "channel": "stable",
+  "target": "${UPDATE_TARGET}",
+  "version": "${VERSION#v}"
+}
+EOF
+chmod 644 "${INSTALL_PREFIX}/share/kettle/install.json"
 
 echo ""
 echo "kettle ${VERSION} installed."

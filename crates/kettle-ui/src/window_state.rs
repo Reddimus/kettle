@@ -66,8 +66,9 @@ pub(crate) struct WindowState {
     pub(crate) fullscreen: bool,
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) selecting: bool,
-    /// Dragging the focused pane's scrollbar thumb.
-    pub(crate) dragging_scrollbar: bool,
+    /// Distance from the pointer to the dragged thumb's top edge. Keeping the
+    /// grab offset prevents the thumb from jumping when a drag starts.
+    pub(crate) scrollbar_drag_offset: Option<f32>,
     /// v2.26.0: the pointer is hovering the focused pane's scrollbar gutter.
     /// Drives the overlay scrollbar's bright (vs dim-at-rest) opacity with no
     /// fade timer, so it costs zero idle wakeups — just a single repaint on the
@@ -275,7 +276,7 @@ impl WindowState {
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
-            dragging_scrollbar: false,
+            scrollbar_drag_offset: None,
             scrollbar_hover: false,
             dragging_split: None,
             search_revealed: None,

@@ -97,7 +97,9 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${ICON_BASE}/128x128/apps/kettle.png" \
     "${ICON_BASE}/256x256/apps/kettle.png" \
     "${PREFIX}/share/kettle/install.sh" \
+    "${PREFIX}/share/kettle/install.json" \
     "${PREFIX}/share/kettle/install-real.sh"
+  rm -rf "${PREFIX}/share/kettle/shell-integration"
   # Cycle 531: remove ${PREFIX}/share/kettle/ if it ends up empty
   # after the install.sh copy is gone. `rmdir` is non-recursive +
   # only succeeds on empty dirs — so a future addition (e.g.,
@@ -217,6 +219,37 @@ fi
 # Works in both tarball and repo modes: ${SCRIPT_DIR}/install.sh
 # = the script that's currently running.
 install -Dm755 "${SCRIPT_DIR}/install.sh" "${PREFIX}/share/kettle/install.sh"
+
+# Keep the shipped prompt-integration snippets beside the installed helper so
+# an authenticated update refreshes the same self-contained layout.
+if [[ -d "${REPO_ROOT}/shell-integration" ]]; then
+  install -d "${PREFIX}/share/kettle/shell-integration"
+  for snippet in "${REPO_ROOT}"/shell-integration/*; do
+    [[ -f "${snippet}" ]] || continue
+    install -m644 "${snippet}" "${PREFIX}/share/kettle/shell-integration/$(basename -- "${snippet}")"
+  done
+fi
+
+# Explicit ownership marker consumed by `kettle update`. Distro packages,
+# cargo installs, and manually copied binaries have no marker and are refused.
+case "$(uname -m)" in
+  x86_64|amd64) UPDATE_TARGET="x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) UPDATE_TARGET="aarch64-unknown-linux-gnu" ;;
+  *) UPDATE_TARGET="unsupported" ;;
+esac
+KETTLE_VERSION=$("${BIN_DIR}/kettle" --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+KETTLE_VERSION=${KETTLE_VERSION:-unknown}
+cat > "${PREFIX}/share/kettle/install.json" <<EOF
+{
+  "schema": 1,
+  "product": "kettle",
+  "managed_by": "kettle-installer",
+  "channel": "stable",
+  "target": "${UPDATE_TARGET}",
+  "version": "${KETTLE_VERSION}"
+}
+EOF
+chmod 644 "${PREFIX}/share/kettle/install.json"
 
 # 4) Refresh caches so GNOME/KDE pick the new entry up immediately.
 # Both tools no-op silently if absent.

@@ -7,6 +7,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **Unfocused windows no longer show a hollow terminal cursor.** Kettle now
+    suppresses cursor rendering while the OS window lacks focus without
+    mutating the child's DEC cursor shape, visibility, or blink state. This
+    removes the bottom-left hollow caret seen in Codex and Claude Code and
+    restores the exact client-selected state on refocus.
+  - **Scrollbar interaction no longer jumps at drag start or shrink on high-DPI
+    displays.** The compact overlay uses logical-pixel scaling, a larger
+    invisible hit strip, a DPI-scaled minimum thumb, theme-derived contrast,
+    and preserves the pointer's offset inside the thumb while dragging.
   - **Windows Search launches survive upgrades from older custom shortcuts.**
     The installer now replaces its managed Start-menu shortcut and explicitly
     clears arguments instead of allowing WScript.Shell to retain stale
@@ -20,11 +29,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     positive.
 
   ### Changed
+  - **Stable releases now publish atomically from one signing job.** Required
+    Windows, macOS, Linux x86_64, and Linux aarch64 packages finish before CI
+    creates an Ed25519-signed update manifest. CI verifies the annotated tag,
+    sidecars, exact draft asset names, and sizes before making the release
+    public; protected-main release preparation and tag creation are separate.
   - **The renderer now uses one coherent wgpu 30 stack.** `glyphon` 0.12 and
     `cosmic-text` 0.19 replace the incompatible wgpu 29 text-rendering graph.
     Kettle presents usable suboptimal surface frames before reconfiguring and
     propagates fallible GPU readback mappings with context instead of assuming
     that a mapped range is always available.
+
+  ### Added
+  - **Official Windows and Linux installs can update with `kettle update`.** A
+    shared updater verifies a domain-separated Ed25519 manifest signature,
+    target-specific archive size and SHA-256, bounded path-safe extraction,
+    installer ownership, and a prefix lock before journaled atomic replacement.
+    `--yes` supports automation, `--update` is an interactive alias, automatic
+    policy is `off|notify|auto`, and interrupted transactions roll back. Windows
+    installs include a console launcher so bare `kettle` commands wait for
+    prompts and propagate exit codes without adding a console to Start launches.
+  - **Codex and Claude Code clipboard-image chords are explicitly preserved.**
+    `Ctrl+V` reaches native Codex and Linux/WSL Claude as `C-v`; `Ctrl+Alt+V`
+    reaches Codex under WSL as `M-C-v`; `Alt+V` reaches native Windows Claude as
+    `M-v`. Kettle keeps `Ctrl+Shift+V` for its own text paste and documents tmux
+    precedence and WSL clipboard fallback behavior.
 
 ## [2.34.4] — 2026-07-09
 

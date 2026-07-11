@@ -243,7 +243,8 @@ pub struct Overlay {
     /// in-progress title-edit text + a scope label and chrome rect.
     /// `None` when no edit is in progress.
     pub edit_title: Option<TitleEditOverlay>,
-    /// Window has keyboard focus (solid vs hollow cursor, pane dimming).
+    /// Window has keyboard focus. Terminal cursors are suppressed entirely
+    /// while false and resume from the unchanged DEC state when focus returns.
     pub window_focused: bool,
     /// v2.26.0: the focused pane's scrollbar should paint in its bright
     /// (interacting) state — the pointer is hovering the scrollbar gutter or the
@@ -288,6 +289,11 @@ pub struct Overlay {
     /// bottom bar — any real modal (search/palette/…) takes the bar instead,
     /// and it returns when they close. Dismissed with Esc, opened with Enter.
     pub update_available: Option<(String, String)>,
+}
+
+#[inline]
+fn cursor_focus_gate(window_focused: bool, terminal_requests_cursor: bool) -> bool {
+    window_focused && terminal_requests_cursor
 }
 
 /// Cycle 660: renderer-side projection of `App::confirm_dialog`.
@@ -2514,24 +2520,37 @@ impl Renderer {
                 let s = pv.snap;
                 let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
                 let has_scroll = hist > 0 && rows + hist > rows;
-                // v2.26.0: pronounced overlay scrollbar (Terminator-like). `Auto`
-                // (default) shows whenever there is scrollback history — not only
-                // while scrolled — so a mouse user always sees the position
-                // indicator; `Always` additionally draws the empty gutter so the
-                // right edge has a permanent channel. Opacity is a two-state step
-                // (no fade timer → zero idle wakeups): dim at rest, bright while
-                // the view is scrolled back (`off > 0`) or the focused pane's bar
-                // is being hovered/dragged.
+                // Compact overlay scrollbar. Width and minimum thumb are logical
+                // pixels scaled to the surface DPI; input uses the same scale but
+                // a larger invisible hit strip. Foreground-derived chrome keeps
+                // reliable contrast across light and dark themes. The two-state
+                // opacity still needs no fade timer or idle redraws.
                 if has_scroll || cfg.scrollbar == ScrollbarMode::Always {
-                    let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0);
-                    let bx = rx + rw - bar_w;
+                    let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0) * self.scale;
+                    let edge = 2.0 * self.scale;
+                    let bx = rx + rw - bar_w - edge;
                     let active = off > 0 || (pv.focused && overlay.scrollbar_active);
-                    let (track_a, thumb_a) = if active { (0.22, 0.92) } else { (0.10, 0.34) };
-                    // Track gutter (drawn full-height behind the thumb).
-                    over.push(rect(bx, ry, bar_w, rh, theme.palette[8], track_a));
+                    let (track_a, thumb_a) = if active { (0.14, 0.82) } else { (0.07, 0.42) };
+                    let track_w = (1.5 * self.scale).clamp(1.0, bar_w);
+                    if active || cfg.scrollbar == ScrollbarMode::Always {
+                        over.push(rect(
+                            bx + (bar_w - track_w) / 2.0,
+                            ry,
+                            track_w,
+                            rh,
+                            theme.foreground,
+                            track_a,
+                        ));
+                    }
                     // Thumb — only when there is actually something to scroll.
-                    if let Some((ty, th)) = kettle_core::scrollbar::thumb(rows, hist, off, rh) {
-                        over.push(rect(bx, ry + ty, bar_w, th, theme.palette[8], thumb_a));
+                    if let Some((ty, th)) = kettle_core::scrollbar::thumb_with_min(
+                        rows,
+                        hist,
+                        off,
+                        rh,
+                        24.0 * self.scale,
+                    ) {
+                        over.push(rect(bx, ry + ty, bar_w, th, theme.foreground, thumb_a));
                     }
                 }
             }
@@ -4226,10 +4245,13 @@ impl Renderer {
         let cp = snap.cursor.point;
         let shape = snap.cursor.shape;
         let cvrow = cp.line.0 + display_off;
-        let base_draw_cursor = shape != EShape::Hidden
-            && (0..screen_rows).contains(&cvrow)
-            && pv.focused
-            && cursor_visible;
+        let base_draw_cursor = cursor_focus_gate(
+            window_focused,
+            shape != EShape::Hidden
+                && (0..screen_rows).contains(&cvrow)
+                && pv.focused
+                && cursor_visible,
+        );
         let draw_cursor = cursor_policy::cursor_draw_allowed(
             snap,
             cvrow,
@@ -4467,7 +4489,7 @@ impl Renderer {
             }
         }
 
-        // Cursor: hollow when the window is unfocused, blink-aware otherwise.
+        // Cursor: hidden with the window unfocused, blink-aware otherwise.
         // Shape comes from the engine's live `RenderableContent.cursor.shape`
         // which DECSCUSR (`CSI Ps SP q`) updates per-pane — vim/neovim/fish
         // use this to flip between block/underline/beam for normal/insert/
@@ -4508,10 +4530,10 @@ impl Renderer {
             // bug that was fixed two weeks ago for the *read* direction).
             let cursor_color =
                 color::resolve_query(258, theme, term_colors).unwrap_or(theme.cursor);
-            // Hollow outline — used by the unfocused-window state *and* when
-            // the running program asks for `HollowBlock` (the DECSCUSR
-            // semantics most apps treat as "I'm not in this pane right now").
-            if !window_focused || shape == EShape::HollowBlock {
+            // Hollow outline only when the running program requests
+            // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
+            // above, so losing focus does not mutate or substitute DEC state.
+            if shape == EShape::HollowBlock {
                 quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
                 quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
                 quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
@@ -6289,6 +6311,9 @@ pub enum DebugScene {
     /// fixed position so the resulting PNG is byte-deterministic
     /// across runs.
     ContextMenu,
+    /// Render an active, partially-scrolled compact overlay scrollbar. Used by
+    /// visual regression coverage; it is not exposed as a public CLI mode.
+    Scrollbar,
 }
 
 /// Top edge (px from the surface top) of the passive "update available"
@@ -7004,6 +7029,33 @@ pub fn capture_png_with_annotation(
                     custom_glyphs: &[],
                 });
                 row_y += row_h;
+            }
+        }
+        if scene == DebugScene::Scrollbar {
+            let track_y = tab_h + pad;
+            let track_h = body_h;
+            let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0);
+            let bar_x = wf - pad - bar_w - 2.0;
+            let track_w = 1.5_f32.clamp(1.0, bar_w);
+            menu_q.push(rect(
+                bar_x + (bar_w - track_w) / 2.0,
+                track_y,
+                track_w,
+                track_h,
+                theme.foreground,
+                0.14,
+            ));
+            if let Some((thumb_y, thumb_h)) =
+                kettle_core::scrollbar::thumb_with_min(rows as usize, 400, 200, track_h, 24.0)
+            {
+                menu_q.push(rect(
+                    bar_x,
+                    track_y + thumb_y,
+                    bar_w,
+                    thumb_h,
+                    theme.foreground,
+                    0.82,
+                ));
             }
         }
         menu_quads_pipe.upload(&device, &queue, [wf, hf], &menu_q);
@@ -9537,5 +9589,13 @@ mod glyph_cell_lock_tests {
         assert!(!actual.message.contains('\n'));
         assert_eq!(actual.message.chars().count(), 2048);
         assert!(!actual.message.contains("second"));
+    }
+
+    #[test]
+    fn terminal_cursor_is_suppressed_while_window_is_unfocused() {
+        assert!(super::cursor_focus_gate(true, true));
+        assert!(!super::cursor_focus_gate(false, true));
+        assert!(!super::cursor_focus_gate(true, false));
+        assert!(!super::cursor_focus_gate(false, false));
     }
 }
