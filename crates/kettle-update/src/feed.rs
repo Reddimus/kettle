@@ -156,6 +156,7 @@ impl FeedClient {
         evaluate_manifest(manifest, current, current_target(), &self.download_prefix)
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     pub(crate) fn download_to<W: std::io::Write>(
         &self,
         update: &AvailableUpdate,
