@@ -29,6 +29,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     exit codes fail closed, and Windows uses a version-independent .NET temp
     path. A headless CI self-test covers the original command-failure false
     positive.
+  - **Package metadata can no longer pair a new version with old checksums.**
+    Release CI now renders Homebrew and AUR files from the exact verified
+    archives, publishes both as release assets, and checks their values against
+    the archive sidecars. Source-controlled `.in` files contain no stale
+    artifact hashes.
 
   ### Changed
   - **Stable releases now publish atomically from one signing job.** Required

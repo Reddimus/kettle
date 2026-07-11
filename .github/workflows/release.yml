@@ -389,6 +389,18 @@ jobs:
           sha256sum dist/kettle-update-manifest.json > dist/kettle-update-manifest.json.sha256
           sha256sum dist/kettle-update-manifest.json.sig > dist/kettle-update-manifest.json.sig.sha256
 
+      - name: Render package-manager metadata from verified archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/render-package-templates.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --macos-archive dist/kettle-macos-universal.zip \
+            --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
+            --output-dir dist/package-metadata
+          grep -q "^  version \"${GITHUB_REF_NAME#v}\"$" dist/package-metadata/kettle.rb
+          grep -q "^pkgver=${GITHUB_REF_NAME#v}$" dist/package-metadata/PKGBUILD
+
       - name: Upload a complete draft, verify it, then publish once
         shell: bash
         env:
@@ -419,6 +431,8 @@ jobs:
             dist/kettle-update-manifest.json.sig
             dist/kettle-update-manifest.json.sha256
             dist/kettle-update-manifest.json.sig.sha256
+            dist/package-metadata/kettle.rb
+            dist/package-metadata/PKGBUILD
           )
           for attempt in 1 2 3; do
             if gh release upload "$tag" "${files[@]}" --clobber; then
@@ -449,6 +463,8 @@ jobs:
               "dist/kettle-update-manifest.json.sig",
               "dist/kettle-update-manifest.json.sha256",
               "dist/kettle-update-manifest.json.sig.sha256",
+              "dist/package-metadata/kettle.rb",
+              "dist/package-metadata/PKGBUILD",
           ])}
           actual = {asset["name"]: asset["size"] for asset in json.load(open("release-assets.json"))["assets"]}
           if actual != expected:

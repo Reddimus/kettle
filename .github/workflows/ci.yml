@@ -142,10 +142,9 @@ jobs:
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
           echo "kettle.ico OK (${count} resolutions)"
       - name: Package template lockstep
-        # Homebrew and AUR templates pin release artifact hashes that are only
-        # known after release.yml uploads the archives. This guard catches stale
-        # version/hash template drift after a release, while still allowing an
-        # unreleased version bump to pass before its tag exists.
+        # Release CI renders Homebrew and AUR metadata only after it has the
+        # verified archives. This guard tests that renderer and, when the
+        # current tag is public, checks the rendered assets against sidecars.
         if: runner.os == 'Linux'
         run: scripts/check-package-templates.sh
       - name: Signed update manifest generator

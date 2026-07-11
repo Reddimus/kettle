@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Verify that source-tree package templates track the workspace version and,
-# once a matching GitHub release tag exists, the published artifact hashes.
+# Validate source templates and, once published, their rendered release assets.
 
 set -euo pipefail
 
@@ -13,10 +12,10 @@ case "${1:-}" in
     cat <<'EOF'
 usage: scripts/check-package-templates.sh [--auto|--local|--require-release]
 
-  --auto             verify local template lockstep; if v<VERSION> exists on
-                     GitHub, also verify hashes against release .sha256 files
-  --local            only verify local template lockstep
-  --require-release  require v<VERSION> and verify published hashes
+  --auto             validate source templates; when v<VERSION> exists,
+                     also validate its generated package-metadata assets
+  --local            validate only the source templates and renderer
+  --require-release  require v<VERSION> and validate its published metadata
 EOF
     exit 0
     ;;
@@ -31,41 +30,21 @@ fail() {
   exit 1
 }
 
-need_file() {
-  [ -f "$1" ] || fail "missing $1"
-}
+for file in \
+  Cargo.toml \
+  packaging/homebrew/kettle.rb.in \
+  packaging/arch/PKGBUILD.in \
+  scripts/render-package-templates.py \
+  scripts/test-package-templates.py; do
+  [ -f "$file" ] || fail "missing $file"
+done
 
-need_file Cargo.toml
-need_file packaging/homebrew/kettle.rb
-need_file packaging/arch/PKGBUILD
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+python3 scripts/test-package-templates.py
 
 version=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
 [ -n "$version" ] || fail "could not read workspace version from Cargo.toml"
-
-formula_version=$(sed -n 's/^  version "\([^"]\+\)"/\1/p' packaging/homebrew/kettle.rb)
-arch_version=$(sed -n 's/^pkgver=\([^[:space:]]\+\)$/\1/p' packaging/arch/PKGBUILD)
-
-[ "$formula_version" = "$version" ] \
-  || fail "Homebrew version $formula_version does not match workspace $version"
-[ "$arch_version" = "$version" ] \
-  || fail "Arch pkgver $arch_version does not match workspace $version"
-
-mapfile -t formula_hashes < <(
-  sed -n 's/^[[:space:]]*sha256 "\([0-9a-f]\{64\}\)".*/\1/p' \
-    packaging/homebrew/kettle.rb
-)
-[ "${#formula_hashes[@]}" -eq 2 ] \
-  || fail "expected exactly 2 Homebrew sha256 entries, found ${#formula_hashes[@]}"
-
-mac_hash=${formula_hashes[0]}
-linux_hash=${formula_hashes[1]}
-arch_hash=$(sed -n "s/^sha256sums=('\([0-9a-f]\{64\}\)')$/\1/p" \
-  packaging/arch/PKGBUILD)
-[ -n "$arch_hash" ] || fail "could not read Arch sha256sums entry"
-[ "$arch_hash" = "$linux_hash" ] \
-  || fail "Arch Linux hash does not match Homebrew Linux hash"
-
-echo "package-template check: local versions/hashes are internally consistent for $version"
+echo "package-template check: source templates render deterministically for $version"
 
 if [ "$MODE" = "local" ]; then
   exit 0
@@ -79,43 +58,56 @@ if ! git ls-remote --exit-code --tags "$remote" "refs/tags/${tag}" >/dev/null 2>
   if [ "$MODE" = "require-release" ]; then
     fail "release tag ${tag} does not exist on ${repo}"
   fi
-  echo "package-template check: ${tag} is not published yet; skipping remote hash check"
+  echo "package-template check: ${tag} is not published yet; skipping release-asset check"
   exit 0
 fi
 
-command -v curl >/dev/null 2>&1 || fail "curl is required for remote hash check"
+command -v curl >/dev/null 2>&1 || fail "curl is required for release-asset checks"
+temporary=$(mktemp -d)
+trap 'rm -rf "$temporary"' EXIT
 
-fetch_hash() {
+fetch_asset() {
   local asset=$1
-  local url="https://github.com/${repo}/releases/download/${tag}/${asset}.sha256"
-  local line
-  local hash
-  if ! line=$(curl -fsSL "$url"); then
+  local url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+  if ! curl -fsSL "$url" -o "$temporary/$asset"; then
     if [ "$MODE" = "require-release" ]; then
       fail "could not fetch $url"
     fi
-    # A main-branch release bump and tag push can land before every release
-    # matrix leg has uploaded its .sha256 sidecar. In auto mode, keep CI from
-    # failing on that transient race; --require-release remains strict.
-    echo "package-template check: ${tag} exists but ${asset}.sha256 is not reachable yet; skipping remote hash check" >&2
-    printf '\n'
-    return 0
+    echo "package-template check: ${tag} exists but ${asset} is not reachable yet; skipping release-asset check" >&2
+    exit 0
   fi
-  read -r hash _ <<< "$line"
-  [ "${#hash}" -eq 64 ] || fail "bad sha256 sidecar for ${asset}: ${line}"
+}
+
+fetch_asset kettle.rb
+fetch_asset PKGBUILD
+fetch_asset kettle-macos-universal.zip.sha256
+fetch_asset kettle-linux-x86_64.tar.gz.sha256
+
+sidecar_hash() {
+  local sidecar=$1
+  local expected_name=$2
+  local hash name extra
+  read -r hash name extra < "$sidecar" || fail "could not parse $sidecar"
+  [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail "invalid SHA-256 in $sidecar"
+  [ "$name" = "$expected_name" ] || fail "unexpected filename in $sidecar: $name"
+  [ -z "${extra:-}" ] || fail "unexpected trailing fields in $sidecar"
   printf '%s\n' "$hash"
 }
 
-published_mac=$(fetch_hash kettle-macos-universal.zip)
-[ -n "$published_mac" ] || exit 0
-published_linux=$(fetch_hash kettle-linux-x86_64.tar.gz)
-[ -n "$published_linux" ] || exit 0
+published_mac=$(sidecar_hash "$temporary/kettle-macos-universal.zip.sha256" kettle-macos-universal.zip)
+published_linux=$(sidecar_hash "$temporary/kettle-linux-x86_64.tar.gz.sha256" kettle-linux-x86_64.tar.gz)
+formula_version=$(sed -n 's/^  version "\([^"]\+\)"/\1/p' "$temporary/kettle.rb")
+arch_version=$(sed -n 's/^pkgver=\([^[:space:]]\+\)$/\1/p' "$temporary/PKGBUILD")
+mapfile -t formula_hashes < <(
+  sed -n 's/^[[:space:]]*sha256 "\([0-9a-f]\{64\}\)".*/\1/p' "$temporary/kettle.rb"
+)
+arch_hash=$(sed -n "s/^sha256sums=('\([0-9a-f]\{64\}\)')$/\1/p" "$temporary/PKGBUILD")
 
-[ "$mac_hash" = "$published_mac" ] \
-  || fail "Homebrew macOS hash $mac_hash does not match published $published_mac"
-[ "$linux_hash" = "$published_linux" ] \
-  || fail "Linux x86_64 hash $linux_hash does not match published $published_linux"
-[ "$arch_hash" = "$published_linux" ] \
-  || fail "Arch hash $arch_hash does not match published $published_linux"
+[ "$formula_version" = "$version" ] || fail "Homebrew release asset version $formula_version does not match $version"
+[ "$arch_version" = "$version" ] || fail "Arch release asset version $arch_version does not match $version"
+[ "${#formula_hashes[@]}" -eq 2 ] || fail "expected two Homebrew hashes, found ${#formula_hashes[@]}"
+[ "${formula_hashes[0]}" = "$published_mac" ] || fail "Homebrew macOS hash does not match its sidecar"
+[ "${formula_hashes[1]}" = "$published_linux" ] || fail "Homebrew Linux hash does not match its sidecar"
+[ "$arch_hash" = "$published_linux" ] || fail "Arch hash does not match the Linux sidecar"
 
-echo "package-template check: published ${tag} hashes match Homebrew and Arch templates"
+echo "package-template check: published ${tag} metadata matches verified sidecars"

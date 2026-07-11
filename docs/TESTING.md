@@ -415,17 +415,15 @@ Separate workflows:
 
 - `.github/workflows/audit.yml` (cycle 244) — `rustsec/audit-
   check` on every Cargo.lock change + daily 06:00 UTC cron.
-- `.github/workflows/release.yml` — multi-platform packaging on
-  every `v*` tag push. Cycle-254 adds SHA-256 sidecars (.sha256
-  file alongside each artifact); cycle-258 onward, each release
-  has up to eight assets (four platform binaries — linux-x86_64,
-  macos-universal, windows-x86_64, and the best-effort aarch64-linux tarball —
-  each with a `.sha256` sidecar; the aarch64 leg is non-blocking, so an
-  occasional release has six).
-- `scripts/check-package-templates.sh` — verifies Homebrew and AUR template
-  versions against `Cargo.toml`, checks their Linux hashes agree, and, once the
-  matching release tag exists, verifies the template hashes against the
-  published `.sha256` sidecars. CI runs it on Linux.
+- `.github/workflows/release.yml` — mandatory Windows, macOS, Linux x86_64,
+  and Linux aarch64 packaging on every verified `v*` tag. One protected
+  finalizer validates all archives and sidecars, signs the update manifest,
+  renders Homebrew/AUR metadata from the archive bytes, verifies the exact
+  14-asset draft, and publishes it once.
+- `scripts/check-package-templates.sh` — tests deterministic Homebrew/AUR
+  rendering from source `.in` files and, once the matching release exists,
+  checks its generated `kettle.rb` and `PKGBUILD` against the published
+  `.sha256` sidecars. CI runs it on Linux.
 - `scripts/check-linux-installers.sh` — builds on the release binary produced by
   CI, installs into throwaway custom prefixes, verifies desktop/man/icon/helper
   paths, uninstalls through the saved helper, and, when the matching release tag

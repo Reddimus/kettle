@@ -1,83 +1,58 @@
 # Homebrew tap setup
 
-[`kettle.rb`](kettle.rb) is a ready-to-use Homebrew formula that
-installs the prebuilt binary from a tagged GitHub release. To make
-`brew install kettle` work for end users, the formula needs to live
-in a *Homebrew tap* — a separate GitHub repo named
-`homebrew-<project>` that Homebrew clones on `brew tap`.
+Every stable GitHub release includes a ready-to-use `kettle.rb` formula. The
+source tree stores [`kettle.rb.in`](kettle.rb.in), whose version and checksums
+are deliberately unresolved until release CI has built and verified the exact
+macOS and Linux archives.
 
-## One-time setup (maintainer)
+## One-time setup
 
-1. **Create the tap repo.** A public repo named exactly
-   `homebrew-kettle` under the same GitHub org/user as kettle —
-   Homebrew expects the `homebrew-` prefix so `brew tap
-   reddimus/kettle` resolves to `Reddimus/homebrew-kettle`.
+1. Create a public `homebrew-kettle` repository under the same GitHub owner.
+   Homebrew maps `brew tap reddimus/kettle` to that repository.
+2. Download the generated formula from the latest release into the tap:
 
-2. **Copy this directory's `kettle.rb` into the tap repo** at the
-   path `Formula/kettle.rb`. The `Formula/` subdirectory is
-   conventional and `brew tap` discovers it without extra config.
+   ```sh
+   mkdir -p Formula
+   curl -fL https://github.com/Reddimus/kettle/releases/latest/download/kettle.rb \
+     -o Formula/kettle.rb
+   ```
 
-3. **Tag the tap repo `v1.0.0`** (the tap version is independent
-   of kettle's version; just a marker that the tap is live).
+3. Commit and push `Formula/kettle.rb`.
 
-End users then install with two commands:
+Users can then install on macOS or Linuxbrew with:
 
 ```sh
 brew tap reddimus/kettle
 brew install kettle
 ```
 
-On both macOS and Linuxbrew. The formula handles platform-specific
-artifact selection (`.app` zip on macOS, tarball on Linux) and
-installs the XDG launcher + icons under `share/` on Linux so the
-kettle tile shows up in GNOME Activities / KDE Krunner the same way
-the cycle-0 `install.sh` does.
+The formula installs the macOS application bundle or Linux binary, desktop
+launcher, icons, man page, and offline documentation as appropriate.
 
 ## Per-release maintenance
 
-On every new kettle tag, **two lines in `kettle.rb` need updating** —
-the `version` and the per-platform `sha256` hashes. The hashes live
-next to the artifacts on the release page (the cycle-254 `.sha256`
-sidecars). One-liner to fetch both for a given version:
+The release finalizer computes SHA-256 directly from the verified archives and
+renders `kettle.rb` with `scripts/render-package-templates.py`. This avoids the
+invalid intermediate state where a new version points at the previous
+release's checksums. Update the tap from the newly published asset:
 
 ```sh
-VER=1.3.5
-for asset in kettle-macos-universal.zip kettle-linux-x86_64.tar.gz; do
-  printf '%s  ' "$asset"
-  curl -fsSL "https://github.com/Reddimus/kettle/releases/download/v${VER}/${asset}.sha256" \
-    | awk '{print $1}'
-done
+curl -fL https://github.com/Reddimus/kettle/releases/latest/download/kettle.rb \
+  -o Formula/kettle.rb
+brew audit --strict --online kettle
+brew test kettle
+git add Formula/kettle.rb
+git commit -m "kettle $(sed -n 's/^  version \"\([^\"]*\)\"/\1/p' Formula/kettle.rb)"
+git push
 ```
 
-Then drop the two hex strings into the matching `sha256` fields in
-`kettle.rb`, then run:
+From the Kettle repository, this command strictly verifies that the published
+formula and AUR metadata match their release sidecars:
 
 ```sh
 scripts/check-package-templates.sh --require-release
 ```
 
-That verifies the formula version matches `Cargo.toml`, the Linux hash matches
-the AUR template, and both hashes match the published release `.sha256`
-sidecars. Commit after it passes. `brew livecheck kettle` (run in the tap
-repo) flags this drift automatically — the `livecheck` block in
-the formula resolves against `/releases/latest` via the same
-GitHub redirect the cycle-253 `install-online.sh` uses.
-
-## Why this lives in the main repo
-
-A homebrew tap is a separate repo, but the *formula* is part of
-the kettle release surface — it pins exact SHA-256s for that
-release, and shifting it lives best alongside the artifact
-publication that produces those hashes. Storing the template here
-means:
-
-- The formula bumps as part of the same PR that bumps `Cargo.toml`
-  (single source of truth for the version).
-- Future contributors looking at "how does kettle ship?" see all
-  packaging paths in one tree (`packaging/{linux,macos,windows,
-  homebrew}/`).
-- The tap repo gets a one-line copy on every release rather than
-  carrying its own drift.
-
-Once the tap repo is up, this directory becomes the canonical
-template; the tap repo is the deployment target.
+The tap remains the deployment target. The `.in` file in this repository is
+the reviewed source template, and the generated release asset is the only
+formula intended for installation.

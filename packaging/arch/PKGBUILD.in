@@ -1,6 +1,10 @@
 # Maintainer: kettle contributors <see github.com/Reddimus/kettle>
 #
-# PKGBUILD for the AUR `kettle-bin` package — installs the prebuilt
+# PKGBUILD template for the AUR `kettle-bin` package. The release finalizer
+# renders the ready-to-use `PKGBUILD` release asset after verifying the Linux
+# archive. Do not submit this unresolved `.in` file directly.
+#
+# The generated package installs the prebuilt
 # Linux x86_64 binary from a tagged GitHub release. Source-build
 # variant (`kettle`) would build from `cargo build --release` instead;
 # this template tracks the binary so users skip the ~3-minute build.
@@ -11,19 +15,16 @@
 #        ssh aur:kettle-bin.git
 #        # or if it doesn't exist yet:
 #        ssh aur:kettle-bin   # AUR creates the repo on first push
-#   2. Copy this PKGBUILD into the clone.
+#   2. Copy the generated `PKGBUILD` release asset into the clone.
 #   3. Regenerate .SRCINFO:
 #        makepkg --printsrcinfo > .SRCINFO
 #   4. Commit + push to AUR.
 #
-# Per-release maintenance: bump `pkgver`, refresh the two sha256
-# lines. Cycle-254 .sha256 sidecars on the GitHub release page give
-# the values — one-liner:
-#
-#     curl -fsSL https://github.com/Reddimus/kettle/releases/download/v${VER}/kettle-linux-x86_64.tar.gz.sha256
+# Per-release version and digest maintenance is performed by
+# `scripts/render-package-templates.py` from the verified archive bytes.
 
 pkgname=kettle-bin
-pkgver=2.35.0
+pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
 arch=('x86_64')
@@ -43,9 +44,8 @@ depends=('fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11'
 provides=('kettle')
 conflicts=('kettle')
 source=("kettle-linux-x86_64-${pkgver}.tar.gz::https://github.com/Reddimus/kettle/releases/download/v${pkgver}/kettle-linux-x86_64.tar.gz")
-# SHA-256 from the cycle-254 sidecar published alongside the artifact.
-# Bump in lockstep with `pkgver` on every release.
-sha256sums=('21113c6e8a14b47a8f7aa7bc2f52a23a44ec8bfde479776751e8cf50cdca1415')
+# SHA-256 computed from the archive published alongside this file.
+sha256sums=('@LINUX_X86_64_SHA256@')
 options=('!strip')   # Already stripped by the release runner.
 
 package() {

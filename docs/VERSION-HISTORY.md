@@ -10,8 +10,10 @@ artifacts.
 - Current workspace version: `2.35.0`
 - Release records inspected: 131 Git tags and 131 changelog headings, from
   `v0.1.0` through `v2.35.0`
-- Version-bearing files that must stay in lockstep: workspace `Cargo.toml`,
-  `flake.nix`, Homebrew formula, Arch `PKGBUILD`, and the changelog
+- Version-bearing source files that must stay in lockstep: workspace
+  `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
+  formula and Arch `PKGBUILD` from verified archives so their checksums cannot
+  refer to a different version.
 
 ## Release eras
 
@@ -39,9 +41,11 @@ artifacts.
 Before cutting a public release, verify:
 
 - `cargo metadata --no-deps` reports the intended workspace package version.
-- `rg -n 'version = "|pkgver=|sha256|## \\[' Cargo.toml flake.nix packaging CHANGELOG.md`
-  shows only the intended version/hash changes.
-- `scripts/check-package-templates.sh --require-release` passes against the
-  release artifacts and `.sha256` sidecars.
-- GitHub release assets, Homebrew hashes, and Arch checksums match the exact
-  tag being published.
+- `rg -n 'version = "|## \\[' Cargo.toml flake.nix CHANGELOG.md` shows only
+  the intended version changes.
+- `scripts/check-package-templates.sh --local` validates the package renderer
+  before the tag exists.
+
+After publication, run `scripts/check-package-templates.sh --require-release`
+to prove the generated Homebrew/AUR metadata matches the exact tagged archive
+sidecars.

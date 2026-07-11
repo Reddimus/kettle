@@ -113,11 +113,11 @@ GitHub runners for every platform:
 - **Linux** — `kettle-linux-x86_64.tar.gz` (binary + `kettle.desktop` + icon
   + `install.sh`). Extract and run `./install.sh` for the easy-install
   path above, or copy the files manually. Arch / Manjaro / EndeavourOS
-  users: a ready-to-use AUR `PKGBUILD` lives at
-  [`packaging/arch/PKGBUILD`](../packaging/arch/PKGBUILD); see
-  [`packaging/arch/README.md`](../packaging/arch/README.md) for the
-  one-time AUR submission walkthrough that lets users install via
-  `yay -S kettle-bin`. NixOS / nix-flake users:
+  users: each release includes a ready-to-use `PKGBUILD`, rendered from
+  [`packaging/arch/PKGBUILD.in`](../packaging/arch/PKGBUILD.in) after CI knows
+  the archive checksum; see [`packaging/arch/README.md`](../packaging/arch/README.md)
+  for the AUR publication workflow that enables `yay -S kettle-bin`.
+  NixOS / nix-flake users:
   `nix run github:reddimus/kettle` runs without installing; see
   [`packaging/nix/README.md`](../packaging/nix/README.md) for
   `nix profile install` + dev-shell + home-manager usage.
@@ -133,10 +133,10 @@ GitHub runners for every platform:
   - From a terminal you can instead clear the quarantine flag directly:
     `xattr -dr com.apple.quarantine /Applications/kettle.app`.
 
-  A ready-to-use Homebrew formula lives at
-  [`packaging/homebrew/kettle.rb`](../packaging/homebrew/kettle.rb);
-  see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)
-  for the one-time tap-repo setup that lets users install with
+  Each release includes a ready-to-use `kettle.rb` formula rendered from
+  [`packaging/homebrew/kettle.rb.in`](../packaging/homebrew/kettle.rb.in);
+  see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md) for
+  tap setup and updates with
   `brew tap reddimus/kettle && brew install kettle`.
 - **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`, the
   `kettle.com` console launcher, and `install.ps1`. Unzip anywhere, then run the bundled installer for
@@ -180,8 +180,8 @@ GitHub runners for every platform:
   > `scoop install kettle` don't resolve — kettle isn't in the winget-pkgs
   > repo or a scoop bucket. If you'd like to maintain one, the SHA-256
   > sidecars shipped with every release satisfy both ecosystems' integrity
-  > checks, and `packaging/homebrew/kettle.rb` + `packaging/arch/PKGBUILD`
-  > are ready-made templates for the manifest shape. Until then, use
+  > checks, and the generated `kettle.rb` + `PKGBUILD` release assets are
+  > ready-made templates for the manifest shape. Until then, use
   > `install.ps1` above (it covers PATH + Start-menu + auto-uninstall, the
   > same integration a package manager would give you).
 

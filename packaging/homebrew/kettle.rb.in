@@ -1,4 +1,8 @@
-# Homebrew formula for kettle
+# Homebrew formula template for kettle.
+#
+# The release finalizer renders this file as the `kettle.rb` release asset
+# after it has verified the platform archives. Do not install this `.in` file
+# directly: its version and SHA-256 values are intentionally unresolved.
 #
 # To set up a tap so macOS / Linux Homebrew users can install kettle:
 #
@@ -6,23 +10,14 @@
 #      same org/user as kettle (Homebrew expects the `homebrew-` prefix
 #      so `brew tap reddimus/kettle` resolves to `Reddimus/homebrew-
 #      kettle`).
-#   2. Copy this file into that repo as `Formula/kettle.rb`.
+#   2. Copy the generated release asset into it as `Formula/kettle.rb`.
 #   3. End users then run:
 #         brew tap reddimus/kettle
 #         brew install kettle
 #
-# Per-release maintenance:
-#
-#   On every new tag, bump the `version` line below + the two
-#   `sha256` lines. The hashes live next to the artifacts on the
-#   release page (the cycle-254 `.sha256` sidecars). Fetch them via:
-#
-#     curl -fsSL https://github.com/Reddimus/kettle/releases/download/v<VER>/kettle-macos-universal.zip.sha256
-#     curl -fsSL https://github.com/Reddimus/kettle/releases/download/v<VER>/kettle-linux-x86_64.tar.gz.sha256
-#
-#   Each prints `<sha>  <filename>` — drop the hex into the matching
-#   field. The `head` of `livecheck` below auto-detects the latest
-#   tag so `brew livecheck kettle` flags drift.
+# Per-release maintenance is automatic. `render-package-templates.py`
+# computes both digests from the verified archives and replaces the three
+# tokens below. `brew livecheck kettle` still flags tap-repository drift.
 #
 # This file is a template — it does NOT live in a tap repo yet.
 # See `packaging/homebrew/README.md` for the full setup walkthrough.
@@ -31,18 +26,18 @@ class Kettle < Formula
   desc "Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/Reddimus/kettle"
   license "MIT"
-  version "2.35.0"
+  version "@VERSION@"
 
   on_macos do
     # macOS ships the universal2 .app bundle — same binary covers
     # arm64 and x86_64. No need to split by architecture.
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-macos-universal.zip"
-    sha256 "1404d754f9ccc5e8687b2bdb0a4869fc6ce95e571774109392ce537cc907aa70"
+    sha256 "@MACOS_SHA256@"
   end
 
   on_linux do
     url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-linux-x86_64.tar.gz"
-    sha256 "21113c6e8a14b47a8f7aa7bc2f52a23a44ec8bfde479776751e8cf50cdca1415"
+    sha256 "@LINUX_X86_64_SHA256@"
   end
 
   livecheck do
