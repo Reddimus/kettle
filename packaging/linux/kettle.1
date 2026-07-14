@@ -1,7 +1,7 @@
 .\" kettle.1 - manual page for kettle terminal emulator
 .\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
 .\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
-.TH KETTLE 1 "2026-06-11" "kettle" "User Commands"
+.TH KETTLE 1 "2026-07-14" "kettle" "User Commands"
 .
 .SH NAME
 kettle \- fast, cross-platform, GPU-accelerated terminal emulator
@@ -380,13 +380,19 @@ working directory, default inherit),
 .B \-\-json
 (one JSON object per line: start / output / title / exit), and
 .BI \-\-record " PATH"
-(also save an asciicast trace). stdin is not forwarded to the child.
+(also save an asciicast trace). The trace must be secured before the child is
+started; a recording error exits with status 125 instead of running unaudited.
+Capture is output-only and stops on a complete asciicast event boundary before
+512 MiB; a later write failure stops the trace without killing the child.
+Piped or redirected stdin is forwarded to the child on Unix and WSL. An
+interactive terminal stdin is left attached to the caller, and native Windows
+ConPTY stdin forwarding remains disabled.
 .TP
 .B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
 Drive a running kettle's agent control server.
 .I METHOD
 is one of
-.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " send_text ", " run_command ,
+.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " read_cells ", " ui_geometry ", " screenshot ", " send_text ", " send_keys ", " dispatch_keybind ", " send_mouse ", " resize_window ", " perform_action ", " wait_for ", " run_command ,
 or
 .B events
 to stream the event feed. The target kettle must run with
@@ -406,10 +412,20 @@ or the command line for
 selects a specific kettle (else the newest running server); and
 .B \-\-raw
 prints the raw JSON result instead of a pretty summary.
+Large list, screen, and cell reads return
+.BR snapshot ,
+.BR next_cursor ,
+and
+.BR truncated ;
+continue with JSON
+.BR cursor / snapshot
+parameters. Requests are capped at 1 MiB and responses at 768 KiB.
 .TP
 .B kettle mcp \fR[\fB\-\-self\-test\fR]
 Run a Model Context Protocol server over stdio, exposing kettle as native agent
-tools (run a command, drive a running kettle). Register with Claude Code:
+tools (run a command, drive a running kettle). Supports MCP 2025-11-25 and
+2025-06-18 with bounded concurrent tool execution and cancellation. Register
+with Claude Code:
 .B claude mcp add kettle \-\- kettle mcp\fR.
 .B \-\-self\-test
 runs an in-process handshake +
@@ -423,7 +439,11 @@ Download and install the latest authenticated stable release. Supported for
 official installer-owned Windows x86_64 and Linux x86_64/aarch64 layouts; other
 installs are refused with package-manager guidance. Verifies an Ed25519-signed
 manifest, exact archive size, and SHA-256 before transactional replacement.
-Running windows are not restarted. Without
+Running windows are not restarted. Windows stages verified files for an
+out-of-process helper that waits for every Kettle process to exit; invalid or
+three-times-failed pending state is quarantined on a best-effort basis so the
+intact old build can start even when evidence cannot be moved. Source and
+dev-record ownership markers are refused. Without
 .BR \-\-yes ,
 an interactive confirmation is required.
 .

@@ -39,9 +39,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Linux deps
         if: runner.os == 'Linux'
@@ -50,7 +51,7 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo fmt --all --check
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -87,14 +88,16 @@ jobs:
       # invocations) and never exercised by CI; the cross-platform
       # rewrite makes a parse-smoke worthwhile.
       #
-      # `taiki-e/install-action@just` is cached so the install is
+      # `taiki-e/install-action` is cached so the install is
       # ~1s after first run. `just --summary` prints every recipe
       # across all platforms (including [unix]+[windows] gated
       # ones), validating the entire file parses. `just --list`
       # then filters to the current OS, confirming the gating logic
       # returns a non-empty set on each runner.
       - name: Install just (cycle 730)
-        uses: taiki-e/install-action@just
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: just
       - name: Justfile validation (cycle 730)
         run: |
           just --summary
@@ -533,15 +536,17 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.89"
       - name: Linux deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: msrv-1.89
       - run: cargo build --workspace --all-targets
@@ -572,15 +577,17 @@ jobs:
       # on every nightly run, and the runtime is scheduled to be
       # removed from the runner on 2026-09-16. Upgrade now, before the
       # nightly job starts hard-failing.
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: nightly
       - name: Linux deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: nightly
       - run: cargo build --workspace --all-targets
@@ -602,15 +609,16 @@ jobs:
     env:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: stable
           targets: aarch64-unknown-linux-gnu
       - name: aarch64 GNU cross-linker
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: aarch64-linux
       - run: cargo build --workspace --target aarch64-unknown-linux-gnu

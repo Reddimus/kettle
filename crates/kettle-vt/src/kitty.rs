@@ -25,67 +25,66 @@ use std::io::Read;
 
 use base64::Engine;
 
-use crate::image::{ImageData, Placed};
+use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
+use crate::image::{ImageData, Placed, rgba_bytes};
 
-/// Cycle 578: per-slot accumulator cap for kitty `m=1` chunked
-/// transmissions. A hostile PTY emitter can chain continuation
-/// chunks indefinitely; without a cap, the in-flight `String`
-/// grows until the host OOMs. 384 MiB covers the largest realistic
-/// payload (8192² × 4 RGBA bytes = 256 MiB base64-encoded at the
-/// 4/3 expansion ≈ 342 MiB) with margin, and stays well below any
-/// realistic host RAM. Pairs with the cycle-576 256-MiB decoded-
-/// image cap in `ImageData::from_encoded`.
-const MAX_KITTY_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
-
-/// Cycle 579: cap on concurrent in-flight kitty image transmissions
-/// keyed by `i=`. Without it, a hostile PTY emitter can send 100 000+
-/// distinct `i=` values, each with one small `m=1` chunk that never
-/// receives its terminating `m=0`, and grow the `in_flight` HashMap
-/// without bound. 32 sits well above any realistic client (kitty,
-/// ueberzug, and chafa typically interleave one or two transmissions);
-/// past that, new ids are refused until the existing slots complete or
-/// are evicted by the per-slot cap above.
-const MAX_IN_FLIGHT_SLOTS: usize = 32;
-
-/// Cycle 764: global cap on the *sum* of all in-flight transmission payloads
-/// (every `in_flight` slot plus the animation `frame_in_flight` slot). The
-/// per-slot `MAX_KITTY_PAYLOAD_BYTES` (384 MiB) is sized for one legitimate
-/// 8192²-pixel image, but on its own `MAX_IN_FLIGHT_SLOTS` (32) × 384 MiB ≈
-/// 12 GiB could be accumulated by a hostile emitter chaining many large partial
-/// transmissions. 1 GiB total comfortably allows a couple of concurrent
-/// max-size images (or many small ones) while bounding the worst case to a
-/// fraction of host RAM. On breach the offending slot is dropped.
-const MAX_TOTAL_IN_FLIGHT_BYTES: usize = 1024 * 1024 * 1024;
-
-/// Cycle 580: cap on per-image animation frames. Each successful
-/// `a=f` frame transmission appends a `Frame` (carrying an `ImageData`
-/// Arc) to `frames[id]`; without a cap, an attacker can chain
-/// 100 000+ frame transmissions for one id and grow the Vec
-/// unboundedly. 256 sits well above any realistic animation (`.gif`
-/// files top out around 200 frames; kitty's animation protocol
-/// imposes no spec-level bound but real content stays small). Past
-/// the cap, additional frame pushes are silently dropped — the
-/// existing animation continues to play with the frames already
-/// captured.
-const MAX_FRAMES_PER_IMAGE: usize = 256;
-
-/// Cycle 581: cap on the number of completed (`store`) images kept
-/// around for later placement. Each entry holds an `ImageData` Arc
-/// whose payload can be up to MAX_IMAGE_DIM² × 4 = 256 MiB (cycle
-/// 576), so 1000 distinct successful transmissions = up to 256 GB
-/// resident. 64 sits well above any realistic terminal usage (a
-/// terminal showing icons + a couple animations rarely transmits
-/// more than a dozen images; even chafa's slideshow mode resets
-/// each frame). Past the cap, new `a=T` completions are dropped:
-/// the image data is decoded (work was done) but not added to
-/// `store`, so it can be drawn at-cursor but can't be replaced
-/// later via `a=p,i=...`.
-const MAX_STORED_IMAGES: usize = 64;
+// All byte/count ceilings come from `GraphicsLimits`; keeping one source of
+// truth prevents the extractor, decoder, and renderer envelopes from drifting.
 
 #[derive(Default)]
 struct Acc {
     control: String,
     payload: String,
+    reservation: Option<GraphicsReservation>,
+}
+
+impl Acc {
+    fn projected_bytes(&self, control: &str, payload: &str) -> Option<usize> {
+        let control_bytes = if self.control.is_empty() {
+            control.len()
+        } else {
+            0
+        };
+        self.control
+            .len()
+            .checked_add(self.payload.len())?
+            .checked_add(control_bytes)?
+            .checked_add(payload.len())
+    }
+
+    fn append(&mut self, control: &str, payload: &str, budget: &GraphicsBudget) -> bool {
+        let Some(new_len) = self.projected_bytes(control, payload) else {
+            return false;
+        };
+        if new_len == 0 || new_len > budget.limits().transmission_bytes {
+            return false;
+        }
+        if let Some(r) = self.reservation.as_mut() {
+            if !r.try_grow_to(new_len) {
+                return false;
+            }
+        } else {
+            let Some(r) = budget.reserve_transient_cpu(new_len) else {
+                return false;
+            };
+            self.reservation = Some(r);
+        }
+        if self.control.is_empty() {
+            if self.control.try_reserve_exact(control.len()).is_err() {
+                return false;
+            }
+            self.control.push_str(control);
+        }
+        if self.payload.try_reserve_exact(payload.len()).is_err() {
+            return false;
+        }
+        self.payload.push_str(payload);
+        true
+    }
+
+    fn buffered_bytes(&self) -> usize {
+        self.control.len().saturating_add(self.payload.len())
+    }
 }
 
 /// A `U=1` virtual placement: the image is fit into a `cols`×`rows`
@@ -245,7 +244,6 @@ pub enum KittyOut {
 
 /// Reassembles chunked transmissions and remembers transmitted images so
 /// they can be placed later by id.
-#[derive(Default)]
 pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
@@ -260,9 +258,29 @@ pub struct KittyState {
     anim: HashMap<u32, AnimationState>,
     /// Relative placements, keyed by `(image id, placement id)`.
     rel: HashMap<(u32, u32), RelativePlacement>,
+    budget: GraphicsBudget,
+}
+
+impl Default for KittyState {
+    fn default() -> Self {
+        Self::new(GraphicsBudget::default())
+    }
 }
 
 impl KittyState {
+    pub(crate) fn new(budget: GraphicsBudget) -> Self {
+        Self {
+            in_flight: HashMap::new(),
+            store: HashMap::new(),
+            virtual_placements: HashMap::new(),
+            frame_in_flight: None,
+            frames: HashMap::new(),
+            anim: HashMap::new(),
+            rel: HashMap::new(),
+            budget,
+        }
+    }
+
     /// Feed one APC `G` body (between `ESC _ G` and `ESC \`).
     pub fn feed(&mut self, body: &str) -> KittyOut {
         let (control, payload) = body.split_once(';').unwrap_or((body, ""));
@@ -359,7 +377,7 @@ impl KittyState {
             // id past saturation is a no-op for animation control so an
             // attacker can't grow `anim` indefinitely by sending `a=a,i=N`
             // for distinct N without ever transmitting an image.
-            if !self.anim.contains_key(&id) && self.anim.len() >= MAX_STORED_IMAGES {
+            if !self.anim.contains_key(&id) && self.anim.len() >= self.budget.limits().placements {
                 return KittyOut::None;
             }
             let st = self.anim.entry(id).or_default();
@@ -422,15 +440,18 @@ impl KittyState {
             let (sx, sy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
             if let Some(patch) = src.crop(sx, sy, w, h) {
                 if dn <= 1 {
-                    if let Some(b) = self.store.get_mut(&id) {
-                        b.compose(&patch, dx, dy, replace);
+                    if let Some(b) = self.store.get_mut(&id)
+                        && !b.compose(&patch, dx, dy, replace)
+                    {
+                        return KittyOut::None;
                     }
                 } else if let Some(fr) = self
                     .frames
                     .get_mut(&id)
                     .and_then(|f| f.get_mut(dn as usize - 2))
+                    && !fr.img.compose(&patch, dx, dy, replace)
                 {
-                    fr.img.compose(&patch, dx, dy, replace);
+                    return KittyOut::None;
                 }
             }
             return KittyOut::Animate { id };
@@ -440,23 +461,36 @@ impl KittyState {
             // first chunk carries `i=`/control; continuations carry only
             // `m`, so the id + control come from the in-flight slot.
             let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
-            let exceeded = {
+            if self.frame_in_flight.is_none()
+                && self.in_flight.len() >= self.budget.limits().in_flight_slots
+            {
+                return KittyOut::None;
+            }
+            let payload = payload.trim();
+            if !self.in_flight_append_fits(
+                self.frame_in_flight.as_ref().map(|(_, acc)| acc),
+                control,
+                payload,
+            ) {
+                self.frame_in_flight = None;
+                return KittyOut::None;
+            }
+            let accepted = {
+                let budget = self.budget.clone();
                 let slot = self
                     .frame_in_flight
                     .get_or_insert_with(|| (id, Acc::default()));
                 if slot.1.control.is_empty() {
                     slot.0 = id;
-                    slot.1.control = control.to_string();
                 }
-                slot.1.payload.push_str(payload.trim());
-                slot.1.payload.len() > MAX_KITTY_PAYLOAD_BYTES
+                slot.1.append(control, payload, &budget)
             };
             // Cycle 578: defense against an attacker chaining `m=1`
             // continuation chunks indefinitely. Drop the slot once it
             // crosses the per-slot cap. Cycle 764: also enforce the global
             // cap (this frame slot + every in_flight slot) so concurrent
             // image + animation transmissions can't sum past the ceiling.
-            if exceeded || self.in_flight_bytes() > MAX_TOTAL_IN_FLIGHT_BYTES {
+            if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
                 self.frame_in_flight = None;
                 return KittyOut::None;
             }
@@ -468,11 +502,18 @@ impl KittyState {
             // either matched an existing slot or just inserted one. Using
             // `expect` documents that invariant so a future refactor that
             // breaks it fails with a pinpointed message.
-            let (fid, Acc { control, payload }) = self
+            let (
+                fid,
+                Acc {
+                    control,
+                    payload,
+                    reservation: _payload_reservation,
+                },
+            ) = self
                 .frame_in_flight
                 .take()
                 .expect("frame_in_flight is Some after get_or_insert_with");
-            if let Some(patch) = decode(&control, &payload) {
+            if let Some(patch) = decode_with_budget(&control, &payload, &self.budget) {
                 let fc = parse_control(&control);
                 let g = |k: &str| fc.get(k).and_then(|v| v.parse::<u32>().ok());
                 let gap = fc.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
@@ -502,48 +543,57 @@ impl KittyState {
                         .or_else(|| bg_frame.and_then(|n| self.frame_image(fid, n)))
                         .or_else(|| {
                             bg_color.and_then(|c| {
-                                ImageData::solid(
+                                ImageData::solid_with_budget(
                                     bw,
                                     bh,
                                     [(c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8],
+                                    &self.budget,
                                 )
                             })
                         })
-                        .or_else(|| ImageData::solid(bw, bh, [0, 0, 0, 0]))
+                        .or_else(|| {
+                            ImageData::solid_with_budget(bw, bh, [0, 0, 0, 0], &self.budget)
+                        })
                         .unwrap_or_else(|| patch.clone());
-                    canvas.compose(&patch, x, y, replace);
+                    if !canvas.compose(&patch, x, y, replace) {
+                        return KittyOut::None;
+                    }
                     canvas
                 };
                 // `r` (>=2) edits an existing frame in place; else append.
-                if let Some(r) = edit
-                    && r >= 2
-                    && let Some(fr) = self
-                        .frames
-                        .get_mut(&fid)
-                        .and_then(|f| f.get_mut(r as usize - 2))
-                {
-                    fr.img = frame_img;
-                    if gap != 0 {
-                        fr.gap_ms = gap;
+                let edit_index = edit.filter(|&r| r >= 2).map(|r| r as usize - 2);
+                let editing_existing = edit_index.and_then(|idx| {
+                    self.frames
+                        .get(&fid)
+                        .and_then(|f| f.get(idx))
+                        .map(|fr| (idx, fr.img.clone()))
+                });
+                if let Some((idx, old_img)) = editing_existing {
+                    if self.animation_replacement_fits(Some(&old_img), &frame_img)
+                        && let Some(fr) = self.frames.get_mut(&fid).and_then(|f| f.get_mut(idx))
+                    {
+                        fr.img = frame_img;
+                        if gap != 0 {
+                            fr.gap_ms = gap;
+                        }
                     }
                 } else {
-                    // Cycle 580: cap per-image frame count. Beyond
-                    // MAX_FRAMES_PER_IMAGE, drop the push silently —
-                    // the animation already has plenty to play, and
-                    // refusing growth bounds the per-id memory ceiling.
-                    // Cycle 582: also cap the frames-map slot count so a
+                    // Cap total frame count and bytes before retaining the
+                    // frame. Also cap the frames-map slot count so a
                     // hostile emitter can't grow the map keyset itself
                     // by firing `a=f,i=N` for many distinct N. Same shape
                     // as the `anim` / `store` / `virtual_placements`
                     // saturation gates.
-                    if self.frames.contains_key(&fid) || self.frames.len() < MAX_STORED_IMAGES {
+                    if (self.frames.contains_key(&fid)
+                        || self.frames.len() < self.budget.limits().placements)
+                        && self.animation_replacement_fits(None, &frame_img)
+                        && self.animation_frame_count() < self.budget.limits().animation_frames
+                    {
                         let frames = self.frames.entry(fid).or_default();
-                        if frames.len() < MAX_FRAMES_PER_IMAGE {
-                            frames.push(Frame {
-                                img: frame_img,
-                                gap_ms: gap,
-                            });
-                        }
+                        frames.push(Frame {
+                            img: frame_img,
+                            gap_ms: gap,
+                        });
                     }
                 }
             }
@@ -561,7 +611,7 @@ impl KittyState {
                 // cap are dropped so an attacker can't grow the placement
                 // map by firing `a=p,U=1,i=N` for many distinct N.
                 if !self.virtual_placements.contains_key(&id)
-                    && self.virtual_placements.len() >= MAX_STORED_IMAGES
+                    && self.placement_state_len() >= self.budget.limits().placements
                 {
                     return KittyOut::None;
                 }
@@ -581,11 +631,11 @@ impl KittyState {
                 let geti = |k: &str| kv.get(k).and_then(|v| v.parse::<i32>().ok());
                 let placement = dim("p").unwrap_or(0);
                 let key = (id, placement);
-                // Cycle 582: saturation gate on the (id, placement) key
-                // space. `rel` keys are pairs; cap at MAX_STORED_IMAGES²
-                // would be huge — use the same flat MAX_STORED_IMAGES so
-                // total entries stay bounded with `store`.
-                if !self.rel.contains_key(&key) && self.rel.len() >= MAX_STORED_IMAGES {
+                // Saturation gate on the `(id, placement)` key space, using
+                // the same flat placement ceiling as the other registries.
+                if !self.rel.contains_key(&key)
+                    && self.placement_state_len() >= self.budget.limits().placements
+                {
                     return KittyOut::None;
                 }
                 self.rel.insert(
@@ -615,30 +665,39 @@ impl KittyState {
         // Cycle 579: refuse new transmissions once the in-flight map
         // is saturated. A continuation chunk for an existing slot is
         // always allowed — only brand-new ids count against the cap.
-        if !self.in_flight.contains_key(&id) && self.in_flight.len() >= MAX_IN_FLIGHT_SLOTS {
+        if !self.in_flight.contains_key(&id)
+            && self.in_flight.len() + usize::from(self.frame_in_flight.is_some())
+                >= self.budget.limits().in_flight_slots
+        {
             return KittyOut::None;
         }
-        let exceeded = {
+        let payload = payload.trim();
+        if !self.in_flight_append_fits(self.in_flight.get(&id), control, payload) {
+            self.in_flight.remove(&id);
+            return KittyOut::None;
+        }
+        let accepted = {
+            let budget = self.budget.clone();
             let acc = self.in_flight.entry(id).or_default();
-            if acc.control.is_empty() {
-                acc.control = control.to_string();
-            }
-            acc.payload.push_str(payload.trim());
-            acc.payload.len() > MAX_KITTY_PAYLOAD_BYTES
+            acc.append(control, payload, &budget)
         };
         // Cycle 578: per-slot cap. Cycle 764: also enforce the global cap
         // across all slots so concurrent large transmissions can't sum past
         // MAX_TOTAL_IN_FLIGHT_BYTES. Either breach drops this slot.
-        if exceeded || self.in_flight_bytes() > MAX_TOTAL_IN_FLIGHT_BYTES {
+        if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
             self.in_flight.remove(&id);
             return KittyOut::None;
         }
         if more {
             return KittyOut::None;
         }
-        let Acc { control, payload } = self.in_flight.remove(&id).unwrap_or_default();
+        let Acc {
+            control,
+            payload,
+            reservation: _payload_reservation,
+        } = self.in_flight.remove(&id).unwrap_or_default();
         let first = parse_control(&control);
-        let Some(img) = decode(&control, &payload) else {
+        let Some(img) = decode_with_budget(&control, &payload, &self.budget) else {
             return KittyOut::None;
         };
         if id != 0 {
@@ -647,7 +706,7 @@ impl KittyState {
             // place — no growth); a brand-new id past saturation is
             // refused so an attacker can't grow `store` indefinitely
             // by completing distinct `i=` transmissions.
-            if self.store.contains_key(&id) || self.store.len() < MAX_STORED_IMAGES {
+            if self.store.contains_key(&id) || self.store.len() < self.budget.limits().placements {
                 self.store.insert(id, img.clone());
             }
         }
@@ -661,7 +720,7 @@ impl KittyState {
             // maps, and `U=1` on an existing-id update would silently grow
             // virtual_placements without it.
             if !self.virtual_placements.contains_key(&id)
-                && self.virtual_placements.len() >= MAX_STORED_IMAGES
+                && self.placement_state_len() >= self.budget.limits().placements
             {
                 return KittyOut::None;
             }
@@ -716,17 +775,57 @@ impl KittyState {
 
     /// Cycle 764: total bytes currently buffered across every in-flight
     /// transmission — all `in_flight` slots plus the animation `frame_in_flight`
-    /// slot. Used to enforce `MAX_TOTAL_IN_FLIGHT_BYTES`. O(slots) ≤ 32, called
+    /// slot. Used to enforce the shared in-flight byte limit. O(slots) ≤ 8, called
     /// once per chunk, so trivially cheap.
     fn in_flight_bytes(&self) -> usize {
         self.in_flight
             .values()
-            .map(|a| a.payload.len())
+            .map(Acc::buffered_bytes)
             .sum::<usize>()
             + self
                 .frame_in_flight
                 .as_ref()
-                .map_or(0, |(_, a)| a.payload.len())
+                .map_or(0, |(_, a)| a.buffered_bytes())
+    }
+
+    fn in_flight_append_fits(&self, slot: Option<&Acc>, control: &str, payload: &str) -> bool {
+        let old_slot_bytes = slot.map_or(0, Acc::buffered_bytes);
+        let new_slot_bytes = match slot {
+            Some(acc) => acc.projected_bytes(control, payload),
+            None => control.len().checked_add(payload.len()),
+        };
+        new_slot_bytes
+            .filter(|&bytes| bytes != 0 && bytes <= self.budget.limits().transmission_bytes)
+            .and_then(|bytes| {
+                self.in_flight_bytes()
+                    .checked_sub(old_slot_bytes)?
+                    .checked_add(bytes)
+            })
+            .is_some_and(|bytes| bytes <= self.budget.limits().in_flight_bytes)
+    }
+
+    fn animation_frame_count(&self) -> usize {
+        self.frames.values().map(Vec::len).sum()
+    }
+
+    fn placement_state_len(&self) -> usize {
+        self.virtual_placements.len().saturating_add(self.rel.len())
+    }
+
+    fn animation_bytes(&self) -> usize {
+        self.frames
+            .values()
+            .flat_map(|frames| frames.iter())
+            .fold(0usize, |total, frame| {
+                total.saturating_add(frame.img.byte_len())
+            })
+    }
+
+    fn animation_replacement_fits(&self, old: Option<&ImageData>, new: &ImageData) -> bool {
+        self.animation_bytes()
+            .checked_sub(old.map_or(0, ImageData::byte_len))
+            .and_then(|n| n.checked_add(new.byte_len()))
+            .is_some_and(|n| n <= self.budget.limits().animation_bytes)
     }
 
     /// Test-only accessor for the cycle-579 in-flight slot cap drift guard.
@@ -776,36 +875,98 @@ fn parse_control(s: &str) -> HashMap<String, String> {
 /// gigabytes — returns `None` instead of OOMing/aborting the process. Cycle
 /// 814 (audit): `.take(cap + 1)` bounds the read; reading past `cap` proves the
 /// stream is over-budget, so we reject it rather than silently truncate.
-fn inflate_bounded(compressed: &[u8], cap: u64) -> Option<Vec<u8>> {
-    let mut d = flate2::read::ZlibDecoder::new(compressed).take(cap + 1);
-    let mut out = Vec::new();
-    d.read_to_end(&mut out).ok()?;
-    if out.len() as u64 > cap {
+fn inflate_bounded_with_budget(
+    compressed: &[u8],
+    cap: usize,
+    budget: &GraphicsBudget,
+) -> Option<(Vec<u8>, GraphicsReservation)> {
+    if cap == 0 || cap > budget.limits().image_bytes {
         return None;
     }
-    Some(out)
+    let mut reservation = budget.reserve_transient_cpu(cap)?;
+    let mut decoder = flate2::read::ZlibDecoder::new(compressed);
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while out.len() < cap {
+        let remaining = cap - out.len();
+        let chunk_len = remaining.min(chunk.len());
+        let n = decoder.read(&mut chunk[..chunk_len]).ok()?;
+        if n == 0 {
+            break;
+        }
+        out.try_reserve_exact(n).ok()?;
+        out.extend_from_slice(&chunk[..n]);
+    }
+    let mut extra = [0u8; 1];
+    if decoder.read(&mut extra).ok()? != 0 || out.is_empty() {
+        return None;
+    }
+    if !reservation.shrink_to(out.len()) {
+        return None;
+    }
+    Some((out, reservation))
 }
 
+#[cfg(test)]
+fn inflate_bounded(compressed: &[u8], cap: u64) -> Option<Vec<u8>> {
+    let cap = usize::try_from(cap).ok()?;
+    inflate_bounded_with_budget(compressed, cap, &GraphicsBudget::default()).map(|(v, _)| v)
+}
+
+#[cfg(test)]
 fn decode(control: &str, b64: &str) -> Option<ImageData> {
+    decode_with_budget(control, b64, &GraphicsBudget::default())
+}
+
+fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Option<ImageData> {
     let kv = parse_control(control);
     // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace;
     // `.trim()` only strips the ends. Strip all ASCII whitespace so a line-wrapped
     // single-shot kitty payload still decodes (the chunked m=1 path is fine).
-    let cleaned: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if b64.len() > budget.limits().transmission_bytes {
+        return None;
+    }
+    let (cleaned, _cleaned_reservation): (std::borrow::Cow<'_, [u8]>, _) =
+        if b64.bytes().any(|b| b.is_ascii_whitespace()) {
+            let reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(b64.len()).ok()?;
+            bytes.extend(b64.bytes().filter(|b| !b.is_ascii_whitespace()));
+            (std::borrow::Cow::Owned(bytes), Some(reservation))
+        } else {
+            (std::borrow::Cow::Borrowed(b64.as_bytes()), None)
+        };
+    let decoded_cap = cleaned
+        .len()
+        .checked_add(3)?
+        .checked_div(4)?
+        .checked_mul(3)?
+        .max(1);
+    if decoded_cap > budget.limits().transmission_bytes {
+        return None;
+    }
+    let _raw_reservation = budget.reserve_transient_cpu(decoded_cap)?;
     let raw = base64::engine::general_purpose::STANDARD
-        .decode(&cleaned)
+        .decode(cleaned.as_ref())
         .ok()?;
-    let raw = if kv.get("o").map(|s| s == "z").unwrap_or(false) {
-        inflate_bounded(&raw, crate::image::MAX_IMAGE_BYTES)?
+    let (raw, _inflated_reservation) = if kv.get("o").map(|s| s == "z").unwrap_or(false) {
+        let (inflated, reservation) =
+            inflate_bounded_with_budget(&raw, budget.limits().image_bytes, budget)?;
+        (inflated, Some(reservation))
     } else {
-        raw
+        (raw, None)
     };
     match kv.get("f").map(|s| s.as_str()).unwrap_or("32") {
-        "100" => ImageData::from_encoded(&raw),
+        "100" => ImageData::from_encoded_with_budget(&raw, budget),
         "32" => {
             let w: u32 = kv.get("s")?.parse().ok()?;
             let h: u32 = kv.get("v")?.parse().ok()?;
-            ImageData::new(w, h, raw)
+            let bytes = rgba_bytes(w, h)?;
+            if raw.len() != bytes {
+                return None;
+            }
+            let reservation = budget.reserve_image_cpu(bytes)?;
+            ImageData::from_reserved(w, h, raw, reservation)
         }
         "24" => {
             let w: u32 = kv.get("s")?.parse().ok()?;
@@ -815,17 +976,19 @@ fn decode(control: &str, b64: &str) -> Option<ImageData> {
             // arm gets for free from ImageData::new. Without this, a mismatched
             // 1x1 claim carrying a huge payload wasted a ~payload-sized alloc +
             // O(payload) copy first (untrusted-PTY resource waste).
-            let expected = (w as usize)
-                .checked_mul(h as usize)
-                .and_then(|wh| wh.checked_mul(3))?;
+            let pixels = u64::from(w).checked_mul(u64::from(h))?;
+            let expected = usize::try_from(pixels.checked_mul(3)?).ok()?;
             if raw.len() != expected {
                 return None;
             }
-            let mut rgba = Vec::with_capacity(raw.len() / 3 * 4);
+            let rgba_len = rgba_bytes(w, h)?;
+            let reservation = budget.reserve_image_cpu(rgba_len)?;
+            let mut rgba = Vec::new();
+            rgba.try_reserve_exact(rgba_len).ok()?;
             for px in raw.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
-            ImageData::new(w, h, rgba)
+            ImageData::from_reserved(w, h, rgba, reservation)
         }
         _ => None,
     }
@@ -1159,35 +1322,19 @@ mod tests {
         assert_eq!(k.frames(4).len(), 1, "frame completes on final chunk");
     }
 
-    /// Cycle 578: pins the per-slot chunked-transmission accumulator
-    /// cap. The behavioral drift guard (`chunked_transmission_caps_*`
-    /// below) actually exercises the cap; this test is the cheap
-    /// always-on snapshot that the constant hasn't drifted from its
-    /// documented sizing (8192² × 4 RGBA × base64 4/3 ≈ 342 MiB plus
-    /// ~12% margin = 384 MiB).
+    /// A full 64 MiB RGBA image still fits after base64's 4/3 expansion.
     #[test]
-    fn kitty_payload_cap_fits_8k_rgba_base64_with_margin() {
-        // 8192² × 4 RGBA = 256 MiB. base64 expansion = 4/3.
-        let realistic_max_base64 = 8192usize * 8192 * 4 * 4 / 3;
+    fn kitty_payload_cap_fits_max_rgba_base64_with_margin() {
+        let limits = crate::GraphicsLimits::default();
+        let realistic_max_base64 = limits.image_bytes.div_ceil(3) * 4;
         assert!(
-            super::MAX_KITTY_PAYLOAD_BYTES > realistic_max_base64,
-            "cap {} must fit a legitimate 8192² RGBA base64 payload ({})",
-            super::MAX_KITTY_PAYLOAD_BYTES,
+            limits.transmission_bytes > realistic_max_base64,
+            "cap {} must fit a max-size RGBA base64 payload ({})",
+            limits.transmission_bytes,
             realistic_max_base64
         );
-        // Sanity floor (>= 1 MiB) and ceiling (<= 1 GiB). const-block
-        // form so clippy's `assertions_on_constants` lint is satisfied
-        // — these are compile-time invariants of the constant itself.
-        const _: () = assert!((1 << 20) < super::MAX_KITTY_PAYLOAD_BYTES);
-        const _: () = assert!(super::MAX_KITTY_PAYLOAD_BYTES <= 1 << 30);
-        // Cycle 764: the global in-flight cap must allow at least one legitimate
-        // max-size slot (else valid large images would always be refused) and
-        // stay well below the naive slots × per-slot worst case (~12 GiB).
-        const _: () = assert!(super::MAX_TOTAL_IN_FLIGHT_BYTES >= super::MAX_KITTY_PAYLOAD_BYTES);
-        const _: () = assert!(
-            super::MAX_TOTAL_IN_FLIGHT_BYTES
-                < super::MAX_IN_FLIGHT_SLOTS * super::MAX_KITTY_PAYLOAD_BYTES
-        );
+        assert!(limits.in_flight_bytes >= limits.transmission_bytes);
+        assert!(limits.in_flight_bytes < limits.in_flight_slots * limits.transmission_bytes);
     }
 
     /// Cycle 582 drift guard: `a=a,i=N` for many distinct N must not
@@ -1198,24 +1345,25 @@ mod tests {
     #[test]
     fn kitty_anim_slot_cap_holds_against_distinct_id_flood() {
         let mut k = KittyState::default();
+        let cap = k.budget.limits().placements;
         // Fill anim with MAX_STORED_IMAGES distinct ids via `a=a`.
-        for id in 1..=super::MAX_STORED_IMAGES as u32 {
+        for id in 1..=cap as u32 {
             k.feed(&format!("a=a,i={id},s=2"));
         }
-        assert_eq!(k.anim_len_for_test(), super::MAX_STORED_IMAGES);
+        assert_eq!(k.anim_len_for_test(), cap);
         // Distinct id past the cap is refused (no growth).
-        let overflow = super::MAX_STORED_IMAGES as u32 + 1;
+        let overflow = cap as u32 + 1;
         k.feed(&format!("a=a,i={overflow},s=2"));
         assert_eq!(
             k.anim_len_for_test(),
-            super::MAX_STORED_IMAGES,
+            cap,
             "anim id {overflow} past saturation must be refused"
         );
         // Update to an existing tracked id is still accepted.
         k.feed("a=a,i=1,s=1");
         assert_eq!(
             k.anim_len_for_test(),
-            super::MAX_STORED_IMAGES,
+            cap,
             "update to existing id must not grow the map"
         );
     }
@@ -1227,17 +1375,18 @@ mod tests {
     #[test]
     fn kitty_stored_images_cap_holds_against_distinct_id_flood() {
         let mut k = KittyState::default();
+        let cap = k.budget.limits().placements;
         // Fill the store with MAX_STORED_IMAGES distinct ids.
-        for id in 1..=super::MAX_STORED_IMAGES as u32 {
+        for id in 1..=cap as u32 {
             k.feed(&format!("a=T,i={id},f=32,s=1,v=1;{PX}"));
         }
-        assert_eq!(k.store_len_for_test(), super::MAX_STORED_IMAGES);
+        assert_eq!(k.store_len_for_test(), cap);
         // One more distinct id: refused; map size unchanged.
-        let overflow = super::MAX_STORED_IMAGES as u32 + 1;
+        let overflow = cap as u32 + 1;
         k.feed(&format!("a=T,i={overflow},f=32,s=1,v=1;{PX}"));
         assert_eq!(
             k.store_len_for_test(),
-            super::MAX_STORED_IMAGES,
+            cap,
             "distinct id {overflow} past saturation must be refused"
         );
         // Update to an existing id: accepted (replaces in place);
@@ -1245,9 +1394,24 @@ mod tests {
         k.feed("a=T,i=1,f=32,s=1,v=1;AQIDBA==");
         assert_eq!(
             k.store_len_for_test(),
-            super::MAX_STORED_IMAGES,
+            cap,
             "update to existing id must replace in place (no growth)"
         );
+    }
+
+    #[test]
+    fn virtual_and_relative_placements_share_one_count_budget() {
+        let mut k = KittyState::default();
+        let cap = k.budget.limits().placements;
+        for id in 1..=cap as u32 {
+            k.feed(&format!("a=p,U=1,i={id},c=1,r=1"));
+        }
+        let overflow = cap as u32 + 1;
+        k.feed(&format!("a=p,i={overflow},p=1,P=1,Q=0"));
+        assert!(k.relative_placement(overflow, 1).is_none());
+        // Updating an admitted placement does not consume another slot.
+        k.feed("a=p,U=1,i=1,c=2,r=2");
+        assert_eq!(k.virtual_placement(1).map(|p| p.cols), Some(2));
     }
 
     /// Cycle 580 drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`
@@ -1257,17 +1421,39 @@ mod tests {
     #[test]
     fn kitty_frames_per_image_cap_holds_against_flood() {
         let mut k = KittyState::default();
+        let cap = k.budget.limits().animation_frames;
         // Establish the base image (`a=T` transmit).
         k.feed(&format!("a=T,i=7,f=32,s=1,v=1;{PX}"));
         // Spam more than the cap's worth of frames; each is a tiny
         // 1×1 RGBA frame so the test allocation stays modest.
-        for _ in 0..(super::MAX_FRAMES_PER_IMAGE + 16) {
+        for _ in 0..(cap + 16) {
             k.feed(&format!("a=f,i=7,f=32,s=1,v=1;{PX}"));
         }
         assert_eq!(
             k.frames(7).len(),
-            super::MAX_FRAMES_PER_IMAGE,
+            cap,
             "frames Vec for one id must clamp at MAX_FRAMES_PER_IMAGE"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_byte_budget_rejects_limit_plus_one_frame() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            animation_bytes: 8,
+            retained_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut k = KittyState::new(budget);
+        k.feed(&format!("a=T,i=7,f=32,s=1,v=1;{PX}"));
+        for _ in 0..3 {
+            k.feed(&format!("a=f,i=7,f=32,s=1,v=1;{PX}"));
+        }
+        assert_eq!(
+            k.frames(7).len(),
+            2,
+            "third 4-byte frame exceeds 8-byte cap"
         );
     }
 
@@ -1280,22 +1466,23 @@ mod tests {
     #[test]
     fn kitty_in_flight_slot_cap_refuses_new_ids_past_saturation() {
         let mut k = KittyState::default();
+        let cap = k.budget.limits().in_flight_slots;
         // Fill MAX_IN_FLIGHT_SLOTS distinct ids, each with an `m=1`
         // chunk so the slot is held open.
-        for id in 1..=super::MAX_IN_FLIGHT_SLOTS as u32 {
+        for id in 1..=cap as u32 {
             k.feed(&format!("a=T,i={id},f=32,s=1,v=1,m=1;AQID"));
         }
         assert_eq!(
             k.in_flight_len_for_test(),
-            super::MAX_IN_FLIGHT_SLOTS,
+            cap,
             "first MAX_IN_FLIGHT_SLOTS distinct ids should all be tracked"
         );
         // One more distinct id is refused without growing the map.
-        let overflow_id = super::MAX_IN_FLIGHT_SLOTS as u32 + 1;
+        let overflow_id = cap as u32 + 1;
         k.feed(&format!("a=T,i={overflow_id},f=32,s=1,v=1,m=1;AQID"));
         assert_eq!(
             k.in_flight_len_for_test(),
-            super::MAX_IN_FLIGHT_SLOTS,
+            cap,
             "id {overflow_id} past the saturation point must be refused"
         );
         // A continuation chunk for an already-tracked id still works.
@@ -1304,24 +1491,45 @@ mod tests {
         k.feed("i=1,m=0;BA==");
         assert_eq!(
             k.in_flight_len_for_test(),
-            super::MAX_IN_FLIGHT_SLOTS - 1,
+            cap - 1,
             "completing id=1 should free a slot"
         );
     }
 
-    /// Cycle 578 behavioral drift guard: a single chunk whose payload
-    /// exceeds `MAX_KITTY_PAYLOAD_BYTES` must drop the in-flight slot
-    /// rather than continue accumulating. Allocates ~384 MiB, so it's
-    /// `#[ignore]` by default; run via
-    /// `cargo test -p kettle-vt -- --ignored kitty_chunk_payload_cap`.
     #[test]
-    #[ignore = "allocates ~384 MiB; opt-in via --ignored"]
+    fn kitty_in_flight_byte_cap_preflights_exact_limit_and_one_past() {
+        let limits = crate::GraphicsLimits {
+            transmission_bytes: 64,
+            in_flight_bytes: 96,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut k = KittyState::new(budget.clone());
+        for id in [1, 2] {
+            let control = format!("i={id},m=1");
+            let payload = "A".repeat(48 - control.len());
+            k.feed(&format!("{control};{payload}"));
+        }
+        assert_eq!(k.in_flight_len_for_test(), 2);
+        assert_eq!(budget.usage().0, limits.in_flight_bytes);
+
+        // The next byte is rejected before either String can grow, and the
+        // offending slot is dropped to make forward progress.
+        k.feed("i=2,m=1;A");
+        assert_eq!(k.in_flight_len_for_test(), 1);
+        assert_eq!(budget.usage().0, 48);
+    }
+
+    #[test]
     fn kitty_chunk_payload_cap_drops_oversize_in_flight() {
-        let mut k = KittyState::default();
-        // First chunk already exceeds the cap. The implementation
-        // pushes the payload then checks length, so this is the
-        // worst-case single-shot path.
-        let oversize = "A".repeat(super::MAX_KITTY_PAYLOAD_BYTES + 1);
+        let limits = crate::GraphicsLimits {
+            transmission_bytes: 64,
+            in_flight_bytes: 96,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut k = KittyState::new(budget);
+        let oversize = "A".repeat(limits.transmission_bytes + 1);
         let out = k.feed(&format!("a=T,i=99,f=32,s=1,v=1,m=1;{oversize}"));
         assert!(matches!(out, KittyOut::None));
         // A normal final chunk for the same id must NOT reassemble the

@@ -4,13 +4,12 @@
 #   - Triggers only on changes that touch the workflow files, so it
 #     doesn't add ~30 s to every code-only PR.
 #   - Runs the bundled `shellcheck` check on every `run: |` block
-#     across all six workflows in one pass — catches a dash-vs-bash
+#     across all workflows in one pass — catches a dash-vs-bash
 #     bug like cycle-253's (the bundled install.sh's
 #     `set -o pipefail` was a Bash-only construct invoked via sh)
 #     before the PR ships.
-#   - Catches mistyped action references (`actions/checkout@v44`
-#     instead of `@v4`) at PR time — currently those only surface
-#     when the workflow actually runs.
+#   - Rejects mutable action references and catches malformed workflow
+#     syntax before a workflow actually runs.
 #
 # Linux-only runner. The check is platform-agnostic and one OS is
 # enough — same rationale as the cycle-219 rustdoc-on-Linux-only job.
@@ -49,13 +48,27 @@ jobs:
     # 5 min is generous and still well below the 360-min default.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      # Download the actionlint binary via the upstream-maintained
-      # install script and run it. Matches the canonical README
-      # recipe — avoids the docker:// overhead on the runner and
-      # pins the script source to the official rhysd/actionlint repo.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Reject mutable action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^\s*(?:-\s*)?uses:\s+(?!\./)(?![^@[:space:]]+@[0-9a-f]{40}(?:[[:space:]]|$))'
+          if rg --line-number --pcre2 "$pattern" .github/workflows; then
+            echo '::error::external actions and workflows must use an immutable 40-character commit SHA'
+            exit 1
+          fi
+      # Download a fixed actionlint release and authenticate the archive before
+      # extracting it. Avoid executing a mutable raw.githubusercontent.com script.
       - name: Run actionlint
         shell: bash
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          set -euo pipefail
+          archive=actionlint_1.7.12_linux_amd64.tar.gz
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors -fsSLO \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$archive"
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" actionlint
           ./actionlint -color

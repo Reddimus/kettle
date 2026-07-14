@@ -742,6 +742,8 @@ struct BgImageAnim {
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     gpu: GpuContext,
+    /// Shared CPU/GPU retained-resource scope for this renderer window.
+    graphics_budget: kettle_core::GraphicsBudget,
     config: wgpu::SurfaceConfiguration,
     /// v2.31.0: consecutive frames whose `get_current_texture()` returned a
     /// non-success state. A handful means a transient surface loss (resize /
@@ -966,8 +968,8 @@ pub struct Renderer {
     /// + re-decoded when the config path changes.
     // Cycle 892 (audit): key is `(path, blur_radius)` — keying on the path
     // alone meant toggling `background-blur` was ignored on reload unless
-    // the image path *also* changed. The value is the decoded RGBA (up to
-    // ~256 MiB); it is freed (`= None`) when the config moves away from
+    // the image path *also* changed. The value is bounded to 64 MiB per frame
+    // and 128 MiB per animation; it is freed (`= None`) when config moves away from
     // `background-type = image` so a large wallpaper doesn't sit resident
     // for the rest of the session after the user turns it off.
     //
@@ -1266,19 +1268,36 @@ impl Renderer {
         let cursor_glyph_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
-        let imgs = imgpipe::ImagePipeline::new(&device, format);
+        let graphics_budget = kettle_core::GraphicsBudget::default();
+        let imgs =
+            imgpipe::ImagePipeline::new_with_budget(&device, format, graphics_budget.clone())
+                .ok_or_else(|| {
+                    anyhow!("GPU graphics budget exhausted while creating image pipeline")
+                })?;
         // v2.23.0: separate pipeline so the wallpaper draws behind cell/chrome
         // quads (see the `bg_imgs` field docs).
-        let bg_imgs = imgpipe::ImagePipeline::new(&device, format);
+        let bg_imgs = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
+            &device,
+            format,
+            graphics_budget.clone(),
+            MAX_BG_TILES,
+        )
+        .ok_or_else(|| {
+            anyhow!("GPU graphics budget exhausted while creating background image pipeline")
+        })?;
         // v2.24.0: procedural starfield wallpaper, same back-most slot.
         let starfield = starfield::StarfieldPipeline::new(&device, format);
         // v2.25.0: cell-locked pane-text pipeline (the `text-renderer=grid`
         // default). Always constructed; only emitted/drawn in grid mode.
-        let glyph_pipeline = GlyphPipeline::new(&device, format);
+        let glyph_pipeline =
+            GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()).ok_or_else(
+                || anyhow!("GPU graphics budget exhausted while creating glyph pipeline"),
+            )?;
 
         Ok(Renderer {
             surface,
             gpu,
+            graphics_budget,
             config,
             surface_fail_streak: 0,
             font_system,
@@ -1844,7 +1863,7 @@ impl Renderer {
         // top of the panel bg. Cycle 251.
         //
         // Cycle 915 (audit): the four per-frame buffers below (menu_q / over /
-        // img_items / live) are INTENTIONALLY allocated fresh each frame, unlike
+        // img_items / image-live sets) are intentionally allocated fresh each frame, unlike
         // the pooled `quad_scratch` / `span_scratch`. They are small and usually
         // near-empty (no open context menu, a handful of panes, no cell images),
         // so the allocation is trivial; high-water pooling is reserved for the
@@ -1853,18 +1872,18 @@ impl Renderer {
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
-        let mut img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> =
-            Vec::with_capacity(16);
+        let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
         // v2.23.0: the wallpaper item(s) draw in their own pass (`bg_imgs`)
         // BEFORE the cell/chrome quads, so the wallpaper sits at the very back
         // and everything else composites opaquely on top. `tile` mode can push
         // many; the rest push one.
-        let mut bg_img_items: Vec<(f32, f32, f32, f32, kettle_core::ImageData)> = Vec::new();
+        let mut bg_img_items: Vec<imgpipe::ImageItem> = Vec::new();
         // v2.23.0: when `chrome-background = auto`, the average color of the
         // currently-displayed wallpaper frame, used to tint the chrome strips.
         // Computed once from the displayed frame below (only when auto is set).
         let mut bg_frame_avg: Option<Rgb> = None;
-        let mut live: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
         // Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
         // 3+4): when cfg.background_type = Image + cfg.background_image
@@ -1910,20 +1929,18 @@ impl Renderer {
                 // even when decode fails (empty `frames`) so the stale wallpaper
                 // stops rendering for a now-broken path and we don't re-decode
                 // the failing file every frame.
-                use std::sync::Arc;
                 let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) =
                     match bg_image::decode_bg_image_frames_with_blur(&want, blur_radius) {
                         Some(fs) => fs
                             .into_iter()
-                            .map(|f| {
-                                (
-                                    kettle_core::ImageData {
-                                        width: f.image.width,
-                                        height: f.image.height,
-                                        rgba: Arc::new(f.image.rgba),
-                                    },
-                                    f.gap_ms,
+                            .filter_map(|f| {
+                                kettle_core::ImageData::new_with_budget(
+                                    f.image.width,
+                                    f.image.height,
+                                    f.image.rgba,
+                                    &self.graphics_budget,
                                 )
+                                .map(|img| (img, f.gap_ms))
                             })
                             .unzip(),
                         None => (Vec::new(), Vec::new()),
@@ -1989,7 +2006,7 @@ impl Renderer {
                 //                               adds proportional fit.
                 let img_w = data.width as f32;
                 let img_h = data.height as f32;
-                live.insert(std::sync::Arc::as_ptr(&data.rgba) as usize);
+                bg_live.insert(data.allocation_key());
                 match cfg.background_image_mode.as_str() {
                     "tile" if bg_tiles_within_cap(sw, sh, img_w, img_h) => {
                         // Tile starts from (0, 0); rows go top-to-bottom.
@@ -1999,7 +2016,13 @@ impl Renderer {
                             while x < sw {
                                 let tw = img_w.min(sw - x);
                                 let th = img_h.min(sh - y);
-                                bg_img_items.push((x, y, tw, th, data.clone()));
+                                bg_img_items.push(imgpipe::ImageItem::full(
+                                    x,
+                                    y,
+                                    tw,
+                                    th,
+                                    data.clone(),
+                                ));
                                 x += img_w;
                             }
                             y += img_h;
@@ -2011,7 +2034,7 @@ impl Renderer {
                         // clones EVERY frame — ~8.3M on a 4K surface — hanging
                         // the render thread. Past `MAX_BG_TILES`, fall back to a
                         // single stretched quad instead of melting the renderer.
-                        bg_img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                        bg_img_items.push(imgpipe::ImageItem::full(0.0, 0.0, sw, sh, data.clone()));
                     }
                     "center" => {
                         // Cycle 391: align_horiz/vert nudge the
@@ -2030,7 +2053,7 @@ impl Renderer {
                             "bottom" => (sh - h).max(0.0),
                             _ => ((sh - h) * 0.5).max(0.0),
                         };
-                        bg_img_items.push((x, y, w, h, data.clone()));
+                        bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
                     }
                     "scale" => {
                         // Cycle 391: aspect-preserving fit within
@@ -2049,19 +2072,19 @@ impl Renderer {
                             "bottom" => (sh - h).max(0.0),
                             _ => ((sh - h) * 0.5).max(0.0),
                         };
-                        bg_img_items.push((x, y, w, h, data.clone()));
+                        bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
                     }
                     _ => {
                         // "stretch_and_fill" + any unknown value:
                         // single quad covering the whole surface.
-                        bg_img_items.push((0.0, 0.0, sw, sh, data.clone()));
+                        bg_img_items.push(imgpipe::ImageItem::full(0.0, 0.0, sw, sh, data.clone()));
                     }
                 }
             }
         } else if self.bg_image_cache.is_some() {
             // Cycle 892 (audit): config no longer requests an image background
             // (type switched away, or path cleared) — drop the decoded RGBA so
-            // an up-to-256-MiB wallpaper isn't pinned for the rest of the
+            // a large wallpaper isn't pinned for the rest of the
             // session. Re-enabling re-decodes via the need_reload path above.
             self.bg_image_cache = None;
             self.bg_image_retry_at = None; // cycle 919 (L2): reset the self-heal throttle
@@ -2297,6 +2320,20 @@ impl Renderer {
         // Reset the focused-cursor glyph; the focused pane's `build_pane` re-sets
         // it this frame if a solid block cursor is visible.
         self.pending_cursor_glyph = None;
+        // Inline image instances share one renderer/window budget. Allocate it
+        // across panes before iterating so pane order cannot monopolize all
+        // slots. Offscreen placements consume no quota.
+        let placement_limit = self.graphics_budget.limits().placements;
+        let visible_placement_counts = panes
+            .iter()
+            .map(|pane| {
+                pane.images
+                    .iter()
+                    .filter(|placement| placement_is_visible(pane.snap, placement))
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        let placement_quotas = fair_placement_quotas(&visible_placement_counts, placement_limit);
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -2403,20 +2440,11 @@ impl Renderer {
             // Image placements, anchored history-aware so they scroll.
             {
                 let top = pv.snap.history_size as i64 - pv.snap.display_offset as i64;
-                let nrows = pv.snap.screen_lines as i64;
-                // Cycle 791 (audit C1): most panes carry 0–1 image placements,
-                // so skip the per-frame `Vec` alloc + sort in that common case
-                // (z-order is meaningless for fewer than two) and iterate the
-                // slice directly; only collect + sort when 2+ placements
-                // actually need ordering. One closure keeps the body single-
-                // sourced across both paths.
+                let quota = placement_quotas[i];
                 let mut draw = |p: &kettle_core::Placement| {
                     let row = p.abs_line - top;
-                    if row + p.cell_rows as i64 <= 0 || row >= nrows {
-                        return;
-                    }
-                    live.insert(std::sync::Arc::as_ptr(&p.img.rgba) as usize);
-                    img_items.push((
+                    inline_live.insert(p.img.allocation_key());
+                    img_items.push(imgpipe::ImageItem::placement(
                         rx + pad_x + p.col as f32 * cw,
                         // Cycle 383: image placements also shift
                         // below the titlebar so a kitty/sixel
@@ -2425,19 +2453,29 @@ impl Renderer {
                         p.cell_cols as f32 * cw,
                         p.cell_rows as f32 * ch,
                         p.img.clone(),
+                        p.source_rect,
                     ));
                 };
-                if pv.images.len() > 1 {
-                    // Draw in ascending z so higher z-index images land on top.
-                    let mut ordered: Vec<&kettle_core::Placement> = pv.images.iter().collect();
-                    ordered.sort_by_key(|p| p.z);
-                    for p in ordered {
-                        draw(p);
+                if quota > 1 {
+                    // Select in the app's class-interleaved order first, then
+                    // sort that fair subset for correct pane-local compositing.
+                    let mut ordered = pv
+                        .images
+                        .iter()
+                        .filter(|placement| placement_is_visible(pv.snap, placement))
+                        .take(quota)
+                        .collect::<Vec<_>>();
+                    ordered.sort_by_key(|placement| placement.z);
+                    for placement in ordered {
+                        draw(placement);
                     }
-                } else {
-                    for p in pv.images {
-                        draw(p);
-                    }
+                } else if quota == 1
+                    && let Some(placement) = pv
+                        .images
+                        .iter()
+                        .find(|placement| placement_is_visible(pv.snap, placement))
+                {
+                    draw(placement);
                 }
             }
 
@@ -3769,8 +3807,13 @@ impl Renderer {
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
         // v2.23.0: wallpaper into its own back pipeline; inline images into
-        // `imgs`. One shared `live` set keys both texture caches' gc (a key
-        // present in `live` but absent from a given cache is a harmless no-op).
+        // `imgs`. Each cache gets its own exact live set so an image used in one
+        // role cannot accidentally pin a stale texture in the other pipeline.
+        // Release textures not referenced by this frame before admitting new
+        // ones. This prevents an old+new transient cache peak from breaching
+        // the per-window/process GPU budgets; visible entries remain pinned.
+        self.bg_imgs.gc(&bg_live);
+        self.imgs.gc(&inline_live);
         self.bg_imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
         // v2.24.0: refresh the procedural starfield's per-frame uniform (just
@@ -3783,10 +3826,8 @@ impl Renderer {
                 self.starfield_started.elapsed().as_secs_f32(),
             );
         }
-        self.bg_imgs.gc(&live);
         self.imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
-        self.imgs.gc(&live);
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
@@ -4869,7 +4910,39 @@ impl Renderer {
 /// back to a single stretched quad. ~60-px tiles on a 4K surface (3840×2160 →
 /// 64×34 ≈ 2176) stay under it; only pathologically small source images
 /// (≤ ~30 px) trip the cap. Cycle 825 (audit).
-const MAX_BG_TILES: f32 = 4096.0;
+const MAX_BG_TILES: usize = 4096;
+
+/// Divide a bounded frame resource across independent panes in deterministic
+/// round-robin order. Saturated or empty panes donate their unused share, so
+/// the result consumes `min(sum(counts), limit)` slots without allowing the
+/// first busy pane to starve every pane after it.
+fn fair_placement_quotas(counts: &[usize], limit: usize) -> Vec<usize> {
+    let mut quotas = vec![0; counts.len()];
+    let mut remaining = limit;
+    while remaining > 0 {
+        let before = remaining;
+        for (quota, count) in quotas.iter_mut().zip(counts.iter().copied()) {
+            if *quota < count {
+                *quota += 1;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        if remaining == before {
+            break;
+        }
+    }
+    quotas
+}
+
+fn placement_is_visible(snap: &PaneSnapshot, placement: &kettle_core::Placement) -> bool {
+    let top = snap.history_size as i64 - snap.display_offset as i64;
+    let row = placement.abs_line - top;
+    let nrows = snap.screen_lines as i64;
+    row + placement.cell_rows as i64 > 0 && row < nrows
+}
 
 /// Whether a `tile` background's source image yields a sane number of tiles for
 /// the surface, or so many (a tiny source image) that the per-frame quad +
@@ -4878,7 +4951,7 @@ const MAX_BG_TILES: f32 = 4096.0;
 fn bg_tiles_within_cap(surface_w: f32, surface_h: f32, img_w: f32, img_h: f32) -> bool {
     let tiles_x = (surface_w / img_w.max(1.0)).ceil().max(1.0);
     let tiles_y = (surface_h / img_h.max(1.0)).ceil().max(1.0);
-    tiles_x * tiles_y <= MAX_BG_TILES
+    tiles_x * tiles_y <= MAX_BG_TILES as f32
 }
 
 fn font_features(cfg: &Config) -> FontFeatures {
@@ -6844,7 +6917,11 @@ pub fn capture_png_with_annotation(
         // uses — so the README imagery isn't a legacy-glyphon misrepresentation.
         // Each buffer's appended instance range gets its own `GlyphClip` so the
         // scissor clips text to its pane, mirroring the live `emit_pane_glyphs`.
-        let mut grid_glyphs = GlyphPipeline::new(&device, format);
+        let mut grid_glyphs =
+            GlyphPipeline::new_with_budget(&device, format, kettle_core::GraphicsBudget::default())
+                .ok_or_else(|| {
+                    anyhow!("GPU graphics budget exhausted while capturing screenshot")
+                })?;
         let mut grid_instances: Vec<GlyphInstance> = Vec::new();
         let mut grid_clips: Vec<GlyphClip> = Vec::new();
         if grid {
@@ -7241,7 +7318,11 @@ pub fn offscreen_selftest() -> anyhow::Result<bool> {
         // Pipeline construction compiles our WGSL on the active backend —
         // this is the part that historically breaks per-platform.
         let mut quads = QuadPipeline::new(&device, format);
-        let mut imgs = imgpipe::ImagePipeline::new(&device, format);
+        let Some(mut imgs) = imgpipe::ImagePipeline::new(&device, format) else {
+            return Err(anyhow!(
+                "GPU graphics budget exhausted while creating offscreen image pipeline"
+            ));
+        };
         quads.upload(
             &device,
             &queue,
@@ -8450,12 +8531,13 @@ mod pane_buffer_lifecycle_tests {
         // A dedicated pipeline exists and is constructed.
         assert!(
             src.contains("bg_imgs: imgpipe::ImagePipeline,")
-                && src.contains("let bg_imgs = imgpipe::ImagePipeline::new(&device, format);"),
+                && src.contains("ImagePipeline::new_with_budget_and_instance_limit("),
             "the wallpaper must have its own ImagePipeline field + construction"
         );
         // The wallpaper items go to bg_img_items, inline images stay in img_items.
         assert!(
-            src.contains("bg_img_items.push(") && src.contains("img_items.push(("),
+            src.contains("bg_img_items.push(")
+                && src.contains("img_items.push(imgpipe::ImageItem::placement("),
             "wallpaper pushes to bg_img_items; inline images to img_items"
         );
         // Draw order: bg_imgs (back) → quads → imgs (inline) → text.
@@ -9145,6 +9227,45 @@ mod bg_tile_cap_tests {
 }
 
 #[cfg(test)]
+mod inline_placement_budget_tests {
+    use super::fair_placement_quotas;
+
+    #[test]
+    fn busy_early_pane_cannot_starve_later_panes() {
+        assert_eq!(fair_placement_quotas(&[256, 1], 256), vec![255, 1]);
+        assert_eq!(
+            fair_placement_quotas(&[256, 256, 256, 256], 256),
+            vec![64, 64, 64, 64]
+        );
+        assert_eq!(fair_placement_quotas(&[0, 3, 100], 4), vec![0, 2, 2]);
+    }
+
+    #[test]
+    fn quotas_are_bounded_complete_and_deterministic() {
+        for (counts, limit) in [
+            (vec![], 10),
+            (vec![0, 0], 10),
+            (vec![1, 2, 3], 0),
+            (vec![1, 2, 3], 99),
+            (vec![5, 1, 8, 2], 9),
+        ] {
+            let first = fair_placement_quotas(&counts, limit);
+            assert_eq!(first, fair_placement_quotas(&counts, limit));
+            assert!(
+                first
+                    .iter()
+                    .zip(&counts)
+                    .all(|(quota, count)| quota <= count)
+            );
+            assert_eq!(
+                first.iter().sum::<usize>(),
+                counts.iter().sum::<usize>().min(limit)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod vi_selection_row_span_tests {
     use super::vi_selection_row_span;
 
@@ -9532,7 +9653,8 @@ mod glyph_cell_lock_tests {
         );
         // Grid mode builds a GlyphPipeline and draws it in the pass.
         assert!(
-            src.contains("let mut grid_glyphs = GlyphPipeline::new(&device, format);"),
+            src.contains("let mut grid_glyphs =")
+                && src.contains("GlyphPipeline::new_with_budget("),
             "Grid screenshot path must build a GlyphPipeline"
         );
         assert!(

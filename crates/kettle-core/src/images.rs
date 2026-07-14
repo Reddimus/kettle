@@ -8,6 +8,16 @@ use std::time::Instant;
 pub use kettle_vt::kitty::{AnimationState, current_frame};
 pub use kettle_vt::{ImageData, Placed};
 
+/// Pixel-space sub-rectangle sampled by one image placement. The renderer
+/// validates it against the referenced image before producing UV coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageSourceRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone)]
 pub struct Placement {
     /// Absolute line = `history_size_at_insert + cursor_viewport_line`.
@@ -16,6 +26,8 @@ pub struct Placement {
     pub cell_cols: usize,
     pub cell_rows: usize,
     pub img: ImageData,
+    /// Optional source pixels within `img`; `None` samples the full image.
+    pub source_rect: Option<ImageSourceRect>,
     /// kitty image id (for deletion); `None` for Sixel/iTerm2.
     pub id: Option<u32>,
     /// z-index; images are drawn in ascending z order.
@@ -122,8 +134,9 @@ pub type Animations = Arc<Mutex<HashMap<u32, AnimEntry>>>;
 pub fn prune(images: &Images, oldest_abs: i64) {
     if let Ok(mut v) = images.lock() {
         v.retain(|p| p.abs_line + p.cell_rows as i64 >= oldest_abs);
-        if v.len() > 512 {
-            let drop = v.len() - 512;
+        let limit = kettle_vt::GraphicsLimits::default().placements;
+        if v.len() > limit {
+            let drop = v.len() - limit;
             v.drain(0..drop);
         }
     }
@@ -131,19 +144,17 @@ pub fn prune(images: &Images, oldest_abs: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnimEntry, AnimationState, ImageData, relative_origin, resolve_chain};
+    use super::{
+        AnimEntry, AnimationState, ImageData, Placement, prune, relative_origin, resolve_chain,
+    };
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     fn px(n: u32) -> ImageData {
         // A 1×1 opaque pixel; the colour channel encodes which frame it is
         // so equality below is meaningful.
-        ImageData {
-            width: 1,
-            height: 1,
-            rgba: Arc::new(vec![n as u8, 0, 0, 255]),
-        }
+        ImageData::new(1, 1, vec![n as u8, 0, 0, 255]).expect("test pixel")
     }
 
     #[test]
@@ -207,5 +218,29 @@ mod tests {
         assert_eq!(resolve_chain(10, &deep, &origins, 8), None);
         let cyc = HashMap::from([(5u32, (6u32, 0, 0)), (6u32, (5u32, 0, 0))]);
         assert_eq!(resolve_chain(5, &cyc, &origins, 8), None);
+    }
+
+    #[test]
+    fn placement_registry_drops_oldest_at_limit_plus_one() {
+        let img = px(1);
+        let limit = kettle_vt::GraphicsLimits::default().placements;
+        let images = Arc::new(Mutex::new(
+            (0..=limit)
+                .map(|i| Placement {
+                    abs_line: i as i64,
+                    col: 0,
+                    cell_cols: 1,
+                    cell_rows: 1,
+                    img: img.clone(),
+                    source_rect: None,
+                    id: None,
+                    z: 0,
+                })
+                .collect(),
+        ));
+        prune(&images, 0);
+        let images = images.lock().unwrap();
+        assert_eq!(images.len(), limit);
+        assert_eq!(images[0].abs_line, 1, "oldest placement is evicted first");
     }
 }

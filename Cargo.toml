@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/kettle-state",
     "crates/kettle-update",
     "crates/kettle-config",
     "crates/kettle-core",
@@ -71,6 +72,7 @@ categories = ["command-line-utilities"]
 # nobody updated the path-dep pins. Workspace-deps make the next
 # `release.sh` version bump update one line instead of ten.
 kettle-config = { path = "crates/kettle-config", version = "2.35.0" }
+kettle-state = { path = "crates/kettle-state", version = "2.35.0" }
 kettle-update = { path = "crates/kettle-update", version = "2.35.0" }
 kettle-core = { path = "crates/kettle-core", version = "2.35.0" }
 kettle-vt = { path = "crates/kettle-vt", version = "2.35.0" }

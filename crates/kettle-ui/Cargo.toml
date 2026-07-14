@@ -50,6 +50,7 @@ kettle-core.workspace = true
 # future kettle-muxd daemon can re-host the same server side.
 kettle-ctl.workspace = true
 kettle-render.workspace = true
+kettle-state.workspace = true
 kettle-update.workspace = true
 # Cycle 655 (sub-cycle 6 of TERMINATOR-REMOTE-DESIGN.md): SSH /
 # Docker / Podman / kubectl session detection. Carries the sysinfo
@@ -64,7 +65,8 @@ log.workspace = true
 mlua.workspace = true
 notify = "8.2.0"
 notify-rust.workspace = true
-open = "5.3.5"
+# 5.4.0 hardens launcher argument handling against option and shell injection.
+open = "5.4.0"
 pollster = "0.4.0"
 # Cycle 290: triggers (cycle 289 config) compile to `regex::Regex`
 # in the App layer (not kettle-core) — the matching engine reads
@@ -119,6 +121,7 @@ libc = "0.2"
 # z-order that would otherwise read as "a foreign window covers the band").
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",

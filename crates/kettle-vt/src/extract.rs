@@ -5,9 +5,8 @@
 
 use crate::image::{ImageData, Placed};
 use crate::kitty::{KittyOut, KittyState};
+use crate::{GraphicsBudget, GraphicsReservation};
 use crate::{iterm, sixel};
-
-const MAX_SEQ: usize = 64 * 1024 * 1024;
 
 /// OSC 133 shell-integration marks (FinalTerm / iTerm2 / kitty convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +96,12 @@ pub enum Progress {
 
 const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 
+/// After abandoning an over-budget control string, consume at most one PTY
+/// read-sized window looking for its real terminator before returning to
+/// ground state. This bounds desynchronization when a producer never emits a
+/// terminator without immediately exposing the rejected payload downstream.
+const MAX_SEQ_RESYNC_BYTES: usize = 64 * 1024;
+
 #[derive(PartialEq)]
 enum Mode {
     Pass,
@@ -115,6 +120,10 @@ pub struct Extractor {
     /// not `ESC \`; preserved so pass-through bytes echo exactly.
     term_bel: bool,
     kitty: KittyState,
+    budget: GraphicsBudget,
+    seq_reservation: Option<GraphicsReservation>,
+    discarding_seq: bool,
+    discard_remaining: usize,
 }
 
 impl Default for Extractor {
@@ -125,6 +134,10 @@ impl Default for Extractor {
 
 impl Extractor {
     pub fn new() -> Self {
+        Self::with_budget(GraphicsBudget::default())
+    }
+
+    fn with_budget(budget: GraphicsBudget) -> Self {
         Extractor {
             mode: Mode::Pass,
             pass: Vec::with_capacity(8192),
@@ -132,7 +145,11 @@ impl Extractor {
             esc_pending: false,
             st_pending: false,
             term_bel: false,
-            kitty: KittyState::default(),
+            kitty: KittyState::new(budget.clone()),
+            budget,
+            seq_reservation: None,
+            discarding_seq: false,
+            discard_remaining: 0,
         }
     }
 
@@ -161,17 +178,17 @@ impl Extractor {
                             b'P' => {
                                 self.flush_pass(&mut out);
                                 self.mode = Mode::Dcs;
-                                self.seq.clear();
+                                self.begin_seq();
                             }
                             b'_' => {
                                 self.flush_pass(&mut out);
                                 self.mode = Mode::Apc;
-                                self.seq.clear();
+                                self.begin_seq();
                             }
                             b']' => {
                                 self.flush_pass(&mut out);
                                 self.mode = Mode::Osc;
-                                self.seq.clear();
+                                self.begin_seq();
                             }
                             _ => {
                                 self.pass.push(0x1b);
@@ -196,15 +213,32 @@ impl Extractor {
                 Mode::Dcs | Mode::Apc | Mode::Osc => {
                     if self.st_pending {
                         let b = input[i];
-                        i += 1;
                         self.st_pending = false;
                         if b == b'\\' {
+                            i += 1;
                             self.term_bel = false;
                             self.finish_seq(&mut out);
                             continue;
                         }
-                        self.seq.push(0x1b);
-                        self.seq.push(b);
+                        if self.discarding_seq {
+                            // Account for the ESC consumed on the preceding
+                            // iteration first. If it is the final quarantined
+                            // byte, leave `b` untouched for Pass mode.
+                            debug_assert_eq!(self.consume_discard_bytes(1), 1);
+                            if self.mode == Mode::Pass {
+                                continue;
+                            }
+                            i += 1;
+                            debug_assert_eq!(self.consume_discard_bytes(1), 1);
+                            continue;
+                        }
+                        i += 1;
+                        // The ESC was consumed by the preceding feed/loop
+                        // iteration. The recovery window is always at least
+                        // two bytes, so a failed append consumes this complete
+                        // pair and never has to replay only half an escape.
+                        let consumed = self.consume_seq_bytes(&[0x1b, b]);
+                        debug_assert_eq!(consumed, 2);
                     } else {
                         // Bulk path: sequence bytes run to the next ESC, raw
                         // ST (0x9c), or — OSC only — BEL terminator. A BEL
@@ -218,9 +252,24 @@ impl Extractor {
                         };
                         match stop {
                             Some(off) => {
-                                self.seq.extend_from_slice(&hay[..off]);
+                                let consumed = self.consume_seq_bytes(&hay[..off]);
+                                i += consumed;
+                                if consumed < off {
+                                    // Bounded discard recovery landed inside
+                                    // this run. Reprocess the remainder in
+                                    // Pass mode instead of swallowing the
+                                    // entire caller-provided buffer.
+                                    continue;
+                                }
+                                if self.mode == Mode::Pass {
+                                    // Recovery landed exactly before the stop
+                                    // byte. Let Pass mode interpret it instead
+                                    // of finishing an already-abandoned
+                                    // sequence with an empty accumulator.
+                                    continue;
+                                }
                                 let b = hay[off];
-                                i += off + 1;
+                                i += 1;
                                 if b == 0x1b {
                                     self.st_pending = true;
                                 } else {
@@ -229,16 +278,9 @@ impl Extractor {
                                 }
                             }
                             None => {
-                                self.seq.extend_from_slice(hay);
-                                i = input.len();
+                                let consumed = self.consume_seq_bytes(hay);
+                                i += consumed;
                             }
-                        }
-                        if self.seq.len() > MAX_SEQ {
-                            // Give up: forward verbatim so we never hang.
-                            // (`seq` is empty when the branch above just
-                            // finished the sequence, so this only fires on a
-                            // genuinely runaway accumulation.)
-                            self.bail(&mut out);
                         }
                     }
                 }
@@ -254,44 +296,115 @@ impl Extractor {
         }
     }
 
-    fn bail(&mut self, out: &mut Vec<Chunk>) {
-        let mut v = Vec::with_capacity(self.seq.len() + 4);
-        v.push(0x1b);
-        v.push(match self.mode {
-            Mode::Dcs => b'P',
-            Mode::Apc => b'_',
-            _ => b']',
-        });
-        v.extend_from_slice(&self.seq);
-        // Append a synthetic terminator so the downstream vte parser doesn't
-        // stay mid-string and swallow the following bytes (which would desync
-        // every later sequence). Mirrors the R::None path: BEL closes an OSC,
-        // ESC \ closes a DCS/APC — both return the engine to Ground. (We have
-        // no real terminator here — this is an abandoned over-long string —
-        // so OSC always uses BEL regardless of `term_bel`.)
-        if self.mode == Mode::Osc {
-            v.push(0x07);
-        } else {
-            v.push(0x1b);
-            v.push(b'\\');
-        }
-        out.push(Chunk::Pass(v));
+    fn begin_seq(&mut self) {
         self.seq.clear();
-        self.mode = Mode::Pass;
-        // v2.20.0 review fix: the bulk arm can latch `st_pending` (it just
-        // consumed an ESC stop byte) BEFORE the MAX_SEQ check runs bail —
-        // the old per-byte loop could never bail in that state. Unwind the
-        // latch into a Pass-mode pending ESC so the consumed byte is
-        // re-interpreted exactly as the fresh escape it is; leaving it
-        // latched would corrupt the FIRST byte of the next sequence.
-        if self.st_pending {
-            self.st_pending = false;
-            self.esc_pending = true;
+        self.seq_reservation = None;
+        self.discarding_seq = false;
+        self.discard_remaining = 0;
+    }
+
+    fn append_seq(&mut self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
         }
+        let Some(new_len) = self.seq.len().checked_add(bytes.len()) else {
+            self.bail(0);
+            return false;
+        };
+        if new_len > self.budget.limits().sequence_bytes {
+            self.bail(0);
+            return false;
+        }
+        if let Some(r) = self.seq_reservation.as_mut() {
+            if !r.try_grow_to(new_len) {
+                self.bail(0);
+                return false;
+            }
+        } else {
+            let Some(r) = self.budget.reserve_transient_cpu(new_len) else {
+                self.bail(0);
+                return false;
+            };
+            self.seq_reservation = Some(r);
+        }
+        if self.seq.try_reserve_exact(bytes.len()).is_err() {
+            self.bail(0);
+            return false;
+        }
+        self.seq.extend_from_slice(bytes);
+        true
+    }
+
+    /// Consume bytes that belong to the active control string. Once the
+    /// configured sequence limit is crossed, bytes up to that boundary plus a
+    /// bounded recovery window are dropped. If the recovery boundary lands in
+    /// this slice, the unconsumed suffix is handled again in Pass mode.
+    fn consume_seq_bytes(&mut self, bytes: &[u8]) -> usize {
+        if bytes.is_empty() {
+            return 0;
+        }
+        if !self.discarding_seq {
+            let room = self
+                .budget
+                .limits()
+                .sequence_bytes
+                .saturating_sub(self.seq.len());
+            if bytes.len() > room {
+                // `append_seq` is intentionally all-or-nothing. Account for
+                // the prefix that still fit so recovery starts at the actual
+                // configured limit, not at the start of this bulk slice.
+                self.bail(room);
+            } else if self.append_seq(bytes) {
+                return bytes.len();
+            }
+        }
+
+        self.consume_discard_bytes(bytes.len())
+    }
+
+    fn consume_discard_bytes(&mut self, available: usize) -> usize {
+        let consumed = available.min(self.discard_remaining);
+        self.discard_remaining -= consumed;
+        if self.discard_remaining == 0 {
+            self.reset_discard();
+        }
+        consumed
+    }
+
+    /// Drop an over-budget graphics/control string. The downstream VT engine
+    /// never saw its introducer, so forwarding a second full copy is both
+    /// unnecessary and would defeat the allocation limit.
+    fn bail(&mut self, bytes_before_limit: usize) {
+        // Release the backing allocation while its reservation is still held;
+        // `clear` alone would retain up to 16 MiB without an active lease.
+        self.seq = Vec::new();
+        self.seq_reservation = None;
+        self.discarding_seq = true;
+        let recovery = self
+            .budget
+            .limits()
+            .sequence_bytes
+            .clamp(2, MAX_SEQ_RESYNC_BYTES);
+        self.discard_remaining = bytes_before_limit.saturating_add(recovery);
+    }
+
+    fn reset_discard(&mut self) {
+        self.seq = Vec::new();
+        self.seq_reservation = None;
+        self.discarding_seq = false;
+        self.discard_remaining = 0;
+        self.st_pending = false;
+        self.term_bel = false;
+        self.mode = Mode::Pass;
     }
 
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
+        if self.discarding_seq {
+            self.reset_discard();
+            return;
+        }
         let mut seq = std::mem::take(&mut self.seq);
+        let _seq_reservation = self.seq_reservation.take();
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
 
         // OSC 133 shell-integration marks are consumed (not forwarded).
@@ -398,7 +511,7 @@ impl Extractor {
                     .position(|&c| c == b'q')
                     .filter(|&q| seq[..q].iter().all(|&c| c.is_ascii_digit() || c == b';'))
                 {
-                    Some(qpos) => sixel::decode(&seq[qpos + 1..])
+                    Some(qpos) => sixel::decode_with_budget(&seq[qpos + 1..], &self.budget)
                         .map(|i| R::Img(Placed::plain(i)))
                         .unwrap_or(R::None),
                     None => R::None,
@@ -406,11 +519,12 @@ impl Extractor {
             }
             Mode::Apc => {
                 if seq.first() == Some(&b'G') {
-                    // Borrow when the APC payload is valid UTF-8 (the common
-                    // case — kitty graphics keys are ASCII); only the lossy
-                    // fallback allocates (cycle 844, audit).
-                    let body = String::from_utf8_lossy(&seq[1..]);
-                    match self.kitty.feed(&body) {
+                    // Kitty control/base64 is ASCII. Reject invalid UTF-8
+                    // without allocating a second sequence-sized lossy copy.
+                    let Some(body) = std::str::from_utf8(&seq[1..]).ok() else {
+                        return;
+                    };
+                    match self.kitty.feed(body) {
                         KittyOut::Place(p) => R::Img(p),
                         KittyOut::Delete { all, id } => R::Del { all, id },
                         // Virtual placements draw nothing at the cursor; the
@@ -482,7 +596,9 @@ impl Extractor {
                 // OSC 104 — reaches this branch and would otherwise heap-alloc a
                 // full String just to fail `starts_with` (cycle 844, audit).
                 if seq.starts_with(b"1337;File=") {
-                    iterm::decode(&String::from_utf8_lossy(&seq))
+                    std::str::from_utf8(&seq)
+                        .ok()
+                        .and_then(|body| iterm::decode_with_budget(body, &self.budget))
                         .map(|i| R::Img(Placed::plain(i)))
                         .unwrap_or(R::None)
                 } else {
@@ -539,7 +655,16 @@ impl Extractor {
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
                 // included, so the VT engine handles it.
-                let mut v = Vec::with_capacity(seq.len() + 4);
+                let Some(pass_len) = seq.len().checked_add(4) else {
+                    return;
+                };
+                let Some(_pass_reservation) = self.budget.reserve_transient_cpu(pass_len) else {
+                    return;
+                };
+                let mut v = Vec::new();
+                if v.try_reserve_exact(pass_len).is_err() {
+                    return;
+                }
                 v.push(0x1b);
                 v.push(match mode {
                     Mode::Dcs => b'P',
@@ -1091,61 +1216,98 @@ mod tests {
         );
     }
 
-    /// FIX 2: an over-long / abandoned control string is forwarded verbatim by
-    /// `bail()`, but with a synthetic terminator appended so the downstream
-    /// engine returns to Ground and does NOT swallow a following sequence (which
-    /// would desync every later sequence). The bailed OSC Pass must END with a
-    /// BEL, and a clean sequence fed afterward must still parse and not be eaten.
+    /// An over-budget string is consumed without forwarding a second full copy.
+    /// Discarding lasts through its real terminator; the next sequence parses.
     #[test]
-    fn bail_appends_terminator_and_does_not_desync() {
-        let mut ex = Extractor::new();
-        // > MAX_SEQ non-terminator bytes inside an OSC bail it. (No terminator
-        // is present, so the whole accumulated body forwards verbatim once the
-        // MAX_SEQ cap is hit.)
+    fn over_budget_osc_is_discarded_and_does_not_desync() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut ex = Extractor::with_budget(budget);
         let mut input = Vec::new();
         input.extend_from_slice(b"\x1b]2;");
-        input.extend(std::iter::repeat_n(b'A', super::MAX_SEQ + 16));
+        input.extend(std::iter::repeat_n(b'A', limits.sequence_bytes + 16));
         let out = ex.feed(&input);
-        let bytes = passed(&out);
-        // The bailed OSC must be BEL-terminated (synthetic terminator appended)
-        // so the downstream parser is returned to Ground.
-        assert_eq!(
-            bytes.last(),
-            Some(&0x07),
-            "bailed OSC must end with a synthetic BEL terminator"
+        assert!(
+            out.is_empty(),
+            "over-budget bytes must not be copied to Pass"
         );
-        // A clean sequence + plain text fed afterward still parses and passes
-        // through (the extractor is back in Pass mode, the downstream engine is
-        // not stuck mid-string). This is the desync the fix prevents.
-        let out = ex.feed(b"\x1b]133;A\x07ok");
+        let out = ex.feed(b"discarded\x07\x1b]133;A\x07ok");
         assert!(
             out.iter()
                 .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
-            "a clean sequence after a bail must still parse, got {out:?}"
+            "a clean sequence after the discarded OSC must parse, got {out:?}"
         );
         assert_eq!(passed(&out), b"ok");
     }
 
-    /// FIX 2 (DCS variant): a runaway DCS is re-terminated with `ESC \`, not BEL.
+    /// DCS uses the same bounded discard path and recognizes its `ESC \` end.
     #[test]
-    fn bail_dcs_appends_esc_backslash() {
-        let mut ex = Extractor::new();
+    fn over_budget_dcs_discards_through_esc_backslash() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut ex = Extractor::with_budget(budget);
         let mut input = Vec::new();
         input.extend_from_slice(b"\x1bP");
-        input.extend(std::iter::repeat_n(b'B', super::MAX_SEQ + 16));
+        input.extend(std::iter::repeat_n(b'B', limits.sequence_bytes + 16));
         let out = ex.feed(&input);
-        let bytes = passed(&out);
-        assert_eq!(
-            &bytes[bytes.len() - 2..],
-            b"\x1b\\",
-            "bailed DCS must end with a synthetic ESC-\\ terminator"
-        );
-        // Downstream not desynced: a clean OSC after the bail still parses.
-        let out = ex.feed(b"\x1b]133;A\x07ok");
+        assert!(out.is_empty());
+        let out = ex.feed(b"discarded\x1b\\\x1b]133;A\x07ok");
         assert!(
             out.iter()
                 .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
             "a clean sequence after a DCS bail must still parse, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn unterminated_over_budget_sequence_recovers_after_bounded_window() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut ex = Extractor::with_budget(budget);
+        let mut input = b"\x1b]".to_vec();
+        input.extend(std::iter::repeat_n(b'X', limits.sequence_bytes * 2 + 3));
+
+        // The configured sequence allowance and one equally-sized recovery
+        // window are swallowed. The suffix after that bounded point is plain
+        // output even though the hostile OSC never supplied a terminator.
+        let out = ex.feed(&input);
+        assert_eq!(passed(&out), b"XXX");
+
+        let out = ex.feed(b"\x1b]133;A\x07ok");
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
+            "a clean sequence after bounded recovery must parse, got {out:?}"
+        );
+        assert_eq!(passed(&out), b"ok");
+    }
+
+    #[test]
+    fn bounded_recovery_can_end_on_a_split_non_st_escape() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut ex = Extractor::with_budget(budget);
+        let mut input = b"\x1b]".to_vec();
+        input.extend(std::iter::repeat_n(b'X', limits.sequence_bytes * 2 - 1));
+        input.push(0x1b);
+
+        assert!(ex.feed(&input).is_empty());
+        assert_eq!(
+            passed(&ex.feed(b"Zok")),
+            b"Zok",
+            "the byte after the boundary ESC must be reprocessed in Pass mode"
         );
     }
 

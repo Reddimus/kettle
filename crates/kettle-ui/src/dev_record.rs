@@ -9,4 +9,4 @@
 //! The `dev-record` feature turns on `kettle-core/asciicast`, which is what
 //! actually compiles the recorder in.
 
-pub use kettle_core::record::{Recorder, printable_token};
+pub use kettle_core::record::{RecordStatus, Recorder, printable_token};

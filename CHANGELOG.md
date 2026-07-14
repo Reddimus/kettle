@@ -6,9 +6,67 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-## [2.35.0] — 2026-07-11
+## [2.35.0] — 2026-07-14
 
   ### Fixed
+  - **Session recording is bounded, private, and collision-safe.** GUI
+    development recordings stop on a complete event boundary at 512 MiB and
+    keep their stopped state visible as `[REC LIMIT]` or `[REC ERROR]`.
+    Managed recording directories use private, unique, locked files and prune
+    only the recognized `kettle-session-*.cast` namespace toward 50 files / 5
+    GiB, without deleting active, linked, legacy, or unrelated files. Explicit
+    paths are locked before truncation, symbolic links are refused, and
+    `kettle exec --record` secures its trace before spawning the child or exits
+    125. The lossless PTY-output fan-out also prevents close/redraw drains from
+    skipping recorded output.
+  - **Terminal graphics have one enforced allocation envelope.** OSC/APC/DCS
+    parsing, kitty transmissions, decoded images, animations, placements,
+    retained CPU memory, and GPU textures now have checked per-resource and
+    process limits with RAII accounting. Oversized unterminated control strings
+    recover after a bounded discard window instead of retaining an unbounded
+    parser state. Unicode-placeholder tiles share source images and select
+    source rectangles with per-instance UVs rather than cloning cropped image
+    data; wallpaper tiling keeps its independent 4096-instance budget.
+  - **The local control plane fails closed on malformed or ambiguous traffic.**
+    Protocol v1 now requires exact versions and response ids, caps requests,
+    responses, events, connections, and interleaved client event queues, and
+    pages large live reads with snapshot tokens. Explicit pane/window targets
+    must be typed live ids and never fall back to focus. Unix discovery/socket
+    state is private and peer-uid checked; Windows named pipes reject remote
+    clients and use a current-user DACL. Client calls have method-aware
+    deadlines and cancellable polling.
+  - **MCP initialization and tool execution are bounded and cancellable.** The
+    stdio bridge negotiates MCP `2025-11-25` or `2025-06-18`, accepts `ping`
+    during initialization, requires the exact initialized notification, and
+    distinguishes invalid JSON-RPC/tool envelopes from known-tool execution
+    errors. Four workers sit behind a 16-request queue; request lines, encoded
+    responses, and tool text are capped, including after JSON escaping.
+    Cancellation drops queued work and stops running headless commands or
+    control waits.
+  - **Config, session, and updater state survive interruption without following
+    unsafe paths.** The new `kettle-state` crate provides durable atomic
+    replacement and advisory locks. Config UI edits preserve BOM/UTF-16
+    encoding, line endings, existing permissions, comments, and first-write
+    backups; retain dotfile-manager symlinks by editing their regular target;
+    and refuse oversized/non-regular files, newly malformed edits, or external
+    changes observed by the final pre-stage comparison. Session snapshots are
+    durably replaced as private files and reject link destinations.
+  - **Self-update extraction and recovery are strict and restartable.** Archive
+    download, entry-count, and expanded-size caps are enforced while reading;
+    traversal, aliases, links, special files, unsafe Windows names, declared
+    size mismatches, and path conflicts are rejected. Schema-2 journals bind
+    every old/new file to size and SHA-256 and checkpoint rollback so recovery
+    itself can resume after interruption. Windows stages verified files for an
+    out-of-process helper, holds shared run locks until old processes unmap,
+    checkpoints each of at most three attempts before fallible work, and
+    attempts to quarantine invalid/exhausted pending state so the intact old
+    build can start; recovery notifications are best-effort.
+  - **Linux source/dev-record installs cannot masquerade as stable packages.**
+    Ownership markers are atomically replaced, record directories and binary
+    feature support are verified, symbolic-link directories are refused, and
+    Desktop Entry values now survive the full two-layer escaping required for
+    spaces, backslashes, percent signs, dollar signs, quotes, and backticks.
+    The stable updater refuses `local-dev` and `local-dev-record` ownership.
   - **Unfocused windows no longer show a hollow terminal cursor.** Kettle now
     suppresses cursor rendering while the OS window lacks focus without
     mutating the child's DEC cursor shape, visibility, or blink state. This
@@ -36,6 +94,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     artifact hashes.
 
   ### Changed
+  - **Release and dependency automation is reproducible by source identity.**
+    GitHub Actions are pinned to full commit SHAs, the locally downloaded
+    `actionlint` binary is checksum-verified, dependency update policy is
+    deduplicated, and the `open` dependency is current.
   - **Stable releases now publish atomically from one signing job.** Required
     Windows, macOS, Linux x86_64, and Linux aarch64 packages finish before CI
     creates an Ed25519-signed update manifest. CI verifies the annotated tag,
@@ -2134,8 +2196,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `kettle:paste len=N` marker. New `m` markers capture kettle's own UI
     transitions the PTY stream can't show (`kettle:tab_add` / `tab_close` /
     `focus_in` / `focus_out`), spanning interactive and non-interactive states.
-    An always-visible `● REC` indicator sits in the title bar while recording. CI
-    now builds + lints + tests the `dev-record` feature so the gated code can't
+    A native-title `● REC` indicator appears while recording. CI now builds +
+    lints + tests the `dev-record` feature so the gated code can't
     bit-rot. Documented in `docs/DEV-RECORD.md` (with a data-flow diagram); the
     redaction is unit-tested.
 

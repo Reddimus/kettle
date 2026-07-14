@@ -353,6 +353,19 @@ struct Cli {
     #[arg(long, value_name = "PATH", verbatim_doc_comment)]
     record: Option<std::path::PathBuf>,
 
+    /// Developer-only: create a private recording directory if needed and
+    /// write every launch to a new collision-safe asciicast file within it.
+    /// Also honored via `KETTLE_RECORD_DIR`. Explicit `--record` and legacy
+    /// `KETTLE_RECORD` take precedence. `--features dev-record` only.
+    #[cfg(feature = "dev-record")]
+    #[arg(
+        long,
+        value_name = "DIRECTORY",
+        conflicts_with = "record",
+        verbatim_doc_comment
+    )]
+    record_dir: Option<std::path::PathBuf>,
+
     /// Developer-only: with --record, capture RAW typed characters instead of
     /// redacted key tokens. WARNING: the trace can then contain typed passwords;
     /// leave it off unless you need byte-exact input. `--features dev-record`.
@@ -648,18 +661,42 @@ fn crash_log_path(
         .join(format!("kettle-crash-{unix_secs}-{pid}.log"))
 }
 
-/// v2.31.0: resolve the asciicast record TARGET from `--record` / `KETTLE_RECORD`.
-/// If `p` is an existing DIRECTORY, return a fresh `session-<unix>.cast` inside
-/// it; otherwise use `p` verbatim as the output file. This lets a *persistent*
-/// `KETTLE_RECORD=<dir>` env var record every launch (the VBS launcher passes an
-/// explicit `--record <file>`, which is already a file so it's returned as-is).
-/// `now_secs` is injected so the mapping is unit-testable.
+/// Resolve the development-recording target without reading global process
+/// state, keeping precedence deterministic and unit-testable:
+///
+/// 1. explicit `--record FILE` / `--record DIRECTORY`
+/// 2. explicit `--record-dir DIRECTORY`
+/// 3. legacy `KETTLE_RECORD` file/existing-directory behavior
+/// 4. `KETTLE_RECORD_DIR`, which always has directory semantics
 #[cfg(feature = "dev-record")]
-fn resolve_record_target(p: std::path::PathBuf, now_secs: u64) -> std::path::PathBuf {
-    if p.is_dir() {
-        p.join(format!("session-{now_secs}.cast"))
+fn resolve_record_target(
+    explicit: Option<std::path::PathBuf>,
+    explicit_directory: Option<std::path::PathBuf>,
+    legacy_env: Option<std::ffi::OsString>,
+    directory_env: Option<std::ffi::OsString>,
+) -> Option<kettle_core::record::RecordingTarget> {
+    use kettle_core::record::RecordingTarget;
+
+    let classify_legacy = |path: std::path::PathBuf| {
+        if path.is_dir() {
+            RecordingTarget::Directory(path)
+        } else {
+            RecordingTarget::File(path)
+        }
+    };
+    let nonempty_env = |value: Option<std::ffi::OsString>| {
+        value
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    if let Some(path) = explicit {
+        Some(classify_legacy(path))
+    } else if let Some(directory) = explicit_directory {
+        Some(RecordingTarget::Directory(directory))
+    } else if let Some(path) = nonempty_env(legacy_env) {
+        Some(classify_legacy(path))
     } else {
-        p
+        nonempty_env(directory_env).map(RecordingTarget::Directory)
     }
 }
 
@@ -843,6 +880,40 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
     reset_sigpipe();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    if kettle_update::is_pending_update_helper_invocation() {
+        std::process::exit(match kettle_update::run_pending_update_helper() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("kettle update helper failed: {error}");
+                1
+            }
+        });
+    }
+    let (_running_install_guard, startup_update_warning) =
+        match kettle_update::prepare_process_start()? {
+            kettle_update::ProcessStart::Ready { guard, warning } => (guard, warning),
+            kettle_update::ProcessStart::PendingUpdate { guard } => {
+                eprintln!(
+                    "A verified Kettle update is waiting for running windows to close; exiting this old build."
+                );
+                // Do not unwind and drop the shared installation lock. The
+                // helper may replace kettle.exe only after the OS has fully
+                // terminated this process and released the handle.
+                let _guard = guard;
+                std::process::exit(0);
+            }
+        };
+    if let Some(warning) = startup_update_warning {
+        eprintln!("kettle update recovery: {warning}");
+        let mut notification = notify_rust::Notification::new();
+        notification
+            .summary("Kettle update recovery")
+            .body(&warning)
+            .appname("kettle");
+        if let Err(error) = notification.show() {
+            log::warn!("could not show update recovery notification: {error}");
+        }
+    }
     // Cycle 204: log the build identity at info level on startup. A user
     // grep'ing their stderr for warnings to file a bug report can paste
     // the surrounding lines — the version line lands once near the top,
@@ -1577,21 +1648,12 @@ fn main() -> anyhow::Result<()> {
         tab_handoff: cli.tab_handoff,
         tab_handoff_fd: cli.tab_handoff_fd,
         #[cfg(feature = "dev-record")]
-        record: cli
-            .record
-            .or_else(|| std::env::var_os("KETTLE_RECORD").map(std::path::PathBuf::from))
-            .map(|p| {
-                // v2.31.0: if the record target is a DIRECTORY, drop a fresh
-                // `session-<unix>.cast` inside it. Lets a PERSISTENT
-                // `KETTLE_RECORD=%USERPROFILE%\kettle-recordings` record EVERY
-                // launch (taskbar / direct / reopen), not just the VBS one that
-                // passes an explicit `--record <file>` — so a crash is captured.
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                resolve_record_target(p, now)
-            }),
+        record: resolve_record_target(
+            cli.record,
+            cli.record_dir,
+            std::env::var_os("KETTLE_RECORD"),
+            std::env::var_os("KETTLE_RECORD_DIR"),
+        ),
         // Cycle 916 (file-by-file audit): bool-PARSE the env var — `is_some()`
         // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
         // enabling raw keystroke (password) capture into the trace. Only an
@@ -1808,26 +1870,75 @@ mod window_state_flag_tests {
 
 #[cfg(all(test, feature = "dev-record"))]
 mod record_target_tests {
-    use super::resolve_record_target;
+    use super::{Cli, resolve_record_target};
+    use clap::Parser;
+    use kettle_core::record::RecordingTarget;
     use std::path::PathBuf;
 
-    /// A directory record target (a persistent `KETTLE_RECORD=<dir>`) becomes a
-    /// fresh `session-<unix>.cast` inside it.
     #[test]
-    fn directory_target_gets_timestamped_session_file() {
-        let dir = std::env::temp_dir(); // a real existing directory
+    fn explicit_existing_directory_keeps_directory_semantics() {
+        let dir = std::env::temp_dir();
         assert_eq!(
-            resolve_record_target(dir.clone(), 1_718_900_000),
-            dir.join("session-1718900000.cast")
+            resolve_record_target(Some(dir.clone()), None, None, None),
+            Some(RecordingTarget::Directory(dir))
         );
     }
 
-    /// An explicit file target (what the VBS passes via `--record <file>`) is used
-    /// verbatim — the timestamp is not appended.
     #[test]
-    fn explicit_file_target_is_verbatim() {
+    fn explicit_file_target_preserves_legacy_behavior() {
         let f = PathBuf::from("C:/does/not/exist/my-trace.cast");
-        assert_eq!(resolve_record_target(f.clone(), 123), f);
+        assert_eq!(
+            resolve_record_target(Some(f.clone()), None, None, None),
+            Some(RecordingTarget::File(f))
+        );
+    }
+
+    #[test]
+    fn missing_record_directory_is_still_a_directory() {
+        let directory = PathBuf::from("missing/private records");
+        assert_eq!(
+            resolve_record_target(None, Some(directory.clone()), None, None),
+            Some(RecordingTarget::Directory(directory))
+        );
+    }
+
+    #[test]
+    fn precedence_is_cli_then_legacy_env_then_directory_env() {
+        let explicit = PathBuf::from("explicit.cast");
+        assert_eq!(
+            resolve_record_target(
+                Some(explicit.clone()),
+                Some(PathBuf::from("explicit-dir")),
+                Some("legacy.cast".into()),
+                Some("env-dir".into()),
+            ),
+            Some(RecordingTarget::File(explicit))
+        );
+        assert_eq!(
+            resolve_record_target(
+                None,
+                None,
+                Some("legacy.cast".into()),
+                Some("env-dir".into()),
+            ),
+            Some(RecordingTarget::File(PathBuf::from("legacy.cast")))
+        );
+        assert_eq!(
+            resolve_record_target(None, None, Some("".into()), Some("env-dir".into())),
+            Some(RecordingTarget::Directory(PathBuf::from("env-dir")))
+        );
+    }
+
+    #[test]
+    fn record_file_and_directory_flags_are_mutually_exclusive() {
+        let error =
+            Cli::try_parse_from(["kettle", "--record", "trace.cast", "--record-dir", "traces"])
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let cli = Cli::try_parse_from(["kettle", "--record-dir", "missing traces"]).unwrap();
+        assert_eq!(cli.record, None);
+        assert_eq!(cli.record_dir, Some(PathBuf::from("missing traces")));
     }
 }
 
@@ -2348,6 +2459,7 @@ mod tests {
             "tab-handoff-fd",
             "exec",
             "record",
+            "record-dir",
             "record-raw-input",
         ];
         let cmd = Cli::command();

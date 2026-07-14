@@ -45,6 +45,8 @@ mod theme_filter;
 
 use std::path::{Path, PathBuf};
 
+use std::io::Read as _;
+
 pub use color::Rgb;
 pub use keybinds::{Action, Bindings, Key, Mods, Trigger};
 pub use theme::Theme;
@@ -1680,69 +1682,50 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
 ///   2. **Append on miss**: if no matching line exists, the new
 ///      `key = value` is appended with a leading blank line for
 ///      readability.
-///   3. **Atomic**: write to `<path>.tmp.<pid>.<nanos>`, then
-///      `rename` over the target. POSIX rename(2) + Windows
-///      MoveFileEx are atomic; if kettle dies mid-write the target
-///      is either untouched or fully updated.
+///   3. **Atomic + durable**: stage a collision-safe private sibling, sync it,
+///      atomically replace the target, and sync the parent directory.
 ///   4. **First-write backup**: if `<path>.bak` doesn't exist yet,
-///      save a copy of the pre-edit content there. Subsequent
+///      save an encoding-preserving copy of the pre-edit bytes there. Subsequent
 ///      writes don't touch the backup — it's a "what did my config
 ///      look like before I started clicking toggles?" forensic
 ///      snapshot.
-///   5. **Post-write validation + rollback**: after the rename, the
-///      new file is re-scanned with `Config::detect_malformed_values`.
+///   5. **Pre-commit validation**: before replacement, the candidate is
+///      scanned with `Config::detect_malformed_values`.
 ///      Because this helper only ever rewrites a single line, any
 ///      *additional* diagnostic compared with the pre-edit content
-///      means the new value is malformed — so we restore the previous
-///      content and return an `io::Error` for the caller to surface.
-///      This is the "I don't corrupt your config" safety net (cycle
-///      896 made it real; before, this contract point was documented
-///      but never implemented).
-///   6. **Symlink rejection**: the path's *canonical* parent must
-///      live inside `<config-root>` (resolved via
-///      `Config::default_path`'s parent or `cli --config` parent).
-///      Caller is expected to pre-validate; this helper just
-///      refuses any path containing `/..` segments after
-///      canonicalization.
+///      means the new value is malformed, so it never becomes visible.
+///   6. **Symlink preservation**: a symlinked config is resolved and its regular
+///      target is replaced, leaving the link intact for dotfile managers.
+///   7. **Concurrency + encoding**: a per-target advisory lock serializes all
+///      Kettle editors, a final byte comparison refuses external-editor races,
+///      and UTF-8 BOM / UTF-16 LE / UTF-16 BE input keeps its encoding.
 ///
 /// Returns the path of the backup (created or pre-existing) on
 /// success so the caller can surface it to the user. Pure-modulo-
 /// the-filesystem so the contract is unit-tested with a tempdir
 /// fixture.
 pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io::Result<PathBuf> {
-    // Refuse traversal in the path. Canonicalize the parent (if it
-    // exists) and reject any `..` component in the input.
-    if path.components().any(|c| c.as_os_str() == "..") {
+    validate_single_line("config key", key)?;
+    validate_single_line("config value", new_value)?;
+    let candidate_line = format!("{key} = {new_value}\n");
+    if !Config::detect_malformed_values(&candidate_line).is_empty() {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("refusing path with `..` component: {}", path.display()),
+            std::io::ErrorKind::InvalidData,
+            format!("refusing to persist `{key} = {new_value}`: it is not a valid config value"),
         ));
     }
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::other(format!("config path has no parent: {}", path.display()))
-    })?;
-    if !parent.exists() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = read_existing_config_text(path)?;
-    // First-write backup: only when `.bak` doesn't already exist.
-    let bak_ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!("{e}.bak"))
-        .unwrap_or_else(|| "bak".to_string());
-    let bak = path.with_extension(bak_ext);
-    if !bak.exists() {
-        std::fs::write(&bak, &existing)?;
-    }
+    let edit = ConfigEdit::begin(path)?;
+    let existing = &edit.document.text;
     // Build the new text by walking lines. A line matches if its
     // first non-whitespace token, normalized to underscore form,
     // equals `key` (also normalized). Comments (`#` or `//` lines)
     // and blank lines pass through untouched.
     let needle = normalize_key(key);
-    let mut out: Vec<String> = Vec::with_capacity(existing.lines().count() + 2);
+    let line_ending = preferred_line_ending(existing);
+    let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
     let mut replaced = false;
-    for line in existing.lines() {
+    for segment in existing.split_inclusive('\n') {
+        let (line, ending) = split_line_ending(segment);
         if let Some(line_key) = parse_line_key(line)
             && normalize_key(line_key) == needle
         {
@@ -1756,57 +1739,36 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
             // to a single line, matching `append_keybind`'s drop-old
             // semantics.
             if !replaced {
-                out.push(format!("{key} = {new_value}"));
+                out.push_str(&format!("{key} = {new_value}"));
+                out.push_str(ending);
                 replaced = true;
             }
             continue;
         }
-        out.push(line.to_string());
+        out.push_str(segment);
     }
     if !replaced {
-        // Append: leading blank line for readability if the file
-        // didn't already end in one.
-        if !out.is_empty() && !out.last().is_some_and(|l| l.is_empty()) {
-            out.push(String::new());
-        }
-        out.push(format!("{key} = {new_value}"));
+        ensure_blank_line_before_append(&mut out, line_ending);
+        out.push_str(&format!("{key} = {new_value}"));
     }
     // Ensure trailing newline so the file is well-formed.
-    let mut text = out.join("\n");
-    if !text.ends_with('\n') {
-        text.push('\n');
+    if !out.ends_with('\n') {
+        out.push_str(line_ending);
     }
-    // Atomic temp+rename.
-    let tmp = path.with_extension(format!(
-        "tmp.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp, &text)?;
-    std::fs::rename(&tmp, path)?;
-    // Contract point 5 (cycle 896): re-validate the written file. We only
-    // ever rewrite ONE line, so any malformed-value diagnostic the new file
-    // has that the pre-edit content did NOT means our edit introduced bad
-    // data — restore the previous content and report it, rather than leaving
-    // a silently-corrupted config the user can't see. (`existing` holds the
-    // exact pre-edit bytes; the `.bak` may be an older forensic snapshot.)
-    let before_bad = Config::detect_malformed_values(&existing).len();
-    let after_bad = Config::detect_malformed_values(&text).len();
+    // Validate before the atomic replacement. A malformed candidate never
+    // becomes visible, so there is no rollback window after the commit.
+    let before_bad = Config::detect_malformed_values(existing).len();
+    let after_bad = Config::detect_malformed_values(&out).len();
     if after_bad > before_bad {
-        // Best-effort rollback to the known-good pre-edit content.
-        std::fs::write(path, &existing)?;
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
                 "refusing to persist `{key} = {new_value}`: it would introduce a \
-                 malformed config value; restored the previous content"
+                 malformed config value"
             ),
         ));
     }
-    Ok(bak)
+    edit.commit(&out)
 }
 
 /// Cycle 766: append a `keybind = <trigger>=<action>` line to the user's config
@@ -1817,28 +1779,19 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// Any prior `keybind` line that maps the SAME trigger is dropped first so the
 /// file doesn't accumulate stale duplicates for a re-rebound chord.
 pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Result<PathBuf> {
-    if path.components().any(|c| c.as_os_str() == "..") {
+    validate_single_line("keybind trigger", trigger)?;
+    validate_single_line("keybind action", action)?;
+    let candidate_line = format!("keybind = {trigger}={action}\n");
+    if !Config::detect_malformed_values(&candidate_line).is_empty() {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("refusing path with `..` component: {}", path.display()),
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to persist `keybind = {trigger}={action}`: it is not a valid key binding"
+            ),
         ));
     }
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::other(format!("config path has no parent: {}", path.display()))
-    })?;
-    if !parent.exists() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = read_existing_config_text(path)?;
-    let bak_ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!("{e}.bak"))
-        .unwrap_or_else(|| "bak".to_string());
-    let bak = path.with_extension(bak_ext);
-    if !bak.exists() {
-        std::fs::write(&bak, &existing)?;
-    }
+    let edit = ConfigEdit::begin(path)?;
+    let existing = &edit.document.text;
     // Drop any existing `keybind` line whose trigger is the SAME chord — a
     // re-rebind should overwrite, not stack. Cycle 913 (audit): compare
     // SEMANTICALLY via `parse_trigger` (and split the value on the LAST `=`, like
@@ -1847,8 +1800,10 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     // literal `=` chord (`ctrl+==action`) de-dups correctly. The old first-`=`
     // string compare missed both and accumulated a stale duplicate line.
     let want_trig = keybinds::parse_trigger(trigger.trim());
-    let mut out: Vec<String> = Vec::with_capacity(existing.lines().count() + 2);
-    for line in existing.lines() {
+    let line_ending = preferred_line_ending(existing);
+    let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
+    for segment in existing.split_inclusive('\n') {
+        let (line, _) = split_line_ending(segment);
         let drop = parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
             && want_trig.is_some()
             && line
@@ -1857,28 +1812,55 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
                 .and_then(|(t, _)| keybinds::parse_trigger(t.trim()))
                 == want_trig;
         if !drop {
-            out.push(line.to_string());
+            out.push_str(segment);
         }
     }
-    if !out.is_empty() && !out.last().is_some_and(|l| l.is_empty()) {
-        out.push(String::new());
+    ensure_blank_line_before_append(&mut out, line_ending);
+    out.push_str(&format!("keybind = {trigger}={action}"));
+    out.push_str(line_ending);
+    if Config::detect_malformed_values(&out).len() > Config::detect_malformed_values(existing).len()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to persist `keybind = {trigger}={action}`: it would introduce a malformed config value"
+            ),
+        ));
     }
-    out.push(format!("keybind = {trigger}={action}"));
-    let mut text = out.join("\n");
-    if !text.ends_with('\n') {
-        text.push('\n');
+    edit.commit(&out)
+}
+
+fn split_line_ending(segment: &str) -> (&str, &str) {
+    if let Some(line) = segment.strip_suffix("\r\n") {
+        (line, "\r\n")
+    } else if let Some(line) = segment.strip_suffix('\n') {
+        (line, "\n")
+    } else {
+        (segment, "")
     }
-    let tmp = path.with_extension(format!(
-        "tmp.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp, &text)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(bak)
+}
+
+fn preferred_line_ending(text: &str) -> &'static str {
+    match text.as_bytes().iter().position(|byte| *byte == b'\n') {
+        Some(index) if index > 0 && text.as_bytes()[index - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
+fn ensure_blank_line_before_append(output: &mut String, line_ending: &str) {
+    if output.is_empty() {
+        return;
+    }
+    if !output.ends_with('\n') {
+        output.push_str(line_ending);
+    }
+    let mut before_final_ending = &output[..output.len() - 1];
+    if let Some(without_carriage_return) = before_final_ending.strip_suffix('\r') {
+        before_final_ending = without_carriage_return;
+    }
+    if !before_final_ending.ends_with('\n') {
+        output.push_str(line_ending);
+    }
 }
 
 /// Cycle 716: extract the key from a `KEY = VALUE` config line.
@@ -1893,21 +1875,309 @@ fn parse_line_key(line: &str) -> Option<&str> {
     if k.is_empty() { None } else { Some(k) }
 }
 
-/// Read an existing config file for in-place editors. Missing files are a
-/// first-write empty config; unreadable or non-UTF-8 files are hard errors so
-/// toggles/keybind edits never replace a user's existing bytes with an empty
-/// file or empty `.bak`.
-fn read_existing_config_text(path: &Path) -> std::io::Result<String> {
-    match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+#[derive(Clone, Copy)]
+enum ConfigEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+struct ConfigDocument {
+    bytes: Vec<u8>,
+    text: String,
+    encoding: ConfigEncoding,
+}
+
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+fn invalid_config_file(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("config path is not a regular file: {}", path.display()),
+    )
+}
+
+fn set_config_read_flags(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    let _ = options;
+}
+
+fn read_config_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(invalid_config_file(path));
+        }
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    set_config_read_flags(&mut options);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            #[cfg(unix)]
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                return Err(invalid_config_file(path));
+            }
+            return Err(error);
+        }
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(invalid_config_file(path));
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "config file {} is {} bytes (cap {MAX_CONFIG_BYTES})",
+                path.display(),
+                metadata.len()
+            ),
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "config file {} exceeds the {MAX_CONFIG_BYTES}-byte cap",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+impl ConfigDocument {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        match read_config_bytes(path) {
+            Ok(bytes) => Self::decode(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                bytes: Vec::new(),
+                text: String::new(),
+                encoding: ConfigEncoding::Utf8,
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn decode(bytes: Vec<u8>) -> std::io::Result<Self> {
+        let (encoding, text) = if let Some(payload) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+            (ConfigEncoding::Utf8Bom, decode_utf8_strict(payload)?)
+        } else if let Some(payload) = bytes.strip_prefix(&[0xff, 0xfe]) {
+            (ConfigEncoding::Utf16Le, decode_utf16_strict(payload, true)?)
+        } else if let Some(payload) = bytes.strip_prefix(&[0xfe, 0xff]) {
+            (
+                ConfigEncoding::Utf16Be,
+                decode_utf16_strict(payload, false)?,
+            )
+        } else {
+            (ConfigEncoding::Utf8, decode_utf8_strict(&bytes)?)
+        };
+        Ok(Self {
+            bytes,
+            text,
+            encoding,
+        })
+    }
+
+    fn encode(&self, text: &str) -> Vec<u8> {
+        match self.encoding {
+            ConfigEncoding::Utf8 => text.as_bytes().to_vec(),
+            ConfigEncoding::Utf8Bom => {
+                let mut bytes = vec![0xef, 0xbb, 0xbf];
+                bytes.extend_from_slice(text.as_bytes());
+                bytes
+            }
+            ConfigEncoding::Utf16Le | ConfigEncoding::Utf16Be => {
+                let little_endian = matches!(self.encoding, ConfigEncoding::Utf16Le);
+                let mut bytes = if little_endian {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                };
+                for unit in text.encode_utf16() {
+                    let encoded = if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    };
+                    bytes.extend_from_slice(&encoded);
+                }
+                bytes
+            }
+        }
+    }
+}
+
+struct ConfigEdit {
+    path: PathBuf,
+    backup: PathBuf,
+    document: ConfigDocument,
+    _lock: kettle_state::ExclusiveFileLock,
+}
+
+impl ConfigEdit {
+    fn begin(requested_path: &Path) -> std::io::Result<Self> {
+        if requested_path.components().any(|c| c.as_os_str() == "..") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing path with `..` component: {}",
+                    requested_path.display()
+                ),
+            ));
+        }
+        let parent = requested_path.parent().ok_or_else(|| {
+            std::io::Error::other(format!(
+                "config path has no parent: {}",
+                requested_path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent)?;
+
+        // Editing a symlink updates its resolved regular-file target instead
+        // of replacing the link itself. This preserves dotfile-manager setups.
+        let path = match std::fs::symlink_metadata(requested_path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(requested_path)?
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "config path is not a regular file: {}",
+                        requested_path.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let canonical_parent = std::fs::canonicalize(parent)?;
+                let name = requested_path.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("config path has no file name: {}", requested_path.display()),
+                    )
+                })?;
+                canonical_parent.join(name)
+            }
+            Err(error) => return Err(error),
+        };
+        let lock_path = path.with_extension(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map_or_else(
+                    || "lock".to_string(),
+                    |extension| format!("{extension}.lock"),
+                ),
+        );
+        let lock = kettle_state::ExclusiveFileLock::acquire(&lock_path)?;
+        let document = ConfigDocument::read(&path)?;
+        let backup = path.with_extension(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map_or_else(|| "bak".to_string(), |extension| format!("{extension}.bak")),
+        );
+        Ok(Self {
+            path,
+            backup,
+            document,
+            _lock: lock,
+        })
+    }
+
+    fn commit(self, text: &str) -> std::io::Result<PathBuf> {
+        // Editors outside Kettle do not honor our advisory lock. Refuse to
+        // overwrite a change made since this edit began.
+        let current = match read_config_bytes(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        if current != self.document.bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "config changed while it was being edited: {}",
+                    self.path.display()
+                ),
+            ));
+        }
+        kettle_state::atomic_create_new(
+            &self.backup,
+            &self.document.bytes,
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )?;
+        kettle_state::atomic_replace(
+            &self.path,
+            &self.document.encode(text),
+            kettle_state::AtomicWriteOptions::PRESERVE_PERMISSIONS,
+        )?;
+        Ok(self.backup)
+    }
+}
+
+fn decode_utf8_strict(bytes: &[u8]) -> std::io::Result<String> {
+    String::from_utf8(bytes.to_vec()).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("config file is not valid UTF-8: {}", error.utf8_error()),
+        )
+    })
+}
+
+fn decode_utf16_strict(bytes: &[u8], little_endian: bool) -> std::io::Result<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "UTF-16 config has an incomplete code unit",
+        ));
+    }
+    let units = bytes.chunks_exact(2).map(|pair| {
+        let pair = [pair[0], pair[1]];
+        if little_endian {
+            u16::from_le_bytes(pair)
+        } else {
+            u16::from_be_bytes(pair)
+        }
+    });
+    std::char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("config file is not valid UTF-8: {}", e.utf8_error()),
+                format!("config file contains invalid UTF-16: {error}"),
             )
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e),
+        })
+}
+
+fn validate_single_line(label: &str, value: &str) -> std::io::Result<()> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} must contain exactly one text line"),
+        ));
     }
+    Ok(())
 }
 
 /// Cycle 716: normalize a config-key name for comparison: lowercase
@@ -2355,7 +2625,6 @@ impl Config {
     /// blob before any allocation. Same defense-in-depth shape as cycle
     /// 585 (session.json) and cycle 584 (bg-image).
     pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
-        const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
         if let Ok(meta) = std::fs::metadata(path)
             && meta.len() > MAX_CONFIG_BYTES
         {
@@ -9111,6 +9380,21 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn persist_config_toggle_rejects_a_new_malformed_value_when_count_is_unchanged() {
+        let dir = tempdir_for("malformed-count");
+        let path = dir.join("config");
+        let original = "cursor-style = already-invalid\nfont-size = 14\n";
+        std::fs::write(&path, original).expect("seed");
+
+        let error = super::persist_config_toggle(&path, "cursor-style", "still-invalid")
+            .expect_err("a pre-existing diagnostic must not mask the replacement");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!path.with_extension("bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Cycle 716: key normalization treats `cursor-blink` /
     /// `cursor_blink` / `Cursor-Blink` as the same line so a user
     /// who hand-edited with underscores doesn't get a duplicate
@@ -9176,6 +9460,225 @@ cell-height = 1.2\n";
         let err =
             super::persist_config_toggle(&bad, "x", "y").expect_err("traversal should be refused");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_config_toggle_preserves_utf16_encoding_and_exact_backup() {
+        let dir = tempdir_for("toggle-utf16");
+        let path = dir.join("config");
+        let original = "# PowerShell 5.1\r\ncursor-blink = true\r\n";
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in original.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let backup = super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+        assert_eq!(std::fs::read(backup).unwrap(), bytes);
+        let written = std::fs::read(&path).unwrap();
+        assert!(written.starts_with(&[0xff, 0xfe]));
+        let decoded = super::ConfigDocument::decode(written).unwrap();
+        assert!(decoded.text.contains("cursor-blink = false"));
+        assert!(!decoded.text.contains("cursor-blink = true"));
+        assert_eq!(decoded.text, "# PowerShell 5.1\r\ncursor-blink = false\r\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_config_toggle_preserves_existing_config_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir_for("toggle-mode");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor-blink = true\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_editors_preserve_crlf_in_untouched_lines() {
+        let dir = tempdir_for("toggle-crlf");
+        let path = dir.join("config");
+        std::fs::write(
+            &path,
+            b"# keep me byte-for-byte\r\ncursor-blink = true\r\nfont-size = 14\r\n",
+        )
+        .unwrap();
+
+        super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"# keep me byte-for-byte\r\ncursor-blink = false\r\nfont-size = 14\r\n"
+        );
+
+        super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").unwrap();
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(
+            written,
+            b"# keep me byte-for-byte\r\ncursor-blink = false\r\nfont-size = 14\r\n\r\nkeybind = Ctrl+Alt+R=new_tab\r\n"
+        );
+        assert!(!written.windows(2).any(|pair| pair == b"\n\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_config_toggle_updates_symlink_target_without_replacing_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir_for("toggle-symlink");
+        let target = dir.join("managed-config");
+        let path = dir.join("config");
+        std::fs::write(&target, "cursor-blink = true\n").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let backup = super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "cursor-blink = false\n"
+        );
+        assert_eq!(
+            backup.canonicalize().unwrap(),
+            target.with_extension("bak").canonicalize().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            "cursor-blink = true\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_edit_refuses_to_overwrite_an_external_change() {
+        let dir = tempdir_for("toggle-external-change");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor-blink = true\n").unwrap();
+        let edit = super::ConfigEdit::begin(&path).unwrap();
+        std::fs::write(&path, "# changed elsewhere\ncursor-blink = true\n").unwrap();
+        let error = edit.commit("cursor-blink = false\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# changed elsewhere\ncursor-blink = true\n"
+        );
+        assert!(!path.with_extension("bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_document_rejects_oversized_and_non_regular_files() {
+        let dir = tempdir_for("bounded-config-read");
+        let oversized = dir.join("oversized-config");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(super::MAX_CONFIG_BYTES + 1)
+            .unwrap();
+        let error = super::ConfigDocument::read(&oversized)
+            .err()
+            .expect("an oversized config must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let non_regular = dir.join("config-directory");
+        std::fs::create_dir(&non_regular).unwrap();
+        let error = super::ConfigDocument::read(&non_regular)
+            .err()
+            .expect("a config directory must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_edit_refuses_an_oversized_external_replacement() {
+        let dir = tempdir_for("toggle-oversized-external-change");
+        let path = dir.join("config");
+        std::fs::write(&path, "cursor-blink = true\n").unwrap();
+        let edit = super::ConfigEdit::begin(&path).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(super::MAX_CONFIG_BYTES + 1)
+            .unwrap();
+
+        let error = edit.commit("cursor-blink = false\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            super::MAX_CONFIG_BYTES + 1
+        );
+        assert!(!path.with_extension("bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_reads_reject_symlinks_and_external_symlink_replacements() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir_for("toggle-symlink-swap");
+        let target = dir.join("target-config");
+        let link = dir.join("linked-config");
+        std::fs::write(&target, "cursor-blink = true\n").unwrap();
+        symlink(&target, &link).unwrap();
+        let error = super::ConfigDocument::read(&link)
+            .err()
+            .expect("the bounded reader must not follow a symlink");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let path = dir.join("config");
+        std::fs::write(&path, "font-size = 14\n").unwrap();
+        let edit = super::ConfigEdit::begin(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&target, &path).unwrap();
+        let error = edit.commit("font-size = 15\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "cursor-blink = true\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!path.with_extension("bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_editors_reject_line_injection() {
+        let dir = tempdir_for("toggle-line-injection");
+        let path = dir.join("config");
+        let error = super::persist_config_toggle(&path, "cursor-blink", "false\ntheme = hostile")
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let error = super::append_keybind(&path, "Ctrl+R\nfont-size = 99", "new_tab").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_keybind_rejects_unknown_action_before_commit() {
+        let dir = tempdir_for("keybind-invalid-action");
+        let path = dir.join("config");
+        std::fs::write(&path, "font-size = 14\n").unwrap();
+        let error = super::append_keybind(&path, "Ctrl+Alt+R", "not_a_real_action").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 14\n");
+        assert!(!path.with_extension("bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

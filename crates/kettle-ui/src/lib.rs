@@ -136,11 +136,10 @@ pub struct Options {
     /// `agent-server` config for THIS launch (`off`|`read-only`|`full`). `None`
     /// = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,
-    /// Cycle 875: developer session-recorder output path (`--record PATH`).
-    /// Writes an asciicast-compatible trace. Only present in `dev-record`
-    /// feature builds — absent from released / packaged binaries.
+    /// Developer session-recorder file or managed directory target. Writes an
+    /// asciicast-compatible trace. Only present in `dev-record` feature builds.
     #[cfg(feature = "dev-record")]
-    pub record: Option<std::path::PathBuf>,
+    pub record: Option<kettle_core::record::RecordingTarget>,
     /// Cycle 876: with `record`, capture RAW typed characters in `i` events
     /// (`--record-raw-input`). Off by default — keystrokes are redacted tokens,
     /// not literal characters, so typed secrets aren't written to the trace.

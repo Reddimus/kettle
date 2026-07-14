@@ -15,7 +15,8 @@
 #   ./scripts/install.sh           # cargo build --release && install
 #   ./scripts/install.sh --skip-build   # use an existing target/release/kettle
 #   ./scripts/install.sh --record-dir=$HOME/.cache/kettle/records
-#                                 # build with dev-record and record launcher sessions
+#                                 # source checkout only: build with dev-record
+#                                 # and record launcher sessions
 #   ./scripts/install.sh --prefix=/usr  # system install (needs sudo / writable prefix)
 #
 # Uninstall:
@@ -33,12 +34,13 @@ PREFIX_ARG_SET=0
 SKIP_BUILD=0
 UNINSTALL=0
 RECORD_DIR=""
+RECORD_DIR_ARG_SET=0
 
 for arg in "$@"; do
   case "$arg" in
     --prefix=*) PREFIX="${arg#--prefix=}"; PREFIX_ARG_SET=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
-    --record-dir=*) RECORD_DIR="${arg#--record-dir=}" ;;
+    --record-dir=*) RECORD_DIR="${arg#--record-dir=}"; RECORD_DIR_ARG_SET=1 ;;
     --uninstall) UNINSTALL=1 ;;
     -h|--help)
       sed -n '2,/^set/p' "$0" | sed 's/^# \{0,1\}//;/^set/d'
@@ -46,6 +48,11 @@ for arg in "$@"; do
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [[ "${RECORD_DIR_ARG_SET}" -eq 1 && -z "${RECORD_DIR}" ]]; then
+  echo "error: --record-dir requires a non-empty directory" >&2
+  exit 2
+fi
 
 # If this script is the installed helper at <prefix>/share/kettle/install.sh,
 # default to that prefix. This keeps `.../share/kettle/install.sh --uninstall`
@@ -75,6 +82,17 @@ else
   TARBALL_MODE=0
   REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
   BIN_SRC="${REPO_ROOT}/target/release/kettle"
+fi
+
+if [[ "${TARBALL_MODE}" -eq 1 && -n "${RECORD_DIR}" ]]; then
+  echo "error: --record-dir requires a source checkout and a dev-record feature build" >&2
+  exit 2
+fi
+
+# Desktop files require absolute executable/icon paths. Resolve a relative
+# prefix against the invocation directory while preserving its punctuation.
+if [[ "${PREFIX}" != /* ]]; then
+  PREFIX="${PWD}/${PREFIX}"
 fi
 
 BIN_DIR="${PREFIX}/bin"
@@ -145,6 +163,67 @@ if [[ ! -x "${BIN_SRC}" ]]; then
   exit 1
 fi
 
+validate_desktop_value() {
+  local label=$1
+  local value=$2
+  if [[ "${value}" == *$'\n'* ]] \
+      || printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    echo "error: ${label} contains a control character unsupported by Desktop Entry files" >&2
+    exit 1
+  fi
+  if command -v iconv >/dev/null 2>&1 \
+      && ! printf '%s' "${value}" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+    echo "error: ${label} is not valid UTF-8" >&2
+    exit 1
+  fi
+}
+validate_desktop_value "install prefix" "${PREFIX}"
+validate_desktop_value "recording directory" "${RECORD_DIR}"
+if [[ "${BIN_DIR}/kettle" == *"="* ]]; then
+  echo "error: Desktop Entry executable paths cannot contain '=': ${BIN_DIR}/kettle" >&2
+  exit 1
+fi
+
+if [[ -n "${RECORD_DIR}" ]]; then
+  BIN_HELP=$("${BIN_SRC}" --help 2>/dev/null) || {
+    echo "error: could not inspect the selected kettle binary for dev-record support" >&2
+    exit 1
+  }
+  if ! grep -q -- '--record-dir' <<<"${BIN_HELP}"; then
+    echo "error: --record-dir requires a kettle binary built with --features dev-record" >&2
+    echo "       rebuild it or omit --skip-build" >&2
+    exit 1
+  fi
+  if [[ -L "${RECORD_DIR}" ]]; then
+    echo "error: recording directory must not be a symbolic link: ${RECORD_DIR}" >&2
+    exit 1
+  fi
+  if [[ -e "${RECORD_DIR}" && ! -d "${RECORD_DIR}" ]]; then
+    echo "error: recording path is not a directory: ${RECORD_DIR}" >&2
+    exit 1
+  fi
+  mkdir -p -- "${RECORD_DIR}"
+  if [[ -L "${RECORD_DIR}" || ! -d "${RECORD_DIR}" ]]; then
+    echo "error: recording directory changed while it was being created: ${RECORD_DIR}" >&2
+    exit 1
+  fi
+  if ! exec {RECORD_DIR_FD}<"${RECORD_DIR}"; then
+    echo "error: could not open recording directory: ${RECORD_DIR}" >&2
+    exit 1
+  fi
+  RECORD_DIR_HANDLE="/proc/$$/fd/${RECORD_DIR_FD}"
+  RECORD_DIR_ID=$(stat -Lc '%d:%i' -- "${RECORD_DIR}")
+  RECORD_DIR_HANDLE_ID=$(stat -Lc '%d:%i' -- "${RECORD_DIR_HANDLE}")
+  if [[ -L "${RECORD_DIR}" || ! -d "${RECORD_DIR_HANDLE}" || "${RECORD_DIR_ID}" != "${RECORD_DIR_HANDLE_ID}" ]]; then
+    exec {RECORD_DIR_FD}<&-
+    echo "error: recording directory changed while it was being opened: ${RECORD_DIR}" >&2
+    exit 1
+  fi
+  chmod 700 -- "${RECORD_DIR_HANDLE}"
+  RECORD_DIR=$(readlink -f -- "${RECORD_DIR_HANDLE}")
+  exec {RECORD_DIR_FD}<&-
+fi
+
 echo "Installing into ${PREFIX}…"
 
 # 1) Binary.
@@ -186,17 +265,51 @@ done
 ICON_ABS="${ICON_BASE}/256x256/apps/kettle.png"
 BIN_ABS="${BIN_DIR}/kettle"
 sed_repl() {
-  printf '%s' "$1" | sed 's/[&#]/\\&/g'
+  printf '%s' "$1" | sed 's/[\\&#]/\\&/g'
 }
-BIN_REPL=$(sed_repl "${BIN_ABS}")
-ICON_REPL=$(sed_repl "${ICON_ABS}")
+desktop_string_escape() {
+  # Desktop Entry string/iconstring values decode their own backslash escape
+  # layer before Exec argument parsing. Encode that layer independently.
+  printf '%s' "$1" | sed 's/\\/\\\\/g'
+}
+desktop_exec_quote() {
+  # First escape the quoted Exec argument grammar, then encode the surrounding
+  # string-value grammar. One literal backslash therefore becomes four in the
+  # desktop file, as required by the Desktop Entry specification.
+  local escaped
+  # These sed replacements intentionally contain literals.
+  # shellcheck disable=SC2016
+  escaped=$(printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g' \
+    -e 's/`/\\`/g' \
+    -e 's/\$/\\$/g' \
+    -e 's/%/%%/g')
+  printf '"%s"' "$(desktop_string_escape "${escaped}")"
+}
+require_desktop_template_line() {
+  local expected=$1
+  local count
+  count=$(awk -v expected="${expected}" '$0 == expected { count++ } END { print count + 0 }' "${APP_DIR}/kettle.desktop")
+  if [[ "${count}" -ne 1 ]]; then
+    echo "error: desktop template must contain exactly one ${expected} entry (found ${count})" >&2
+    exit 1
+  fi
+}
+require_desktop_template_line 'Exec=kettle'
+require_desktop_template_line 'TryExec=kettle'
+require_desktop_template_line 'Icon=kettle'
+BIN_EXEC=$(desktop_exec_quote "${BIN_ABS}")
+BIN_REPL=$(sed_repl "${BIN_EXEC}")
+BIN_VALUE_REPL=$(sed_repl "$(desktop_string_escape "${BIN_ABS}")")
+ICON_REPL=$(sed_repl "$(desktop_string_escape "${ICON_ABS}")")
 sed -i "s#^Exec=kettle\$#Exec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
-sed -i "s#^TryExec=kettle\$#TryExec=${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
+sed -i "s#^TryExec=kettle\$#TryExec=${BIN_VALUE_REPL}#" "${APP_DIR}/kettle.desktop"
 sed -i "s#^Icon=kettle\$#Icon=${ICON_REPL}#" "${APP_DIR}/kettle.desktop"
 if [[ -n "${RECORD_DIR}" ]]; then
-  mkdir -p "${RECORD_DIR}"
-  REC_REPL=$(sed_repl "${RECORD_DIR}")
-  sed -i "s#^Exec=.*\$#Exec=/usr/bin/env KETTLE_RECORD=${REC_REPL} ${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
+  RECORD_ARG=$(desktop_exec_quote "KETTLE_RECORD_DIR=${RECORD_DIR}")
+  RECORD_REPL=$(sed_repl "${RECORD_ARG}")
+  sed -i "s#^Exec=.*\$#Exec=/usr/bin/env ${RECORD_REPL} ${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
 fi
 
 # 3b) Man page (cycle 279) — `man kettle` works after install if
@@ -239,17 +352,36 @@ case "$(uname -m)" in
 esac
 KETTLE_VERSION=$("${BIN_DIR}/kettle" --version 2>/dev/null | awk 'NR == 1 { print $2 }')
 KETTLE_VERSION=${KETTLE_VERSION:-unknown}
-cat > "${PREFIX}/share/kettle/install.json" <<EOF
+if [[ -n "${RECORD_DIR}" ]]; then
+  INSTALL_CHANNEL="local-dev-record"
+elif [[ "${TARBALL_MODE}" -eq 1 ]]; then
+  INSTALL_CHANNEL="stable"
+else
+  INSTALL_CHANNEL="local-dev"
+fi
+MARKER_PATH="${PREFIX}/share/kettle/install.json"
+MARKER_TMP=$(mktemp "${PREFIX}/share/kettle/.install.json.tmp.XXXXXX")
+trap 'rm -f -- "${MARKER_TMP:-}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+chmod 600 "${MARKER_TMP}"
+cat > "${MARKER_TMP}" <<EOF
 {
   "schema": 1,
   "product": "kettle",
   "managed_by": "kettle-installer",
-  "channel": "stable",
+  "channel": "${INSTALL_CHANNEL}",
   "target": "${UPDATE_TARGET}",
   "version": "${KETTLE_VERSION}"
 }
 EOF
-chmod 644 "${PREFIX}/share/kettle/install.json"
+chmod 644 "${MARKER_TMP}"
+# Rename replaces a pre-existing leaf symlink instead of following it. `-T`
+# also refuses to reinterpret a malicious directory at the marker path as a
+# destination directory.
+mv -fT -- "${MARKER_TMP}" "${MARKER_PATH}"
+MARKER_TMP=""
+trap - EXIT INT TERM
 
 # 4) Refresh caches so GNOME/KDE pick the new entry up immediately.
 # Both tools no-op silently if absent.

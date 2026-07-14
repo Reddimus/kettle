@@ -352,17 +352,18 @@ Remove-Item -ErrorAction SilentlyContinue $versionTmp
 # Explicit ownership marker consumed by `kettle update`. Package-manager,
 # cargo-install, and manually copied binaries do not carry this marker and are
 # therefore never overwritten by the self-updater.
+$installChannel = if ($sourceMode -eq 'zip') { 'stable' } else { 'local-dev' }
 $installMarker = [ordered]@{
     schema = 1
     product = "kettle"
     managed_by = "kettle-installer"
-    channel = "stable"
+    channel = $installChannel
     target = "x86_64-pc-windows-msvc"
     version = $kettleVersion
 } | ConvertTo-Json
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $Prefix ".kettle-install.json"), $installMarker + "`n", $utf8NoBom)
-Write-Output "  wrote authenticated-update ownership marker"
+Write-Output "  wrote authenticated-update ownership marker ($installChannel)"
 
 # Portable mode short-circuits the system-touching steps.
 if ($portable) {

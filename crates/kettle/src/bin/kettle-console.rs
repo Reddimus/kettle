@@ -131,7 +131,7 @@ fn takes_one_value(argument: &str) -> bool {
             | "-T"
             | "--remote-file"
             | "--lua-script"
-    ) || (cfg!(feature = "dev-record") && name == "--record")
+    ) || (cfg!(feature = "dev-record") && matches!(name, "--record" | "--record-dir"))
         || (name.starts_with("-d") && name.len() > 2)
         || (name.starts_with("-T") && name.len() > 2)
 }
@@ -183,5 +183,18 @@ mod tests {
         assert!(!should_wait(["--config", "update"]));
         assert!(!should_wait(["-e", "pwsh"]));
         assert!(!should_wait(["-e", "update"]));
+    }
+
+    #[cfg(feature = "dev-record")]
+    #[test]
+    fn recording_directory_is_classified_as_a_gui_value_option() {
+        assert!(!should_wait(["--record-dir", "C:\\recordings"]));
+        assert!(!should_wait(["--record-dir=C:\\recordings"]));
+        assert!(!should_wait([
+            "--record-dir",
+            "C:\\recordings",
+            "--record-raw-input"
+        ]));
+        assert!(should_wait(["--record-dir"]));
     }
 }

@@ -250,7 +250,7 @@ Terminator's. Each key falls into one of three buckets:
 | Key | Rationale |
 |---|---|
 | `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
-| `http-proxy` | The kettle binary makes no HTTP requests, so a proxy setting is meaningless. (The install scripts `install-online.sh` use system curl — kettle the binary itself never fetches HTTP) |
+| `http-proxy` | Parsed for Terminator/plugin compatibility but not consumed today. Kettle's authenticated self-updater does make HTTPS requests, but its feed is process-wide and intentionally does not inherit this per-profile terminal setting |
 | `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
 
 #### Genuine future work — parsed for forward-compat
@@ -284,13 +284,25 @@ config file in `$EDITOR` for everything else:
 
 Each click both mutates the running `Config` (the change takes effect
 immediately) and atomically rewrites the matching line in the config file via
-the `kettle_config::persist_config_toggle` helper. The atomic write preserves every
-existing comment, blank line, and key order byte-for-byte — only the targeted
-`key = value` line is replaced (or appended if it doesn't exist yet).
+the `kettle_config::persist_config_toggle` helper. Non-target comments, blank
+lines, and key order are preserved; the targeted line is replaced (and
+duplicate assignments for that key are collapsed), or appended if it does not
+exist. The writer preserves the file's existing LF/CRLF convention, UTF-8 BOM
+or UTF-16 encoding, and Unix permissions. A symlinked config is resolved once
+and its regular target is replaced, leaving the dotfile-manager link intact.
 
-On the first toggle in any session, kettle saves a snapshot of the pre-edit
-file at `~/.config/kettle/config.bak` so you can roll back to your hand-edited
-state.
+The complete read, validation, backup, and replacement transaction holds a
+per-target advisory lock, which serializes Kettle's own writers. Immediately
+before staging, Kettle compares the current bytes with those originally read
+and refuses an external change observed by that comparison. An editor that does
+not honor the lock can still race after the comparison; portable filesystems do
+not provide a content-based compare-and-swap. Files over 1 MiB, non-regular
+targets, and an in-app edit that introduces additional config diagnostics are
+refused; unrelated diagnostics already present in the hand-edited file do not
+block a valid preference change. The first successful in-app edit creates an exact,
+encoding-preserving `<resolved-config>.bak` if it does not already exist (the
+default path is `~/.config/kettle/config.bak`); later edits never replace that
+snapshot.
 
 ## Keybind grammar
 

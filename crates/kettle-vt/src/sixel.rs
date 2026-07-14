@@ -2,7 +2,8 @@
 //! sixel`, libsixel and friends. Modelled on the Contour state machine
 //! (`contour/src/vtbackend/SixelParser.cpp`) and vt100.net chapter 14.
 
-use crate::image::ImageData;
+use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
+use crate::image::{ImageData, rgba_bytes};
 
 const MAX_DIM: usize = 8192;
 
@@ -90,16 +91,20 @@ struct SixelCanvas {
     cap_h: usize,
     width: usize,
     height: usize,
+    budget: GraphicsBudget,
+    reservation: Option<GraphicsReservation>,
 }
 
 impl SixelCanvas {
-    fn new() -> Self {
+    fn new(budget: GraphicsBudget) -> Self {
         SixelCanvas {
             buf: Vec::new(),
             cap_w: 0,
             cap_h: 0,
             width: 0,
             height: 0,
+            budget,
+            reservation: None,
         }
     }
 
@@ -119,7 +124,20 @@ impl SixelCanvas {
         }
         let ncw = grow_cap(self.cap_w, new_w);
         let nch = grow_cap(self.cap_h, new_h);
-        let mut nb = vec![0u8; ncw * nch * 4];
+        let bytes = ncw.checked_mul(nch).and_then(|v| v.checked_mul(4));
+        let Some(bytes) = bytes.filter(|&n| n <= self.budget.limits().image_bytes) else {
+            return false;
+        };
+        // Hold the old canvas reservation until the new allocation has
+        // succeeded, so geometric growth's transient old+new peak is counted.
+        let Some(reservation) = self.budget.reserve_image_cpu(bytes) else {
+            return false;
+        };
+        let mut nb = Vec::new();
+        if nb.try_reserve_exact(bytes).is_err() {
+            return false;
+        }
+        nb.resize(bytes, 0);
         // Copy only the rows/cols that hold data (the old logical extent), at
         // the old stride → new stride. The rest of `nb` stays zero.
         let row_bytes = self.width * 4;
@@ -129,6 +147,7 @@ impl SixelCanvas {
             nb[dst..dst + row_bytes].copy_from_slice(&self.buf[src..src + row_bytes]);
         }
         self.buf = nb;
+        self.reservation = Some(reservation);
         self.cap_w = ncw;
         self.cap_h = nch;
         self.width = new_w;
@@ -155,28 +174,45 @@ impl SixelCanvas {
 
     /// Compact the used `width × height` region (stride `cap_w`) into a tight
     /// `width × height` RGBA buffer and build the image. One final O(W·H) pass.
-    fn into_image(self) -> Option<ImageData> {
+    fn into_image(mut self) -> Option<ImageData> {
         if self.cap_w == self.width && self.cap_h == self.height {
-            return ImageData::new(self.width as u32, self.height as u32, self.buf);
+            let reservation = self.reservation.take()?;
+            return ImageData::from_reserved(
+                self.width as u32,
+                self.height as u32,
+                self.buf,
+                reservation,
+            );
         }
-        let mut tight = vec![0u8; self.width.saturating_mul(self.height).saturating_mul(4)];
+        let bytes = rgba_bytes(self.width as u32, self.height as u32)?;
+        let reservation = self.budget.reserve_image_cpu(bytes)?;
+        let mut tight = Vec::new();
+        tight.try_reserve_exact(bytes).ok()?;
+        tight.resize(bytes, 0);
         let row_bytes = self.width * 4;
         for row in 0..self.height {
             let src = row * self.cap_w * 4;
             let dst = row * self.width * 4;
             tight[dst..dst + row_bytes].copy_from_slice(&self.buf[src..src + row_bytes]);
         }
-        ImageData::new(self.width as u32, self.height as u32, tight)
+        ImageData::from_reserved(self.width as u32, self.height as u32, tight, reservation)
     }
 }
 
 /// Decode the body of a Sixel DCS (the bytes after the `q`, before `ST`).
 pub fn decode(data: &[u8]) -> Option<ImageData> {
+    decode_with_budget(data, &GraphicsBudget::default())
+}
+
+pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option<ImageData> {
+    if data.len() > budget.limits().sequence_bytes {
+        return None;
+    }
     let mut palette = default_palette();
     let mut color = 1usize;
     let mut x = 0usize;
     let mut band_y = 0usize;
-    let mut canvas = SixelCanvas::new();
+    let mut canvas = SixelCanvas::new(budget.clone());
 
     let mut i = 0;
     let n = data.len();

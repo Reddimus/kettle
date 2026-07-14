@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
+use kettle_core::{GraphicsBudget, GraphicsReservation};
 
 /// One pinned glyph quad. `kind` selects the atlas: 0 = color, 1 = mask.
 #[repr(C)]
@@ -124,17 +125,32 @@ struct Atlas {
     cursor_x: u32,
     shelf_y: u32,
     shelf_h: u32,
+    budget: GraphicsBudget,
+    _gpu: GraphicsReservation,
 }
 
 /// 1px gutter so neighboring glyphs can never sample into each other.
 const GUTTER: u32 = 1;
 
 impl Atlas {
-    fn new(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, bpp: u32) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        label: &str,
+        format: wgpu::TextureFormat,
+        bpp: u32,
+        budget: GraphicsBudget,
+    ) -> Option<Self> {
         let (width, height) = (1024u32, 512u32);
+        if width > device.limits().max_texture_dimension_2d
+            || height > device.limits().max_texture_dimension_2d
+        {
+            return None;
+        }
+        let bytes = texture_bytes(width, height, bpp)?;
+        let gpu = budget.reserve_gpu(bytes)?;
         let tex = Self::make_tex(device, label, format, width, height);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        Self {
+        Some(Self {
             tex,
             view,
             format,
@@ -144,7 +160,9 @@ impl Atlas {
             cursor_x: 0,
             shelf_y: 0,
             shelf_h: 0,
-        }
+            budget,
+            _gpu: gpu,
+        })
     }
 
     fn make_tex(
@@ -175,18 +193,18 @@ impl Atlas {
     /// Reserve a `w×h` rectangle (with gutter). `None` ⇒ the current texture is
     /// out of vertical room and the caller must `grow`.
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        let (gw, gh) = (w + GUTTER, h + GUTTER);
-        if self.cursor_x + gw > self.width {
+        let (gw, gh) = (w.checked_add(GUTTER)?, h.checked_add(GUTTER)?);
+        if self.cursor_x.checked_add(gw)? > self.width {
             // Next shelf.
             self.cursor_x = 0;
-            self.shelf_y += self.shelf_h;
+            self.shelf_y = self.shelf_y.checked_add(self.shelf_h)?;
             self.shelf_h = 0;
         }
-        if self.shelf_y + gh > self.height {
+        if self.shelf_y.checked_add(gh)? > self.height {
             return None;
         }
         let (x, y) = (self.cursor_x, self.shelf_y);
-        self.cursor_x += gw;
+        self.cursor_x = self.cursor_x.checked_add(gw)?;
         self.shelf_h = self.shelf_h.max(gh);
         Some((x, y))
     }
@@ -200,10 +218,16 @@ impl Atlas {
         label: &str,
         max_dim: u32,
     ) -> bool {
-        let new_h = (self.height * 2).min(max_dim);
+        let new_h = self.height.checked_mul(2).unwrap_or(max_dim).min(max_dim);
         if new_h <= self.height {
             return false;
         }
+        let Some(bytes) = texture_bytes(self.width, new_h, self.bpp) else {
+            return false;
+        };
+        let Some(gpu) = self.budget.reserve_gpu(bytes) else {
+            return false;
+        };
         let new_tex = Self::make_tex(device, label, self.format, self.width, new_h);
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("kettle-glyph-atlas-grow"),
@@ -231,10 +255,18 @@ impl Atlas {
         self.view = new_tex.create_view(&wgpu::TextureViewDescriptor::default());
         self.tex = new_tex;
         self.height = new_h;
+        self._gpu = gpu;
         true
     }
 
     fn write(&self, queue: &wgpu::Queue, x: u32, y: u32, w: u32, h: u32, data: &[u8]) {
+        let Some(expected) = texture_bytes(w, h, self.bpp) else {
+            return;
+        };
+        if data.len() != expected {
+            log::warn!("skipping malformed glyph bitmap: byte length mismatch");
+            return;
+        }
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.tex,
@@ -255,6 +287,14 @@ impl Atlas {
             },
         );
     }
+}
+
+fn texture_bytes(width: u32, height: u32, bytes_per_pixel: u32) -> Option<usize> {
+    u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(u64::from(bytes_per_pixel))?
+        .try_into()
+        .ok()
 }
 
 #[repr(C)]
@@ -356,6 +396,8 @@ pub struct GlyphPipeline {
     max_dim: u32,
     instances: wgpu::Buffer,
     capacity: usize,
+    instance_gpu: GraphicsReservation,
+    budget: GraphicsBudget,
     count: u32,
     /// Surface size [w, h] in physical px from the last `upload`, used to clamp
     /// per-pane scissor rects in `draw`.
@@ -363,7 +405,17 @@ pub struct GlyphPipeline {
 }
 
 impl GlyphPipeline {
+    #[cfg(test)]
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_with_budget(device, format, GraphicsBudget::default())
+            .expect("fixed glyph pipeline allocations fit the default GPU budget")
+    }
+
+    pub fn new_with_budget(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+    ) -> Option<Self> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-glyph"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -375,13 +427,20 @@ impl GlyphPipeline {
         } else {
             wgpu::TextureFormat::Rgba8Unorm
         };
-        let color = Atlas::new(device, "kettle-glyph-color-atlas", color_format, 4);
+        let color = Atlas::new(
+            device,
+            "kettle-glyph-color-atlas",
+            color_format,
+            4,
+            budget.clone(),
+        )?;
         let mask = Atlas::new(
             device,
             "kettle-glyph-mask-atlas",
             wgpu::TextureFormat::R8Unorm,
             1,
-        );
+            budget.clone(),
+        )?;
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-glyph-screen"),
@@ -486,14 +545,16 @@ impl GlyphPipeline {
             multiview_mask: None,
             cache: None,
         });
-        let capacity = 8192;
+        let capacity: usize = 8192;
+        let instance_bytes = capacity.checked_mul(std::mem::size_of::<GlyphInstance>())?;
+        let instance_gpu = budget.reserve_gpu(instance_bytes)?;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-glyph-instances"),
             size: (capacity * std::mem::size_of::<GlyphInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self {
+        Some(Self {
             pipeline,
             atlas_bgl,
             sampler,
@@ -506,9 +567,11 @@ impl GlyphPipeline {
             max_dim: device.limits().max_texture_dimension_2d,
             instances,
             capacity,
+            instance_gpu,
+            budget,
             count: 0,
             screen: [0.0; 2],
-        }
+        })
     }
 
     fn make_bg(
@@ -557,6 +620,13 @@ impl GlyphPipeline {
         if let Some(slot) = self.slots.get(&key) {
             return *slot;
         }
+        // Once the append-only atlases are saturated, caching an unbounded
+        // stream of misses would still grow this map. Refuse new keys at a
+        // deterministic ceiling; existing cached glyphs remain available.
+        const MAX_GLYPH_SLOTS: usize = 131_072;
+        if self.slots.len() >= MAX_GLYPH_SLOTS {
+            return None;
+        }
         let slot = self.rasterize_into_atlas(device, queue, rasterize);
         self.slots.insert(key, slot);
         slot
@@ -578,12 +648,16 @@ impl GlyphPipeline {
         } else {
             (&mut self.mask, 1u32, "kettle-glyph-mask-atlas")
         };
+        if texture_bytes(g.width, g.height, atlas.bpp) != Some(g.data.len()) {
+            log::warn!("skipping malformed glyph bitmap: byte length mismatch");
+            return None;
+        }
         // The atlas only grows in HEIGHT; a glyph wider than the (fixed) atlas
         // width can never be packed, and writing it would copy past the texture's
         // right edge (a wgpu validation error → with panic=abort, a process
         // abort). Skip it instead. Unreachable in practice (needs a single glyph
         // > ~1024 physical px, i.e. an absurd font size), but a GPU-input guard.
-        if g.width + GUTTER > atlas.width {
+        if g.width.checked_add(GUTTER).is_none_or(|w| w > atlas.width) {
             log::warn!(
                 "kettle glyph {}px wider than the {}px atlas — skipping",
                 g.width,
@@ -649,13 +723,28 @@ impl GlyphPipeline {
             }),
         );
         if data.len() > self.capacity {
-            self.capacity = data.len().next_power_of_two();
-            self.instances = device.create_buffer(&wgpu::BufferDescriptor {
+            let Some(capacity) = data.len().checked_next_power_of_two() else {
+                self.count = 0;
+                return;
+            };
+            let Some(bytes) = capacity.checked_mul(std::mem::size_of::<GlyphInstance>()) else {
+                self.count = 0;
+                return;
+            };
+            let Some(gpu) = self.budget.reserve_gpu(bytes) else {
+                log::warn!("glyph instance buffer growth exceeds GPU graphics budget");
+                self.count = 0;
+                return;
+            };
+            let instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kettle-glyph-instances"),
-                size: (self.capacity * std::mem::size_of::<GlyphInstance>()) as u64,
+                size: bytes as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            self.instances = instances;
+            self.capacity = capacity;
+            self.instance_gpu = gpu;
         }
         if !data.is_empty() {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(data));
@@ -727,6 +816,14 @@ impl GlyphPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_byte_math_is_checked_at_the_per_texture_boundary() {
+        let limit = kettle_core::GraphicsLimits::default().image_bytes;
+        assert_eq!(texture_bytes(8192, 2048, 4), Some(limit));
+        assert_eq!(texture_bytes(8192, 2049, 4), Some(limit + 8192 * 4));
+        assert_eq!(texture_bytes(u32::MAX, u32::MAX, 4), None);
+    }
 
     /// The instance layout the vertex attributes index by offset. If a field is
     /// reordered/resized without updating `vertex_attr_array!`, the GPU reads

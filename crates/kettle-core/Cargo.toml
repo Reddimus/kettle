@@ -16,8 +16,9 @@ workspace = true
 # Cycle 924 (agent-first A1): the asciicast v2 session recorder (`record.rs`),
 # promoted here from kettle-ui's `dev-record`. OFF by default; enabled by
 # kettle-ui's `dev-record` feature (GUI `--record`) and unconditionally by the
-# bin crate (`kettle exec --record`). Pulls in serde_json for JSON escaping.
-asciicast = ["dep:serde_json", "dep:log"]
+# bin crate (`kettle exec --record`). Pulls in serde_json for JSON escaping and
+# fs4 for cross-platform active-cast locks.
+asciicast = ["dep:serde_json", "dep:log", "dep:fs4"]
 
 [dependencies]
 alacritty_terminal = "0.26.0"
@@ -28,21 +29,30 @@ portable-pty = "0.9.0"
 regex.workspace = true
 # Cycle 924: only used by the `asciicast` recorder (optional) + its JSON
 # escaping; a dev-dependency too (the cycle-911 replay test parses .cast).
+fs4 = { version = "1.1", optional = true }
 log = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # Dropdown-parity cycle: Git-for-Windows discovery via the registry
 # (HKLM/HKCU `SOFTWARE\GitForWindows\InstallPath`). Zero new lockfile
 # entries — winreg 0.10 is already in the graph as portable-pty's own dep.
 winreg = "0.56"
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 # Cycle 911: parse asciicast v2 (.cast) traces in the e2e replay test — the
 # format record.rs writes — so a recorded session can be replayed through
 # the VT pipeline deterministically. Dev-only; not in the shipped crate.
-serde_json = "1"
 # Cycle 924: `record.rs` is compiled under `cfg(test)` (feature off) so its
 # unit tests + the replay test run in the plain suite; it calls `log::warn!`,
 # so `log` must be present at test time even when `asciicast` is off.
+fs4 = "1.1"
 log.workspace = true
+serde_json = "1"
+tempfile = "3"

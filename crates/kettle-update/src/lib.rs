@@ -13,8 +13,9 @@ pub use feed::{
     verify_manifest,
 };
 pub use install::{
-    InstallOutcome, ManagedInstall, detect_managed_install, install_update, marker_json,
-    write_atomic_file,
+    InstallDisposition, InstallOutcome, ManagedInstall, ProcessStart, RunningInstallGuard,
+    detect_managed_install, install_update, is_pending_update_helper_invocation, marker_json,
+    prepare_process_start, run_pending_update_helper, write_atomic_file,
 };
 
 /// Stable release feed published as GitHub release assets.

@@ -32,6 +32,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -47,6 +48,8 @@ const SETTLE: Duration = Duration::from_millis(60);
 pub const EXIT_TIMEOUT: i32 = 124;
 /// Exit code for an internal kettle error (spawn failure, no PTY, bad args).
 pub const EXIT_INTERNAL: i32 = 125;
+/// Internal exit status when an MCP request cancels a running headless child.
+pub const EXIT_CANCELLED: i32 = 130;
 
 /// How the child's output is rendered to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,58 +78,117 @@ pub struct ExecOpts {
     pub forward_stdin: bool,
 }
 
-/// A streaming ANSI stripper that is correct across read boundaries.
-///
-/// `kettle_core::strip_ansi_bytes` is a whole-buffer function that drops a bare
-/// trailing `ESC` and can't see a sequence split across two reads. For a live
-/// stream we must hold back any incomplete trailing escape sequence until its
-/// terminator arrives in the next chunk. This state machine does exactly that:
-/// it emits stripped text for every *complete* run and carries an in-progress
-/// escape across `push` calls.
-#[derive(Default)]
+/// Maximum unterminated OSC/DCS/APC/PM/SOS payload discarded before the
+/// stripper resynchronizes. The parser stores only finite state, but a bound is
+/// still required so a malicious child cannot suppress all later plaintext.
+const MAX_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Default)]
 pub struct AnsiStripper {
-    /// Bytes of an escape sequence seen so far that has not yet terminated.
-    /// Empty when we are not inside a sequence.
-    pending: Vec<u8>,
+    state: StripState,
+}
+
+#[derive(Debug, Default)]
+enum StripState {
+    #[default]
+    Ground,
+    Escape,
+    EscapeIntermediate {
+        remaining: usize,
+    },
+    Csi {
+        remaining: usize,
+    },
+    String {
+        bel_terminated: bool,
+        escaped: bool,
+        remaining: usize,
+    },
 }
 
 impl AnsiStripper {
     /// Feed a chunk; append the stripped plaintext to `out`.
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         for &b in input {
-            if self.pending.is_empty() {
-                if b == 0x1b {
-                    self.pending.push(b);
-                } else {
-                    out.push(b);
+            let state = std::mem::take(&mut self.state);
+            self.state = match state {
+                StripState::Ground => match b {
+                    0x1b => StripState::Escape,
+                    0x9b => Self::csi(),
+                    0x9d => Self::string(true),
+                    0x90 | 0x98 | 0x9e | 0x9f => Self::string(false),
+                    0x9c => StripState::Ground,
+                    _ => {
+                        out.push(b);
+                        StripState::Ground
+                    }
+                },
+                StripState::Escape => match b {
+                    b'[' => Self::csi(),
+                    b']' => Self::string(true),
+                    b'P' | b'X' | b'^' | b'_' => Self::string(false),
+                    0x20..=0x2f => StripState::EscapeIntermediate {
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    0x1b => StripState::Escape,
+                    _ => StripState::Ground,
+                },
+                StripState::EscapeIntermediate { remaining } => {
+                    if b == 0x1b {
+                        StripState::Escape
+                    } else if (0x30..=0x7e).contains(&b) || remaining <= 1 {
+                        StripState::Ground
+                    } else {
+                        StripState::EscapeIntermediate {
+                            remaining: remaining - 1,
+                        }
+                    }
                 }
-                continue;
-            }
-            // Inside an escape sequence: accumulate and test for termination.
-            self.pending.push(b);
-            if self.sequence_complete() {
-                self.pending.clear();
-            }
+                StripState::Csi { remaining } => {
+                    if b == 0x1b {
+                        StripState::Escape
+                    } else if (0x40..=0x7e).contains(&b) || remaining <= 1 {
+                        StripState::Ground
+                    } else {
+                        StripState::Csi {
+                            remaining: remaining - 1,
+                        }
+                    }
+                }
+                StripState::String {
+                    bel_terminated,
+                    escaped,
+                    remaining,
+                } => {
+                    if b == 0x9c
+                        || (bel_terminated && b == 0x07)
+                        || (escaped && b == b'\\')
+                        || remaining <= 1
+                    {
+                        StripState::Ground
+                    } else {
+                        StripState::String {
+                            bel_terminated,
+                            escaped: b == 0x1b,
+                            remaining: remaining - 1,
+                        }
+                    }
+                }
+            };
         }
     }
 
-    /// Has `self.pending` reached a complete escape sequence?
-    fn sequence_complete(&self) -> bool {
-        let p = &self.pending;
-        // Need at least ESC + introducer to classify.
-        if p.len() < 2 {
-            return false;
+    fn csi() -> StripState {
+        StripState::Csi {
+            remaining: MAX_CONTROL_SEQUENCE_BYTES,
         }
-        match p[1] {
-            // CSI: ESC [ params… final(0x40..=0x7e)
-            b'[' => p.len() >= 3 && (0x40..=0x7e).contains(&p[p.len() - 1]),
-            // OSC: ESC ] … (BEL | ESC \)
-            b']' => {
-                let last = p[p.len() - 1];
-                last == 0x07 || (p.len() >= 4 && p[p.len() - 2] == 0x1b && last == b'\\')
-            }
-            // Any other single-char ESC X — complete at 2 bytes.
-            _ => true,
+    }
+
+    fn string(bel_terminated: bool) -> StripState {
+        StripState::String {
+            bel_terminated,
+            escaped: false,
+            remaining: MAX_CONTROL_SEQUENCE_BYTES,
         }
     }
 }
@@ -142,6 +204,17 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
 /// tail-capped (1 MiB) child output in the requested mode (strip-ansi
 /// recommended for agent assertions).
 pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
+    run_exec_capture_inner(opts, None)
+}
+
+/// Capture a headless command while observing an MCP cancellation flag. When
+/// cancellation is requested, the child is killed, output is settle-drained,
+/// and any recorder is finalized before returning [`EXIT_CANCELLED`].
+pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (i32, String) {
+    run_exec_capture_inner(opts, Some(cancelled))
+}
+
+fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
     /// A sink that keeps only the last `cap` bytes (so an unbounded producer
     /// can't exhaust memory; agents want "what just happened" anyway).
     struct TailSink {
@@ -165,7 +238,7 @@ pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
         buf: Vec::new(),
         cap: 1024 * 1024,
     };
-    let code = run_exec_with(opts, &default_size_probe, &mut sink);
+    let code = run_exec_with_cancellation(opts, &default_size_probe, &mut sink, cancelled);
     (code, String::from_utf8_lossy(&sink.buf).into_owned())
 }
 
@@ -176,9 +249,18 @@ pub fn default_size_probe() -> Option<(u16, u16)> {
 
 /// Core run loop, with the stdout sink and size probe injected for testing.
 pub fn run_exec_with(
+    opts: ExecOpts,
+    _size_probe: &dyn Fn() -> Option<(u16, u16)>,
+    sink: &mut dyn Write,
+) -> i32 {
+    run_exec_with_cancellation(opts, _size_probe, sink, None)
+}
+
+fn run_exec_with_cancellation(
     mut opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
     sink: &mut dyn Write,
+    cancelled: Option<&AtomicBool>,
 ) -> i32 {
     if opts.argv.is_empty() {
         let _ = writeln!(std::io::stderr(), "kettle exec: no command given");
@@ -193,6 +275,24 @@ pub fn run_exec_with(
     let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
     let waker: Waker = std::sync::Arc::new(|| {});
     let cwd = opts.cwd.as_ref().and_then(|p| p.to_str());
+
+    // Recording is an explicit audit request for `kettle exec`. Establish it
+    // before the PTY exists and fail closed if the path cannot be secured; a
+    // child must never run after Kettle has silently lost the requested trace.
+    let mut recorder = match opts.record.as_ref() {
+        Some(path) => match kettle_core::record::Recorder::start(path, opts.cols, opts.rows, false)
+        {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot start --record trace: {error}"
+                );
+                return EXIT_INTERNAL;
+            }
+        },
+        None => None,
+    };
 
     let term = match Terminal::new_with_env_and_output(
         &opts.argv,
@@ -233,19 +333,6 @@ pub fn run_exec_with(
         spawn_stdin_pump(term.writer_handle());
     }
 
-    // Optional asciicast (.cast) recording (output-only — exec never routes
-    // keystrokes here; the audit trail is verbatim child output + resize).
-    let mut recorder =
-        opts.record.as_ref().and_then(|p| {
-            match kettle_core::record::Recorder::start(p, opts.cols, opts.rows, false) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    let _ = writeln!(std::io::stderr(), "kettle exec: --record failed: {e}");
-                    None
-                }
-            }
-        });
-
     let mut out = Outputter::new(opts.mode);
     out.start(sink, opts.cols, opts.rows);
 
@@ -255,9 +342,7 @@ pub fn run_exec_with(
     loop {
         // Drain output first so we never lose bytes that arrived before exit.
         while let Ok(bytes) = orx.try_recv() {
-            if let Some(r) = recorder.as_mut() {
-                r.record_output(&bytes);
-            }
+            record_chunk(&mut recorder, &bytes);
             out.output(sink, &bytes);
         }
         // Service the child's terminal queries + lifecycle events.
@@ -303,9 +388,7 @@ pub fn run_exec_with(
         {
             // Final drain in case something landed in the settle window.
             while let Ok(bytes) = orx.try_recv() {
-                if let Some(r) = recorder.as_mut() {
-                    r.record_output(&bytes);
-                }
+                record_chunk(&mut recorder, &bytes);
                 out.output(sink, &bytes);
             }
             if let Some(mut r) = recorder.take() {
@@ -323,17 +406,36 @@ pub fn run_exec_with(
             return code;
         }
 
+        // MCP cancellation is prompt and follows the same teardown discipline
+        // as timeout: kill the PTY child, drain its last repaint, and finish the
+        // recorder before releasing the worker slot.
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) && child_gone_at.is_none() {
+            terminate_process_tree(&term);
+            // Reap the killed child where the PTY backend exposes its status;
+            // this prevents a cancelled long-running MCP tool from leaving a
+            // zombie behind while still bounding cancellation latency.
+            let _ = wait_for_exit_code(&term);
+            std::thread::sleep(SETTLE);
+            while let Ok(bytes) = orx.try_recv() {
+                record_chunk(&mut recorder, &bytes);
+                out.output(sink, &bytes);
+            }
+            if let Some(mut recorder) = recorder.take() {
+                recorder.finish();
+            }
+            out.finish(sink, EXIT_CANCELLED, started.elapsed());
+            return EXIT_CANCELLED;
+        }
+
         // Timeout: kill the child, settle briefly, report 124.
         if let Some(limit) = opts.timeout
             && started.elapsed() >= limit
             && child_gone_at.is_none()
         {
-            term.kill();
+            terminate_process_tree(&term);
             std::thread::sleep(SETTLE);
             while let Ok(bytes) = orx.try_recv() {
-                if let Some(r) = recorder.as_mut() {
-                    r.record_output(&bytes);
-                }
+                record_chunk(&mut recorder, &bytes);
                 out.output(sink, &bytes);
             }
             if let Some(mut r) = recorder.take() {
@@ -344,6 +446,123 @@ pub fn run_exec_with(
         }
 
         std::thread::sleep(Duration::from_millis(8));
+    }
+}
+
+/// Stop the complete command tree for timeout/cancellation. Killing only the
+/// PTY's immediate child leaves backgrounded or `setsid` descendants running.
+/// Linux exposes the parent relation through `/proc`; freeze the discovered
+/// tree before killing it so descendants cannot race by forking while it is
+/// being enumerated. Other Unix targets still kill the PTY process group, and
+/// every platform finishes with the portable-pty child handle.
+fn terminate_process_tree(term: &Terminal) {
+    let Some(root) = term.child_pid() else {
+        term.kill();
+        return;
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut frozen = std::collections::HashSet::new();
+        // SAFETY: root is the positive PID returned by portable-pty.
+        unsafe {
+            libc::kill(root as libc::pid_t, libc::SIGSTOP);
+        }
+        frozen.insert(root);
+        // A small fixed-point loop bounds work under a hostile fork load while
+        // freezing every process as soon as it becomes visible.
+        for _ in 0..8 {
+            let mut discovered = linux_descendants(root, 4096);
+            discovered.push(root);
+            let before = frozen.len();
+            for pid in discovered {
+                if frozen.insert(pid) {
+                    // SAFETY: kill is called with a positive PID obtained from
+                    // procfs. Failure (already exited or permission denied) is
+                    // harmless and the portable child kill remains below.
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGSTOP);
+                    }
+                }
+            }
+            if frozen.len() == before {
+                break;
+            }
+        }
+        for pid in frozen.iter().copied().filter(|pid| *pid != root) {
+            // SAFETY: as above; SIGKILL cannot invoke user handlers.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // portable-pty makes the child the leader of its terminal process
+        // group on Unix. A negative pid addresses that entire group.
+        if let Ok(group) = libc::pid_t::try_from(root) {
+            // SAFETY: group is a positive child PID; negating it selects only
+            // that child's process group.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = root;
+
+    term.kill();
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendants(root: u32, limit: usize) -> Vec<u32> {
+    let mut result = Vec::new();
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::from([root]);
+    while let Some(parent) = pending.pop() {
+        if result.len() >= limit {
+            break;
+        }
+        let path = format!("/proc/{parent}/task/{parent}/children");
+        let Ok(children) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for child in children
+            .split_ascii_whitespace()
+            .filter_map(|value| value.parse::<u32>().ok())
+        {
+            if seen.insert(child) {
+                result.push(child);
+                pending.push(child);
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    result
+}
+
+fn record_chunk(recorder: &mut Option<kettle_core::record::Recorder>, bytes: &[u8]) {
+    use kettle_core::record::RecordStatus;
+
+    let Some(recorder) = recorder.as_mut() else {
+        return;
+    };
+    let previous = recorder.status();
+    recorder.record_output(bytes);
+    if previous == RecordStatus::Recording && recorder.status() != previous {
+        let reason = match recorder.status() {
+            RecordStatus::LimitReached => "512 MiB session limit reached",
+            RecordStatus::IoError => "recording I/O failed",
+            RecordStatus::Recording => return,
+        };
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: asciicast capture stopped ({reason}); child execution continues"
+        );
     }
 }
 
@@ -638,6 +857,41 @@ mod tests {
     }
 
     #[test]
+    fn ansi_stripper_removes_string_control_payloads_and_c1_forms() {
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(
+            b"a\x1bP1;2|dcs\x1b\\b\x1b_apc\x1b\\c\x1b^pm\x1b\\d\x1bXsos\x1b\\e",
+            &mut out,
+        );
+        assert_eq!(out, b"abcde");
+
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(b"a\x90dcs\x9cb\x9dapc\x07c\x9b31md", &mut out);
+        assert_eq!(out, b"abcd");
+    }
+
+    #[test]
+    fn ansi_stripper_has_constant_memory_and_bounded_resynchronization() {
+        assert!(std::mem::size_of::<AnsiStripper>() <= 32);
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(b"prefix\x1b]unterminated", &mut out);
+        for _ in 0..=(MAX_CONTROL_SEQUENCE_BYTES / 1024) {
+            stripper.push(&[b'x'; 1024], &mut out);
+        }
+        stripper.push(b"tail", &mut out);
+
+        assert!(out.starts_with(b"prefix"));
+        assert!(out.ends_with(b"tail"));
+        assert!(
+            out.len() <= 2048,
+            "resynchronization retained too much data"
+        );
+    }
+
+    #[test]
     fn ansi_stripper_bare_trailing_escape_dropped() {
         let mut s = AnsiStripper::default();
         let mut out = Vec::new();
@@ -682,6 +936,130 @@ mod tests {
         };
         let mut sink = Vec::new();
         assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requested_recording_failure_prevents_the_child_from_starting() {
+        let temp = tempfile::tempdir().unwrap();
+        let record = temp.path().join("active.cast");
+        let marker = temp.path().join("child-started");
+        let active = kettle_core::record::Recorder::start(&record, 80, 24, false).unwrap();
+        let opts = ExecOpts {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf started > \"$1\"".into(),
+                "kettle-exec-test".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: None,
+            mode: OutputMode::Raw,
+            record: Some(record),
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
+        assert!(
+            !marker.exists(),
+            "child ran without its requested audit trace"
+        );
+        drop(active);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_kills_a_detached_descendant() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("detached.pid");
+        let opts = ExecOpts {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "setsid sleep 30 & echo $! > \"$1\"; wait".into(),
+                "kettle-exec-test".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_millis(150)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let process_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if process_path.exists() {
+            // Avoid leaking the fixture if the assertion fails.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !process_path.exists(),
+            "detached descendant {pid} survived timeout"
+        );
+    }
+
+    #[test]
+    fn cancellable_capture_kills_child_and_finishes_recorder_promptly() {
+        let dir = std::env::temp_dir().join(format!("kettle-exec-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("cancel.cast");
+        #[cfg(unix)]
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf started; exec sleep 30".into(),
+        ];
+        #[cfg(windows)]
+        let argv = vec!["ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()];
+        let opts = ExecOpts {
+            argv,
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+            mode: OutputMode::StripAnsi,
+            record: Some(record.clone()),
+            forward_stdin: false,
+        };
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let child_cancelled = cancelled.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            run_exec_capture_cancellable(opts, child_cancelled.as_ref())
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        cancelled.store(true, Ordering::Release);
+        let (code, _output) = worker.join().unwrap();
+
+        assert_eq!(code, EXIT_CANCELLED);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let cast = std::fs::read_to_string(&record).unwrap();
+        assert!(
+            cast.lines()
+                .next()
+                .is_some_and(|line| line.contains("\"version\":2"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

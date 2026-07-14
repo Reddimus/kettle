@@ -31,11 +31,22 @@ DEC cursor command to the child. On refocus, the exact client-selected DEC shape
 visibility, and blink state is rendered again. This avoids the hollow bottom-left
 caret that interactive clients can leave visible while another window is active.
 
+## Keyboard encoding
+
+Kettle currently emits its legacy/xterm-compatible key encodings, including
+application cursor/keypad modes and the existing modifier forms. It does not
+emit kitty CSI-u keyboard events. Although the underlying terminal engine can
+parse kitty keyboard mode requests, Kettle deliberately leaves that mode
+disabled so Neovim and other clients do not negotiate CSI-u and then receive
+legacy bytes. A future CSI-u encoder must land before that capability can be
+advertised; v2.35 does not claim it.
+
 ## tmux and full-screen clients
 
 - Kettle forwards application cursor/keypad modes, focus reports, SGR mouse
   events, bracketed paste, alternate-scroll behavior, and resize events through
-  the PTY. tmux can therefore negotiate these features normally.
+  the PTY. tmux can therefore negotiate these features normally; this does not
+  imply kitty CSI-u/extended-key support.
 - Hold `Shift` while using the wheel to scroll Kettle's own scrollback when a
   mouse-aware tmux/TUI pane would otherwise consume the wheel.
 - Client-owned `Ctrl+V`, `Alt+V`, and `Ctrl+Alt+V` chords remain PTY input inside

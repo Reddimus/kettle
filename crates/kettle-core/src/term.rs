@@ -18,8 +18,8 @@ use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, TermEvent, Waker};
 use crate::images::{
-    AnimEntry, Animations, Images, Placement, RelEntry, Relatives, VirtualEntry, Virtuals,
-    relative_origin, resolve_chain,
+    AnimEntry, Animations, ImageSourceRect, Images, Placement, RelEntry, Relatives, VirtualEntry,
+    Virtuals, relative_origin, resolve_chain,
 };
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -1623,16 +1623,21 @@ impl Terminal {
                                             v,
                                         } => {
                                             if let Ok(mut rm) = relatives.lock() {
-                                                rm.insert(
-                                                    (id, placement),
-                                                    RelEntry {
-                                                        img,
-                                                        parent_img,
-                                                        parent_placement,
-                                                        h,
-                                                        v,
-                                                    },
-                                                );
+                                                let key = (id, placement);
+                                                let limit =
+                                                    kettle_vt::GraphicsLimits::default().placements;
+                                                if rm.contains_key(&key) || rm.len() < limit {
+                                                    rm.insert(
+                                                        key,
+                                                        RelEntry {
+                                                            img,
+                                                            parent_img,
+                                                            parent_placement,
+                                                            h,
+                                                            v,
+                                                        },
+                                                    );
+                                                }
                                             }
                                             (waker)();
                                         }
@@ -1644,7 +1649,14 @@ impl Terminal {
                                             z,
                                         } => {
                                             if let Ok(mut vm) = virtuals.lock() {
-                                                vm.insert(id, VirtualEntry { img, cols, rows, z });
+                                                let limit =
+                                                    kettle_vt::GraphicsLimits::default().placements;
+                                                if vm.contains_key(&id) || vm.len() < limit {
+                                                    vm.insert(
+                                                        id,
+                                                        VirtualEntry { img, cols, rows, z },
+                                                    );
+                                                }
                                             }
                                             (waker)();
                                         }
@@ -1670,15 +1682,34 @@ impl Terminal {
                                                         }
                                                         _ => std::time::Instant::now(),
                                                     };
-                                                    am.insert(
-                                                        id,
-                                                        AnimEntry {
-                                                            imgs,
-                                                            gaps,
-                                                            state,
-                                                            started,
-                                                        },
-                                                    );
+                                                    let limits =
+                                                        kettle_vt::GraphicsLimits::default();
+                                                    let bytes =
+                                                        imgs.iter().try_fold(0usize, |n, img| {
+                                                            n.checked_add(img.byte_len())
+                                                        });
+                                                    if (am.contains_key(&id)
+                                                        || am.len() < limits.placements)
+                                                        && imgs.len()
+                                                            <= limits
+                                                                .animation_frames
+                                                                .saturating_add(1)
+                                                        && limits
+                                                            .animation_bytes
+                                                            .checked_add(limits.image_bytes)
+                                                            .zip(bytes)
+                                                            .is_some_and(|(cap, n)| n <= cap)
+                                                    {
+                                                        am.insert(
+                                                            id,
+                                                            AnimEntry {
+                                                                imgs,
+                                                                gaps,
+                                                                state,
+                                                                started,
+                                                            },
+                                                        );
+                                                    }
                                                 }
                                             }
                                             (waker)();
@@ -2096,6 +2127,9 @@ impl Terminal {
                 placeholder::resolve_run(&cells).into_iter().zip(run.iter())
             {
                 out.push((abs, col, res));
+                if out.len() >= kettle_vt::GraphicsLimits::default().placements {
+                    return out;
+                }
             }
         }
         out
@@ -2113,26 +2147,11 @@ impl Terminal {
             let Some(v) = virtuals.get(&res.image_id) else {
                 continue;
             };
-            let pcols = v.cols.max(1).min(u16::MAX as u32) as u16;
-            let prows = v.rows.max(1).min(u16::MAX as u32) as u16;
-            if let Some((x, y, w, h)) = placeholder::tile_src_rect(
-                v.img.width,
-                v.img.height,
-                pcols,
-                prows,
-                res.row,
-                res.col,
-            ) && let Some(crop) = v.img.crop(x, y, w, h)
-            {
-                out.push(Placement {
-                    abs_line: abs,
-                    col,
-                    cell_cols: 1,
-                    cell_rows: 1,
-                    img: crop,
-                    id: Some(res.image_id),
-                    z: v.z,
-                });
+            if let Some(placement) = placeholder_tile_placement(abs, col, res, v) {
+                out.push(placement);
+                if out.len() >= kettle_vt::GraphicsLimits::default().placements {
+                    break;
+                }
             }
         }
         out
@@ -2154,7 +2173,10 @@ impl Terminal {
             if rel.is_empty() {
                 return Vec::new();
             }
-            rel.iter().map(|(&(c, _), e)| (c, e.clone())).collect()
+            let mut entries: Vec<_> = rel.iter().map(|(&(c, _), e)| (c, e.clone())).collect();
+            entries.sort_by_key(|(id, _)| *id);
+            entries.truncate(kettle_vt::GraphicsLimits::default().placements);
+            entries
         };
         // Concrete origins: a parent is either a placeholder/virtual image
         // (top-left of its cells) or a regular placement (its abs_line/col).
@@ -2199,6 +2221,7 @@ impl Terminal {
                 cell_cols: e.img.width.div_ceil(cw) as usize,
                 cell_rows: e.img.height.div_ceil(chh) as usize,
                 img: e.img.clone(),
+                source_rect: None,
                 id: Some(*cimg),
                 z: 0,
             });
@@ -2576,6 +2599,42 @@ fn fg_id_bits(c: AnsiColor) -> u32 {
     }
 }
 
+fn placeholder_tile_placement(
+    abs_line: i64,
+    col: usize,
+    resolved: placeholder::ResolvedCell,
+    virtual_image: &VirtualEntry,
+) -> Option<Placement> {
+    let pcols = virtual_image.cols.max(1).min(u16::MAX as u32) as u16;
+    let prows = virtual_image.rows.max(1).min(u16::MAX as u32) as u16;
+    let (x, y, width, height) = placeholder::tile_src_rect(
+        virtual_image.img.width,
+        virtual_image.img.height,
+        pcols,
+        prows,
+        resolved.row,
+        resolved.col,
+    )?;
+    Some(Placement {
+        abs_line,
+        col,
+        cell_cols: 1,
+        cell_rows: 1,
+        // Keep the original allocation shared across every placeholder cell.
+        // The renderer samples only `source_rect`, avoiding a crop allocation
+        // and a distinct GPU texture for every visible tile on every frame.
+        img: virtual_image.img.clone(),
+        source_rect: Some(ImageSourceRect {
+            x,
+            y,
+            width,
+            height,
+        }),
+        id: Some(resolved.image_id),
+        z: virtual_image.z,
+    })
+}
+
 /// Anchor a decoded image at the cursor, then push the cursor below it so
 /// subsequent shell output flows after the image (kitty/iTerm2/Sixel all
 /// place at the cursor and advance).
@@ -2609,17 +2668,61 @@ fn place_image(
             cell_cols,
             cell_rows,
             img: data,
+            source_rect: None,
             id,
             z,
         });
-        if v.len() > 512 {
-            let drop = v.len() - 512;
+        let limit = kettle_vt::GraphicsLimits::default().placements;
+        if v.len() > limit {
+            let drop = v.len() - limit;
             v.drain(0..drop);
         }
     }
     // Reserve the rows the image occupies.
     let nl = "\r\n".repeat(cell_rows.clamp(1, 256));
     processor.advance(&mut *t, nl.as_bytes());
+}
+
+#[cfg(test)]
+mod placeholder_tile_placement_tests {
+    use super::{VirtualEntry, placeholder_tile_placement};
+    use kettle_vt::ImageData;
+    use kettle_vt::placeholder::ResolvedCell;
+
+    #[test]
+    fn placeholder_tile_shares_pixels_and_records_source_rect() {
+        let image = ImageData::new(4, 2, vec![0; 4 * 2 * 4]).expect("test image");
+        let virtual_image = VirtualEntry {
+            img: image.clone(),
+            cols: 2,
+            rows: 1,
+            z: 7,
+        };
+        let placement = placeholder_tile_placement(
+            12,
+            3,
+            ResolvedCell {
+                image_id: 42,
+                placement_id: 0,
+                row: 0,
+                col: 1,
+            },
+            &virtual_image,
+        )
+        .expect("right-hand tile");
+
+        assert_eq!(placement.img.allocation_key(), image.allocation_key());
+        assert_eq!(placement.img.byte_len(), image.byte_len());
+        assert_eq!(
+            placement.source_rect,
+            Some(crate::ImageSourceRect {
+                x: 2,
+                y: 0,
+                width: 2,
+                height: 2,
+            })
+        );
+    }
 }
 
 /// End-to-end VT conformance: drives the *same* parser path the PTY reader

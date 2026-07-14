@@ -1,8 +1,10 @@
 # Developer session recorder (`dev-record`)
 
-A maintainer-only diagnostics recorder, **compiled out of every released /
-packaged build**. It writes an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
-trace of a kettle session that replays with `asciinema play`.
+A maintainer-only GUI diagnostics recorder, **compiled out of every released /
+packaged GUI build**. It writes an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
+trace of a Kettle session that replays with `asciinema play`. The shared,
+output-only writer remains available to the released `kettle exec --record`
+command; automatic GUI recording does not.
 
 ## Enabling
 
@@ -12,6 +14,9 @@ The recorder only exists in builds made with the `dev-record` Cargo feature:
 cargo run --features dev-record -- --record /tmp/session.cast
 # or:
 KETTLE_RECORD=/tmp/session.cast cargo run --features dev-record
+# create the directory if missing and allocate a unique cast:
+cargo run --features dev-record -- --record-dir /tmp/kettle-records
+KETTLE_RECORD_DIR=/tmp/kettle-records cargo run --features dev-record
 ```
 
 On Linux maintainer machines, the user-local launcher can be synced to a
@@ -22,17 +27,65 @@ just install-local-dev-record
 ```
 
 By default this writes traces under `~/.cache/kettle/records`; pass
-`RECORD_DIR=/path/to/records` to use a different local directory.
+the directory as the recipe argument to use a different local location:
+
+```sh
+just install-local-dev-record /path/to/records
+```
+
+Target precedence is fixed: `--record`, `--record-dir`, legacy
+`KETTLE_RECORD`, then `KETTLE_RECORD_DIR`. `--record PATH` and
+`KETTLE_RECORD=PATH` preserve their historical behavior: an existing directory
+gets managed-directory behavior, while any other path is an explicit file.
+`--record-dir` and `KETTLE_RECORD_DIR` always mean a directory, including when
+it does not exist yet. Empty environment variables are ignored.
 
 Released binaries (and anything built without the feature) contain **none** of
-the recorder code — no flag, no overhead, no attack surface. Recording is never
-on by default and never starts on first launch.
+the GUI recording flag, hooks, or automatic launcher behavior. Recording is
+never on by default and never starts on first launch.
+
+## Storage bounds and ownership
+
+Managed recording directories are created with mode `0700` on Unix. Each cast
+uses a collision-safe `kettle-session-<time>-<pid>-<counter>.cast` name,
+`create_new`, an exclusive active-file lock, and mode `0600`. Two launches in
+the same second therefore cannot truncate or interleave one another. An
+explicit file retains the established overwrite behavior, but Kettle obtains
+its exclusive lock before truncating it; a second active writer is refused.
+
+Each session stops at a complete NDJSON event boundary before 512 MiB. When
+space permits, its last event is a `kettle:record_limit` marker. The native
+title changes from `[REC]` to `[REC LIMIT]`. A startup, write, or flush failure
+uses `[REC ERROR]` and emits one desktop notification in the same event-loop
+turn. Neither condition terminates the terminal session.
+
+Starting a managed recording prunes the new `kettle-session-*.cast` namespace
+toward budgets of 50 files and 5 GiB. Kettle removes the oldest unlocked files
+first and never removes an active file. Pre-existing `session-*.cast` files,
+unrelated files, symlinks, and unrecognized names are not managed or deleted.
+If active/unreadable files keep the managed namespace above its budget,
+recording continues and the condition is logged rather than deleting uncertain
+data.
+Kettle refuses a symbolic-link recording file or directory. The Linux
+installer also rejects a symbolic-link directory and verifies that
+`--skip-build --record-dir` points to a binary that actually contains the
+`dev-record` feature before marking the install `local-dev-record`.
+
+Source installs are marked `local-dev` or `local-dev-record`; only release
+tarball/online installs are marked `stable`. The signed self-updater refuses a
+local development marker so it cannot replace a feature build with a public
+binary and silently disable recording. Re-run `just install-local-dev-record`
+from the checkout to update the installed development build.
 
 > **Shared recorder.** The trace writer now lives in `kettle-core` behind the
 > `asciicast` feature, so it backs two front-ends: the GUI's `--record` (full
 > trace — output, input tokens, and `m` markers) and the new headless
 > `kettle exec --record run.cast` (output-only — no window, no keystroke or
-> marker channel). See [AGENT.md](AGENT.md) for `kettle exec`.
+> marker channel). Both use the same 512 MiB event boundary, no-link checks,
+> and private-file writer. `kettle exec` fails closed with status 125 if the
+> requested file cannot be secured before the child is started; a later
+> disk/write failure stops capture without killing an already running child.
+> See [AGENT.md](AGENT.md) for `kettle exec`.
 
 ## What it captures
 
@@ -67,7 +120,10 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   (or `KETTLE_RECORD_RAW_INPUT=1`) opts into literal capture — ⚠ the trace can
   then contain typed secrets; leave it off unless you need byte-exact input.
 - **Pasted content is never recorded** — only a `kettle:paste len=N` marker.
-- An always-visible **`[REC]`** indicator sits in the title bar.
+- The native window title carries **`[REC]`** while capture is active and
+  retains the limit/I/O stop states described above. Borderless and fullscreen
+  modes can hide OS title decorations, so recording errors also emit a desktop
+  notification when the platform notification service is available.
 - The trace file is local-only (`0600` on Unix); kettle never uploads it. Writes
   are best-effort — a full disk disables the recorder, it never crashes kettle.
 
@@ -75,10 +131,11 @@ the child's `ECHO` flag), so the recorder is conservative by default:
 
 ```mermaid
 flowchart LR
-  PTY[PTY output] --> APP["App.drain_events"]
+  PTY[PTY output] --> FAN["Shared output fan-out<br/>redraw + close drains"]
   KBD[Keystrokes] --> TOK["redacted token"]
   UI["Tabs / focus / paste"] --> MRK["UI marker"]
-  APP --> REC[Recorder]
+  FAN --> REC[Recorder]
+  FAN --> LUA["Lua output hooks"]
   TOK --> REC
   MRK --> REC
   REC -->|"asciicast v2 NDJSON"| FILE[("session.cast")]

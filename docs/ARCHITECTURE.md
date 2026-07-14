@@ -11,24 +11,37 @@ cwd, images, clipboard, title) flow back to the UI.
 graph TD
     bin["kettle (bin)<br/>CLI · entry · exec/ctl/mcp subcommands"] --> ui
     bin --> ctl
+    bin --> update
     ui["kettle-ui<br/>winit multi-window app · per-window tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
     ui --> core
     ui --> cfg
     ui --> remote
     ui --> ctl
+    ui --> state
+    ui --> update
     ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · reader thread<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
-    cfg["kettle-config<br/>Ghostty config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"]
+    cfg["kettle-config<br/>Ghostty config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
+    update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
+    state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
 ```
+
+`kettle-state` is the leaf persistence boundary shared by configuration,
+sessions, and the updater. It stages with `create_new` beside the destination,
+syncs file data before replacement, uses write-through replacement on Windows,
+syncs the parent directory on Unix, preserves existing permissions when asked,
+and rejects symlink destinations by default. Its advisory lock lets callers
+serialize compound operations; configuration persistence holds it across the
+complete read, validate, backup, and replacement transaction.
 
 ## Agent control plane
 
-The agent-first surface (see [AGENT.md](AGENT.md) for the full reference) is
-the eighth workspace member, **kettle-ctl** — a UI-free crate that owns the
+The agent-first control surface (see [AGENT.md](AGENT.md) for the full
+reference) is owned by **kettle-ctl**, a UI-free crate that defines the
 control-plane protocol (NDJSON request/response/event), the local-IPC transport
 (a Unix domain socket or a Windows named pipe), the discovery registry, and a
 blocking client. It is **off by default**: nothing binds a socket or writes a
@@ -65,6 +78,18 @@ window and tag each entry with its `window`; `--pane N` resolves across
 windows (pane ids are process-global); and a live tab tear-off emits a
 `tab_moved` event (`{from_window, to_window, tab}`) on the subscription
 feed.
+
+Protocol v1 uses a typed method table as the authorization source of truth:
+each method declares read/mutate capability and UI/connection execution. The
+wire remains additive JSON, with exact `v: 1`, 1 MiB request and 768 KiB
+response/event bounds, and snapshot paging for large live reads. Discovery
+records are atomically replaced and private; accepted Unix connections also
+verify peer uid. The MCP bridge negotiates `2025-11-25` or `2025-06-18` and
+dispatches tool calls through a four-worker, 16-request bounded queue with
+JSON-RPC cancellation tracking. The blocking control client reads frames
+incrementally under method-aware deadlines, preserves events interleaved before
+a response, and treats malformed frames or mismatched response ids as terminal
+protocol errors.
 
 The discovery registry reserves a `kind` field — `"gui"` today — as the
 forward-compat seam for the optional `kettle-muxd` session daemon (see
@@ -165,12 +190,32 @@ use a bounded best-effort sender and may drop under plugin backpressure;
 recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
 policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
 it takes the terminal lock and bounds memory without creating a lock cycle.
+GUI development recording subscribes to the same fan-out used by normal redraw
+and close drains, so consuming output for a recorder cannot steal it from Lua or
+skip a pane's final bytes. The shared asciicast writer stops at a complete event
+boundary before 512 MiB. Managed directories use private unique files, active
+file locks, and namespace-scoped 50-file / 5-GiB retention; explicit paths are
+locked before truncation.
 
 ## kitty graphics pipeline
 
 The biggest VT extension. Decoding lives in `kettle-vt::kitty` (pure,
 heavily unit-tested); per-terminal registries live on `kettle-core::Terminal`
 and are populated by the reader thread; the renderer reads them each frame.
+
+`kettle-vt::GraphicsLimits` is the single allocation envelope for this path.
+Escape sequences are capped at 16 MiB; kitty transmissions at 96 MiB with at
+most eight/128 MiB in flight; decoded images and individual textures at 64 MiB;
+animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
+charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
+instance buffers to a 256 MiB terminal/window scope and 512 MiB process
+accounts. Decoders reserve before allocation, image clones share one lease,
+copy-on-write reserves a second image, and GPU caches release non-visible
+textures before admitting replacements. An oversized, unterminated control
+string is quarantined for at most one additional 64 KiB recovery window before
+the extractor returns to ground state. The 256-placement limit applies to
+inline terminal images; the independent wallpaper pipeline permits up to 4096
+tile instances and batches consecutive tiles that share a texture.
 
 ```mermaid
 graph LR
@@ -179,12 +224,12 @@ graph LR
     kit -->|"a=p,U=1"| virt["virtuals registry<br/>rows×cols box"]
     kit -->|"a=f / a=a / a=c"| anim["anims registry<br/>frames + AnimationState"]
     kit -->|"a=p,P=,Q="| rel["relatives registry<br/>(parent, h, v)"]
-    grid["U+10EEEE cells<br/>(fg=id, diacritics=row/col)"] --> ph["placeholder_tiles()<br/>resolve_run + tile crop"]
+    grid["U+10EEEE cells<br/>(fg=id, diacritics=row/col)"] --> ph["placeholder_tiles()<br/>resolve_run + source rect"]
     virt --> ph
     anim --> clk["current_frame(clock)<br/>swaps Placement.img"]
     rel --> rt["relative_tiles()<br/>resolve_chain(depth≤8)"]
     grid --> rt
-    place & ph & rt & clk --> draw["render_frame: image pipeline"]
+    place & ph & rt & clk --> draw["render_frame: shared texture + per-instance UVs"]
 ```
 
 ## Render pass order
@@ -329,8 +374,8 @@ text, so its bitmap is already resident).
   registries (`images`, `virtuals`, `anims`, `relatives`, `prompts`, `cwd`)
   are `Arc<Mutex<…>>` snapshotted cheaply for rendering; a running kitty
   animation schedules a ~30 fps redraw tick (otherwise idle, no CPU). The
-  extractor caps in-flight sequences (64 MiB) so a hostile stream can't hang
-  or OOM — the cap is security-relevant: an SSH session into a 256 MiB
+  extractor caps in-flight sequences (16 MiB) so a hostile stream can't hang
+  or OOM — the cap is security-relevant: an SSH session into a constrained
   container can otherwise OOM-kill kettle by emitting unbounded image data.
 - **Lua VM** is parked on the App struct (single-threaded
   `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
@@ -614,8 +659,8 @@ sequenceDiagram
 
     Note over Mux,FS: Debounced autosave
     Mux->>Mux: structural change (new tab / split / close)
-    Mux->>FS: tempfile write
-    FS->>FS: rename → session.json (atomic;<br/>notify-watcher ignores temp)
+    Mux->>FS: private staged sibling + file sync
+    FS->>FS: atomic replace → session.json<br/>parent-directory sync
 
     Note over App,FS: Next launch — restore is opt-in
     App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
@@ -628,10 +673,11 @@ sequenceDiagram
 
 Four notable invariants preserved by this flow:
 
-- **Atomic write** — `session.json` is written tempfile + rename, so a
-  power-loss between writes leaves the previous valid snapshot intact
-  (no truncated/partial JSON). This was added after a corrupted
-  save on shutdown.
+- **Durable private write** — `session.json` is staged beside its destination,
+  synced, atomically replaced, and followed by a parent-directory sync. It is
+  mode `0600` on Unix (including when replacing a permissive legacy file), and
+  a symbolic-link destination is refused. A power loss cannot expose a
+  truncated/partial JSON snapshot.
 - **OSC 7 catchup** — kettle parses the shell's OSC 7 stream
   continuously, not just at startup; pane cwd updates the moment
   the user `cd`s.

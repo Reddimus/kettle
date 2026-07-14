@@ -222,6 +222,31 @@ class LiveKettle:
     def json_ctl(self, method: str, params: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         return json.loads(self.ctl(method, params=params, raw=True).stdout)
 
+    def read_cells(self) -> Dict[str, object]:
+        """Read the complete visible grid through the bounded control API."""
+        for attempt in range(5):
+            try:
+                result = self.json_ctl("read_cells", {"limit": 1536})
+                cells = list(result.get("cells", []))
+                cursor = result.get("next_cursor")
+                snapshot = result.get("snapshot")
+                while cursor is not None:
+                    page = self.json_ctl(
+                        "read_cells",
+                        {"cursor": cursor, "limit": 1536, "snapshot": snapshot},
+                    )
+                    cells.extend(page.get("cells", []))
+                    cursor = page.get("next_cursor")
+                result["cells"] = cells
+                result["next_cursor"] = None
+                result["truncated"] = False
+                return result
+            except SystemExit as error:
+                if "stale_snapshot" not in str(error) or attempt == 4:
+                    raise
+                time.sleep(0.05)
+        raise AssertionError("unreachable")
+
     def screenshot(self, path: Path) -> None:
         self.ctl("screenshot", params={"full_window": True, "path": str(path)}, timeout=12)
 
@@ -412,6 +437,26 @@ def text_cell_point(
     raise SystemExit(f"interaction smoke: could not locate visible marker {needle!r}")
 
 
+def wait_for_text_cell_point(
+    live: "LiveKettle",
+    needle: str,
+    *,
+    at_end: bool = False,
+    timeout: float = 3.0,
+) -> Tuple[float, float]:
+    """Wait until a terminal-state change has reached the rendered cell grid."""
+    deadline = time.monotonic() + timeout
+    while True:
+        cells = live.read_cells()
+        geometry = live.json_ctl("ui_geometry")
+        try:
+            return text_cell_point(cells, geometry, needle, at_end=at_end)
+        except SystemExit:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def visible_context_row(geometry: Dict[str, object], label: str) -> Dict[str, object]:
     menu = geometry.get("context_menu")
     if not isinstance(menu, dict):
@@ -455,7 +500,7 @@ def wait_for_resize(
     last_cells: Dict[str, object] = {}
     while time.monotonic() < deadline:
         last_geo = live.json_ctl("ui_geometry")
-        last_cells = live.json_ctl("read_cells")
+        last_cells = live.read_cells()
         surface = last_geo.get("surface", {})
         width = int(surface.get("width", 0))
         height = int(surface.get("height", 0))
@@ -764,7 +809,7 @@ def run_underline(kettle: str, root: Path) -> Path:
         for i in range(1, 9):
             geo = live.json_ctl("ui_geometry")
             (out / f"geometry-{i}.json").write_text(json.dumps(geo, indent=2) + "\n")
-            cells = live.json_ctl("read_cells")
+            cells = live.read_cells()
             (out / f"cells-{i}.json").write_text(json.dumps(cells))
             live.screenshot(out / f"frame-{i}.png")
             if i < 8:
@@ -931,7 +976,7 @@ def run_underline(kettle: str, root: Path) -> Path:
 
 
 def capture_live_state(live: LiveKettle, out: Path, label: str) -> Dict[str, object]:
-    cells = live.json_ctl("read_cells")
+    cells = live.read_cells()
     (out / f"{label}.cells.json").write_text(json.dumps(cells, indent=2) + "\n")
     screen = live.json_ctl("read_screen")
     (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
@@ -1467,6 +1512,14 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             live.ctl("send_text", params={"text": "exit"})
             live.ctl("send_keys", params={"keys": ["enter"]})
             run(["tmux", "-L", tmux_socket, "kill-server"], timeout=3, capture=True)
+            tmux_exit_marker = "KETTLE_AGENT_TUI_TMUX_EXITED"
+            time.sleep(0.5)
+            live_shell_command(
+                live,
+                command_with_marker("printf 'tmux-exited\\n'", tmux_exit_marker),
+                tmux_exit_marker,
+                timeout_ms=12000,
+            )
             probes.append({"name": "tmux", "status": "ok"})
             probes.append({"name": "tmux-split", "status": "ok"})
 
@@ -1599,11 +1652,8 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "selection-after-home.screen.json").write_text(
             json.dumps(live.json_ctl("read_screen"), indent=2) + "\n"
         )
-        top_cells = live.json_ctl("read_cells")
-        top_geo = live.json_ctl("ui_geometry")
-        first_x, first_y = text_cell_point(
-            top_cells,
-            top_geo,
+        first_x, first_y = wait_for_text_cell_point(
+            live,
             "KETTLE_INTERACTION_SCROLL_001",
         )
         live.ctl(
@@ -1621,12 +1671,9 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "selection-after-end.screen.json").write_text(
             json.dumps(live.json_ctl("read_screen"), indent=2) + "\n"
         )
-        end_cells = live.json_ctl("read_cells")
-        end_geo = live.json_ctl("ui_geometry")
         last_marker = "KETTLE_INTERACTION_SCROLL_DONE"
-        last_x, last_y = text_cell_point(
-            end_cells,
-            end_geo,
+        last_x, last_y = wait_for_text_cell_point(
+            live,
             last_marker,
             at_end=True,
         )
@@ -1676,7 +1723,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
 
         geo = live.json_ctl("ui_geometry")
         content = geo["content"]  # type: ignore[index]
-        selection_cells = live.json_ctl("read_cells")
+        selection_cells = live.read_cells()
         (out / "selection-target.cells.json").write_text(json.dumps(selection_cells, indent=2) + "\n")
         sx0, sy0, sx1, sy1 = selection_drag_points(selection_cells, content)  # type: ignore[arg-type]
         live.screenshot(out / "selection-before.png")
@@ -1763,7 +1810,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
         states.append(capture_live_state(live, out, "split-right"))
 
         before_resize_geo = live.json_ctl("ui_geometry")
-        before_resize_cells = live.json_ctl("read_cells")
+        before_resize_cells = live.read_cells()
         (out / "resize-before.geometry.json").write_text(json.dumps(before_resize_geo, indent=2) + "\n")
         (out / "resize-before.cells.json").write_text(json.dumps(before_resize_cells, indent=2) + "\n")
         surface = before_resize_geo["surface"]  # type: ignore[index]

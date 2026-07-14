@@ -31,7 +31,7 @@
 /// PNG/JPEG/GIF/WebP/BMP decompression-bomb shape. Reuse the
 /// same per-axis + total-alloc envelope as `kettle_vt::image`.
 const MAX_BG_IMAGE_DIM: u32 = 8192;
-const MAX_BG_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BG_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Animated background bounds (v2.21.x). A multi-frame background (animated
 /// GIF / APNG / animated WebP) decodes EVERY frame's RGBA up front, so the
@@ -42,8 +42,8 @@ const MAX_BG_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 /// rather than OOMing on launch. A 0 ms inter-frame gap (common in
 /// "play as fast as possible" GIFs) is clamped up so the loop has a real
 /// period and the render tick (capped at ~30 fps) governs the actual wake rate.
-const MAX_BG_ANIM_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_BG_FRAMES: usize = 512;
+const MAX_BG_ANIM_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_BG_FRAMES: usize = 128;
 const MIN_BG_FRAME_GAP_MS: u32 = 20;
 
 /// Decoded RGBA image ready for texture upload. Width/height in
@@ -136,20 +136,25 @@ pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
 /// DESIGN.md sub-cycle 9 design) gives the same visual at
 /// negligible per-frame cost; CPU-side is the bounded
 /// foundation that ships the user-visible effect today.
-fn box_blur(img: &mut BgImage, radius: u32) {
+fn box_blur(img: &mut BgImage, radius: u32) -> bool {
     if radius == 0 || img.width == 0 || img.height == 0 {
-        return;
+        return true;
     }
     let r = radius.min(16);
     // Cycle 850 (audit): one scratch buffer reused across all six sub-passes
     // (the old code allocated a fresh full-image Vec in each — up to 6 × 256 MB
     // at MAX_BG_IMAGE_DIM). Each pass writes into `scratch` then swaps, so the
     // result always lands back in `img.rgba`.
-    let mut scratch = vec![0u8; img.rgba.len()];
+    let mut scratch = Vec::new();
+    if scratch.try_reserve_exact(img.rgba.len()).is_err() {
+        return false;
+    }
+    scratch.resize(img.rgba.len(), 0);
     for _ in 0..3 {
         box_blur_axis(img, r, true, &mut scratch);
         box_blur_axis(img, r, false, &mut scratch);
     }
+    true
 }
 
 /// One separable box-blur pass along the horizontal (`horizontal == true`) or
@@ -311,8 +316,9 @@ pub fn decode_bg_image(path: &str) -> Option<BgImage> {
 /// pristine image use `decode_bg_image` directly.
 pub fn decode_bg_image_with_blur(path: &str, blur_radius: u32) -> Option<BgImage> {
     let mut img = decode_bg_image(path)?;
-    if blur_radius > 0 {
-        box_blur(&mut img, blur_radius);
+    if blur_radius > 0 && !box_blur(&mut img, blur_radius) {
+        log::warn!("background-image: insufficient memory budget for blur scratch");
+        return None;
     }
     Some(img)
 }
@@ -330,7 +336,7 @@ fn single_frame(path: &str) -> Option<Vec<BgFrame>> {
 /// (with a `log::warn`), matching [`decode_bg_image`]. Frames decode once here;
 /// the render loop only swaps the already-decoded RGBA per the playback clock.
 pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
-    use image::{AnimationDecoder, ImageFormat};
+    use image::{AnimationDecoder, ImageDecoder, ImageFormat};
     let pb = resolve_bg_path(path)?;
     let reader = match image::ImageReader::open(&pb).and_then(|r| r.with_guessed_format()) {
         Ok(r) => r,
@@ -350,16 +356,32 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
     let inner = reader.into_inner();
     // Build the format-specific animation frame iterator, or fall back to the
     // single-frame path for a non-animated GIF/PNG/WebP (or any decoder error).
-    let frames = match format {
+    let (mut frames, frame_upper_bound) = match format {
         Some(ImageFormat::Gif) => match image::codecs::gif::GifDecoder::new(inner) {
-            Ok(d) => d.into_frames(),
+            Ok(d) if decoder_dimensions_fit(d.dimensions()) => {
+                let bytes = decoder_frame_bytes(d.dimensions())?;
+                (d.into_frames(), bytes)
+            }
+            Ok(d) => {
+                let (w, h) = d.dimensions();
+                log::warn!("background-image: animation canvas {w}x{h} exceeds resource limits");
+                return None;
+            }
             Err(e) => {
                 log::warn!("background-image gif {}: {e}", pb.display());
                 return None;
             }
         },
         Some(ImageFormat::WebP) => match image::codecs::webp::WebPDecoder::new(inner) {
-            Ok(d) if d.has_animation() => d.into_frames(),
+            Ok(d) if d.has_animation() && decoder_dimensions_fit(d.dimensions()) => {
+                let bytes = decoder_frame_bytes(d.dimensions())?;
+                (d.into_frames(), bytes)
+            }
+            Ok(d) if d.has_animation() => {
+                let (w, h) = d.dimensions();
+                log::warn!("background-image: animation canvas {w}x{h} exceeds resource limits");
+                return None;
+            }
             Ok(_) => return single_frame(path),
             Err(e) => {
                 log::warn!("background-image webp {}: {e}", pb.display());
@@ -367,17 +389,25 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
             }
         },
         Some(ImageFormat::Png) => match image::codecs::png::PngDecoder::new(inner) {
-            Ok(d) => match d.is_apng() {
-                Ok(true) => match d.apng() {
-                    Ok(a) => a.into_frames(),
-                    Err(e) => {
-                        log::warn!("background-image apng {}: {e}", pb.display());
-                        return None;
-                    }
-                },
-                // Plain (non-animated) PNG → still.
-                _ => return single_frame(path),
-            },
+            Ok(d) if decoder_dimensions_fit(d.dimensions()) => {
+                let bytes = decoder_frame_bytes(d.dimensions())?;
+                match d.is_apng() {
+                    Ok(true) => match d.apng() {
+                        Ok(a) => (a.into_frames(), bytes),
+                        Err(e) => {
+                            log::warn!("background-image apng {}: {e}", pb.display());
+                            return None;
+                        }
+                    },
+                    // Plain (non-animated) PNG → still.
+                    _ => return single_frame(path),
+                }
+            }
+            Ok(d) => {
+                let (w, h) = d.dimensions();
+                log::warn!("background-image: animation canvas {w}x{h} exceeds resource limits");
+                return None;
+            }
             Err(_) => return single_frame(path),
         },
         _ => return single_frame(path),
@@ -386,11 +416,28 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
     // each frame ≤ MAX_BG_IMAGE_DIM per axis. Truncate (≥ 1 frame) on exceedance.
     let mut out: Vec<BgFrame> = Vec::new();
     let mut total: u64 = 0;
-    for fr in frames {
+    loop {
         if out.len() >= MAX_BG_FRAMES {
             log::warn!("background-image: animation truncated at {MAX_BG_FRAMES} frames");
             break;
         }
+        if total
+            .checked_add(frame_upper_bound)
+            .is_none_or(|next| next > MAX_BG_ANIM_BYTES)
+        {
+            log::warn!(
+                "background-image: animation exceeds {} MB budget, truncating at {} frames",
+                MAX_BG_ANIM_BYTES / (1024 * 1024),
+                out.len()
+            );
+            break;
+        }
+        // Check the canvas-sized upper bound before requesting the next frame:
+        // animation decoders allocate during `next()`, so a `for` loop would
+        // decode one over-budget frame before the post-decode size check.
+        let Some(fr) = frames.next() else {
+            break;
+        };
         let fr = match fr {
             Ok(f) => f,
             Err(e) => {
@@ -409,8 +456,16 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
             log::warn!("background-image: frame {w}x{h} exceeds {MAX_BG_IMAGE_DIM}px cap");
             break;
         }
-        let bytes = (w as u64) * (h as u64) * 4;
-        if total + bytes > MAX_BG_ANIM_BYTES {
+        let Some(bytes) = u64::from(w)
+            .checked_mul(u64::from(h))
+            .and_then(|n| n.checked_mul(4))
+        else {
+            break;
+        };
+        let Some(next_total) = total.checked_add(bytes) else {
+            break;
+        };
+        if bytes > MAX_BG_IMAGE_BYTES || next_total > MAX_BG_ANIM_BYTES {
             log::warn!(
                 "background-image: animation exceeds {} MB budget, truncating at {} frames",
                 MAX_BG_ANIM_BYTES / (1024 * 1024),
@@ -418,7 +473,7 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
             );
             break;
         }
-        total += bytes;
+        total = next_total;
         out.push(BgFrame {
             image: BgImage {
                 width: w,
@@ -443,15 +498,42 @@ pub fn decode_bg_image_frames_with_blur(path: &str, blur_radius: u32) -> Option<
     let mut frames = decode_bg_image_frames(path)?;
     if blur_radius > 0 {
         for f in &mut frames {
-            box_blur(&mut f.image, blur_radius);
+            if !box_blur(&mut f.image, blur_radius) {
+                log::warn!("background-image: insufficient memory budget for blur scratch");
+                return None;
+            }
         }
     }
     Some(frames)
 }
 
+fn decoder_dimensions_fit((width, height): (u32, u32)) -> bool {
+    decoder_frame_bytes((width, height)).is_some()
+}
+
+fn decoder_frame_bytes((width, height): (u32, u32)) -> Option<u64> {
+    if width == 0 || height == 0 || width > MAX_BG_IMAGE_DIM || height > MAX_BG_IMAGE_DIM {
+        return None;
+    }
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(4)?;
+    (bytes <= MAX_BG_IMAGE_BYTES).then_some(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_frame_envelope_accepts_limit_and_rejects_one_past() {
+        assert!(decoder_dimensions_fit((8192, 2048)));
+        assert!(!decoder_dimensions_fit((8192, 2049)));
+        assert!(!decoder_dimensions_fit((MAX_BG_IMAGE_DIM + 1, 1)));
+        assert_eq!(MAX_BG_IMAGE_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_BG_ANIM_BYTES, 128 * 1024 * 1024);
+        assert_eq!(MAX_BG_FRAMES, 128);
+    }
 
     /// Pre-cycle-850 O(W·H·R) brute force, kept as a correctness oracle.
     fn box_blur_reference(img: &mut BgImage, radius: u32) {

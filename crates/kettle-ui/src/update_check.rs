@@ -176,9 +176,15 @@ pub fn maybe_spawn_check(
                     }
                     if policy == UpdatePolicy::Auto {
                         match kettle_update::install_update(&client, &update) {
-                            Ok(_) => {
-                                let _ = proxy
-                                    .send_event(UserEvent::UpdateInstalled { tag: update.tag });
+                            Ok(outcome) => {
+                                let staged = matches!(
+                                    outcome.disposition,
+                                    kettle_update::InstallDisposition::Staged { .. }
+                                );
+                                let _ = proxy.send_event(UserEvent::UpdateInstalled {
+                                    tag: update.tag,
+                                    staged,
+                                });
                             }
                             Err(kettle_update::UpdateError::UnmanagedInstall(reason)) => {
                                 log::info!(
