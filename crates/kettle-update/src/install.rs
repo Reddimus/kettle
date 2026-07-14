@@ -3256,10 +3256,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_live_executable_and_run_lock_gate_replacement() {
+    fn windows_run_lock_and_target_handle_gate_replacement() {
         let root = tempfile::tempdir().unwrap();
         let child_executable = root.path().join("kettle.exe");
         fs::copy(std::env::current_exe().unwrap(), &child_executable).unwrap();
+        let blocked_target_path = root.path().join("kettle.com");
+        fs::write(&blocked_target_path, b"launcher").unwrap();
         let lock_path = root.path().join(RUNNING_LOCK_FILE);
         let ready = root.path().join("ready");
         let release = root.path().join("release");
@@ -3291,18 +3293,37 @@ mod tests {
             Err(fs4::TryLockError::WouldBlock)
         ));
 
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let mut blocked_options = OpenOptions::new();
+        blocked_options.read(true).share_mode(0);
+        let blocked_target = blocked_options.open(&blocked_target_path).unwrap();
+        let (unblock_tx, unblock_rx) = std::sync::mpsc::sync_channel::<()>(0);
         let release_path = release.clone();
-        let release_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+        let blocker = std::thread::spawn(move || {
+            unblock_rx.recv().unwrap();
+            drop(blocked_target);
             fs::write(release_path, b"release").unwrap();
         });
-        let started = std::time::Instant::now();
-        wait_for_windows_update_targets(root.path()).unwrap();
+        let prefix = root.path().to_path_buf();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            done_tx
+                .send(wait_for_windows_update_targets(&prefix))
+                .unwrap();
+        });
         assert!(
-            started.elapsed() >= std::time::Duration::from_millis(200),
-            "the live mapped executable did not delay replacement"
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "a no-share target handle did not delay replacement"
         );
-        release_thread.join().unwrap();
+        unblock_tx.send(()).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("target probe did not resume after the handle closed")
+            .unwrap();
+        waiter.join().unwrap();
+        blocker.join().unwrap();
         assert!(child.wait().unwrap().success());
 
         let exclusive = OpenOptions::new()
@@ -3477,7 +3498,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "child process fixture; invoked by windows_live_executable_and_run_lock_gate_replacement"]
+    #[ignore = "child process fixture; invoked by windows_run_lock_and_target_handle_gate_replacement"]
     fn windows_update_lock_child() {
         let Ok(lock_path) = std::env::var("KETTLE_TEST_RUNNING_LOCK") else {
             return;
