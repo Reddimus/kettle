@@ -334,12 +334,13 @@ pub fn is_pending_update_helper_invocation() -> bool {
     #[cfg(windows)]
     {
         let mut args = std::env::args_os().skip(1);
-        return args.next().as_deref()
-            == Some(std::ffi::OsStr::new("--kettle-apply-pending-update"))
-            && args.next().is_none();
+        args.next().as_deref() == Some(std::ffi::OsStr::new("--kettle-apply-pending-update"))
+            && args.next().is_none()
     }
     #[cfg(not(windows))]
-    false
+    {
+        false
+    }
 }
 
 /// Reconcile a staged Windows update before normal startup and acquire the
@@ -410,18 +411,20 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 }
             }
         }
-        return Ok(ProcessStart::Ready {
+        Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {
                 _lock: Some(running_lock),
             },
             warning,
-        });
+        })
     }
     #[cfg(not(windows))]
-    Ok(ProcessStart::Ready {
-        guard: RunningInstallGuard {},
-        warning: None,
-    })
+    {
+        Ok(ProcessStart::Ready {
+            guard: RunningInstallGuard {},
+            warning: None,
+        })
+    }
 }
 
 /// Apply the fixed pending-update record beside this helper executable.
@@ -444,10 +447,12 @@ pub fn run_pending_update_helper() -> Result<(), UpdateError> {
                 "pending-update mode may only run from a staged Kettle helper".into(),
             ));
         }
-        return run_pending_update_helper_inner(&prefix, &executable);
+        run_pending_update_helper_inner(&prefix, &executable)
     }
     #[cfg(not(windows))]
-    Err(UpdateError::UnsupportedPlatform)
+    {
+        Err(UpdateError::UnsupportedPlatform)
+    }
 }
 
 pub fn marker_json(version: &str) -> Result<String, UpdateError> {
@@ -613,7 +618,7 @@ fn install_update_into(
 
     #[cfg(windows)]
     {
-        return stage_windows_update(staging, install, update);
+        stage_windows_update(staging, install, update)
     }
 
     #[cfg(target_os = "linux")]
