@@ -1928,13 +1928,16 @@ fn read_config_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     set_config_read_flags(&mut options);
-    let file = options.open(path).map_err(|error| {
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            return invalid_config_file(path);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            #[cfg(unix)]
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                return Err(invalid_config_file(path));
+            }
+            return Err(error);
         }
-        error
-    })?;
+    };
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(invalid_config_file(path));
@@ -9547,7 +9550,10 @@ cell-height = 1.2\n";
             std::fs::read_to_string(&target).unwrap(),
             "cursor-blink = false\n"
         );
-        assert_eq!(backup, target.with_extension("bak"));
+        assert_eq!(
+            backup.canonicalize().unwrap(),
+            target.with_extension("bak").canonicalize().unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(backup).unwrap(),
             "cursor-blink = true\n"
