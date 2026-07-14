@@ -44,21 +44,11 @@ pub struct PresenceEntry {
 /// Resolve the presence directory, environment injected for tests. Sibling
 /// of the ctl discovery registry: `<runtime base>/kettle/instances`.
 pub fn presence_dir_from(get: impl Fn(&str) -> Option<String>) -> PathBuf {
-    // Same base resolution as discovery::registry_dir_from — see there for
-    // the rationale (absolute per-user location; temp dir as last resort).
-    let env = |k: &str| get(k).filter(|s| !s.is_empty());
-    let base: PathBuf = if cfg!(windows) {
-        env("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-    } else {
-        env("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .or_else(|| env("XDG_STATE_HOME").map(PathBuf::from))
-            .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-            .unwrap_or_else(std::env::temp_dir)
-    };
-    base.join("kettle").join("instances")
+    // Discovery owns runtime-base validation and the private fallback policy.
+    // Derive the sibling instead of duplicating that security boundary here.
+    let mut dir = crate::discovery::registry_dir_from(get);
+    dir.set_file_name("instances");
+    dir
 }
 
 /// The default presence directory from the real environment.
@@ -292,6 +282,10 @@ mod tests {
         let p = presence_dir_from(fake);
         let d = crate::discovery::registry_dir_from(fake);
         assert_eq!(p.parent(), d.parent(), "shared <base>/kettle parent");
-        assert!(p.ends_with("instances"));
+        assert_eq!(
+            p.file_name().and_then(|name| name.to_str()),
+            Some("instances")
+        );
+        assert_eq!(d.file_name().and_then(|name| name.to_str()), Some("ctl"));
     }
 }
