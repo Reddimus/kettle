@@ -423,13 +423,16 @@ fn open_session_file(path: &std::path::Path) -> std::io::Result<(std::fs::File, 
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     set_session_read_flags(&mut options);
-    let file = options.open(path).map_err(|error| {
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            return invalid_session_file(path);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            #[cfg(unix)]
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                return Err(invalid_session_file(path));
+            }
+            return Err(error);
         }
-        error
-    })?;
+    };
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(invalid_session_file(path));
