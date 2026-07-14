@@ -2,8 +2,8 @@
 //!
 //! Newline-delimited JSON (one message per line). Versioned with a leading
 //! `"v"` field; the compatibility policy is **additive only** — new fields may
-//! be added, unknown fields are ignored, and a message whose `v` exceeds the
-//! reader's supported version is rejected with `unsupported_version` rather
+//! be added, unknown fields are ignored, and a message whose `v` differs from
+//! the reader's supported version is rejected with `unsupported_version` rather
 //! than mis-parsed. Keeping `params`/`result` as free-form JSON values means a
 //! new method needs no protocol-struct change — only a server handler + a
 //! client call site.
@@ -19,13 +19,213 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The only wire-protocol version this build speaks. A peer announcing a higher
-/// `v` is rejected rather than guessed at.
+/// The only wire-protocol version this build speaks. Protocol v1 is not
+/// backward-negotiated: every request, response, and event must carry exactly
+/// this value.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Hard cap on a single NDJSON line (request or response), mirroring the
-/// remote.cmd 1 MiB guard. A longer line is a protocol error + connection close.
+/// Hard cap on a client request line. A longer line is a protocol error and the
+/// connection is closed.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// Hard cap on one server response/event line. This is intentionally smaller
+/// than the request cap so a screen or cell read cannot amplify a small request
+/// into an unbounded allocation in clients and MCP bridges.
+pub const MAX_RESPONSE_LINE_BYTES: usize = 768 * 1024;
+
+/// Maximum page size accepted by list/grid methods.
+pub const MAX_PAGE_ITEMS: usize = 4096;
+
+/// Default page size. Existing small results remain single-page while large
+/// grids and multi-window sessions are bounded.
+pub const DEFAULT_PAGE_ITEMS: usize = 1024;
+
+/// Authorization class for a control method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// Available in `agent-server=read-only` and `full`.
+    Read,
+    /// Requires `agent-server=full`.
+    Mutate,
+}
+
+/// Thread on which a method is implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Execution {
+    /// Forward to the UI thread, which owns application state.
+    Ui,
+    /// Run on the connection worker without blocking the UI thread.
+    Connection,
+}
+
+/// Every control method supported by protocol v1. This enum is the single
+/// source of truth for dispatch, privilege checks, and execution placement;
+/// unknown wire strings are still reported as `unknown_method`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Method {
+    GetState,
+    ListTabs,
+    ListPanes,
+    ReadScreen,
+    ReadCells,
+    UiGeometry,
+    Screenshot,
+    Subscribe,
+    SendText,
+    SendKeys,
+    DispatchKeybind,
+    SendMouse,
+    ResizeWindow,
+    PerformAction,
+    RunCommand,
+    WaitFor,
+}
+
+impl Method {
+    /// Complete method table, used by tests and diagnostics.
+    pub const ALL: [Self; 16] = [
+        Self::GetState,
+        Self::ListTabs,
+        Self::ListPanes,
+        Self::ReadScreen,
+        Self::ReadCells,
+        Self::UiGeometry,
+        Self::Screenshot,
+        Self::Subscribe,
+        Self::SendText,
+        Self::SendKeys,
+        Self::DispatchKeybind,
+        Self::SendMouse,
+        Self::ResizeWindow,
+        Self::PerformAction,
+        Self::RunCommand,
+        Self::WaitFor,
+    ];
+
+    /// Parse the stable protocol-v1 method spelling.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "get_state" => Self::GetState,
+            "list_tabs" => Self::ListTabs,
+            "list_panes" => Self::ListPanes,
+            "read_screen" => Self::ReadScreen,
+            "read_cells" => Self::ReadCells,
+            "ui_geometry" => Self::UiGeometry,
+            "screenshot" => Self::Screenshot,
+            "subscribe" => Self::Subscribe,
+            "send_text" => Self::SendText,
+            "send_keys" => Self::SendKeys,
+            "dispatch_keybind" => Self::DispatchKeybind,
+            "send_mouse" => Self::SendMouse,
+            "resize_window" => Self::ResizeWindow,
+            "perform_action" => Self::PerformAction,
+            "run_command" => Self::RunCommand,
+            "wait_for" => Self::WaitFor,
+            _ => return None,
+        })
+    }
+
+    /// Stable wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GetState => "get_state",
+            Self::ListTabs => "list_tabs",
+            Self::ListPanes => "list_panes",
+            Self::ReadScreen => "read_screen",
+            Self::ReadCells => "read_cells",
+            Self::UiGeometry => "ui_geometry",
+            Self::Screenshot => "screenshot",
+            Self::Subscribe => "subscribe",
+            Self::SendText => "send_text",
+            Self::SendKeys => "send_keys",
+            Self::DispatchKeybind => "dispatch_keybind",
+            Self::SendMouse => "send_mouse",
+            Self::ResizeWindow => "resize_window",
+            Self::PerformAction => "perform_action",
+            Self::RunCommand => "run_command",
+            Self::WaitFor => "wait_for",
+        }
+    }
+
+    /// Privilege required by this method.
+    pub const fn capability(self) -> Capability {
+        match self {
+            Self::Screenshot
+            | Self::SendText
+            | Self::SendKeys
+            | Self::DispatchKeybind
+            | Self::SendMouse
+            | Self::ResizeWindow
+            | Self::PerformAction
+            | Self::RunCommand => Capability::Mutate,
+            _ => Capability::Read,
+        }
+    }
+
+    /// Execution placement for this method.
+    pub const fn execution(self) -> Execution {
+        match self {
+            Self::WaitFor => Execution::Connection,
+            _ => Execution::Ui,
+        }
+    }
+}
+
+/// Parsed additive paging controls. Cursors are decimal item offsets so v1
+/// clients can persist and inspect them without a binary codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRequest {
+    pub offset: usize,
+    pub limit: usize,
+    pub snapshot: Option<String>,
+}
+
+impl PageRequest {
+    /// Parse optional `cursor`, `limit`, and `snapshot` fields.
+    pub fn from_params(params: &Value) -> Result<Self, &'static str> {
+        let offset = match params.get("cursor") {
+            None | Some(Value::Null) => 0,
+            Some(Value::String(cursor)) => cursor
+                .parse::<usize>()
+                .map_err(|_| "cursor must be a decimal item offset")?,
+            _ => return Err("cursor must be a string"),
+        };
+        let limit = match params.get("limit") {
+            None | Some(Value::Null) => DEFAULT_PAGE_ITEMS,
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n > 0)
+                .ok_or("limit must be a positive integer")?
+                .min(MAX_PAGE_ITEMS),
+        };
+        let snapshot = match params.get("snapshot") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if !value.is_empty() && value.len() <= 128 => {
+                Some(value.clone())
+            }
+            Some(Value::String(_)) => return Err("snapshot must be 1..=128 bytes"),
+            _ => return Err("snapshot must be a string"),
+        };
+        if offset > 0 && snapshot.is_none() {
+            return Err("snapshot is required when cursor is non-zero");
+        }
+        Ok(Self {
+            offset,
+            limit,
+            snapshot,
+        })
+    }
+
+    /// End offset and additive continuation metadata for a collection.
+    pub fn bounds(&self, total: usize) -> (usize, usize, Option<String>, bool) {
+        let start = self.offset.min(total);
+        let end = start.saturating_add(self.limit).min(total);
+        let truncated = end < total;
+        let next = truncated.then(|| end.to_string());
+        (start, end, next, truncated)
+    }
+}
 
 /// A client→server request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +323,7 @@ impl Event {
 pub mod error_codes {
     /// The request line was not valid JSON / not a `Request`.
     pub const BAD_REQUEST: &str = "bad_request";
-    /// `v` is newer than this build supports.
+    /// `v` differs from the only version this build supports.
     pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
     /// Unknown method name.
     pub const UNKNOWN_METHOD: &str = "unknown_method";
@@ -140,6 +340,10 @@ pub mod error_codes {
     pub const BUSY: &str = "busy";
     /// Internal server error.
     pub const INTERNAL: &str = "internal";
+    /// A handler result could not be represented within the response budget.
+    pub const RESPONSE_TOO_LARGE: &str = "response_too_large";
+    /// A paged live-state read continued after the underlying snapshot changed.
+    pub const STALE_SNAPSHOT: &str = "stale_snapshot";
 }
 
 /// Parse one ALREADY-BUFFERED NDJSON request line, validating the size cap +
@@ -173,11 +377,14 @@ pub fn parse_request_line(line: &str) -> Result<Request, Response> {
             format!("invalid request: {e}"),
         )
     })?;
-    if req.v > PROTOCOL_VERSION {
+    if req.v != PROTOCOL_VERSION {
         return Err(Response::err(
             req.id,
             error_codes::UNSUPPORTED_VERSION,
-            format!("protocol v{} > supported v{PROTOCOL_VERSION}", req.v),
+            format!(
+                "protocol v{} is unsupported; expected v{PROTOCOL_VERSION}",
+                req.v
+            ),
         ));
     }
     Ok(req)
@@ -208,6 +415,41 @@ mod tests {
         let err = parse_request_line(r#"{"v":99,"id":42,"method":"x"}"#).unwrap_err();
         assert_eq!(err.id, 42, "id recovered so the client can correlate");
         assert_eq!(err.error.unwrap().code, error_codes::UNSUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn older_version_is_also_rejected() {
+        let err = parse_request_line(r#"{"v":0,"id":9,"method":"x"}"#).unwrap_err();
+        assert_eq!(err.id, 9);
+        assert_eq!(err.error.unwrap().code, error_codes::UNSUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn method_table_is_unique_and_classified() {
+        let mut names = std::collections::HashSet::new();
+        for method in Method::ALL {
+            assert!(names.insert(method.as_str()));
+            assert_eq!(Method::from_name(method.as_str()), Some(method));
+            let _ = method.capability();
+            let _ = method.execution();
+        }
+        assert_eq!(Method::Screenshot.capability(), Capability::Mutate);
+    }
+
+    #[test]
+    fn paging_is_bounded_and_validated() {
+        let page = PageRequest::from_params(&serde_json::json!({
+            "cursor": "10",
+            "limit": MAX_PAGE_ITEMS + 10,
+            "snapshot": "abc",
+        }))
+        .unwrap();
+        assert_eq!(page.offset, 10);
+        assert_eq!(page.limit, MAX_PAGE_ITEMS);
+        assert_eq!(page.bounds(20), (10, 20, None, false));
+        assert!(PageRequest::from_params(&serde_json::json!({"cursor": -1})).is_err());
+        assert!(PageRequest::from_params(&serde_json::json!({"limit": 0})).is_err());
+        assert!(PageRequest::from_params(&serde_json::json!({"cursor": "1"})).is_err());
     }
 
     #[test]

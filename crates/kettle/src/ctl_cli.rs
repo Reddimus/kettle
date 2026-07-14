@@ -151,6 +151,7 @@ fn pretty(method: &str, result: &Value) -> String {
                     ));
                 }
             }
+            out.push_str(&page_notice(result));
             out
         }
         "list_tabs" => {
@@ -169,13 +170,18 @@ fn pretty(method: &str, result: &Value) -> String {
                     ));
                 }
             }
+            out.push_str(&page_notice(result));
             out
         }
-        "read_screen" => result
-            .get("text")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("{result}\n")),
+        "read_screen" => {
+            let mut out = result
+                .get("text")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{result}\n"));
+            out.push_str(&page_notice(result));
+            out
+        }
         "screenshot" => {
             let path = result.get("path").and_then(|p| p.as_str()).unwrap_or("");
             let scope = if result.get("full_window").and_then(|v| v.as_bool()) == Some(true) {
@@ -238,5 +244,37 @@ fn pretty(method: &str, result: &Value) -> String {
             }
         }
         _ => format!("{result}\n"),
+    }
+}
+
+fn page_notice(result: &Value) -> String {
+    if result.get("truncated").and_then(Value::as_bool) != Some(true) {
+        return String::new();
+    }
+    let cursor = result
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let snapshot = result.get("snapshot").and_then(Value::as_str).unwrap_or("");
+    format!(
+        "\n[more: repeat with --json '{{\"cursor\":\"{cursor}\",\"snapshot\":\"{snapshot}\"}}']\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paged_pretty_output_explains_continuation() {
+        let result = serde_json::json!({
+            "panes": [],
+            "truncated": true,
+            "next_cursor": "10",
+            "snapshot": "abc",
+        });
+        let output = pretty("list_panes", &result);
+        assert!(output.contains(r#""cursor":"10""#));
+        assert!(output.contains(r#""snapshot":"abc""#));
     }
 }

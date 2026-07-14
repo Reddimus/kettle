@@ -31,10 +31,11 @@ artifacts.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.35.0` (2026-06-19 to 2026-07-11): cwd-aware titles and
+- `v2.29.0` to `v2.35.0` (2026-06-19 to 2026-07-14): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
-  keyboard text selection, package-template lockstep, and dev-record launcher
-  sync.
+  keyboard text selection, package-template lockstep, bounded/private recording
+  retention, graphics-resource accounting, hardened control/MCP and durable
+  state boundaries, and restartable installer-owned updates.
 
 ## Maintainer checks
 

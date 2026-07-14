@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 bitflags = "2.11.1"
+kettle-state.workspace = true
 log.workspace = true
 # Cycle 309: `detect_malformed_values` validates `trigger = REGEX`
 # patterns at --check-config time. The regex crate is already a
@@ -25,3 +26,9 @@ log.workspace = true
 # imports the type — no new transitive deps. Cheaper than
 # reinventing a fragile syntactic regex sanity check.
 regex.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

@@ -10,6 +10,7 @@ use crate::{MANIFEST_URL, SIGNATURE_URL, SIGNING_CONTEXT, UPDATE_PUBLIC_KEY, cur
 
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 1024;
+const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -170,7 +171,7 @@ impl FeedClient {
             .download_url
             .as_deref()
             .ok_or(UpdateError::UnsupportedPlatform)?;
-        if asset.size == 0 || asset.size > 512 * 1024 * 1024 {
+        if asset.size == 0 || asset.size > MAX_ARTIFACT_BYTES {
             return Err(UpdateError::MalformedManifest(
                 "artifact size is outside the accepted range".to_string(),
             ));
@@ -346,7 +347,7 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), UpdateError> {
                 "asset targets and names must be unique".to_string(),
             ));
         }
-        if asset.size == 0 || asset.size > 512 * 1024 * 1024 {
+        if asset.size == 0 || asset.size > MAX_ARTIFACT_BYTES {
             return Err(UpdateError::MalformedManifest(
                 "artifact size is outside the accepted range".to_string(),
             ));

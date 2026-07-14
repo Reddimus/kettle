@@ -48,8 +48,8 @@ updates:
       - dependency-name: "objc2"
       - dependency-name: "objc2-app-kit"
 
-  # GitHub Actions used by ci.yml / release.yml. Same weekly cadence so
-  # the review surface lands together.
+  # GitHub Actions used across the workflow set. Same weekly cadence so the
+  # review surface lands together; version comments keep SHA pins updateable.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
@@ -69,11 +69,3 @@ updates:
         update-types:
           - patch
           - minor
-    ignore:
-      # `dtolnay/rust-toolchain@1.89` (ci.yml's `msrv` job) pins the toolchain
-      # to the declared MSRV — the `@1.89` ref is a Rust *version*, not an
-      # action release. Dependabot read it as a version tag and proposed
-      # `@1.100` (a Rust release that does not exist), which broke the `msrv`
-      # job (PR #5). The MSRV is bumped deliberately alongside `rust-version`
-      # in Cargo.toml, never by automation; ignore this action entirely.
-      - dependency-name: "dtolnay/rust-toolchain"

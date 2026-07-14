@@ -27,7 +27,7 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
       - name: Require a GitHub-verified annotated tag
@@ -95,14 +95,16 @@ jobs:
             fi
           fi
           echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
       - name: Linux deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-pretest
       - run: cargo test --workspace
@@ -140,20 +142,22 @@ jobs:
             artifact: kettle-linux-aarch64.tar.gz
             rust_target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
       # consistency gate moved to the `pretest` job (single Linux, runs before
       # any per-OS build) so a version mismatch blocks ALL platform builds,
       # rather than letting macOS/Windows publish artifacts while only the Linux
       # package leg caught it (partial-release risk). See the `pretest` job above.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         # Cycle 838 (audit): key the cache per artifact so the two ubuntu-latest
         # legs (x86_64 + aarch64) don't share one cache and thrash each other's
         # target dir — mirrors how ci.yml keys its msrv/nightly/aarch64 legs.
@@ -310,7 +314,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.artifact }}").Hash.ToLower()
           Set-Content -NoNewline -Path "${{ matrix.artifact }}.sha256" -Value "$hash  ${{ matrix.artifact }}`n"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           retention-days: 7
@@ -328,8 +332,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true

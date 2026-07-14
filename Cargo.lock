@@ -1784,7 +1784,10 @@ dependencies = [
  "kettle-update",
  "libc",
  "log",
+ "notify-rust",
+ "serde",
  "serde_json",
+ "tempfile",
  "windows-sys 0.61.2",
  "winresource",
 ]
@@ -1794,8 +1797,11 @@ name = "kettle-config"
 version = "2.35.0"
 dependencies = [
  "bitflags 2.13.0",
+ "kettle-state",
+ "libc",
  "log",
  "regex",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1805,11 +1811,15 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "crossbeam-channel",
+ "fs4",
  "kettle-vt",
+ "libc",
  "log",
  "portable-pty",
  "regex",
  "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
 ]
 
@@ -1852,6 +1862,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kettle-state"
+version = "2.35.0"
+dependencies = [
+ "fs4",
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "kettle-ui"
 version = "2.35.0"
 dependencies = [
@@ -1865,6 +1885,7 @@ dependencies = [
  "kettle-ctl",
  "kettle-remote",
  "kettle-render",
+ "kettle-state",
  "kettle-update",
  "libc",
  "log",
@@ -1892,6 +1913,9 @@ dependencies = [
  "flate2",
  "fs4",
  "hex",
+ "kettle-state",
+ "libc",
+ "log",
  "semver",
  "serde",
  "serde_json",
@@ -2657,9 +2681,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "open"
-version = "5.3.6"
+version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd8d3b65c44123a56e0133d2cd06ce4361bd3ca99d41198b2f25e3c3db9b8b4a"
+checksum = "a0b3d059e795d52b8a72fef45658620edd4d9c359b338564aa14391ffa511ed5"
 dependencies = [
  "is-wsl",
  "libc",

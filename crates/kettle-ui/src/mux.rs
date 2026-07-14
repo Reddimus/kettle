@@ -8,6 +8,11 @@ use crossbeam_channel::{Receiver, Sender};
 use kettle_config::{Config, CursorStyle};
 use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
 
+/// At the PTY reader's 64 KiB maximum chunk size, this bounds lossless recorder
+/// backlog to 512 KiB per pane. The sender blocks before taking the terminal
+/// lock, so backpressure cannot deadlock rendering.
+const LOSSLESS_OUTPUT_QUEUE_DEPTH: usize = 8;
+
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells use the placeholder "kettle" — cycle 89's
 /// cwd-basename fallback fills in for those once OSC 7 arrives. SSH panes
@@ -769,12 +774,8 @@ pub struct Mux {
     /// Controls whether spawn_pane attaches the output sidechannel
     /// to new PTYs (zero-cost when false: no per-PTY-read alloc).
     pub lua_output_subscribed: bool,
-    /// Cycle 881: when the dev-record recorder is teeing PTY output, make the
-    /// output sidechannel UNBOUNDED instead of the lossy `bounded(64)` used for
-    /// Lua plugins — so a fast output burst can't silently drop chunks and put
-    /// holes in the asciicast trace. Same rationale as the (already unbounded)
-    /// event channel: growth only happens if the UI thread is wedged, and the
-    /// App drains it every frame. False (= bounded, drop-on-full) otherwise.
+    /// When the dev recorder is teeing PTY output, use bounded lossless
+    /// backpressure rather than the Lua plugin tap's best-effort delivery.
     pub record_lossless: bool,
     /// Ring buffer of recently-closed tab snapshots (cycle 247).
     /// Bounded so a long-running session doesn't accumulate state.
@@ -876,12 +877,11 @@ impl Mux {
         // The Mux's output_tx is set when a LuaEngine subscribes
         // (App configures it post-construction); None when no
         // plugin is listening so the alloc-per-PTY-read is skipped.
-        // Cycle 881: lossless (unbounded) when the recorder is teeing output so
-        // the asciicast trace can't lose chunks under a fast burst; the lossy
-        // `bounded(64)` (drop-on-full) is kept for the Lua-plugin case where
-        // dropping under back-pressure is acceptable.
+        // Recorder delivery is bounded and blocking. `PtyOutputSender::send`
+        // runs before the reader takes the terminal lock, so this applies PTY
+        // backpressure without the event-channel deadlock described above.
         let (out_tx, out_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = if self.record_lossless {
-            crossbeam_channel::unbounded()
+            crossbeam_channel::bounded(LOSSLESS_OUTPUT_QUEUE_DEPTH)
         } else {
             crossbeam_channel::bounded(64)
         };

@@ -19,23 +19,91 @@ if [ ! -x target/release/kettle ]; then
 fi
 
 tmp_root=$(mktemp -d /tmp/kettle-install-smoke.XXXXXX)
-trap 'rm -rf "$tmp_root"' EXIT INT TERM
+normal_binary="${tmp_root}/kettle-release-no-dev-record"
+cp target/release/kettle "${normal_binary}"
+cleanup() {
+  cp "${normal_binary}" target/release/kettle 2>/dev/null || true
+  rm -rf "${tmp_root}"
+}
+trap cleanup EXIT INT TERM
+
+if ./scripts/install.sh --skip-build --record-dir= > /dev/null 2>&1; then
+  fail "installer accepted an empty development recording directory"
+fi
 
 assert_abs_desktop_paths() {
   local prefix=$1
+  local record_dir=${2:-}
   local desktop="${prefix}/share/applications/kettle.desktop"
+  local binary="${prefix}/bin/kettle"
+  local icon="${prefix}/share/icons/hicolor/256x256/apps/kettle.png"
+  desktop_string_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g'
+  }
+  desktop_exec_quote() {
+    local escaped
+    # shellcheck disable=SC2016
+    escaped=$(printf '%s' "$1" | sed \
+      -e 's/\\/\\\\/g' \
+      -e 's/"/\\"/g' \
+      -e 's/`/\\`/g' \
+      -e 's/\$/\\$/g' \
+      -e 's/%/%%/g')
+    printf '"%s"' "$(desktop_string_escape "${escaped}")"
+  }
   grep -qx "Name=Kettle" "$desktop" \
     || fail "desktop Name is not the user-facing app name Kettle"
-  grep -qx "Exec=${prefix}/bin/kettle" "$desktop" \
-    || fail "desktop Exec does not point at ${prefix}/bin/kettle"
-  grep -qx "TryExec=${prefix}/bin/kettle" "$desktop" \
+  if [ -n "$record_dir" ]; then
+    grep -Fqx "Exec=/usr/bin/env $(desktop_exec_quote "KETTLE_RECORD_DIR=${record_dir}") $(desktop_exec_quote "${binary}")" "$desktop" \
+      || fail "desktop recording Exec does not preserve its argument boundaries"
+  else
+    grep -Fqx "Exec=$(desktop_exec_quote "${binary}")" "$desktop" \
+      || fail "desktop Exec does not point at ${prefix}/bin/kettle"
+  fi
+  grep -Fqx "TryExec=$(desktop_string_escape "${binary}")" "$desktop" \
     || fail "desktop TryExec does not point at ${prefix}/bin/kettle"
-  grep -qx "Icon=${prefix}/share/icons/hicolor/256x256/apps/kettle.png" "$desktop" \
+  grep -Fqx "Icon=$(desktop_string_escape "${icon}")" "$desktop" \
     || fail "desktop Icon does not point at the prefix-local PNG"
+  if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate "$desktop" || fail "generated desktop entry is invalid"
+  fi
+}
+
+assert_desktop_launch_argv() {
+  local prefix=$1
+  local expected_record_dir=$2
+  command -v gio >/dev/null 2>&1 || fail "gio is required to verify desktop Exec argument parsing"
+  local desktop="${prefix}/share/applications/kettle.desktop"
+  local binary="${prefix}/bin/kettle"
+  local original="${prefix}/bin/kettle.desktop-test-original"
+  local probe="${tmp_root}/desktop-launch.probe"
+  mv -- "${binary}" "${original}"
+  # shellcheck disable=SC2016 # The second line is the generated probe script.
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf '\''%s\n%s\n%s\n%s\n'\'' "$0" "$#" "${1-}" "${KETTLE_RECORD_DIR-}" > "${KETTLE_DESKTOP_PROBE:?}"' \
+    > "${binary}"
+  chmod 755 -- "${binary}"
+  KETTLE_DESKTOP_PROBE="${probe}" gio launch "${desktop}"
+  local deadline=$((SECONDS + 10))
+  while [[ ! -f "${probe}" && ${SECONDS} -lt ${deadline} ]]; do
+    sleep 0.05
+  done
+  [[ -f "${probe}" ]] || fail "desktop launch did not execute the probe binary"
+  mapfile -t desktop_probe < "${probe}"
+  [[ "${desktop_probe[0]-}" == "${binary}" ]] \
+    || fail "desktop Exec decoded the binary path incorrectly"
+  [[ "${desktop_probe[1]-}" == "0" && -z "${desktop_probe[2]-}" ]] \
+    || fail "desktop Exec introduced unexpected arguments"
+  [[ "${desktop_probe[3]-}" == "${expected_record_dir}" ]] \
+    || fail "desktop Exec decoded the recording directory incorrectly"
+  mv -- "${original}" "${binary}"
 }
 
 assert_installed_prefix() {
   local prefix=$1
+  local expected_channel=$2
+  local record_dir=${3:-}
   [ -x "${prefix}/bin/kettle" ] || fail "missing installed binary in ${prefix}"
   [ -x "${prefix}/share/kettle/install.sh" ] \
     || fail "missing saved uninstall helper in ${prefix}"
@@ -43,6 +111,8 @@ assert_installed_prefix() {
     || fail "missing self-update ownership marker in ${prefix}"
   grep -q '"managed_by": "kettle-installer"' "${prefix}/share/kettle/install.json" \
     || fail "invalid self-update ownership marker in ${prefix}"
+  grep -q "\"channel\": \"${expected_channel}\"" "${prefix}/share/kettle/install.json" \
+    || fail "expected ${expected_channel} install marker in ${prefix}"
   [ -f "${prefix}/share/kettle/shell-integration/kettle.bash" ] \
     || fail "missing installed shell integration in ${prefix}"
   [ -f "${prefix}/share/man/man1/kettle.1" ] || fail "missing installed man page"
@@ -50,7 +120,7 @@ assert_installed_prefix() {
     || fail "missing installed SVG icon"
   [ -f "${prefix}/share/icons/hicolor/256x256/apps/kettle.png" ] \
     || fail "missing installed PNG icon"
-  assert_abs_desktop_paths "$prefix"
+  assert_abs_desktop_paths "$prefix" "$record_dir"
   "${prefix}/bin/kettle" --version | grep -qE '^kettle [0-9]+\.[0-9]+\.[0-9]+' \
     || fail "installed binary did not print a kettle version"
 }
@@ -72,10 +142,62 @@ direct_prefix="${tmp_root}/direct"
 grep -q "To uninstall: ${direct_prefix}/share/kettle/install.sh --uninstall" \
   "${tmp_root}/direct-install.out" \
   || fail "direct installer did not print prefix-aware uninstall hint"
-assert_installed_prefix "$direct_prefix"
+assert_installed_prefix "$direct_prefix" "local-dev"
 "${direct_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/direct-uninstall.out"
 assert_uninstalled_prefix "$direct_prefix"
 echo "linux-installer check: direct custom-prefix install/uninstall OK"
+
+if ./scripts/install.sh --skip-build "--prefix=${tmp_root}/must-refuse" \
+    "--record-dir=${tmp_root}/normal-binary-records" >/dev/null 2>&1; then
+  fail "normal release binary was accepted as a dev-record install"
+fi
+
+symlink_target="${tmp_root}/symlink target"
+symlink_record="${tmp_root}/symlink records"
+mkdir -p "${symlink_target}"
+ln -s "${symlink_target}" "${symlink_record}"
+if ./scripts/install.sh "--prefix=${tmp_root}/must-refuse-symlink" \
+    "--record-dir=${symlink_record}" >/dev/null 2>&1; then
+  fail "installer accepted a symlink as the recording directory"
+fi
+
+cargo build --release -p kettle --features dev-record
+dev_prefix="${tmp_root}/dev back\\slash % dollar\$ quote\" tick\`"
+record_dir="${tmp_root}/record back\\slash % dollar\$ quote\" tick\`"
+./scripts/install.sh --skip-build "--prefix=${dev_prefix}" "--record-dir=${record_dir}" \
+  > "${tmp_root}/dev-install.out"
+assert_installed_prefix "$dev_prefix" "local-dev-record" "$record_dir"
+[ "$(stat -c '%a' "$record_dir")" = "700" ] \
+  || fail "development recording directory is not mode 0700"
+assert_desktop_launch_argv "$dev_prefix" "$record_dir"
+"${dev_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/dev-uninstall.out"
+assert_uninstalled_prefix "$dev_prefix"
+echo "linux-installer check: spaced dev-record prefix/install/uninstall OK"
+
+# Restore the exact non-dev release binary for the simulated public bundle and
+# for any CI smoke that follows this script.
+cp "${normal_binary}" target/release/kettle
+
+# Exercise the release-tarball layout without requiring a published tag. Only
+# this layout (and install-online.sh) may emit a stable self-update marker.
+bundle="${tmp_root}/bundle"
+mkdir -p "${bundle}/packaging"
+cp "${normal_binary}" "${bundle}/kettle"
+cp scripts/install.sh "${bundle}/install.sh"
+cp -R packaging/linux "${bundle}/packaging/linux"
+cp -R shell-integration "${bundle}/shell-integration"
+if "${bundle}/install.sh" --skip-build --record-dir="${tmp_root}/invalid" \
+  > /dev/null 2>&1; then
+  fail "release-tarball installer accepted the source-only --record-dir option"
+fi
+tarball_prefix="${tmp_root}/tarball"
+"${bundle}/install.sh" --skip-build "--prefix=${tarball_prefix}" \
+  > "${tmp_root}/tarball-install.out"
+assert_installed_prefix "$tarball_prefix" "stable"
+"${tarball_prefix}/share/kettle/install.sh" --uninstall \
+  > "${tmp_root}/tarball-uninstall.out"
+assert_uninstalled_prefix "$tarball_prefix"
+echo "linux-installer check: simulated release-tarball channel OK"
 
 repo=${KETTLE_GITHUB_REPO:-Reddimus/kettle}
 tag="v${version}"
@@ -99,7 +221,7 @@ if grep -q '^To uninstall: ./scripts/install.sh --uninstall$' \
     "${tmp_root}/online-install.out"; then
   fail "online installer leaked the old bundled uninstall hint"
 fi
-assert_installed_prefix "$online_prefix"
+assert_installed_prefix "$online_prefix" "stable"
 [ -x "${online_prefix}/share/kettle/install-real.sh" ] \
   || fail "online installer did not save real bundled helper"
 "${online_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/online-uninstall.out"

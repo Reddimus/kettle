@@ -65,11 +65,30 @@ while ! "$KETTLE" ctl --pid "$pid" list_panes --raw >"$tmp/panes.json" 2>/dev/nu
   sleep 0.1
 done
 
-"$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_%s' SMOKE" >/dev/null
-"$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
-"$KETTLE" ctl --pid "$pid" wait_for --text "KETTLE_LIVE_RENDER_SMOKE" \
-  --json '{"timeout_ms":5000,"quiet_ms":150}' >/dev/null
-"$KETTLE" ctl --pid "$pid" read_screen --raw >"$tmp/screen.json"
+# The control socket can become ready while an interactive shell is still
+# running startup hooks. A late prompt/theme redraw may then clear a command
+# that was successfully written and briefly observed. Require the marker in a
+# final snapshot and retry within the existing launch deadline.
+for attempt in 1 2 3; do
+  "$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_%s' SMOKE" >/dev/null
+  "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null
+  "$KETTLE" ctl --pid "$pid" wait_for --text "KETTLE_LIVE_RENDER_SMOKE" \
+    --json '{"timeout_ms":5000,"quiet_ms":250}' >/dev/null
+  "$KETTLE" ctl --pid "$pid" read_screen --raw >"$tmp/screen.json"
+  if python3 - "$tmp/screen.json" <<'PY'
+import json
+import sys
+
+screen = json.loads(open(sys.argv[1], encoding="utf-8").read())
+raise SystemExit("KETTLE_LIVE_RENDER_SMOKE" not in screen.get("text", ""))
+PY
+  then
+    break
+  fi
+  if [ "$attempt" -lt 3 ]; then
+    sleep 0.25
+  fi
+done
 
 for i in $(seq 1 "$FRAMES"); do
   "$KETTLE" ctl --pid "$pid" screenshot --json "{\"path\":\"$tmp/frame-$i.png\"}" >/dev/null

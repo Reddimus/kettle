@@ -30,14 +30,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_channel::{Receiver, Sender};
 use kettle_config::AgentServer;
 use kettle_ctl::discovery::{self, RegistryEntry};
-use kettle_ctl::protocol::{Event, Request, Response};
+use kettle_ctl::protocol::{Event, Execution, Method, Request, Response};
 use kettle_ctl::transport::{CtlListener, CtlStream};
 
 /// Max concurrent connections; excess are dropped immediately.
 const MAX_CONNECTIONS: usize = 8;
 /// Per-connection event queue cap (subscribers only). On overflow we drop +
 /// flag `lag` so a slow client can't make the App allocate without bound.
-const EVENT_QUEUE_CAP: usize = 1024;
+const EVENT_QUEUE_CAP: usize = 256;
+/// One extra channel slot is reserved for a lag notice after the data budget is
+/// full. Without it, enqueueing the notice into the already-full queue can
+/// never succeed, leaving a slow subscriber unaware that events were dropped.
+const EVENT_CHANNEL_CAP: usize = EVENT_QUEUE_CAP + 1;
+/// Tighter than the wire response cap so a full subscriber queue remains
+/// bounded to roughly 16 MiB rather than hundreds of MiB.
+const MAX_EVENT_BYTES: usize = 64 * 1024;
 
 /// A reply channel for one request (a 1-slot oneshot).
 pub type ReplyTx = Sender<Response>;
@@ -121,14 +128,22 @@ impl CtlServer {
         };
         if let Err(e) = discovery::register(&registry_dir, &entry) {
             log::warn!("agent-server: cannot write discovery entry: {e}");
+            return None;
         }
         log::info!("agent-server: listening on {endpoint} (mode {mode:?})");
 
         let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
-        let accept = std::thread::Builder::new()
+        let accept = match std::thread::Builder::new()
             .name("kettle-ctl-accept".into())
             .spawn(move || accept_loop(listener, tx, wake))
-            .ok()?;
+        {
+            Ok(accept) => accept,
+            Err(error) => {
+                discovery::unregister(&registry_dir, pid);
+                log::warn!("agent-server: cannot spawn accept thread: {error}");
+                return None;
+            }
+        };
 
         Some(CtlServer {
             mode,
@@ -216,15 +231,31 @@ impl CtlServer {
     /// Broadcast an event to every subscribed connection. Overflowing a slow
     /// connection's queue drops the event for it + sends a one-line `lag` notice.
     pub fn broadcast(&self, ev: &Event) {
+        let outgoing = match serde_json::to_vec(ev) {
+            Ok(bytes) if bytes.len() <= MAX_EVENT_BYTES => ev.clone(),
+            _ => Event::new(
+                "lag",
+                ev.pane,
+                serde_json::json!({"dropped": 1, "reason": "event_too_large"}),
+            ),
+        };
         for conn in self.conns.values() {
             if !conn.subscribed {
                 continue;
             }
-            if conn.event_tx.try_send(ev.clone()).is_err() {
+            if conn.event_tx.len() >= EVENT_QUEUE_CAP {
                 let _ = conn.event_tx.try_send(Event::new(
                     "lag",
                     None,
-                    serde_json::json!({"dropped": 1}),
+                    serde_json::json!({"dropped": 1, "reason": "queue_full"}),
+                ));
+                continue;
+            }
+            if conn.event_tx.try_send(outgoing.clone()).is_err() {
+                let _ = conn.event_tx.try_send(Event::new(
+                    "lag",
+                    None,
+                    serde_json::json!({"dropped": 1, "reason": "queue_full"}),
                 ));
             }
         }
@@ -271,6 +302,17 @@ fn accept_loop(listener: CtlListener, tx: Sender<CtlServerMsg>, wake: Arc<dyn Fn
                 continue;
             }
         };
+        match conn.peer_is_same_user() {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("agent-server: refusing control connection from another user");
+                continue;
+            }
+            Err(e) => {
+                log::warn!("agent-server: cannot verify control peer credentials: {e}");
+                continue;
+            }
+        }
         // Hard connection cap: refuse (and close) once MAX_CONNECTIONS are live.
         if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
             log::warn!("agent-server: connection cap ({MAX_CONNECTIONS}) reached; refusing");
@@ -279,19 +321,47 @@ fn accept_loop(listener: CtlListener, tx: Sender<CtlServerMsg>, wake: Arc<dyn Fn
         }
         let conn_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         active.fetch_add(1, Ordering::Relaxed);
-        let (event_tx, event_rx) = crossbeam_channel::bounded::<Event>(EVENT_QUEUE_CAP);
-        let _ = tx.send(CtlServerMsg::NewConn { conn_id, event_tx });
-        wake();
+        let (event_tx, event_rx) = crossbeam_channel::bounded::<Event>(EVENT_CHANNEL_CAP);
         let ctx = tx.clone();
         let cwake = wake.clone();
         let active_dec = active.clone();
-        std::thread::Builder::new()
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let spawned = std::thread::Builder::new()
             .name(format!("kettle-ctl-{conn_id}"))
             .spawn(move || {
+                if start_rx.recv().is_err() {
+                    active_dec.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
                 connection_loop(conn, conn_id, ctx, cwake, event_rx);
                 active_dec.fetch_sub(1, Ordering::Relaxed);
-            })
-            .ok();
+            });
+        finish_worker_spawn(spawned, conn_id, event_tx, &tx, &wake, start_tx, &active);
+    }
+}
+
+/// Publish a connection only after its worker exists. On spawn failure the
+/// admission count is rolled back and no `NewConn` can reach the App.
+fn finish_worker_spawn(
+    spawned: std::io::Result<std::thread::JoinHandle<()>>,
+    conn_id: u64,
+    event_tx: Sender<Event>,
+    tx: &Sender<CtlServerMsg>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+    start_tx: std::sync::mpsc::SyncSender<()>,
+    active: &Arc<std::sync::atomic::AtomicUsize>,
+) {
+    match spawned {
+        Ok(_) => {
+            if tx.send(CtlServerMsg::NewConn { conn_id, event_tx }).is_ok() {
+                wake();
+                let _ = start_tx.send(());
+            }
+        }
+        Err(error) => {
+            active.fetch_sub(1, Ordering::Relaxed);
+            log::warn!("agent-server: cannot spawn connection worker: {error}");
+        }
     }
 }
 
@@ -312,8 +382,20 @@ fn connection_loop(
         // Extract a complete line if we have one.
         if let Some(pos) = acc.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = acc.drain(..=pos).collect();
-            let s = String::from_utf8_lossy(&line);
-            let trimmed = s.trim_end();
+            let trimmed = match std::str::from_utf8(&line) {
+                Ok(line) => line.trim_end(),
+                Err(error) => {
+                    let response = Response::err(
+                        0,
+                        kettle_ctl::protocol::error_codes::BAD_REQUEST,
+                        format!("request line is not UTF-8: {error}"),
+                    );
+                    if write_response_line(&mut conn, &response).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             if trimmed.is_empty() {
                 continue;
             }
@@ -326,9 +408,12 @@ fn connection_loop(
                 // internal `read_screen` requests (≥50ms apart) until the
                 // condition holds or the deadline passes. The UI thread only
                 // ever answers individual snapshot probes.
-                Ok(req) if req.method == "wait_for" => {
+                Ok(req)
+                    if Method::from_name(&req.method)
+                        .is_some_and(|method| method.execution() == Execution::Connection) =>
+                {
                     let resp = wait_for_poll(&mut conn, &tx, &wake, conn_id, &req);
-                    if write_line(&mut conn, &resp).is_err() {
+                    if write_response_line(&mut conn, &resp).is_err() {
                         break 'outer;
                     }
                     continue;
@@ -377,7 +462,7 @@ fn connection_loop(
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'outer,
                 }
             };
-            if write_line(&mut conn, &resp).is_err() {
+            if write_response_line(&mut conn, &resp).is_err() {
                 break 'outer;
             }
             if is_subscribe {
@@ -391,13 +476,13 @@ fn connection_loop(
                 loop {
                     match event_rx.recv_timeout(std::time::Duration::from_secs(20)) {
                         Ok(ev) => {
-                            if write_line(&mut conn, &ev).is_err() {
+                            if write_event_line(&mut conn, &ev).is_err() {
                                 break 'outer;
                             }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                             let ping = Event::new("ping", None, serde_json::Value::Null);
-                            if write_line(&mut conn, &ping).is_err() {
+                            if write_event_line(&mut conn, &ping).is_err() {
                                 break 'outer;
                             }
                         }
@@ -416,7 +501,7 @@ fn connection_loop(
                 kettle_ctl::protocol::error_codes::BAD_REQUEST,
                 "request line exceeds 1 MiB",
             );
-            let _ = write_line(&mut conn, &resp);
+            let _ = write_response_line(&mut conn, &resp);
             break;
         }
         match conn.read(&mut buf) {
@@ -428,9 +513,44 @@ fn connection_loop(
     wake();
 }
 
-/// Serialize `value` and write it + a newline + flush.
-fn write_line<T: serde::Serialize>(conn: &mut CtlStream, value: &T) -> std::io::Result<()> {
-    let line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+/// Serialize and write a response within the server amplification budget.
+fn write_response_line(conn: &mut CtlStream, value: &Response) -> std::io::Result<()> {
+    let line = serialized_response_line(value)?;
+    write_serialized_line(conn, &line)
+}
+
+fn serialized_response_line(value: &Response) -> std::io::Result<String> {
+    let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    if line.len() > kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES {
+        line = serde_json::to_string(&Response::err(
+            value.id,
+            kettle_ctl::protocol::error_codes::RESPONSE_TOO_LARGE,
+            format!(
+                "response exceeds {} bytes; use cursor/limit paging",
+                kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES
+            ),
+        ))
+        .map_err(std::io::Error::other)?;
+    }
+    Ok(line)
+}
+
+/// Events share the response budget. Oversize event payloads become a bounded
+/// lag notice rather than closing every subscriber.
+fn write_event_line(conn: &mut CtlStream, value: &Event) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    if line.len() > kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES {
+        line = serde_json::to_string(&Event::new(
+            "lag",
+            value.pane,
+            serde_json::json!({"dropped": 1, "reason": "event_too_large"}),
+        ))
+        .map_err(std::io::Error::other)?;
+    }
+    write_serialized_line(conn, &line)
+}
+
+fn write_serialized_line(conn: &mut CtlStream, line: &str) -> std::io::Result<()> {
     conn.write_all(line.as_bytes())?;
     conn.write_all(b"\n")?;
     conn.flush()
@@ -608,40 +728,6 @@ fn wait_for_poll(
     }
 }
 
-/// The set of mutating methods. A drift-guard test pins that every method the
-/// server dispatches is classified here, and that `handle_ctl_request` gates
-/// the mutating ones on `agent-server = full`. (Used by the drift-guard tests.)
-#[cfg_attr(not(test), allow(dead_code))]
-pub const MUTATING_METHODS: &[&str] = &[
-    "send_text",
-    "send_keys",
-    "send_mouse",
-    "resize_window",
-    "perform_action",
-    "run_command",
-];
-
-/// The read-only methods (allowed in `read-only` mode).
-#[cfg_attr(not(test), allow(dead_code))]
-pub const READ_ONLY_METHODS: &[&str] = &[
-    "get_state",
-    "list_tabs",
-    "list_panes",
-    "read_screen",
-    "read_cells",
-    "ui_geometry",
-    "screenshot",
-    "subscribe",
-];
-
-/// v2.20.0: methods handled entirely on the CONNECTION thread (never reach
-/// `handle_ctl_request`). `wait_for` is read-only by construction — it only
-/// ever issues `read_screen` probes — so it works in `read-only` mode; it is
-/// listed separately because the dispatch-block drift guard below scans the
-/// UI-thread match, which these never appear in.
-#[cfg_attr(not(test), allow(dead_code))]
-pub const CONN_THREAD_METHODS: &[&str] = &["wait_for"];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,35 +743,24 @@ mod tests {
         assert!(AgentServer::Full.allows_mutation());
     }
 
-    /// Drift guard: the method classification must stay disjoint + cover every
-    /// method `handle_ctl_request` dispatches (the app.rs match). Mutating
-    /// methods MUST be gated; read-only MUST NOT overlap them. If a new method
-    /// is added to the dispatch without classifying it here, the source-scan
-    /// guard in app.rs catches it.
+    /// The typed protocol table replaces parallel string allowlists. Every
+    /// connection-thread method must have an explicit worker dispatch path.
     #[test]
-    fn method_classification_is_disjoint() {
-        for m in MUTATING_METHODS {
-            assert!(
-                !READ_ONLY_METHODS.contains(m),
-                "method {m} is both mutating and read-only"
-            );
-            assert!(
-                !CONN_THREAD_METHODS.contains(m),
-                "method {m} is both mutating and connection-thread"
-            );
-        }
-        for m in CONN_THREAD_METHODS {
-            assert!(
-                !READ_ONLY_METHODS.contains(m),
-                "method {m} is both connection-thread and read-only"
-            );
-            // Connection-thread methods must be special-cased in
-            // connection_loop, BEFORE the UI-thread forward.
-            let src = include_str!("ctl_server.rs");
-            assert!(
-                src.contains(&format!("req.method == \"{m}\"")),
-                "conn-thread method {m} has no connection_loop arm"
-            );
+    fn connection_thread_methods_have_worker_dispatch() {
+        for method in Method::ALL {
+            if method.execution() == Execution::Connection {
+                assert_eq!(
+                    method.capability(),
+                    kettle_ctl::protocol::Capability::Read,
+                    "connection-thread methods cannot bypass the UI mutation gate"
+                );
+                let name = method.as_str();
+                let src = include_str!("ctl_server.rs");
+                assert!(
+                    src.contains("method.execution() == Execution::Connection"),
+                    "connection-thread method {name} has no connection_loop dispatch"
+                );
+            }
         }
     }
 
@@ -774,35 +849,99 @@ mod tests {
         assert!(server.conns.contains_key(&replacement));
     }
 
-    /// Drift guard: every method arm in `App::handle_ctl_request` must appear in
-    /// exactly one of the classification lists, and every mutating method must
-    /// be guarded by `require_full`. Reads the app.rs source.
     #[test]
-    fn every_dispatched_method_is_classified() {
-        let src = include_str!("app.rs");
-        // The dispatch block is between these markers. (Window widened in
-        // v2.20.0 when the send_keys arm landed; the `other =>` fallback arm
-        // bounds the real block well inside it.)
-        let start = src
-            .find("let resp = match req.method.as_str() {")
-            .expect("dispatch block present");
-        let block = &src[start..start + 3600];
-        for m in READ_ONLY_METHODS.iter().chain(MUTATING_METHODS) {
-            assert!(
-                block.contains(&format!("\"{m}\"")),
-                "method {m} classified but not dispatched in handle_ctl_request"
-            );
+    fn spawn_failure_rolls_back_without_registering_connection() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (event_tx, _event_rx) = crossbeam_channel::bounded(1);
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(0);
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let spawned: std::io::Result<std::thread::JoinHandle<()>> =
+            Err(std::io::Error::other("injected spawn failure"));
+
+        finish_worker_spawn(spawned, 7, event_tx, &tx, &wake, start_tx, &active);
+
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(rx.try_recv().is_err(), "failed worker must not register");
+    }
+
+    #[test]
+    fn oversize_response_becomes_bounded_structured_error() {
+        let response = Response::ok(
+            42,
+            serde_json::json!({"text": "x".repeat(kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES)}),
+        );
+        let line = serialized_response_line(&response).unwrap();
+        assert!(line.len() <= kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES);
+        let response: Response = serde_json::from_str(&line).unwrap();
+        assert_eq!(response.id, 42);
+        assert_eq!(
+            response.error.unwrap().code,
+            kettle_ctl::protocol::error_codes::RESPONSE_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn oversize_event_is_replaced_before_it_enters_subscriber_queue() {
+        let (mut server, _tx) = test_server();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(EVENT_QUEUE_CAP);
+        server.add_conn(1, event_tx);
+        server.set_subscribed(1);
+        server.broadcast(&Event::new(
+            "output",
+            Some(9),
+            serde_json::json!("x".repeat(MAX_EVENT_BYTES)),
+        ));
+        let event = event_rx.recv().unwrap();
+        assert_eq!(event.event, "lag");
+        assert_eq!(event.data["reason"], "event_too_large");
+    }
+
+    #[test]
+    fn saturated_subscriber_queue_retains_a_lag_notice() {
+        let (mut server, _tx) = test_server();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(EVENT_CHANNEL_CAP);
+        server.add_conn(1, event_tx.clone());
+        server.set_subscribed(1);
+        for seq in 0..EVENT_QUEUE_CAP {
+            event_tx
+                .try_send(Event::new("output", None, serde_json::json!({"seq": seq})))
+                .unwrap();
         }
-        // Each mutating method's arm must reference the `require_full` gate.
-        for m in MUTATING_METHODS {
-            let arm = format!("\"{m}\" =>");
-            let pos = block
-                .find(&arm)
-                .unwrap_or_else(|| panic!("{m} arm missing"));
-            let arm_body = &block[pos..(pos + 200).min(block.len())];
+
+        server.broadcast(&Event::new(
+            "output",
+            None,
+            serde_json::json!({"seq": "lost"}),
+        ));
+
+        assert_eq!(event_rx.len(), EVENT_CHANNEL_CAP);
+        let events: Vec<_> = event_rx.try_iter().collect();
+        let lag = events.last().expect("reserved lag event");
+        assert_eq!(lag.event, "lag");
+        assert_eq!(lag.data["reason"], "queue_full");
+    }
+
+    /// Drift guard: every typed method has an App dispatch arm and the single
+    /// capability gate occurs before that match.
+    #[test]
+    fn every_typed_method_is_dispatched_behind_capability_gate() {
+        let src = include_str!("app.rs");
+        let start = src
+            .find("if method.capability() == Capability::Mutate")
+            .expect("typed capability gate present");
+        let dispatch = src[start..]
+            .find("let resp = match method {")
+            .map(|offset| start + offset)
+            .expect("dispatch block present");
+        assert!(start < dispatch, "authorization must precede dispatch");
+        let block = &src[dispatch..(dispatch + 3600).min(src.len())];
+        for method in Method::ALL {
+            let variant = format!("Method::{method:?}");
             assert!(
-                arm_body.contains("require_full"),
-                "mutating method {m} must be gated by require_full"
+                block.contains(&variant),
+                "typed method {} is not dispatched in handle_ctl_request",
+                method.as_str()
             );
         }
     }

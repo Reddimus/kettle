@@ -95,7 +95,44 @@ const CELL_FLAG_ALL_UNDERLINES: u16 = CELL_FLAG_UNDERLINE
     | CELL_FLAG_UNDERCURL
     | CELL_FLAG_DOTTED_UNDERLINE
     | CELL_FLAG_DASHED_UNDERLINE;
-const MAX_CTL_SELECTION_BYTES: usize = 256 * 1024;
+const MAX_CTL_SELECTION_BYTES: usize = 128 * 1024;
+const MAX_CTL_TEXT_PAGE_BYTES: usize = 256 * 1024;
+const MAX_CTL_COMMAND_OUTPUT_BYTES: usize = 512 * 1024;
+
+fn optional_u64_param(
+    params: &serde_json::Value,
+    name: &str,
+) -> std::result::Result<Option<u64>, String> {
+    match params.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("'{name}' must be an unsigned integer")),
+    }
+}
+
+#[cfg(test)]
+mod ctl_target_param_tests {
+    use super::optional_u64_param;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_targets_are_typed_instead_of_falling_back() {
+        assert_eq!(optional_u64_param(&json!({}), "pane").unwrap(), None);
+        assert_eq!(
+            optional_u64_param(&json!({"pane": 42}), "pane").unwrap(),
+            Some(42)
+        );
+        for value in [json!(null), json!("42"), json!(-1), json!(1.5)] {
+            let params = json!({"pane": value});
+            assert!(
+                optional_u64_param(&params, "pane").is_err(),
+                "explicit malformed target must not resolve as absent: {params}"
+            );
+        }
+    }
+}
 
 fn cap_ctl_selection(mut text: String) -> (String, bool) {
     if text.len() <= MAX_CTL_SELECTION_BYTES {
@@ -107,6 +144,108 @@ fn cap_ctl_selection(mut text: String) -> (String, bool) {
     }
     text.truncate(end);
     (text, true)
+}
+
+fn cap_utf8_bytes(mut text: String, cap: usize) -> (String, bool) {
+    if text.len() <= cap {
+        return (text, false);
+    }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    (text, true)
+}
+
+/// Merge independently-owned placement classes without letting a saturated
+/// class hide every item from the others. This preserves all three bounded
+/// registries for visibility culling; the renderer applies the smaller shared
+/// frame quota after removing offscreen placements.
+fn round_robin_bounded<T, const N: usize>(groups: [Vec<T>; N], limit: usize) -> Vec<T> {
+    let mut groups = groups.map(Vec::into_iter);
+    let mut out = Vec::with_capacity(
+        groups
+            .iter()
+            .map(|group| group.len())
+            .sum::<usize>()
+            .min(limit),
+    );
+    while out.len() < limit {
+        let before = out.len();
+        for group in &mut groups {
+            if let Some(item) = group.next() {
+                out.push(item);
+                if out.len() == limit {
+                    break;
+                }
+            }
+        }
+        if out.len() == before {
+            break;
+        }
+    }
+    out
+}
+
+fn ctl_snapshot(kind: &str, value: &(impl serde::Serialize + ?Sized)) -> String {
+    // Stable FNV-1a is sufficient here: the token detects live-state drift; it
+    // is not an authentication primitive.
+    struct Hasher(u64);
+    impl std::io::Write for Hasher {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            for &byte in bytes {
+                self.0 ^= u64::from(byte);
+                self.0 = self.0.wrapping_mul(0x100000001b3);
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut hasher = Hasher(0xcbf29ce484222325);
+    let _ = std::io::Write::write_all(&mut hasher, kind.as_bytes());
+    let _ = serde_json::to_writer(&mut hasher, value);
+    format!("{:016x}", hasher.0)
+}
+
+fn ctl_page_values(
+    req: &kettle_ctl::protocol::Request,
+    key: &str,
+    values: Vec<serde_json::Value>,
+) -> kettle_ctl::protocol::Response {
+    use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
+
+    let page = match PageRequest::from_params(&req.params) {
+        Ok(page) => page,
+        Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+    };
+    let snapshot = ctl_snapshot(key, &values);
+    if page
+        .snapshot
+        .as_deref()
+        .is_some_and(|want| want != snapshot)
+    {
+        return Response::err(
+            req.id,
+            ec::STALE_SNAPSHOT,
+            "live state changed between pages; restart without cursor/snapshot",
+        );
+    }
+    let total = values.len();
+    let (start, end, next_cursor, truncated) = page.bounds(total);
+    let mut result = serde_json::Map::new();
+    result.insert(
+        key.into(),
+        serde_json::Value::Array(values[start..end].to_vec()),
+    );
+    result.insert("snapshot".into(), serde_json::Value::String(snapshot));
+    result.insert("next_cursor".into(), next_cursor.into());
+    result.insert("truncated".into(), truncated.into());
+    result.insert("total".into(), total.into());
+    Response::ok(req.id, serde_json::Value::Object(result))
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +275,7 @@ pub enum UserEvent {
     /// current image; the next kettle launch uses the installed release.
     UpdateInstalled {
         tag: String,
+        staged: bool,
     },
     /// An opt-in automatic update failed after a newer signed release was found.
     UpdateFailed {
@@ -1420,13 +1560,35 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
 
 #[cfg(feature = "dev-record")]
 const RECORDING_TITLE_SUFFIX: &str = " [REC]";
+#[cfg(feature = "dev-record")]
+const RECORDING_LIMIT_TITLE_SUFFIX: &str = " [REC LIMIT]";
+#[cfg(feature = "dev-record")]
+const RECORDING_ERROR_TITLE_SUFFIX: &str = " [REC ERROR]";
 
 #[cfg(feature = "dev-record")]
-fn recording_window_title(mut title: String, recording: bool) -> String {
-    if recording {
-        title.push_str(RECORDING_TITLE_SUFFIX);
+fn recording_window_title(
+    mut title: String,
+    status: Option<crate::dev_record::RecordStatus>,
+) -> String {
+    match status {
+        Some(crate::dev_record::RecordStatus::Recording) => title.push_str(RECORDING_TITLE_SUFFIX),
+        Some(crate::dev_record::RecordStatus::LimitReached) => {
+            title.push_str(RECORDING_LIMIT_TITLE_SUFFIX)
+        }
+        Some(crate::dev_record::RecordStatus::IoError) => {
+            title.push_str(RECORDING_ERROR_TITLE_SUFFIX)
+        }
+        None => {}
     }
     title
+}
+
+#[cfg(feature = "dev-record")]
+fn effective_record_status(
+    recorder: Option<crate::dev_record::RecordStatus>,
+    start_failed: bool,
+) -> Option<crate::dev_record::RecordStatus> {
+    recorder.or(start_failed.then_some(crate::dev_record::RecordStatus::IoError))
 }
 
 fn window_title_with_home(
@@ -2686,6 +2848,14 @@ pub struct App {
     /// given; compiled out entirely of shipped builds.
     #[cfg(feature = "dev-record")]
     recorder: Option<crate::dev_record::Recorder>,
+    /// A requested recorder that failed before construction still needs a
+    /// persistent visible error state; there is no `Recorder` to carry it.
+    #[cfg(feature = "dev-record")]
+    recording_start_failed: bool,
+    /// Desktop notifications are edge-triggered so a stopped recorder does
+    /// not emit one notification per redraw or stale-flush timer tick.
+    #[cfg(feature = "dev-record")]
+    recording_error_reported: bool,
     proxy: EventLoopProxy<UserEvent>,
     /// v2.20.0 P4 (perf): wakeup-dedup latch shared by every pane's `Waker`.
     /// Under output flood the PTY readers fire once per 64KiB read — dozens
@@ -3147,6 +3317,10 @@ impl App {
             quit_requested: false,
             #[cfg(feature = "dev-record")]
             recorder: None,
+            #[cfg(feature = "dev-record")]
+            recording_start_failed: false,
+            #[cfg(feature = "dev-record")]
+            recording_error_reported: false,
             proxy,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Cycle 928 (agent-first A2): server is started later in `resumed`
@@ -4679,15 +4853,41 @@ impl App {
         }
     }
 
+    /// Fan one destructive drain of the shared PTY-output sidechannel out to
+    /// every enabled consumer. Both redraw-time and close-time drains must use
+    /// this path; otherwise whichever path receives a chunk first can starve
+    /// recorder or Lua output hooks of the same bytes.
+    fn dispatch_output_chunks(
+        &mut self,
+        _ws: &mut WindowState,
+        output_chunks: Vec<(u64, Vec<u8>)>,
+    ) {
+        for (pane_id, bytes) in output_chunks {
+            #[cfg(feature = "dev-record")]
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.record_output(&bytes);
+            }
+            if let Some(eng) = &self.lua_engine {
+                eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
+            }
+            self.drain_lua_hook_commands("output hook");
+        }
+        #[cfg(feature = "dev-record")]
+        self.sync_recording_state(
+            _ws,
+            "Session recording stopped because the recording file could not be written.",
+        );
+    }
+
     fn drain_events(&mut self, ws: &mut WindowState) {
         let mut bell = false;
         // Cycle 246: pane ids that fired `TermEvent::Bell` this drain
         // pass — latched onto their containing tabs *after* the
         // values_mut() iteration so we don't double-borrow mux.panes.
         let mut bell_panes: Vec<u64> = Vec::new();
-        // Cycle 378: pane ids + raw-output bytes accumulated during
-        // this drain pass. Fired as LuaEvent::Output after the
-        // values_mut iteration completes (to avoid borrow conflicts).
+        // Pane ids + raw-output chunks accumulated during this drain pass.
+        // Keep the PTY reader's bounded chunks intact instead of concatenating
+        // a whole backlog into a second potentially huge allocation.
         let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
         // Cycle 929 (agent-first A2): collect OSC-133 CommandFinished events per
         // pane so the App is the SINGLE drainer — `drain_command_finished_events`
@@ -4708,16 +4908,10 @@ impl App {
         // 14 t doesn't need a renderer lookup per CSI).
         let (cell_w, cell_h) = self.cell_px(ws);
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-            // Cycle 378: drain the optional output sidechannel
-            // BEFORE the regular event channel. Coalesces multiple
-            // chunks into a single Vec per pane per drain pass.
+            // Drain the optional output sidechannel before regular events.
             if let Some(out_rx) = &pane.output_rx {
-                let mut combined: Vec<u8> = Vec::new();
                 while let Ok(chunk) = out_rx.try_recv() {
-                    combined.extend_from_slice(&chunk);
-                }
-                if !combined.is_empty() {
-                    output_chunks.push((pane_id, combined));
+                    output_chunks.push((pane_id, chunk));
                 }
             }
             while let Ok(ev) = pane.rx.try_recv() {
@@ -4940,22 +5134,9 @@ impl App {
             }
             self.drain_lua_hook_commands("bell hook");
         }
-        // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
-        // fire LuaEvent::Output(pane_id, bytes) for each pane that
-        // accumulated PTY-output chunks this drain pass.
-        for (pane_id, bytes) in output_chunks {
-            // Cycle 875: tee PTY output into the asciicast trace (borrow before
-            // the bytes move into the Lua event below). All panes feed one
-            // stream — fine for the common single-pane recording.
-            #[cfg(feature = "dev-record")]
-            if let Some(rec) = self.recorder.as_mut() {
-                rec.record_output(&bytes);
-            }
-            if let Some(eng) = &self.lua_engine {
-                eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
-            }
-            self.drain_lua_hook_commands("output hook");
-        }
+        // Cycle 378/875: a single destructive drain fans out to Lua and the
+        // optional recorder so neither consumer can steal bytes from the other.
+        self.dispatch_output_chunks(ws, output_chunks);
         // Cycle 929 (agent-first A2): fan out the OSC-133 CommandFinished events
         // drained above — command-notify (existing behavior), the run_command
         // correlator, and event subscribers all from this single place.
@@ -5017,23 +5198,15 @@ impl App {
         }
     }
 
-    /// Cycle 908 (dev-record completeness): tee any PTY output still queued in
-    /// the recorder output sidechannels into the trace, right now. The recorder
-    /// is otherwise fed ONLY by `drain_events()` (on redraw), so output that
-    /// lands after the last redraw-drain and before a pane is reaped or the
-    /// window closes — a fast `-e cmd`'s final line, or bytes in flight when the
-    /// user clicks X — would be dropped with the pane: the sidechannel is
-    /// unbounded + lossless so it accumulates, but it's never read once the
-    /// pane is gone. Call this immediately before `mux.reap()` and on close so
-    /// the trace keeps its tail. Events batch through the recorder's BufWriter
-    /// (~250ms interval flush); clean close paths flush via `finish()`. No-op
-    /// when not recording. Verified by `dev-record`-feature test
-    /// `recorder_captures_fast_command_tail` + the live close-path tests.
+    /// Cycle 908 (dev-record completeness): fan out PTY output still queued in
+    /// the shared output sidechannels right now. Output that lands after the
+    /// last redraw drain and before a pane is reaped or its window closes would
+    /// otherwise be lost to both the recorder and Lua hooks. Call this before
+    /// `mux.reap()` and on close so both consumers keep their tail. Recorder
+    /// events batch through a BufWriter (~250ms interval flush); clean close
+    /// paths flush via `finish()`.
     #[cfg(feature = "dev-record")]
     fn flush_recorder_output(&mut self, ws: &mut WindowState) {
-        if self.recorder.is_none() {
-            return;
-        }
         // Always drain what's queued right now (cheap, non-blocking).
         self.drain_recorder_output_once(ws);
         // A pane marked `closed` (its shell exited under exit-action = close /
@@ -5067,33 +5240,46 @@ impl App {
         }
     }
 
-    /// Drain every pane's recorder output sidechannel into the trace once.
-    /// Returns whether any bytes were captured. (Events batch through the
-    /// Recorder's BufWriter with a ~250ms interval flush; clean close paths
-    /// flush via `finish()`.)
+    /// Drain every pane's shared output sidechannel and fan each chunk out to
+    /// the recorder and Lua once. Returns whether any bytes were captured.
+    /// Keep this active after recorder startup failure: Lua may still be
+    /// subscribed to the same destructive channel.
     #[cfg(feature = "dev-record")]
     fn drain_recorder_output_once(&mut self, ws: &mut WindowState) -> bool {
-        // Collect first (immutable borrow of the panes), then feed the recorder
-        // (mutable borrow of self.recorder) — two sequential borrows.
-        let mut tail: Vec<Vec<u8>> = Vec::new();
-        for pane in ws.mux.panes.values() {
+        // Collect first (immutable borrow of the panes), then dispatch through
+        // `self` after that borrow ends.
+        let mut tail: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (&pane_id, pane) in &ws.mux.panes {
             if let Some(rx) = &pane.output_rx {
-                let mut combined: Vec<u8> = Vec::new();
                 while let Ok(chunk) = rx.try_recv() {
-                    combined.extend_from_slice(&chunk);
-                }
-                if !combined.is_empty() {
-                    tail.push(combined);
+                    tail.push((pane_id, chunk));
                 }
             }
         }
         let got = !tail.is_empty();
-        if let Some(rec) = self.recorder.as_mut() {
-            for chunk in &tail {
-                rec.record_output(chunk);
-            }
-        }
+        self.dispatch_output_chunks(ws, tail);
         got
+    }
+
+    #[cfg(feature = "dev-record")]
+    fn recording_status(&self) -> Option<crate::dev_record::RecordStatus> {
+        effective_record_status(
+            self.recorder.as_ref().map(|rec| rec.status()),
+            self.recording_start_failed,
+        )
+    }
+
+    /// Reflect terminal recorder failures in both persistent window state and
+    /// an edge-triggered desktop notification during the same event-loop turn.
+    #[cfg(feature = "dev-record")]
+    fn sync_recording_state(&mut self, ws: &mut WindowState, io_error_body: &str) {
+        if self.recording_status() == Some(crate::dev_record::RecordStatus::IoError)
+            && !self.recording_error_reported
+        {
+            self.recording_error_reported = true;
+            fire_notify("kettle: recording error", io_error_body);
+        }
+        self.sync_window_title(ws);
     }
 
     /// Keep the OS window title in sync with the *active* pane's title —
@@ -5124,7 +5310,7 @@ impl App {
         // the dev recorder is never silently capturing. Keep it ASCII because
         // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
-        let want = recording_window_title(want, self.recorder.is_some());
+        let want = recording_window_title(want, self.recording_status());
         let want = sanitize_native_window_title(&want);
         if self.gpu_software_fallback {
             format!("{want} - software rendering (GPU unavailable)")
@@ -6043,9 +6229,19 @@ impl App {
         let home = crate::mux::home_dir_string();
         for (id, r) in &layout {
             if let Some(p) = ws.mux.panes.get(id) {
-                let mut imgs = p.term.placements();
-                imgs.extend(p.term.placeholder_tiles());
-                imgs.extend(p.term.relative_tiles());
+                // Each protocol registry has its own defensive cap. Interleave
+                // all three before renderer-side visibility culling so a busy
+                // class cannot hide the others, while offscreen entries do not
+                // consume the smaller frame-wide draw quota.
+                let per_class_limit = kettle_core::GraphicsLimits::default().placements;
+                let imgs = round_robin_bounded(
+                    [
+                        p.term.placements(),
+                        p.term.placeholder_tiles(),
+                        p.term.relative_tiles(),
+                    ],
+                    per_class_limit.saturating_mul(3),
+                );
                 if let Ok(g) = p.term.term.lock() {
                     let si = metas.len();
                     if snaps.len() <= si {
@@ -9899,7 +10095,7 @@ impl App {
         reply: crate::ctl_server::ReplyTx,
         internal_probe: bool,
     ) {
-        use kettle_ctl::protocol::{Response, error_codes as ec};
+        use kettle_ctl::protocol::{Capability, Method, Response, error_codes as ec};
         let mode = self
             .ctl
             .as_ref()
@@ -9916,60 +10112,61 @@ impl App {
         }
         #[cfg(not(feature = "dev-record"))]
         let _ = internal_probe;
-        // Single mutation gate (a drift-guard test pins that every mutating
-        // method routes through this check).
-        let require_full = |id: u64, method: &str| -> Option<Response> {
-            (!mode.allows_mutation()).then(|| {
-                Response::err(
-                    id,
-                    ec::READ_ONLY,
-                    format!("method '{method}' requires agent-server=full"),
-                )
-            })
+        if !req.params.is_null() && !req.params.is_object() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "params must be an object",
+            ));
+            return;
+        }
+        let Some(method) = Method::from_name(&req.method) else {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::UNKNOWN_METHOD,
+                format!("unknown method '{}'", req.method),
+            ));
+            return;
         };
-        let resp = match req.method.as_str() {
-            "get_state" => Response::ok(req.id, self.ctl_get_state(ws, mode)),
-            "list_tabs" => Response::ok(req.id, self.ctl_list_tabs(ws)),
-            "list_panes" => Response::ok(req.id, self.ctl_list_panes(ws)),
-            "read_screen" => self.ctl_read_screen(ws, req),
-            "read_cells" => self.ctl_read_cells(ws, req),
-            "ui_geometry" => Response::ok(req.id, self.ctl_ui_geometry(ws, req)),
-            "screenshot" => {
+        if method.capability() == Capability::Mutate && !mode.allows_mutation() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::READ_ONLY,
+                format!("method '{}' requires agent-server=full", method.as_str()),
+            ));
+            return;
+        }
+        let resp = match method {
+            Method::GetState => Response::ok(req.id, self.ctl_get_state(ws, mode)),
+            Method::ListTabs => self.ctl_list_tabs(ws, req),
+            Method::ListPanes => self.ctl_list_panes(ws, req),
+            Method::ReadScreen => self.ctl_read_screen(ws, req),
+            Method::ReadCells => self.ctl_read_cells(ws, req),
+            Method::UiGeometry => self.ctl_ui_geometry(ws, req),
+            Method::Screenshot => {
                 self.ctl_screenshot(ws, req, reply);
                 return;
             }
-            "subscribe" => {
+            Method::Subscribe => {
                 if let Some(c) = &mut self.ctl {
                     c.set_subscribed(conn_id);
                 }
                 Response::ok(req.id, serde_json::json!({"subscribed": true}))
             }
-            "send_text" => require_full(req.id, "send_text")
-                .unwrap_or_else(|| self.ctl_send_text(ws, conn_id, req)),
-            "send_keys" => require_full(req.id, "send_keys")
-                .unwrap_or_else(|| self.ctl_send_keys(ws, conn_id, req)),
-            "dispatch_keybind" => require_full(req.id, "dispatch_keybind")
-                .unwrap_or_else(|| self.ctl_dispatch_keybind(ws, event_loop, req)),
-            "send_mouse" => require_full(req.id, "send_mouse")
-                .unwrap_or_else(|| self.ctl_send_mouse(ws, event_loop, req)),
-            "resize_window" => require_full(req.id, "resize_window")
-                .unwrap_or_else(|| self.ctl_resize_window(ws, req)),
-            "perform_action" => require_full(req.id, "perform_action")
-                .unwrap_or_else(|| self.ctl_perform_action(ws, event_loop, req)),
-            "run_command" => {
-                if let Some(deny) = require_full(req.id, "run_command") {
-                    deny
-                } else {
-                    // Deferred: store `reply`; resolved on completion/deadline.
-                    self.ctl_run_command(ws, conn_id, req, reply);
-                    return;
-                }
+            Method::SendText => self.ctl_send_text(ws, conn_id, req),
+            Method::SendKeys => self.ctl_send_keys(ws, conn_id, req),
+            Method::DispatchKeybind => self.ctl_dispatch_keybind(ws, event_loop, req),
+            Method::SendMouse => self.ctl_send_mouse(ws, event_loop, req),
+            Method::ResizeWindow => self.ctl_resize_window(ws, req),
+            Method::PerformAction => self.ctl_perform_action(ws, event_loop, req),
+            Method::RunCommand => {
+                // Deferred: store `reply`; resolved on completion/deadline.
+                self.ctl_run_command(ws, conn_id, req, reply);
+                return;
             }
-            other => Response::err(
-                req.id,
-                ec::UNKNOWN_METHOD,
-                format!("unknown method '{other}'"),
-            ),
+            Method::WaitFor => {
+                Response::err(req.id, ec::INTERNAL, "wait_for was routed to the UI thread")
+            }
         };
         let _ = reply.send(resp);
     }
@@ -9996,7 +10193,11 @@ impl App {
     }
 
     /// `list_tabs`: index, title, active flag, pane ids.
-    fn ctl_list_tabs(&self, ws: &WindowState) -> serde_json::Value {
+    fn ctl_list_tabs(
+        &self,
+        ws: &WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
         // C8 (multi-window): tabs across EVERY window, ordered by window seq.
         // `index` and `active` are in-window values; `window` disambiguates.
         let mut tabs = Vec::new();
@@ -10013,12 +10214,16 @@ impl App {
                 }));
             }
         }
-        serde_json::json!({ "tabs": tabs })
+        ctl_page_values(req, "tabs", tabs)
     }
 
     /// `list_panes`: id, tab, title, cwd, size, focused, argv, child_pid,
     /// agent_attached.
-    fn ctl_list_panes(&self, ws: &WindowState) -> serde_json::Value {
+    fn ctl_list_panes(
+        &self,
+        ws: &WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
         // C8 (multi-window): panes across EVERY window; `tab` is the
         // in-window tab index, `window` the owning window's seq, `focused`
         // means focused WITHIN its window.
@@ -10026,7 +10231,7 @@ impl App {
         for w in self.all_windows(ws) {
             self.ctl_list_panes_of(w, &mut panes);
         }
-        serde_json::json!({ "panes": panes })
+        ctl_page_values(req, "panes", panes)
     }
 
     fn ctl_list_panes_of(&self, ws: &WindowState, panes: &mut Vec<serde_json::Value>) {
@@ -10081,7 +10286,7 @@ impl App {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
-            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+            Err((code, message)) => return Response::err(req.id, code, message),
         };
         let scrollback = req
             .params
@@ -10128,31 +10333,68 @@ impl App {
                 )
             })
             .unwrap_or((false, None, false, None));
-        match p.term.screen_text(scrollback) {
-            Some(s) => Response::ok(
+        let Some(s) = p.term.screen_text(scrollback) else {
+            return Response::err(req.id, ec::INTERNAL, "could not read the grid");
+        };
+        let page = match kettle_ctl::protocol::PageRequest::from_params(&req.params) {
+            Ok(page) => page,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
+        let snapshot = ctl_snapshot("screen", &s.text);
+        if page
+            .snapshot
+            .as_deref()
+            .is_some_and(|want| want != snapshot)
+        {
+            return Response::err(
                 req.id,
-                serde_json::json!({
-                    "pane": pane,
-                    "text": s.text,
-                    "cols": s.cols,
-                    "rows": s.rows,
-                    "history_size": s.history_size,
-                    "display_offset": s.display_offset,
-                    "cursor": [s.cursor.0, s.cursor.1],
-                    // v2.20.0 (agent plane): DEC ?25 — vim/fzf/less hide the
-                    // cursor; agents must know when `cursor` is meaningless.
-                    "cursor_visible": s.cursor_visible,
-                    // Additive diagnostic surface: read_screen already exposes
-                    // the pane text; this lets end-to-end tests assert the exact
-                    // range selected by real keyboard/mouse workflows.
-                    "selection_present": selection_present,
-                    "selection": selection,
-                    "selection_truncated": selection_truncated,
-                    "selection_range": selection_range,
-                }),
-            ),
-            None => Response::err(req.id, ec::INTERNAL, "could not read the grid"),
+                ec::STALE_SNAPSHOT,
+                "screen changed between pages; restart without cursor/snapshot",
+            );
         }
+        let lines: Vec<&str> = s.text.split_inclusive('\n').collect();
+        let total = lines.len();
+        let start = page.offset.min(total);
+        let desired_end = start.saturating_add(page.limit).min(total);
+        let mut end = start;
+        let mut text = String::new();
+        let mut text_truncated = false;
+        while end < desired_end {
+            let line = lines[end];
+            if !text.is_empty() && text.len().saturating_add(line.len()) > MAX_CTL_TEXT_PAGE_BYTES {
+                break;
+            }
+            if text.is_empty() && line.len() > MAX_CTL_TEXT_PAGE_BYTES {
+                (text, text_truncated) = cap_utf8_bytes(line.to_string(), MAX_CTL_TEXT_PAGE_BYTES);
+                end += 1;
+                break;
+            }
+            text.push_str(line);
+            end += 1;
+        }
+        let truncated = end < total;
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "pane": pane,
+                "text": text,
+                "cols": s.cols,
+                "rows": s.rows,
+                "history_size": s.history_size,
+                "display_offset": s.display_offset,
+                "cursor": [s.cursor.0, s.cursor.1],
+                "cursor_visible": s.cursor_visible,
+                "selection_present": selection_present,
+                "selection": selection,
+                "selection_truncated": selection_truncated,
+                "selection_range": selection_range,
+                "snapshot": snapshot,
+                "next_cursor": truncated.then(|| end.to_string()),
+                "truncated": truncated,
+                "text_truncated": text_truncated,
+                "total": total,
+            }),
+        )
     }
 
     /// `read_cells`: visible cell snapshot with selected render attributes.
@@ -10165,7 +10407,7 @@ impl App {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
-            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+            Err((code, message)) => return Response::err(req.id, code, message),
         };
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
@@ -10199,18 +10441,19 @@ impl App {
                 "underline_color": sc.underline_color.is_some(),
             }));
         }
-        Response::ok(
-            req.id,
-            serde_json::json!({
-                "pane": pane,
-                "cols": snap.columns,
-                "rows": snap.screen_lines,
-                "history_size": snap.history_size,
-                "display_offset": snap.display_offset,
-                "cursor": [snap.cursor.point.line.0, snap.cursor.point.column.0],
-                "cells": cells,
-            }),
-        )
+        let mut response = ctl_page_values(req, "cells", cells);
+        if let Some(result) = response.result.as_object_mut() {
+            result.insert("pane".into(), pane.into());
+            result.insert("cols".into(), snap.columns.into());
+            result.insert("rows".into(), snap.screen_lines.into());
+            result.insert("history_size".into(), snap.history_size.into());
+            result.insert("display_offset".into(), snap.display_offset.into());
+            result.insert(
+                "cursor".into(),
+                serde_json::json!([snap.cursor.point.line.0, snap.cursor.point.column.0]),
+            );
+        }
+        response
     }
 
     /// `ui_geometry`: read-only live geometry for chrome diagnostics.
@@ -10218,17 +10461,27 @@ impl App {
         &self,
         ws: &WindowState,
         req: &kettle_ctl::protocol::Request,
-    ) -> serde_json::Value {
-        let want_window = req.params.get("window").and_then(|v| v.as_u64());
-        let target = want_window
-            .and_then(|seq| {
-                if seq == ws.seq {
-                    Some(ws)
-                } else {
-                    self.windows.get(&seq)
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+
+        let want_window = match optional_u64_param(&req.params, "window") {
+            Ok(window) => window,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
+        let target = match want_window {
+            None => ws,
+            Some(seq) if seq == ws.seq => ws,
+            Some(seq) => match self.windows.get(&seq) {
+                Some(target) => target,
+                None => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        format!("no window with id {seq}"),
+                    );
                 }
-            })
-            .unwrap_or(ws);
+            },
+        };
         let surface = target
             .renderer
             .as_ref()
@@ -10403,46 +10656,49 @@ impl App {
                 "rect": rect_json(self.title_edit_rect(target)),
             })
         });
-        serde_json::json!({
-            "window": target.seq,
-            "surface": {"width": surface.0, "height": surface.1},
-            "cell": cell,
-            "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
-            "content": rect_json(self.area(target)),
-            "modals": {
-                "search": target.mux.search.open,
-                "palette": target.palette_input.is_some(),
-                "settings": target.settings_nav.is_some(),
-                "settings_text_edit": target.settings_text_edit.is_some(),
-                "layout_picker": target.layout_picker_input.is_some(),
-                "hint_mode": target.hint_state.is_some(),
-                "ssh_launcher": target.ssh_input.is_some(),
-                "context_menu": target.context_menu.is_some(),
-                "title_edit": target.editing_title.is_some(),
-                "confirm_dialog": target.confirm_dialog.is_some(),
-                "vi_mode": target.vi_mode.is_some(),
-            },
-            "context_menu": context_menu,
-            "title_edit": title_edit,
-            "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
-                "cols": cols,
-                "rows": rows,
-            })),
-            "cursor": [target.cursor.x, target.cursor.y],
-            "tab_drag_active": target.tab_drag_active,
-            "tab_drag_armed": target.tab_drag_press.is_some(),
-            "tab_drag_visible": target.tab_drag_active && target.tab_drag_press.is_none(),
-            "tab_bar": {
-                "height": bar.height,
-                "y": bar.y,
-                "new_tab": rect_json(bar.new_tab),
-                "new_tab_menu": rect_json(bar.new_tab_menu),
-                "drag_cursor_x": bar.drag_cursor_x,
-                "insert_marker": bar.insert_marker,
-                "segments": segments,
-            },
-            "pane_titlebars": pane_titlebars,
-        })
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "window": target.seq,
+                "surface": {"width": surface.0, "height": surface.1},
+                "cell": cell,
+                "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
+                "content": rect_json(self.area(target)),
+                "modals": {
+                    "search": target.mux.search.open,
+                    "palette": target.palette_input.is_some(),
+                    "settings": target.settings_nav.is_some(),
+                    "settings_text_edit": target.settings_text_edit.is_some(),
+                    "layout_picker": target.layout_picker_input.is_some(),
+                    "hint_mode": target.hint_state.is_some(),
+                    "ssh_launcher": target.ssh_input.is_some(),
+                    "context_menu": target.context_menu.is_some(),
+                    "title_edit": target.editing_title.is_some(),
+                    "confirm_dialog": target.confirm_dialog.is_some(),
+                    "vi_mode": target.vi_mode.is_some(),
+                },
+                "context_menu": context_menu,
+                "title_edit": title_edit,
+                "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
+                    "cols": cols,
+                    "rows": rows,
+                })),
+                "cursor": [target.cursor.x, target.cursor.y],
+                "tab_drag_active": target.tab_drag_active,
+                "tab_drag_armed": target.tab_drag_press.is_some(),
+                "tab_drag_visible": target.tab_drag_active && target.tab_drag_press.is_none(),
+                "tab_bar": {
+                    "height": bar.height,
+                    "y": bar.y,
+                    "new_tab": rect_json(bar.new_tab),
+                    "new_tab_menu": rect_json(bar.new_tab_menu),
+                    "drag_cursor_x": bar.drag_cursor_x,
+                    "insert_marker": bar.insert_marker,
+                    "segments": segments,
+                },
+                "pane_titlebars": pane_titlebars,
+            }),
+        )
     }
 
     /// `perform_action`: dispatch a named kettle app action against the focused
@@ -10568,11 +10824,10 @@ impl App {
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
-        let target_seq = req
-            .params
-            .get("window")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(ws.seq);
+        let target_seq = match optional_u64_param(&req.params, "window") {
+            Ok(window) => window.unwrap_or(ws.seq),
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
         let Some(width) = req.params.get("width").and_then(|v| v.as_u64()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing integer 'width'");
         };
@@ -10637,11 +10892,10 @@ impl App {
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{Response, error_codes as ec};
-        let target_seq = req
-            .params
-            .get("window")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(ws.seq);
+        let target_seq = match optional_u64_param(&req.params, "window") {
+            Ok(window) => window.unwrap_or(ws.seq),
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
         if target_seq == ws.seq {
             return self.ctl_send_mouse_for_window(ws, event_loop, req);
         }
@@ -10999,8 +11253,8 @@ impl App {
         } else {
             match self.ctl_resolve_pane(ws, &req.params) {
                 Ok(p) => Some(p),
-                Err(e) => {
-                    let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, e));
+                Err((code, message)) => {
+                    let _ = reply.send(Response::err(req.id, code, message));
                     return;
                 }
             }
@@ -11126,7 +11380,7 @@ impl App {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
-            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+            Err((code, message)) => return Response::err(req.id, code, message),
         };
         let Some(text) = req.params.get("text").and_then(|v| v.as_str()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'text' string");
@@ -11175,7 +11429,7 @@ impl App {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
-            Err(e) => return Response::err(req.id, ec::NO_SUCH_PANE, e),
+            Err((code, message)) => return Response::err(req.id, code, message),
         };
         let Some(keys) = req.params.get("keys").and_then(|v| v.as_array()) else {
             return Response::err(
@@ -11250,8 +11504,12 @@ impl App {
         &self,
         ws: &WindowState,
         params: &serde_json::Value,
-    ) -> Result<u64, String> {
-        if let Some(p) = params.get("pane").and_then(|v| v.as_u64()) {
+    ) -> Result<u64, (&'static str, String)> {
+        use kettle_ctl::protocol::error_codes as ec;
+
+        let pane =
+            optional_u64_param(params, "pane").map_err(|message| (ec::BAD_PARAMS, message))?;
+        if let Some(p) = pane {
             // C8 (multi-window): an explicit pane id may live in ANY window
             // (pane ids are process-global).
             if ws.mux.panes.contains_key(&p)
@@ -11259,14 +11517,14 @@ impl App {
             {
                 return Ok(p);
             }
-            return Err(format!("no pane with id {p}"));
+            return Err((ec::NO_SUCH_PANE, format!("no pane with id {p}")));
         }
         ws.mux
             .tabs
             .get(ws.mux.active)
             .map(|t| t.focus)
             .filter(|f| ws.mux.panes.contains_key(f))
-            .ok_or_else(|| "no focused pane".to_string())
+            .ok_or_else(|| (ec::NO_SUCH_PANE, "no focused pane".to_string()))
     }
 
     /// C8 (multi-window): every window — the checked-out one plus the map —
@@ -11363,8 +11621,8 @@ impl App {
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
-            Err(e) => {
-                let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, e));
+            Err((code, message)) => {
+                let _ = reply.send(Response::err(req.id, code, message));
                 return;
             }
         };
@@ -11447,7 +11705,10 @@ impl App {
         let Some(run) = self.pending_runs.remove(&pane) else {
             return;
         };
-        let output = self.ctl_capture_output_since(ws, pane, run.start_line);
+        let (output, output_truncated) = cap_utf8_bytes(
+            self.ctl_capture_output_since(ws, pane, run.start_line),
+            MAX_CTL_COMMAND_OUTPUT_BYTES,
+        );
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
             serde_json::json!({
@@ -11456,6 +11717,7 @@ impl App {
                 "duration_ms": ev.duration.as_millis() as u64,
                 "timed_out": false,
                 "output": output,
+                "output_truncated": output_truncated,
             }),
         );
         let _ = run.reply.send(resp);
@@ -11498,7 +11760,10 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let output = self.ctl_capture_output_since(ws, pane, run.start_line);
+            let (output, output_truncated) = cap_utf8_bytes(
+                self.ctl_capture_output_since(ws, pane, run.start_line),
+                MAX_CTL_COMMAND_OUTPUT_BYTES,
+            );
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -11506,6 +11771,7 @@ impl App {
                     "exit_code": serde_json::Value::Null,
                     "timed_out": true,
                     "output": output,
+                    "output_truncated": output_truncated,
                     "hint": "no OSC 133 command-end seen — enable shell integration \
                              (kettle --shell-integration <shell>) for exit codes",
                 }),
@@ -14985,17 +15251,23 @@ impl App {
         // tees PTY output into the trace; starting the recorder *after* it
         // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
         #[cfg(feature = "dev-record")]
-        if let Some((path, raw)) = dev_record {
+        if let Some((target, raw)) = dev_record {
             let (cols, rows) = self.grid_of(ws, self.area(ws));
-            match crate::dev_record::Recorder::start(&path, cols as u16, rows as u16, raw) {
-                Ok(rec) => {
+            match crate::dev_record::Recorder::start_target(&target, cols as u16, rows as u16, raw)
+            {
+                Ok((rec, path)) => {
                     log::info!("dev-record: recording this session to {}", path.display());
+                    self.recording_start_failed = false;
+                    self.recording_error_reported = false;
                     self.recorder = Some(rec);
+                    self.sync_recording_state(ws, "");
                 }
-                Err(e) => log::warn!(
-                    "dev-record: could not start recorder at {}: {e}",
-                    path.display()
-                ),
+                Err(e) => {
+                    log::warn!("dev-record: could not start recorder for {target:?}: {e}");
+                    self.recording_start_failed = true;
+                    let body = format!("The requested session recording could not be started: {e}");
+                    self.sync_recording_state(ws, &body);
+                }
             }
         }
         self.redraw(ws);
@@ -15089,11 +15361,18 @@ impl App {
                     w.request_redraw();
                 }
             }
-            UserEvent::UpdateInstalled { tag } => {
-                fire_notify(
-                    "kettle update installed",
-                    &format!("{tag} is ready and will be used the next time kettle starts"),
-                );
+            UserEvent::UpdateInstalled { tag, staged } => {
+                if staged {
+                    fire_notify(
+                        "kettle update staged",
+                        &format!("{tag} will install after every Kettle window is closed"),
+                    );
+                } else {
+                    fire_notify(
+                        "kettle update installed",
+                        &format!("{tag} is ready and will be used the next time kettle starts"),
+                    );
+                }
             }
             UserEvent::UpdateFailed { message } => {
                 log::warn!("automatic update failed: {message}");
@@ -15110,21 +15389,31 @@ impl App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                // Cycle 875/908: tee any in-flight PTY output into the trace,
-                // THEN flush, before exit (Drop also flushes). Without the
-                // drain, bytes queued in a pane's output_rx when the user clicks
-                // X are never recorded — `finish()` only flushes already-written
-                // events, it does not pull the output sidechannel.
+                // Cycle 875/908: fan out in-flight shared PTY output, then flush
+                // before exit (Drop also flushes). `finish()` only flushes
+                // recorder events already written; it cannot pull the shared
+                // sidechannel or deliver its tail to Lua.
                 #[cfg(feature = "dev-record")]
                 {
                     self.flush_recorder_output(ws);
                     // C4: the recorder spans the whole session — finish it
                     // only when the LAST window goes (this one is checked out
                     // of the map, so empty == last).
-                    if self.windows.is_empty()
+                    let finish_failed = if self.windows.is_empty()
                         && let Some(rec) = self.recorder.as_mut()
                     {
+                        let before = rec.status();
                         rec.finish();
+                        rec.status() != before
+                            && rec.status() == crate::dev_record::RecordStatus::IoError
+                    } else {
+                        false
+                    };
+                    if finish_failed {
+                        self.sync_recording_state(
+                            ws,
+                            "Session recording stopped because its final data could not be flushed.",
+                        );
                     }
                 }
                 self.save_session(ws);
@@ -16887,11 +17176,23 @@ impl App {
         // by silence left its buffered tail unflushed until the next event;
         // flush here when stale and, while dirty, wake at the deadline.
         #[cfg(feature = "dev-record")]
-        if let Some(rec) = self.recorder.as_mut() {
-            rec.flush_if_stale();
-            if let Some(deadline) = rec.flush_deadline() {
-                let ms = (deadline.saturating_duration_since(now).as_millis() as u64).max(1);
-                wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+        {
+            let recorder_status_changed = if let Some(rec) = self.recorder.as_mut() {
+                let before = rec.status();
+                rec.flush_if_stale();
+                if let Some(deadline) = rec.flush_deadline() {
+                    let ms = (deadline.saturating_duration_since(now).as_millis() as u64).max(1);
+                    wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+                }
+                rec.status() != before
+            } else {
+                false
+            };
+            if recorder_status_changed {
+                self.sync_recording_state(
+                    ws,
+                    "Session recording stopped because buffered data could not be flushed.",
+                );
             }
         }
         wait_ms
@@ -16967,6 +17268,19 @@ mod tests {
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn inline_placement_classes_are_interleaved_before_frame_budget() {
+        assert_eq!(
+            super::round_robin_bounded([vec![1, 2, 3], vec![10, 11, 12], vec![20, 21, 22]], 5),
+            vec![1, 10, 20, 2, 11]
+        );
+        assert_eq!(
+            super::round_robin_bounded([vec![1, 2], vec![], vec![20]], 99),
+            vec![1, 20, 2]
+        );
+        assert!(super::round_robin_bounded([vec![1], vec![2], vec![3]], 0).is_empty());
+    }
 
     /// I1 (audit v2.32.0): an OSC-set title is neutralized before it reaches the
     /// OS titlebar / tab / status bar — control chars AND Unicode bidi-override
@@ -17128,6 +17442,45 @@ mod tests {
         assert!(truncated);
         assert_eq!(capped.len(), super::MAX_CTL_SELECTION_BYTES - 1);
         assert!(capped.is_char_boundary(capped.len()));
+    }
+
+    #[test]
+    fn control_pages_are_bounded_and_snapshot_consistent() {
+        let values: Vec<serde_json::Value> = (0..5).map(serde_json::Value::from).collect();
+        let first = kettle_ctl::protocol::Request {
+            v: 1,
+            id: 1,
+            method: "list_panes".into(),
+            params: serde_json::json!({"limit": 2}),
+        };
+        let response = super::ctl_page_values(&first, "panes", values.clone());
+        assert!(response.ok);
+        assert_eq!(response.result["panes"].as_array().unwrap().len(), 2);
+        assert_eq!(response.result["next_cursor"], "2");
+        assert_eq!(response.result["truncated"], true);
+
+        let second = kettle_ctl::protocol::Request {
+            id: 2,
+            params: serde_json::json!({
+                "cursor": response.result["next_cursor"],
+                "snapshot": response.result["snapshot"],
+                "limit": 2,
+            }),
+            ..first
+        };
+        let response = super::ctl_page_values(&second, "panes", values);
+        assert_eq!(response.result["panes"], serde_json::json!([2, 3]));
+
+        let stale = kettle_ctl::protocol::Request {
+            id: 3,
+            params: serde_json::json!({"cursor": "2", "snapshot": "stale"}),
+            ..second
+        };
+        let response = super::ctl_page_values(&stale, "panes", vec![serde_json::json!(1)]);
+        assert_eq!(
+            response.error.unwrap().code,
+            kettle_ctl::protocol::error_codes::STALE_SNAPSHOT
+        );
     }
 
     /// Startup drift guard: the window is hidden only while renderer init runs,
@@ -17361,21 +17714,15 @@ mod tests {
         );
     }
 
-    /// Cycle 908 (dev-record completeness) drift guard. The recorder is fed PTY
-    /// output ONLY by `drain_events()` (on redraw), so output that lands after
-    /// the last redraw-drain and before a pane is reaped / the window closes
-    /// would be dropped with the pane (a fast `-e cmd`'s final line, or bytes in
-    /// flight at close). `flush_recorder_output()` must therefore run before
-    /// BOTH `mux.reap()` sites and on `CloseRequested`. A behavioral test needs
-    /// a full App + window; pin the wiring at the source level via the
-    /// distinctive per-site comments (so the guard can't self-match its own
-    /// assertion literals). The live close-path tests verify behavior.
+    /// Cycle 908 (dev-record completeness) drift guard. Redraw and close-time
+    /// drains destructively consume one shared output channel, so both must fan
+    /// out through the same recorder + Lua dispatcher before panes disappear.
     #[cfg(feature = "dev-record")]
     #[test]
     fn recorder_output_flushed_before_reap_and_on_close() {
         let src = include_str!("app.rs");
         assert!(
-            src.contains("fn flush_recorder_output(&mut self)"),
+            src.contains("fn flush_recorder_output(&mut self, ws: &mut WindowState)"),
             "the recorder-output flush helper must exist"
         );
         for marker in [
@@ -17388,6 +17735,25 @@ mod tests {
                 "missing recorder-flush wiring at a close/reap site: {marker:?}"
             );
         }
+
+        let regular_drain = src
+            .split("fn drain_events(&mut self, ws: &mut WindowState)")
+            .nth(1)
+            .and_then(|body| body.split("fn flush_recorder_output").next())
+            .expect("regular output drain body");
+        assert!(
+            regular_drain.contains("self.dispatch_output_chunks(ws, output_chunks);"),
+            "redraw-time output must use the shared fan-out dispatcher"
+        );
+        let close_drain = src
+            .split("fn drain_recorder_output_once")
+            .nth(1)
+            .and_then(|body| body.split("fn recording_status").next())
+            .expect("close-time output drain body");
+        assert!(
+            close_drain.contains("self.dispatch_output_chunks(ws, tail);"),
+            "close-time output must use the shared fan-out dispatcher"
+        );
     }
 
     /// Cycle 897 (audit) drift guards. Three event-state leaks, each needing a
@@ -19780,17 +20146,43 @@ mod tests {
     #[cfg(feature = "dev-record")]
     #[test]
     fn recording_window_title_suffix_is_ascii_safe() {
-        use super::{RECORDING_TITLE_SUFFIX, recording_window_title};
+        use super::{
+            RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX, RECORDING_TITLE_SUFFIX,
+            effective_record_status, recording_window_title,
+        };
+        use crate::dev_record::RecordStatus;
 
+        assert_eq!(effective_record_status(None, false), None);
         assert_eq!(
-            recording_window_title("kettle".to_string(), false),
-            "kettle"
+            effective_record_status(None, true),
+            Some(RecordStatus::IoError)
         );
         assert_eq!(
-            recording_window_title("kettle".to_string(), true),
+            effective_record_status(Some(RecordStatus::LimitReached), true),
+            Some(RecordStatus::LimitReached)
+        );
+        assert_eq!(recording_window_title("kettle".to_string(), None), "kettle");
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::Recording)),
             "kettle [REC]"
         );
-        assert!(RECORDING_TITLE_SUFFIX.is_ascii());
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::LimitReached)),
+            "kettle [REC LIMIT]"
+        );
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::IoError)),
+            "kettle [REC ERROR]"
+        );
+        assert!(
+            [
+                RECORDING_TITLE_SUFFIX,
+                RECORDING_LIMIT_TITLE_SUFFIX,
+                RECORDING_ERROR_TITLE_SUFFIX
+            ]
+            .iter()
+            .all(|suffix| suffix.is_ascii())
+        );
         assert!(
             !RECORDING_TITLE_SUFFIX.contains('●'),
             "native title-bar text must avoid host-font-dependent symbol glyphs"

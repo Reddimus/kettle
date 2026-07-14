@@ -2,19 +2,20 @@
 
 use std::sync::Arc;
 
+use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
+
 /// Cycle 576 decompression-bomb defense: max per-axis pixel count
 /// accepted by `ImageData::from_encoded`. Matches `sixel::MAX_DIM`
 /// (cycle predates the audit doc; same realistic-terminal envelope).
-const MAX_IMAGE_DIM: u32 = 8192;
+pub const MAX_IMAGE_DIM: u32 = 8192;
 
 /// Cycle 576 decompression-bomb defense: max total bytes the `image`
-/// crate may allocate while decoding. 8192² × 4 RGBA bytes = 256 MiB,
-/// the natural upper bound paired with `MAX_IMAGE_DIM`.
+/// crate may allocate while decoding. The independent axis cap still rejects
+/// pathological shapes; the byte cap limits any one retained image to 64 MiB.
 ///
 /// Cycle 814: `pub(crate)` so the kitty decoder can bound its zlib (`o=z`)
-/// inflate to this same envelope — a legal 8192² RGBA image is exactly this
-/// many bytes, so nothing valid is rejected.
-pub(crate) const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+/// inflate to this same envelope.
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A decoded image plus placement metadata (kitty image id + z-index;
 /// Sixel/iTerm2 use `id = None`, `z = 0`).
@@ -42,10 +43,22 @@ pub struct ImageData {
     pub height: u32,
     /// `width * height * 4` bytes, RGBA8, top-left origin.
     pub rgba: Arc<Vec<u8>>,
+    /// Pins the CPU reservation for exactly as long as this allocation lives.
+    /// Clones share both the pixel buffer and this token, so bytes count once.
+    _cpu: Arc<GraphicsReservation>,
 }
 
 impl ImageData {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<ImageData> {
+        Self::new_with_budget(width, height, rgba, &GraphicsBudget::default())
+    }
+
+    pub fn new_with_budget(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        budget: &GraphicsBudget,
+    ) -> Option<ImageData> {
         // Cycle 577: checked arithmetic. The previous unchecked
         // `width as usize * height as usize * 4` would panic on debug
         // and silently wrap on release for adversarial header values
@@ -74,35 +87,81 @@ impl ImageData {
         if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
             return None;
         }
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|wh| wh.checked_mul(4))?;
+        let expected = rgba_bytes(width, height)?;
+        if expected > budget.limits().image_bytes {
+            return None;
+        }
         if rgba.len() != expected {
+            return None;
+        }
+        let reservation = budget.reserve_image_cpu(expected)?;
+        Self::from_reserved(width, height, rgba, reservation)
+    }
+
+    pub(crate) fn from_reserved(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        reservation: GraphicsReservation,
+    ) -> Option<ImageData> {
+        if width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
+            return None;
+        }
+        let expected = rgba_bytes(width, height)?;
+        if expected > reservation.budget().limits().image_bytes
+            || rgba.len() != expected
+            || reservation.bytes() != expected
+        {
             return None;
         }
         Some(ImageData {
             width,
             height,
             rgba: Arc::new(rgba),
+            _cpu: Arc::new(reservation),
         })
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.rgba.len()
+    }
+
+    pub fn allocation_key(&self) -> usize {
+        Arc::as_ptr(&self.rgba) as usize
     }
 
     /// Decode an encoded terminal-embedded image (PNG / JPEG / GIF — the
     /// only formats kettle-vt enables on the `image` crate per Cargo.toml
     /// cycle-277 narrow features). Bounded against decompression bombs:
     /// rejects images wider/taller than 8192 px or whose decoded RGBA
-    /// buffer would exceed 256 MiB. Cycle 576.
+    /// buffer would exceed 64 MiB.
     pub fn from_encoded(bytes: &[u8]) -> Option<ImageData> {
+        Self::from_encoded_with_budget(bytes, &GraphicsBudget::default())
+    }
+
+    pub(crate) fn from_encoded_with_budget(
+        bytes: &[u8],
+        budget: &GraphicsBudget,
+    ) -> Option<ImageData> {
+        // Reserve both the retained RGBA output and the decoder's bounded
+        // working allocation before invoking the image crate.
+        let decode_cap = budget.limits().image_bytes.min(MAX_IMAGE_BYTES as usize);
+        let mut output = budget.reserve_image_cpu(decode_cap)?;
+        let _scratch = budget.reserve_transient_cpu(decode_cap)?;
         let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?;
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(MAX_IMAGE_DIM);
         limits.max_image_height = Some(MAX_IMAGE_DIM);
-        limits.max_alloc = Some(MAX_IMAGE_BYTES);
+        limits.max_alloc = Some(decode_cap as u64);
         reader.limits(limits);
         let img = reader.decode().ok()?.to_rgba8();
-        ImageData::new(img.width(), img.height(), img.into_raw())
+        let expected = rgba_bytes(img.width(), img.height())?;
+        if expected > decode_cap || !output.shrink_to(expected) {
+            return None;
+        }
+        ImageData::from_reserved(img.width(), img.height(), img.into_raw(), output)
     }
 
     /// A copied sub-rectangle. The rect is clamped to the image bounds; an
@@ -117,12 +176,16 @@ impl ImageData {
         if w == 0 || h == 0 {
             return None;
         }
-        let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+        let bytes = rgba_bytes(w, h)?;
+        let reservation = self._cpu.budget().reserve_image_cpu(bytes)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes).ok()?;
         for row in 0..h {
-            let src = (((y + row) * self.width + x) * 4) as usize;
-            out.extend_from_slice(&self.rgba[src..src + w as usize * 4]);
+            let src = ((u64::from(y + row) * u64::from(self.width) + u64::from(x)) * 4) as usize;
+            let row_bytes = usize::try_from(u64::from(w) * 4).ok()?;
+            out.extend_from_slice(&self.rgba[src..src + row_bytes]);
         }
-        ImageData::new(w, h, out)
+        ImageData::from_reserved(w, h, out, reservation)
     }
 
     /// A `w × h` canvas filled with one RGBA color (kitty animation `Y=`
@@ -138,11 +201,34 @@ impl ImageData {
         if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
             return None;
         }
-        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
-        for _ in 0..(w as usize * h as usize) {
+        let bytes = rgba_bytes(w, h)?;
+        let budget = GraphicsBudget::default();
+        let reservation = budget.reserve_image_cpu(bytes)?;
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes).ok()?;
+        while rgba.len() < bytes {
             rgba.extend_from_slice(&color);
         }
-        ImageData::new(w, h, rgba)
+        ImageData::from_reserved(w, h, rgba, reservation)
+    }
+
+    pub(crate) fn solid_with_budget(
+        w: u32,
+        h: u32,
+        color: [u8; 4],
+        budget: &GraphicsBudget,
+    ) -> Option<ImageData> {
+        if w == 0 || h == 0 || w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
+            return None;
+        }
+        let bytes = rgba_bytes(w, h)?;
+        let reservation = budget.reserve_image_cpu(bytes)?;
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes).ok()?;
+        while rgba.len() < bytes {
+            rgba.extend_from_slice(&color);
+        }
+        ImageData::from_reserved(w, h, rgba, reservation)
     }
 
     /// Compose `src` onto this image at `(x, y)`, clipped to bounds. With
@@ -150,13 +236,30 @@ impl ImageData {
     /// over the destination (straight-alpha "source-over"). This is the
     /// kitty animation frame-composition primitive (`graphics-protocol.rst`
     /// frame canvas + `a=c`).
-    pub fn compose(&mut self, src: &ImageData, x: u32, y: u32, replace: bool) {
+    pub fn compose(&mut self, src: &ImageData, x: u32, y: u32, replace: bool) -> bool {
         if x >= self.width || y >= self.height {
-            return;
+            return true;
         }
         let cw = src.width.min(self.width - x);
         let ch = src.height.min(self.height - y);
-        let dst = std::sync::Arc::make_mut(&mut self.rgba);
+        if Arc::strong_count(&self.rgba) > 1 {
+            // `Arc::make_mut` would allocate an unaccounted full-image copy.
+            // Reserve first and clone fallibly, then install matching pixels +
+            // lease as one allocation identity.
+            let Some(reservation) = self._cpu.budget().reserve_image_cpu(self.rgba.len()) else {
+                return false;
+            };
+            let mut copy = Vec::new();
+            if copy.try_reserve_exact(self.rgba.len()).is_err() {
+                return false;
+            }
+            copy.extend_from_slice(&self.rgba);
+            self.rgba = Arc::new(copy);
+            self._cpu = Arc::new(reservation);
+        }
+        let Some(dst) = Arc::get_mut(&mut self.rgba) else {
+            return false;
+        };
         for row in 0..ch {
             for col in 0..cw {
                 // Cycle 760: compute byte offsets in u64 so the multiply can't
@@ -188,7 +291,15 @@ impl ImageData {
                 dst[d + 3] = (sa + (dst[d + 3] as u32) * (255 - sa) / 255).min(255) as u8;
             }
         }
+        true
     }
+}
+
+pub(crate) fn rgba_bytes(width: u32, height: u32) -> Option<usize> {
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(4)?;
+    usize::try_from(bytes).ok()
 }
 
 impl std::fmt::Debug for ImageData {
@@ -267,8 +378,46 @@ mod tests {
         let w = MAX_IMAGE_DIM + 1;
         assert!(ImageData::new(w, 1, vec![0; w as usize * 4]).is_none());
         assert!(ImageData::new(1, w, vec![0; w as usize * 4]).is_none());
+        let budget = GraphicsBudget::default();
+        let bytes = rgba_bytes(w, 1).unwrap();
+        let reservation = budget.reserve_image_cpu(bytes).unwrap();
+        assert!(ImageData::from_reserved(w, 1, vec![0; bytes], reservation).is_none());
         // `solid` guards its pre-fill allocation the same way.
         assert!(ImageData::solid(MAX_IMAGE_DIM + 1, 1, [0; 4]).is_none());
+    }
+
+    #[test]
+    fn image_byte_budget_accepts_limit_and_rejects_one_past_without_large_allocations() {
+        assert_eq!(rgba_bytes(8192, 2048), Some(MAX_IMAGE_BYTES as usize));
+        assert_eq!(
+            rgba_bytes(8192, 2049),
+            Some(MAX_IMAGE_BYTES as usize + 8192 * 4)
+        );
+
+        let limits = crate::GraphicsLimits {
+            image_bytes: 16,
+            retained_bytes: 32,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        assert!(ImageData::new_with_budget(2, 2, vec![0; 16], &budget).is_some());
+        assert!(ImageData::new_with_budget(5, 1, vec![0; 20], &budget).is_none());
+    }
+
+    #[test]
+    fn compose_refuses_unbudgeted_copy_on_write_without_mutating() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 16,
+            retained_bytes: 16,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let mut dst = ImageData::new_with_budget(2, 2, vec![0; 16], &budget).unwrap();
+        let pinned = dst.clone();
+        let src = ImageData::new(1, 1, vec![255, 0, 0, 255]).unwrap();
+        assert!(!dst.compose(&src, 0, 0, true));
+        assert_eq!(dst.rgba.as_slice(), &[0; 16]);
+        assert_eq!(pinned.rgba.as_slice(), &[0; 16]);
     }
 
     /// Cycle 576 drift guard for the decompression-bomb defense in

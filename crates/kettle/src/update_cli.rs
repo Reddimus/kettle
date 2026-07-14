@@ -52,10 +52,16 @@ pub fn run(assume_yes: bool, current: &str) -> i32 {
     );
     match kettle_update::install_update(&client, &update) {
         Ok(outcome) => {
-            println!(
-                "Installed kettle {}. Existing windows keep running {}; restart kettle when convenient.",
-                outcome.version, current
-            );
+            match outcome.disposition {
+                kettle_update::InstallDisposition::Applied => println!(
+                    "Installed kettle {}. Existing windows keep running {}; restart kettle when convenient.",
+                    outcome.version, current
+                ),
+                kettle_update::InstallDisposition::Staged { .. } => println!(
+                    "Verified and staged kettle {}. Close all Kettle windows to let the update helper replace the running executable.",
+                    outcome.version
+                ),
+            }
             0
         }
         Err(UpdateError::UpdateLocked) => {

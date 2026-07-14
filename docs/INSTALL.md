@@ -29,7 +29,11 @@ kettle update --yes
 
 `kettle --update` is an interactive convenience alias. Kettle verifies the
 signed stable manifest, archive size, and SHA-256 before a transactional
-replacement. It never requests elevation and never restarts open windows. A
+replacement. It never requests elevation and never restarts open windows. On
+Windows, the verified release waits in private staged state until all Kettle
+windows close; new launches hand off to the helper instead of running the old
+binary. Upgrading a pre-v2.35 Windows install requires one rerun of the bundled
+`install.ps1` to bootstrap that helper-aware build. A
 Windows Kettle executable launched from WSL updates the same Windows install;
 a native WSL/Linux Kettle updates its Linux prefix. Package-manager, Cargo,
 Homebrew, Nix, AUR, and manually copied installs are refused so their owner
@@ -82,6 +86,20 @@ cd kettle
 ```
 
 Requires Rust ≥ 1.89 (the workspace MSRV).
+
+An in-tree source install is marked `local-dev`, so `kettle update` will not
+replace it with a stable binary. Rebuild and rerun `./scripts/install.sh` to
+refresh it. Maintainers who want every Ubuntu Super-key launch recorded can use:
+
+```sh
+just install-local-dev-record
+# or choose another private directory, including one whose path contains spaces:
+just install-local-dev-record "$HOME/Kettle recordings"
+```
+
+That build and launcher use the `local-dev-record` marker and
+`KETTLE_RECORD_DIR`; see [DEV-RECORD.md](DEV-RECORD.md) for privacy, limits, and
+retention behavior.
 
 ### From a downloaded release tarball
 

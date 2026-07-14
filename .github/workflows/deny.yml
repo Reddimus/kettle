@@ -47,12 +47,12 @@ jobs:
     # headroom for the action's vendored binary download.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # The official EmbarkStudios action vendors `cargo-deny`
       # itself; no separate `cargo install` step needed. Pinned to
       # v2 so a future v3 breaking change doesn't silently flip
       # check outputs.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           # Run every check class except `advisories` — the
           # cycle-244 `audit.yml` already covers those via the

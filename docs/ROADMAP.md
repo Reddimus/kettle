@@ -161,8 +161,9 @@
 - [x] kitty Unicode placeholders — renderer path: per-frame grid scan for
       `U+10EEEE`, fg→image-id (256/truecolor/named) + diacritic decode,
       left-inheritance over contiguous runs, virtual image sliced per cell
-      (`ImageData::crop`, `placeholder::tile_src_rect`) and drawn through
-      the existing image pipeline (`Terminal::placeholder_tiles`, +3
+      (`placeholder::tile_src_rect`) using shared image allocations and
+      per-instance source UVs, then drawn through the existing image pipeline
+      (`Terminal::placeholder_tiles`, +3
       tests; 89 workspace tests). Placement-id via underline color is the
       remaining sub-item.
 

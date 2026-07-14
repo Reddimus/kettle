@@ -68,8 +68,13 @@ fn mcp_stdio_initialize_list_and_kettle_run() {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18"}
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "kettle-test", "version": "1"}
+            }
         }),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         json!({
             "jsonrpc": "2.0",

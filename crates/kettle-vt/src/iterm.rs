@@ -2,6 +2,7 @@
 
 use base64::Engine;
 
+use crate::graphics_limits::GraphicsBudget;
 use crate::image::ImageData;
 
 /// Decode an `OSC 1337` body (the bytes after `OSC` and before `ST`, i.e.
@@ -15,6 +16,13 @@ use crate::image::ImageData;
 /// return `None` for any non-inline transfer — the bytes are simply consumed,
 /// matching iTerm2's default-to-download behavior.
 pub fn decode(body: &str) -> Option<ImageData> {
+    decode_with_budget(body, &GraphicsBudget::default())
+}
+
+pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<ImageData> {
+    if body.len() > budget.limits().sequence_bytes {
+        return None;
+    }
     let rest = body.strip_prefix("1337;File=")?;
     let (args, b64) = rest.split_once(':')?;
     // Only inline=1 is displayed; absent/0/other → file download, not an image.
@@ -29,11 +37,21 @@ pub fn decode(body: &str) -> Option<ImageData> {
     // and `.trim()` only strips the ends, so a line-wrapped OSC-1337 body (raw
     // newlines aren't ST, so they reach the decoder) silently failed. Strip all
     // ASCII whitespace first.
-    let cleaned: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let _cleaned_reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
+    let mut cleaned = Vec::new();
+    cleaned.try_reserve_exact(b64.len()).ok()?;
+    cleaned.extend(b64.bytes().filter(|b| !b.is_ascii_whitespace()));
+    let decoded_cap = cleaned
+        .len()
+        .checked_add(3)?
+        .checked_div(4)?
+        .checked_mul(3)?
+        .max(1);
+    let _decoded_reservation = budget.reserve_transient_cpu(decoded_cap)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&cleaned)
         .ok()?;
-    ImageData::from_encoded(&bytes)
+    ImageData::from_encoded_with_budget(&bytes, budget)
 }
 
 #[cfg(test)]

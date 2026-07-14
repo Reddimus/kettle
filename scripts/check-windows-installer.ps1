@@ -67,6 +67,8 @@ Assert-PathExists (Join-Path $prefix 'kettle.com') 'kettle.com console launcher'
 Assert-PathExists (Join-Path $prefix 'install.ps1') 'saved install.ps1'
 Assert-PathExists (Join-Path $prefix '.kettle-install-prefix') 'prefix marker'
 Assert-PathExists (Join-Path $prefix '.kettle-install.json') 'self-update ownership marker'
+$marker = Get-Content -LiteralPath (Join-Path $prefix '.kettle-install.json') -Raw | ConvertFrom-Json
+Assert-Equal $marker.channel 'local-dev' 'repo install marker channel'
 Assert-PathExists (Join-Path $prefix 'kettle.ico') 'icon'
 Assert-PathExists (Join-Path $prefix 'shell-integration\kettle.ps1') 'PowerShell shell integration'
 
@@ -144,6 +146,8 @@ try {
     Assert-PathExists $shortcutPath 'Start menu shortcut'
     Assert-PathExists $testUninstallKey 'isolated Add/Remove Programs entry'
     Assert-PathExists (Join-Path $integrationPrefix '.kettle-install.json') 'default self-update ownership marker'
+    $integrationMarker = Get-Content -LiteralPath (Join-Path $integrationPrefix '.kettle-install.json') -Raw | ConvertFrom-Json
+    Assert-Equal $integrationMarker.channel 'local-dev' 'default repo install marker channel'
     $shortcut = $ws.CreateShortcut($shortcutPath)
     Assert-Equal $shortcut.TargetPath (Join-Path $integrationPrefix 'kettle.exe') 'shortcut target'
     Assert-Equal $shortcut.Arguments '' 'shortcut arguments'
@@ -171,4 +175,26 @@ try {
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $integrationRoot
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $testUninstallKey
+}
+
+# Recreate the extracted release-zip layout separately from repo mode. Only
+# this layout may opt into the stable self-update channel.
+$zipRoot = Join-Path $tempRoot "kettle-windows-zip-fixture"
+$zipPrefix = Join-Path $tempRoot "kettle-windows-zip-install"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $zipRoot, $zipPrefix
+try {
+    New-Item -ItemType Directory -Force -Path $zipRoot | Out-Null
+    Copy-Item (Join-Path $repo 'target\release\kettle.exe') (Join-Path $zipRoot 'kettle.exe')
+    Copy-Item (Join-Path $repo 'target\release\kettle-console.exe') (Join-Path $zipRoot 'kettle.com')
+    Copy-Item (Join-Path $repo 'scripts\install.ps1') (Join-Path $zipRoot 'install.ps1')
+    & (Join-Path $zipRoot 'install.ps1') -Prefix $zipPrefix -IntegrationTestRoot $integrationRoot |
+        Tee-Object -FilePath (Join-Path $tempRoot 'kettle-windows-zip-install.out')
+    $zipMarker = Get-Content -LiteralPath (Join-Path $zipPrefix '.kettle-install.json') -Raw | ConvertFrom-Json
+    Assert-Equal $zipMarker.channel 'stable' 'release zip install marker channel'
+    & (Join-Path $zipPrefix 'install.ps1') -Uninstall -IntegrationTestRoot $integrationRoot |
+        Tee-Object -FilePath (Join-Path $tempRoot 'kettle-windows-zip-uninstall.out')
+    Assert-PathAbsent (Join-Path $zipPrefix 'kettle.exe') 'release zip kettle.exe'
+    Write-Output 'windows-installer check: release zip stable channel OK'
+} finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $zipRoot, $zipPrefix
 }

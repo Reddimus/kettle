@@ -54,6 +54,8 @@ kettle-render.workspace = true
 kettle-update.workspace = true
 kettle-ui.workspace = true
 log.workspace = true
+notify-rust.workspace = true
+serde.workspace = true
 # Cycle 923 (agent-first A1): `kettle exec --json` NDJSON event stream; also
 # the JSON-RPC/MCP surface (cycle 931) and the ctl client (cycle 930).
 serde_json = "1"
@@ -98,3 +100,6 @@ winresource = "0.1"
 # crate is genuinely imported in source.
 [package.metadata.cargo-machete]
 ignored = ["winresource"]
+
+[dev-dependencies]
+tempfile = "3"

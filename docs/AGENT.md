@@ -75,6 +75,13 @@ Output modes: raw (default, verbatim PTY bytes — includes a terminal's normal
 control sequences), `--strip-ansi` (plain text, good for assertions), `--json`
 (one JSON object per line).
 
+`--record PATH` is output-only and uses the same private asciicast writer as
+the developer GUI recorder. Kettle acquires the file's exclusive lock and
+rejects links/non-regular targets before it creates the PTY; failure exits 125
+without running the command. Capture stops at a complete event boundary before
+512 MiB. A later write failure stops recording but does not kill a child that
+is already running.
+
 ### ConPTY caveats (Windows)
 
 On Windows the child runs under a ConPTY (pseudoconsole). Two consequences:
@@ -119,6 +126,12 @@ kettle --agent-server full        # this launch only
 Modes: `off` (no server), `read-only` (read the screen / list panes / subscribe),
 `full` (also send text + run commands).
 
+The endpoint is local-only and user-private. Unix uses a `0600` domain socket,
+checks peer credentials against Kettle's effective uid, and stores atomic `0600`
+discovery records in a `0700` directory. Windows rejects remote named-pipe
+clients and uses the creator's private DACL. Discovery ignores links, unsafe
+permissions, mismatched pids, and non-v1 records.
+
 Then drive it with `kettle ctl`:
 
 ```sh
@@ -150,10 +163,10 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq), `window_title` |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
-| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` adds selected text capped at 256 KiB plus `selection_truncated`; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`) |
+| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` adds selected text capped at 128 KiB plus `selection_truncated`; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
 | `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, and tab drag armed/visible state |
-| `screenshot` | read-only | save a live PNG (`pane`, `full_window`, `path`) |
+| `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
@@ -162,7 +175,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`, optional event-local `mods`) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
-| `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output}` |
+| `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; output is capped at 512 KiB |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -170,6 +183,18 @@ so press Enter with `send_keys`, not a trailing `\n`.
 `window` field disambiguates. Pane ids are process-global and stable across
 tab moves/tear-offs, and an explicit `pane` param targets a pane in **any**
 window (without one, the focused window's focused pane is used).
+When `pane` or `window` is supplied explicitly it must be an unsigned integer
+that identifies a live target. A malformed or stale explicit target is an
+error; Kettle never falls back to the focused pane/window for that request.
+
+`list_tabs`, `list_panes`, `read_screen`, and `read_cells` are paged. Pass
+`limit` (1–4096); when `truncated` is true, repeat the call with both the returned
+`next_cursor` and `snapshot`. A `stale_snapshot` error means live terminal state
+changed between pages and the read must restart. Small results remain one page.
+`read_screen` additionally reports `text_truncated` if one pathological terminal
+line alone exceeds its 256 KiB text budget.
+Every control request is capped at 1 MiB and every response/event at 768 KiB;
+protocol peers must send exactly `v: 1`.
 
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
@@ -238,12 +263,27 @@ is found, the control-backed tools return an actionable error pointing at
 `--agent-server`.
 
 The control surface also exposes `screenshot`, which saves a live PNG using the
-same renderer readback path as the UI screenshot action. It works in
-`agent-server=read-only`; by default it captures the focused pane crop, and
-`--json '{"full_window":true}'` captures the whole window.
+same renderer readback path as the UI screenshot action. It requires
+`agent-server=full` because it writes to the filesystem; by default it captures
+the focused pane crop, and `--json '{"full_window":true}'` captures the whole
+window.
 
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
+
+The stdio server negotiates MCP `2025-11-25` and the compatible `2025-06-18`
+revision. Clients must send `initialize`, wait for its response, then send the
+exact `notifications/initialized` notification before calling tools. Tool calls
+run on four workers behind a 16-request queue; `ping` remains available during
+the initialization handshake. Unknown tools and malformed `tools/call`
+envelopes return JSON-RPC `-32602`; execution/input failures from a known tool
+remain MCP tool errors. `notifications/cancelled` marks queued or running
+requests cancelled, promptly terminates a running `kettle_run` child or stops a
+control-server wait, and emits no response for that cancelled request as
+required by MCP.
+JSON-RPC input is capped at 1 MiB per line, output at 768 KiB, and tool text at
+512 KiB. Tool text is truncated further when JSON escaping would otherwise
+exceed the encoded response cap. Stdout contains protocol messages only.
 
 ## Local Smoke Checks
 
@@ -400,9 +440,9 @@ This is also desktop-local because it opens real GUI terminal windows.
   Windows named pipe with the default DACL (creator/owner + admins). There is
   **no TCP** at this layer. The protection boundary is "the same local user (and
   elevated admins)" — identical to the kettle process itself.
-- **Capability split.** `read-only` cannot send keystrokes or run commands; only
-  `full` can. A single `require_full` gate guards every mutating method (a
-  drift-guard test pins this).
+- **Capability split.** `read-only` cannot send keystrokes, run commands, or
+  write screenshot files; only `full` can. A single capability gate guards every
+  mutating method (a drift-guard test pins this).
 - **Auditable.** Every connection and every mutating method is logged. When the
   dev-record recorder is active, each agent action is annotated in the `.cast`
   trace as an `m` marker (`kettle:agent <method> conn=N`).

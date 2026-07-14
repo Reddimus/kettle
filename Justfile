@@ -277,8 +277,8 @@ install-local: release
 [unix]
 install-local-dev-record RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
     cargo build --release -p kettle --features dev-record
-    ./scripts/install.sh --skip-build --record-dir={{RECORD_DIR}}
-    @echo "local dev-record install synced to {{RECORD_DIR}}"
+    ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
+    @printf 'local dev-record install synced to %s\n' {{quote(RECORD_DIR)}}
 
 [windows]
 install-local-dev-record:

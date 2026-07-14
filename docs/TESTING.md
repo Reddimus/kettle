@@ -27,7 +27,7 @@ allowed threshold fail the gate.
 
 ## What's covered (automated)
 
-**500+ tests across the workspace** — see
+**900+ tests across the workspace** — see
 [CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions
 (cycle-288 → 303 feature sweep, cycles 330-410 Terminator-parity
 sweep, cycles 411-438 production-polish run, cycles 576-587 resource-
@@ -40,16 +40,20 @@ claims that go stale; TESTING.md is exempt from that scan
 (contributor-leaning doc) but follows the same range-stable
 discipline here.
 
-- **kettle-vt** (50+ tests): plain-text passthrough is byte-exact;
+- **kettle-vt** (80+ tests): plain-text passthrough is byte-exact;
   iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
   decode to the right pixels; OSC 7 / OSC 133 are consumed and
   surrounding text still passes; OSC 1 → OSC 2 rewrite (cycle 102) so
   vim/tmux/ranger short-titles set the tab title; a sequence delivered
   one byte at a time still yields exactly one image; an ~8 MiB
   interleaved stream passes through intact in well under 5 s
-  (linear-time / bounded-memory guard).
+  (linear-time / bounded-memory guard). Limit and limit-plus-one tests cover
+  sequence/transmission, decoded-image, animation, placement, and CPU/GPU RAII
+  accounting without allocating host-scale adversarial buffers. Oversized OSC
+  and DCS tests also cover real-terminator recovery, bounded recovery when no
+  terminator arrives, and an `ESC` split exactly across the recovery boundary.
 
-- **kettle-config** (90+ tests): TokyoNight Night is the verified shipped
+- **kettle-config** (190+ tests): TokyoNight Night is the verified shipped
   default theme (the self-contained `Theme::default()` fallback palette is
   Catppuccin Mocha); Ghostty `key = value` overrides, repeats, `palette`
   (0..=15 + cycle-124 out-of-range diagnostic), `infinite` scrollback,
@@ -60,12 +64,22 @@ discipline here.
   HashMap-shadowed bindings); the cycle-117 palette-completeness drift
   guard (now also covering `OpenContextMenu` / `UndoCloseTab` /
   `DuplicateTab` / `DuplicatePane` from v1.3.0); the cycle-100
-  example-config drift guard; the cycle-125 README-keybind regression
-  guard; cycle-99/108/109 session load/save atomic + corruption-backup
-  contracts; cycle-121/122 empty-value resets for every string-config
-  key; cycle-118 `clamp_font_size` bounds.
+  example-config drift guard; the cycle-125 README-keybind regression guard;
+  persistence preserves encoding, newline convention, comments, permissions,
+  first-write backups, and symlinked dotfile targets while refusing
+  non-regular/oversized files, newly malformed edits, and external changes
+  observed by the final pre-stage comparison;
+  cycle-99/108/109 session load/save atomic + corruption-backup contracts;
+  cycle-121/122 empty-value resets for every string-config key; cycle-118
+  `clamp_font_size` bounds.
 
-- **kettle-core VT conformance** (80+ tests): drives the *real*
+- **kettle-state**: creates and replaces private state without leaving staging
+  files, preserves an existing destination's permissions, rejects symlink
+  destinations, and proves exclusive advisory locks block competing handles
+  and release on drop. Configuration, session, and updater tests separately pin
+  each caller's validation and recovery policy on top of these primitives.
+
+- **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
   grid/cursor/SGR/mode state across a broad `vttest`-style sweep —
   text + `\r\n` + CUP addressing, erase-line/erase-display, SGR
@@ -87,13 +101,15 @@ discipline here.
   wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
   zero-width.
 
-- **kettle-render** (30+ unit tests + visual integration tests):
+- **kettle-render** (110+ unit tests + visual integration tests):
   truncate respects display columns (not chars), the
   `clamp_font_size` floor/ceiling/NaN/∞ contract (cycle 118), the
   `cap_axis_cells` GPU-texture safety guard (cycle 119), color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12). The v2.25.1 grid-regression guard renders
+  Vulkan/Metal/DX12), shared-image source-rectangle UV validation,
+  independent inline/wallpaper instance limits, and same-texture draw batching.
+  The v2.25.1 grid-regression guard renders
   zsh-style `➜  ~`, POSIX, lambda/starship-style, git-status, and
   PowerShell-style prompt lines through the cell-locked glyph pipeline,
   toggles only the block cursor between two offscreen frames, and
@@ -106,7 +122,7 @@ discipline here.
   blank-menu render-pass-order regression class that bare logic
   tests can't see.
 
-- **kettle-ui** (80+ tests): split-tree layout tiles with no
+- **kettle-ui** (270+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
   splits keep every leaf; `Node::leaf_ids` DFS-order +
   `nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
@@ -124,9 +140,10 @@ discipline here.
   + `tab_close_hover_icon_overrides_chrome_default`;
   selection-autoscroll ladder; cwd-basename tab-title fallback
   (cycle 89); the SSH and `-e PROG` initial-pane-title heuristics
-  (cycle 93 / cycle 95); session JSON round-trips, atomic save
-  + corruption-backup contracts; xterm modifier encoding + paste
-  payload bracketing + injection-guard.
+  (cycle 93 / cycle 95); session JSON round-trips, durable private save,
+  symlink refusal, permission tightening, and corruption/oversize backup
+  contracts; xterm modifier encoding + paste payload bracketing +
+  injection-guard.
 
 - **Multi-window (v2.18.0, cross-crate)**: the tab tear-off drag is a
   pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
@@ -146,7 +163,7 @@ discipline here.
   code paths allowed to terminate the process, now that closing one
   window must leave the others running.
 
-- **kettle** (binary, 15+ tests): clap argv parsing for the cycle-30
+- **kettle** (binary, 50+ tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105
   `format_ssh_hosts` table renderer (sort + column alignment +
   empty fallback); the cycle-219
@@ -218,6 +235,15 @@ v2 trace — the exact format [`docs/DEV-RECORD.md`](DEV-RECORD.md)'s recorder
 writes — and feeds its `o` (output) events through the harness, asserting grid
 text + SGR state. A scrubbed recording of a real agent session can therefore be
 committed as a regression fixture and re-fed without a PTY or auth.
+
+**Recorder boundaries.** `kettle-core` tests exact-limit and limit-plus-one
+events, UTF-8 splits, the visible limit marker, unique private directory files,
+exclusive-writer refusal, link rejection, locked-file retention, and pruning by
+both count and bytes without touching unrelated names. `kettle-ui` pins the
+`[REC]` / `[REC LIMIT]` / `[REC ERROR]` title states and lossless redraw/close
+fan-out. `kettle exec` integration tests prove an unavailable recording path
+prevents child startup with status 125 and that cancellation promptly closes a
+replayable trace.
 
 **Windows Codex footer cursor.** Native Windows Codex goes through ConPTY. Its
 active repaint can finish with a visible cursor on the status row and then move
@@ -335,7 +361,13 @@ These need a real display and are run by hand (or on real hardware):
     `tools/list` + one `kettle_run`). CI also runs
     `crates/kettle/tests/mcp_stdio.rs`, which spawns the real `kettle mcp`
     process and speaks newline-delimited JSON-RPC over stdio — the boundary
-    Claude Code / Codex use when the server is registered as an MCP.
+    Claude Code / Codex use when the server is registered as an MCP. Protocol
+    tests must cover both supported revisions, the exact initialized
+    notification, initialization-time ping, notification silence, malformed or
+    unknown tool envelopes, encoded-response truncation, 1 MiB/768 KiB framing
+    limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
+    loopback tests separately pin response deadlines, cancellation, strict
+    frame/id validation, and preservation of events that precede a response.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
@@ -405,11 +437,11 @@ name the shape of bug each cycle caught.
   empty argument list, working directory, registry entry, and cleanup. Sentinel
   state also verifies a portable uninstall cannot remove default-install
   shortcut, registry, PATH, or PowerShell profile state.
-- Cycle-876 **`dev-record` feature build** — the developer-only session
-  recorder is compiled OUT of shipped builds, so the default checks never
-  exercise it; CI separately runs `clippy -D` + the recorder tests under
-  `--features dev-record` so the gated code + hooks can't bit-rot. See
-  [DEV-RECORD.md](DEV-RECORD.md).
+- **`dev-record` feature build** — the automatic GUI recording flags, input
+  tokens, markers, and status UI are compiled out of shipped builds. The shared
+  output-only writer remains in releases for `kettle exec --record`. CI
+  separately runs clippy and the GUI hook tests with `--features dev-record` so
+  the gated launcher path cannot bit-rot. See [DEV-RECORD.md](DEV-RECORD.md).
 
 Separate workflows:
 
@@ -424,11 +456,16 @@ Separate workflows:
   rendering from source `.in` files and, once the matching release exists,
   checks its generated `kettle.rb` and `PKGBUILD` against the published
   `.sha256` sidecars. CI runs it on Linux.
-- `scripts/check-linux-installers.sh` — builds on the release binary produced by
-  CI, installs into throwaway custom prefixes, verifies desktop/man/icon/helper
-  paths, uninstalls through the saved helper, and, when the matching release tag
-  exists, runs `install-online.sh` against the published tarball to verify
-  SHA-256 checking plus prefix-local uninstall behavior.
+- `scripts/check-linux-installers.sh` — starts from the release binary produced
+  by CI, installs into throwaway custom prefixes, and verifies desktop, man,
+  icon, helper, and `local-dev` ownership state. It proves that this normal
+  binary is refused for `--record-dir`, builds the `dev-record` variant, and
+  repeats with prefix/record paths containing every Desktop Entry quoting edge
+  (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
+  checks. The original normal binary is restored for a simulated stable
+  release-tarball install. When the matching release tag exists, the script
+  also runs `install-online.sh` and verifies SHA-256 and prefix-local uninstall
+  behavior.
 - `scripts/check-windows-installer.ps1` — runs on Windows CI after the release
   binary is built, installs to a throwaway custom prefix, verifies the portable
   install payload, then uninstalls through the saved helper without repeating

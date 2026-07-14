@@ -70,6 +70,7 @@ run_kettle_exec_json_match() {
 
 if have sh; then
   smoke_shell=(sh -lc)
+  # shellcheck disable=SC2016 # The child shell, not this harness, expands these.
   env_probe='printf "TERM=%s COLORTERM=%s\n" "$TERM" "$COLORTERM"'
   json_probe='printf "kettle-agent-json-ok\n"'
 elif [ "${OS:-}" = "Windows_NT" ]; then

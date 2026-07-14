@@ -143,12 +143,16 @@ Each cycle has the same shape:
 
 ```text
 crates/
+  kettle-state/    Durable atomic file replacement · advisory file locks
+  kettle-update/   Signed update feeds · bounded extraction · transactions
   kettle-config/   Config parsing · 500+ themes · keybinds · ssh-host · fuzzy
   kettle-vt/       Image-protocol extractor (Sixel · kitty · iTerm2 · OSC 7/133)
   kettle-core/     PTY reader · alacritty_terminal+vte · search · hints · links
   kettle-render/   wgpu pipelines · glyphon text · screenshots · GPU self-test
+  kettle-remote/   SSH/container detection · process-tree inspection
+  kettle-ctl/      Local control protocol · IPC transport · discovery · client
   kettle-ui/       winit app · tab/split mux · session · input · all the chrome
-  kettle/          CLI entry point (clap) · --list-* / --check-config / --screenshot
+  kettle/          CLI entry point (clap) · exec / ctl / mcp · GUI launch
 ```
 
 Each crate has its own tests. Anything pure (logic with no `&self` / I/O)

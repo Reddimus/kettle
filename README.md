@@ -44,7 +44,9 @@ and **WezTerm** into one tool.
   atlas, with damage-aware draws.
 - **Battle-tested VT core** — built on `alacritty_terminal` + `vte`, so
   vim/tmux/neovim/AstroNvim work out of the box (truecolor, undercurl,
-  alt-screen, bracketed paste, mouse, kitty keyboard).
+  alt-screen, bracketed paste, mouse, focus reports, and xterm-compatible
+  modified keys). Kettle intentionally does not advertise kitty CSI-u keyboard
+  mode until it has a matching encoder.
 - **Terminator-style multiplexing** — tabs (clickable tab bar), splits,
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
@@ -116,11 +118,13 @@ and **WezTerm** into one tool.
 - **Authenticated updates** — `kettle update` verifies a dedicated Ed25519-
   signed stable manifest plus the selected archive's exact size and SHA-256,
   then transactionally updates an official Windows or Linux installer layout.
-  It never elevates or restarts running windows. The default `update-policy =
-  notify` performs a quiet once-a-day check; use `off` or opt into background
-  installation with `auto`, and use `kettle --check-update` for an explicit
-  check. Package-manager and manually managed binaries are refused rather than
-  overwritten. See [Updating Kettle](docs/UPDATES.md).
+  It never elevates or restarts running windows; Windows uses an out-of-process
+  helper after every Kettle process closes instead of trying to replace a mapped
+  executable. The default `update-policy = notify` performs a quiet once-a-day
+  check; use `off` or opt into background installation with `auto`, and use
+  `kettle --check-update` for an explicit check. Package-manager, source, and
+  manually managed binaries are refused rather than overwritten. See
+  [Updating Kettle](docs/UPDATES.md).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 

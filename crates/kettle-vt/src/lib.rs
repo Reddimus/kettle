@@ -32,6 +32,7 @@
 //!   diacritics) decode path for kitty `U=1` virtual placements.
 
 pub mod extract;
+pub mod graphics_limits;
 pub mod image;
 pub mod iterm;
 pub mod kitty;
@@ -39,6 +40,7 @@ pub mod placeholder;
 pub mod sixel;
 
 pub use extract::{Chunk, Extractor, Progress, PromptKind};
+pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
 pub use image::{ImageData, Placed};
 
 #[cfg(test)]

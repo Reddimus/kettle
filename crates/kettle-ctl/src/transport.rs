@@ -77,6 +77,150 @@ impl CtlStream {
         }
     }
 
+    /// Wait until at least one byte can be read, the peer closes, or `timeout`
+    /// elapses. This is deliberately a readiness primitive rather than a
+    /// socket read timeout: the Windows transport is a named-pipe `File`, and
+    /// both client implementations need the same bounded-frame behavior.
+    pub(crate) fn wait_readable(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        match self {
+            #[cfg(unix)]
+            CtlStream::Unix(stream) => {
+                use std::os::fd::AsRawFd as _;
+
+                let started = std::time::Instant::now();
+                loop {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    let millis = remaining
+                        .as_millis()
+                        .saturating_add(u128::from(remaining.subsec_nanos() > 0))
+                        .min(i32::MAX as u128) as i32;
+                    let mut poll_fd = libc::pollfd {
+                        fd: stream.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: `poll_fd` is a valid one-element poll array and
+                    // the stream owns its fd for the duration of the call.
+                    let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+                    if result > 0 {
+                        return Ok(true);
+                    }
+                    if result == 0 {
+                        return Ok(false);
+                    }
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                    if started.elapsed() >= timeout {
+                        return Ok(false);
+                    }
+                }
+            }
+            #[cfg(windows)]
+            CtlStream::Windows(file) => {
+                use std::os::windows::io::AsRawHandle as _;
+
+                let deadline = std::time::Instant::now() + timeout;
+                loop {
+                    let mut available = 0u32;
+                    // SAFETY: the file owns a valid named-pipe handle; the
+                    // null buffer form queries available bytes without reading.
+                    let ok = unsafe {
+                        windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                            file.as_raw_handle() as _,
+                            std::ptr::null_mut(),
+                            0,
+                            std::ptr::null_mut(),
+                            &mut available,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if ok == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if available > 0 {
+                        return Ok(true);
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        return Ok(false);
+                    }
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(now)
+                            .min(std::time::Duration::from_millis(10)),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Verify that an accepted local transport peer has the same effective user
+    /// as this process. Filesystem permissions remain the first boundary; peer
+    /// credentials close the race where a socket path is inherited or passed to
+    /// another local account. Platforms without a peer-credential API retain
+    /// the private endpoint/DACL boundary.
+    pub fn peer_is_same_user(&self) -> io::Result<bool> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            CtlStream::Unix(stream) => {
+                use std::os::fd::AsRawFd as _;
+                let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+                let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+                // SAFETY: `credentials` and `len` are valid writable buffers and
+                // the stream fd remains alive for the duration of the call.
+                let rc = unsafe {
+                    libc::getsockopt(
+                        stream.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_PEERCRED,
+                        std::ptr::addr_of_mut!(credentials).cast(),
+                        &mut len,
+                    )
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(credentials.uid == unsafe { libc::geteuid() })
+            }
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "dragonfly"
+            ))]
+            CtlStream::Unix(stream) => {
+                use std::os::fd::AsRawFd as _;
+                let mut uid: libc::uid_t = 0;
+                let mut gid: libc::gid_t = 0;
+                // SAFETY: uid/gid are valid output pointers and the stream fd
+                // remains alive for the call.
+                let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(uid == unsafe { libc::geteuid() })
+            }
+            #[cfg(all(
+                unix,
+                not(any(
+                    target_os = "linux",
+                    target_os = "android",
+                    target_os = "macos",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly"
+                ))
+            ))]
+            CtlStream::Unix(_) => Ok(true),
+            #[cfg(windows)]
+            CtlStream::Windows(_) => Ok(true),
+        }
+    }
+
     /// v2.20.0 (review fix): has the peer hung up? Non-destructive and
     /// non-blocking (a zero-byte peek). Lets `wait_for`'s poll loop notice a
     /// vanished client instead of pinning one of the MAX_CONNECTIONS slots —
@@ -225,14 +369,18 @@ mod imp {
     use std::os::windows::io::FromRawHandle;
     use std::ptr;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
     const PIPE_BUF: u32 = 64 * 1024;
@@ -241,9 +389,9 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Create one named-pipe instance for `name`. Default security (null SA) =
-    /// creator/owner + admins, matching the documented same-local-user threat
-    /// model. `first` adds `FILE_FLAG_FIRST_PIPE_INSTANCE` so creating the FIRST
+    /// Create one named-pipe instance for `name`. A protected DACL grants full
+    /// access only to the object owner, SYSTEM, and administrators. `first` adds
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE` so creating the FIRST
     /// instance FAILS (ERROR_ACCESS_DENIED) if the name is already taken — this
     /// is the squatting guard: a malicious local process that pre-created the
     /// pipe to intercept the server's clients cannot, because `bind` refuses to
@@ -255,20 +403,44 @@ mod imp {
             } else {
                 0
             };
-        // SAFETY: `name_w` is a valid NUL-terminated wide string; all other
-        // args are constants. The returned handle is owned by us.
+        let sddl = wide("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)");
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: SDDL is NUL-terminated and descriptor is a valid output
+        // pointer. LocalFree below releases the returned allocation.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let attrs = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `name_w` is a valid NUL-terminated wide string and attrs owns
+        // a valid security descriptor for this call. The returned pipe handle
+        // is owned by us.
         let h = unsafe {
             CreateNamedPipeW(
                 name_w.as_ptr(),
                 open_mode,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 PIPE_BUF,
                 PIPE_BUF,
                 0,
-                ptr::null(),
+                &attrs,
             )
         };
+        unsafe {
+            LocalFree(descriptor);
+        }
         if h == INVALID_HANDLE_VALUE || h.is_null() {
             return Err(io::Error::last_os_error());
         }

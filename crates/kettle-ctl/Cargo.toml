@@ -40,6 +40,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_Security_Authorization",
     # Multi-window cycle (Peacock presence): pid-liveness via OpenProcess +
     # GetExitCodeProcess for stale-entry cleanup.
     "Win32_System_Threading",

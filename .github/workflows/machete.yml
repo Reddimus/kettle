@@ -56,13 +56,14 @@ jobs:
     # 10 min handles a cold rust-cache restore.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: machete
       # `bnjbvr/cargo-machete` is the upstream maintainer's official
-      # action. Pinned to v0 for now since the project's still on the
-      # 0.x line; bump when a v1 cuts. The action vendors cargo-machete
-      # so no separate `cargo install` step is needed.
-      - uses: bnjbvr/cargo-machete@v0.9.2
+      # action. The immutable SHA is v0.9.2; the action vendors
+      # cargo-machete so no separate `cargo install` step is needed.
+      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08 # v0.9.2

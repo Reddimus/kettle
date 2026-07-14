@@ -42,10 +42,9 @@ jobs:
     timeout-minutes: 5
     steps:
       # The `actions/labeler` action vendors all the logic itself —
-      # no setup-node / etc. needed. Pinned to v5 (current latest as
-      # of v1.3.6) so a future v6 breaking change doesn't silently
-      # flip label assignment.
-      - uses: actions/labeler@v6
+      # no setup-node / etc. needed. The immutable SHA below is the
+      # reviewed v6.2.0 release; Dependabot keeps the pin current.
+      - uses: actions/labeler@b8dd2d9be0f68b860e7dae5dae7d772984eacd6d # v6.2.0
         with:
           configuration-path: .github/labeler.yml
           # Don't sync-labels — keep manually-applied labels (e.g.,
