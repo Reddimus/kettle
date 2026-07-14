@@ -1,4 +1,8 @@
-use std::fs::{self, File};
+#[cfg(any(windows, target_os = "linux", test))]
+use std::fs;
+#[cfg(any(windows, target_os = "linux"))]
+use std::fs::File;
+#[cfg(any(windows, target_os = "linux"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -2518,13 +2522,13 @@ pub fn write_atomic_file(destination: &Path, bytes: &[u8]) -> Result<(), UpdateE
     atomic_write(destination, bytes, None)
 }
 
-#[cfg(unix)]
+#[cfg(all(any(windows, target_os = "linux"), unix))]
 fn sync_parent(parent: &Path) -> Result<(), UpdateError> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(any(windows, target_os = "linux"), not(unix)))]
 fn sync_parent(_parent: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
@@ -2893,7 +2897,7 @@ mod tests {
         tx.rollback().unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn transaction_refuses_symbolic_link_destinations() {
         use std::os::unix::fs::symlink;
