@@ -216,6 +216,13 @@ pub struct TitleEditOverlay {
     pub rect: Rect4,
 }
 
+/// Active input-method composition projected over the focused terminal cursor.
+pub struct ImePreedit {
+    pub text: String,
+    pub row: usize,
+    pub col: usize,
+}
+
 /// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
@@ -226,6 +233,8 @@ pub struct Overlay {
     pub links: Vec<LinkRect>,
     /// Quick-select hint labels (drawn over the focused pane).
     pub hint_labels: Vec<HintLabel>,
+    /// Input-method preedit text drawn at the focused terminal cursor.
+    pub ime_preedit: Option<ImePreedit>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
@@ -876,6 +885,9 @@ pub struct Renderer {
     /// its P1b equality gate (re-shaped only when the grid size changes).
     resize_overlay_buffer: TextBuffer,
     resize_overlay_text: String,
+    /// Input-method preedit buffer and equality gate.
+    ime_buffer: TextBuffer,
+    ime_text: String,
     /// Cycle 853 (audit): pooled scratch for the per-frame cell/UI quad list
     /// (`render_frame_with_status` filled a fresh `Vec` of `panes*16+256`
     /// `QuadInstance`s every frame). Taken + cleared at the top of the frame,
@@ -1247,9 +1259,12 @@ impl Renderer {
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
-        let search_buffer = TextBuffer::new(&mut font_system, metrics);
+        let mut search_buffer = TextBuffer::new(&mut font_system, metrics);
+        search_buffer.set_wrap(Wrap::None);
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
+        let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
+        ime_buffer.set_wrap(Wrap::None);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
         // Cycle 636: honor cfg.cell_width / cell_height multipliers
@@ -1337,6 +1352,8 @@ impl Renderer {
             status_bar_text: String::new(),
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
+            ime_buffer,
+            ime_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
@@ -2535,6 +2552,29 @@ impl Renderer {
                         if hint.dim { 0.6 } else { 0.96 },
                     ));
                 }
+                if let Some(preedit) = &overlay.ime_preedit {
+                    let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
+                    let x = rx + pad_x + preedit.col as f32 * cw;
+                    let y = ry + pad_y + pane_titlebar_h + preedit.row as f32 * ch;
+                    quads.push(rect(
+                        x,
+                        y,
+                        cells as f32 * cw,
+                        ch,
+                        theme.selection_background,
+                        0.96,
+                    ));
+                    // A persistent underline distinguishes composition from
+                    // selected terminal text and survives high-contrast themes.
+                    quads.push(rect(
+                        x,
+                        y + ch - 2.0,
+                        cells as f32 * cw,
+                        2.0,
+                        cfg.search_background.unwrap_or(theme.palette[3]),
+                        1.0,
+                    ));
+                }
             }
 
             // Post-text overlay: dim unfocused panes; per-pane scrollbar.
@@ -2638,6 +2678,7 @@ impl Renderer {
                 overlay.search_count,
                 nav_hint
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -2657,6 +2698,7 @@ impl Renderer {
                 "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
                 overlay.palette_hint
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -2679,6 +2721,7 @@ impl Renderer {
                 "  ▤ layout: {q}_   ▸ {}   (Enter spawn · Tab/↑↓ select · Esc cancel)",
                 overlay.layout_picker_hint
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -2698,6 +2741,7 @@ impl Renderer {
                 "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
                 overlay.ssh_hint
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -2728,6 +2772,7 @@ impl Renderer {
                 "  ✎ {} {}_   (Enter apply · Esc cancel)",
                 edit.label, edit.input
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(edit.rect.2, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer
                 .set_size(Some(edit.rect.2), Some(edit.rect.3));
@@ -2784,6 +2829,7 @@ impl Renderer {
                 .saturating_sub(left.chars().count() + buttons_cols)
                 .max(1);
             let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -2825,6 +2871,7 @@ impl Renderer {
             let label = format!(
                 "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
             );
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             self.search_buffer.set_text(
@@ -3153,6 +3200,25 @@ impl Renderer {
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
+        }
+        if let Some(preedit) = &overlay.ime_preedit {
+            let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
+            self.ime_buffer.set_metrics(metrics);
+            self.ime_buffer
+                .set_size(Some(cells as f32 * cw + 2.0), Some(ch));
+            if self.ime_text != preedit.text {
+                self.ime_buffer.set_text(
+                    &preedit.text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.ime_text.clone_from(&preedit.text);
+            }
+            self.ime_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else {
+            self.ime_text.clear();
         }
         let focus_origin = panes.iter().find(|p| p.focused).map(|p| p.rect);
 
@@ -3487,6 +3553,22 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+            if let Some(preedit) = &overlay.ime_preedit {
+                areas.push(TextArea {
+                    buffer: &self.ime_buffer,
+                    left: frx + pad_x + preedit.col as f32 * cw,
+                    top: fry + pad_y + pane_titlebar_h + preedit.row as f32 * ch,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: frx as i32,
+                        top: fry as i32,
+                        right: (frx + frw) as i32,
+                        bottom: (fry + frh) as i32,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
+            }
         }
 
         // Right-click context menu — drawn in its own final pass
@@ -3663,6 +3745,7 @@ impl Renderer {
         // vertices.
         let overlay_open = overlay.search_query.is_some()
             || !overlay.hint_labels.is_empty()
+            || overlay.ime_preedit.is_some()
             || overlay.ssh_query.is_some()
             || overlay.palette_query.is_some()
             || overlay.layout_picker_query.is_some()
@@ -3682,6 +3765,7 @@ impl Renderer {
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
+            self.ime_text.hash(&mut h);
             h.finish()
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
@@ -5727,8 +5811,33 @@ pub fn settings_hit_test(
     SettingsHit::Inert
 }
 
-/// actually paints into. The ellipsis itself is 1 cell so we reserve a
-/// column for it.
+/// Maximum monospace columns available to a single-line overlay buffer.
+/// Reserve one column for glyph overhang and fractional cell metrics.
+fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
+    if !width.is_finite() || !cell_width.is_finite() || width <= 0.0 || cell_width <= 0.0 {
+        return 0;
+    }
+
+    ((width / cell_width).floor() as usize).saturating_sub(1)
+}
+
+/// Fit a bottom-bar label without allowing Glyphon to create clipped rows.
+fn fit_single_line_label(label: &str, max_cols: usize) -> String {
+    if display_width(label) <= max_cols {
+        return label.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+    if max_cols == 1 {
+        return "…".to_string();
+    }
+
+    let mut fitted = take_cols_front(label, max_cols - 1);
+    fitted.push('…');
+    fitted
+}
+
 /// Display width (terminal columns) of a string, via `unicode-width`.
 fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
@@ -8834,9 +8943,24 @@ mod pane_buffer_lifecycle_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        display_width, fit_pane_titlebar_title, fit_tab_path, fit_tab_segment_title, fit_tab_title,
-        middle_ellipsis,
+        display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
+        fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
     };
+
+    #[test]
+    fn single_line_overlay_labels_fit_without_wrapping() {
+        assert_eq!(overlay_label_cols(800.0, 8.0), 99);
+        assert_eq!(overlay_label_cols(0.0, 8.0), 0);
+        assert_eq!(overlay_label_cols(800.0, 0.0), 0);
+
+        let fitted = fit_single_line_label("  ⌘ query_ ▸ 中文 command and controls", 20);
+        assert_eq!(display_width(&fitted), 20);
+        assert!(fitted.starts_with("  ⌘ query_"));
+        assert!(fitted.ends_with('…'));
+        assert_eq!(fit_single_line_label("abc", 3), "abc");
+        assert_eq!(fit_single_line_label("abc", 1), "…");
+        assert_eq!(fit_single_line_label("abc", 0), "");
+    }
 
     #[test]
     fn middle_ellipsis_fits_and_keeps_both_ends() {

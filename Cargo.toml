@@ -126,6 +126,14 @@ dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
 
+[patch.crates-io]
+# alacritty_terminal 0.26.0 evicts from `title_stack` when Kitty's keyboard
+# mode stack reaches its depth cap. That can panic with an empty title stack
+# and corrupts unrelated title state. Its active-mode query/screen bookkeeping
+# also loses direct flag changes. Keep the released source local until an
+# upstream release carries both fixes; `vendor/README.md` records scope.
+alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

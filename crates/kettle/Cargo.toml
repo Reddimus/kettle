@@ -81,6 +81,8 @@ libc = "0.2"
 # `Win32_Foundation` → INVALID_HANDLE_VALUE / GetLastError.
 windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
 ] }

@@ -228,6 +228,15 @@ jobs:
           # works without these files; they're a discoverability +
           # source-of-truth aid, not a runtime requirement.
           cp -r shell-integration dist/kettle/
+          VERSION=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          TARGET="${{ matrix.rust_target }}"
+          if [ -z "$TARGET" ]; then
+            TARGET=x86_64-unknown-linux-gnu
+          fi
+          python3 scripts/package-manifest.py generate \
+            --root dist/kettle --target "$TARGET" --version "$VERSION"
+          python3 scripts/package-manifest.py verify \
+            --root dist/kettle --target "$TARGET" --version "$VERSION"
           tar -C dist -czf ${{ matrix.artifact }} kettle
 
       - name: Package (macOS .app bundle)
@@ -290,6 +299,11 @@ jobs:
           # only release artifact that didn't surface in the OS app
           # launcher after the user extracted it.
           Copy-Item scripts/install.ps1 dist/kettle/
+          $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
+          python scripts/package-manifest.py generate `
+            --root dist/kettle --target x86_64-pc-windows-msvc --version $version
+          python scripts/package-manifest.py verify `
+            --root dist/kettle --target x86_64-pc-windows-msvc --version $version
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 
       # Generate a SHA-256 sidecar for the artifact so users (and the
@@ -354,6 +368,27 @@ jobs:
             test -s "$artifact.sha256"
             sha256sum -c "$artifact.sha256"
           done
+
+      - name: Verify inner package manifests from final archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          mkdir -p "$extracted/linux-x86_64" "$extracted/linux-aarch64" "$extracted/windows"
+          tar -xzf dist/kettle-linux-x86_64.tar.gz -C "$extracted/linux-x86_64"
+          tar -xzf dist/kettle-linux-aarch64.tar.gz -C "$extracted/linux-aarch64"
+          unzip -q dist/kettle-windows-x86_64.zip -d "$extracted/windows"
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 scripts/package-manifest.py verify \
+            --root "$extracted/linux-x86_64/kettle" \
+            --target x86_64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py verify \
+            --root "$extracted/linux-aarch64/kettle" \
+            --target aarch64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py verify \
+            --root "$extracted/windows" \
+            --target x86_64-pc-windows-msvc --version "$VERSION"
 
       - name: Build deterministic signed update feed
         shell: bash

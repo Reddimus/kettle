@@ -8,14 +8,23 @@
 //! - **Unix:** a `UnixListener` at a filesystem path, mode `0600`.
 //! - **Windows:** a byte-mode named pipe (`\\.\pipe\kettle-ctl-<pid>`) created
 //!   with `CreateNamedPipeW` (default DACL = creator/owner + admins) and
-//!   `PIPE_UNLIMITED_INSTANCES`, wrapped via `File::from_raw_handle` so each
-//!   connection is plain `Read`/`Write`. The *client* needs no platform code —
-//!   `std::fs::OpenOptions` opens a named pipe natively.
+//!   `PIPE_UNLIMITED_INSTANCES`. Accepted server handles use synchronous I/O;
+//!   client handles use overlapped I/O so blocked writes can honor request
+//!   deadlines and cancellation.
 //!
 //! Hand-rolled over the `interprocess` crate (supply-chain leanness; the needed
 //! subset is small and matches the windows-sys precedent in the bin crate).
 
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub struct WindowsStream {
+    file: std::fs::File,
+    overlapped: bool,
+}
 
 /// Shared client-connect retry policy, referenced by BOTH platform `connect`
 /// impls so the Unix socket and Windows named-pipe legs stay in lockstep. A
@@ -33,7 +42,7 @@ pub enum CtlStream {
     #[cfg(unix)]
     Unix(std::os::unix::net::UnixStream),
     #[cfg(windows)]
-    Windows(std::fs::File),
+    Windows(WindowsStream),
 }
 
 impl Read for CtlStream {
@@ -42,7 +51,9 @@ impl Read for CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => s.read(buf),
             #[cfg(windows)]
-            CtlStream::Windows(f) => f.read(buf),
+            CtlStream::Windows(stream) if stream.overlapped => windows_io::read(&stream.file, buf),
+            #[cfg(windows)]
+            CtlStream::Windows(stream) => stream.file.read(buf),
         }
     }
 }
@@ -53,7 +64,11 @@ impl Write for CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => s.write(buf),
             #[cfg(windows)]
-            CtlStream::Windows(f) => f.write(buf),
+            CtlStream::Windows(stream) if stream.overlapped => {
+                windows_io::write(&stream.file, buf, None, None)
+            }
+            #[cfg(windows)]
+            CtlStream::Windows(stream) => stream.file.write(buf),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -61,7 +76,7 @@ impl Write for CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => s.flush(),
             #[cfg(windows)]
-            CtlStream::Windows(f) => f.flush(),
+            CtlStream::Windows(stream) => stream.file.flush(),
         }
     }
 }
@@ -73,8 +88,67 @@ impl CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => Ok(CtlStream::Unix(s.try_clone()?)),
             #[cfg(windows)]
-            CtlStream::Windows(f) => Ok(CtlStream::Windows(f.try_clone()?)),
+            CtlStream::Windows(stream) => Ok(CtlStream::Windows(WindowsStream {
+                file: stream.file.try_clone()?,
+                overlapped: stream.overlapped,
+            })),
         }
+    }
+
+    /// Write an entire protocol frame without allowing a blocked local peer to
+    /// outlive the request's deadline. On Windows, client pipe handles use
+    /// overlapped I/O so cancellation can target the exact pending operation.
+    /// Unix uses nonblocking `send` plus `poll`, leaving the stream's shared
+    /// blocking mode unchanged for reader and server threads.
+    pub(crate) fn write_all_until(
+        &mut self,
+        mut buf: &[u8],
+        deadline: Instant,
+        cancelled: Option<&AtomicBool>,
+    ) -> io::Result<()> {
+        while !buf.is_empty() {
+            check_write_state(deadline, cancelled)?;
+            let written = match self {
+                #[cfg(unix)]
+                CtlStream::Unix(stream) => {
+                    use std::os::fd::AsRawFd as _;
+
+                    loop {
+                        let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+                        // SAFETY: the stream owns this fd and `buf` is readable
+                        // for its full length during the call.
+                        let result = unsafe {
+                            libc::send(stream.as_raw_fd(), buf.as_ptr().cast(), buf.len(), flags)
+                        };
+                        if result >= 0 {
+                            break result as usize;
+                        }
+                        let error = io::Error::last_os_error();
+                        match error.kind() {
+                            io::ErrorKind::Interrupted => continue,
+                            io::ErrorKind::WouldBlock => {
+                                wait_unix_writable(stream, deadline, cancelled)?;
+                            }
+                            _ => return Err(error),
+                        }
+                    }
+                }
+                #[cfg(windows)]
+                CtlStream::Windows(stream) if stream.overlapped => {
+                    windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
+                }
+                #[cfg(windows)]
+                CtlStream::Windows(stream) => stream.file.write(buf)?,
+            };
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write the control frame",
+                ));
+            }
+            buf = &buf[written..];
+        }
+        Ok(())
     }
 
     /// Wait until at least one byte can be read, the peer closes, or `timeout`
@@ -118,7 +192,7 @@ impl CtlStream {
                 }
             }
             #[cfg(windows)]
-            CtlStream::Windows(file) => {
+            CtlStream::Windows(stream) => {
                 use std::os::windows::io::AsRawHandle as _;
 
                 let deadline = std::time::Instant::now() + timeout;
@@ -128,7 +202,7 @@ impl CtlStream {
                     // null buffer form queries available bytes without reading.
                     let ok = unsafe {
                         windows_sys::Win32::System::Pipes::PeekNamedPipe(
-                            file.as_raw_handle() as _,
+                            stream.file.as_raw_handle() as _,
                             std::ptr::null_mut(),
                             0,
                             std::ptr::null_mut(),
@@ -262,14 +336,14 @@ impl CtlStream {
                 }
             }
             #[cfg(windows)]
-            CtlStream::Windows(f) => {
+            CtlStream::Windows(stream) => {
                 use std::os::windows::io::AsRawHandle;
                 let mut avail: u32 = 0;
                 // SAFETY: a valid pipe handle we own; a null buffer with zero
                 // length is the documented query-only form of PeekNamedPipe.
                 let ok = unsafe {
                     windows_sys::Win32::System::Pipes::PeekNamedPipe(
-                        f.as_raw_handle() as _,
+                        stream.file.as_raw_handle() as _,
                         std::ptr::null_mut(),
                         0,
                         std::ptr::null_mut(),
@@ -290,6 +364,250 @@ impl CtlStream {
                 )
             }
         }
+    }
+}
+
+fn check_write_state(deadline: Instant, cancelled: Option<&AtomicBool>) -> io::Result<()> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "control write was cancelled",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "control write timed out",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_unix_writable(
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+    cancelled: Option<&AtomicBool>,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    loop {
+        check_write_state(deadline, cancelled)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = if cancelled.is_some() {
+            remaining.min(Duration::from_millis(50))
+        } else {
+            remaining
+        };
+        let millis = duration_millis_ceil(wait).min(i32::MAX as u128) as i32;
+        let mut poll_fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: `poll_fd` is a valid one-element array and the stream owns
+        // its fd for the duration of the call.
+        let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+        if result > 0 {
+            return Ok(());
+        }
+        if result == 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn duration_millis_ceil(duration: Duration) -> u128 {
+    duration
+        .as_nanos()
+        .saturating_add(999_999)
+        .saturating_div(1_000_000)
+}
+
+#[cfg(windows)]
+mod windows_io {
+    use super::*;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+
+    struct Event(HANDLE);
+
+    impl Event {
+        fn new() -> io::Result<Self> {
+            // SAFETY: null security attributes/name create an unnamed,
+            // non-inheritable event owned by this process.
+            let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            if handle.is_null() {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Self(handle))
+            }
+        }
+    }
+
+    impl Drop for Event {
+        fn drop(&mut self) {
+            // SAFETY: Event exclusively owns this valid handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    pub(super) fn read(file: &std::fs::File, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let len = buf.len().min(u32::MAX as usize) as u32;
+        run(file, None, None, |handle, overlapped| {
+            // SAFETY: buffer and OVERLAPPED remain alive until `run` observes
+            // completion, including after cancellation.
+            unsafe {
+                ReadFile(
+                    handle,
+                    buf.as_mut_ptr(),
+                    len,
+                    std::ptr::null_mut(),
+                    overlapped,
+                )
+            }
+        })
+    }
+
+    pub(super) fn write(
+        file: &std::fs::File,
+        buf: &[u8],
+        deadline: Option<Instant>,
+        cancelled: Option<&AtomicBool>,
+    ) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let len = buf.len().min(u32::MAX as usize) as u32;
+        run(file, deadline, cancelled, |handle, overlapped| {
+            // SAFETY: buffer and OVERLAPPED remain alive until `run` observes
+            // completion, including after cancellation.
+            unsafe { WriteFile(handle, buf.as_ptr(), len, std::ptr::null_mut(), overlapped) }
+        })
+    }
+
+    fn run(
+        file: &std::fs::File,
+        deadline: Option<Instant>,
+        cancelled: Option<&AtomicBool>,
+        start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
+    ) -> io::Result<usize> {
+        let event = Event::new()?;
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.0,
+            ..Default::default()
+        };
+        let handle = file.as_raw_handle() as HANDLE;
+        let started = start(handle, &mut overlapped);
+        if started == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                return Err(error);
+            }
+        }
+
+        if started != 0 {
+            return completed_result(handle, &mut overlapped, false);
+        }
+
+        let stopped = loop {
+            let reason = stop_reason(deadline, cancelled);
+            if let Some(reason) = reason {
+                // A completion can race this cancellation. Either way, wait
+                // for the kernel to stop touching OVERLAPPED before it drops.
+                // ERROR_NOT_FOUND means the operation already completed.
+                let cancelled_ok = unsafe { CancelIoEx(handle, &overlapped) };
+                if cancelled_ok == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
+                        break Err(error);
+                    }
+                }
+                break Err(reason);
+            }
+
+            let wait_ms = match deadline {
+                None if cancelled.is_none() => INFINITE,
+                Some(deadline) => duration_millis(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50)),
+                ),
+                None => 50,
+            };
+            match unsafe { WaitForSingleObject(event.0, wait_ms) } {
+                WAIT_OBJECT_0 => break Ok(()),
+                WAIT_TIMEOUT => continue,
+                WAIT_FAILED => break Err(io::Error::last_os_error()),
+                other => {
+                    break Err(io::Error::other(format!(
+                        "unexpected overlapped wait result {}",
+                        other
+                    )));
+                }
+            }
+        };
+
+        if let Err(error) = stopped {
+            // Even when waiting itself fails, attempt cancellation and then
+            // block until the kernel has stopped referencing `overlapped`.
+            // Returning before this drain would leave kernel I/O pointing at
+            // stack storage that is about to be freed.
+            unsafe { CancelIoEx(handle, &overlapped) };
+            let _ = completed_result(handle, &mut overlapped, true);
+            return Err(error);
+        }
+        completed_result(handle, &mut overlapped, false)
+    }
+
+    fn completed_result(
+        handle: HANDLE,
+        overlapped: &mut OVERLAPPED,
+        wait: bool,
+    ) -> io::Result<usize> {
+        let mut transferred = 0u32;
+        // SAFETY: the handle and OVERLAPPED belong to the active operation;
+        // callers keep all referenced buffers alive through this call.
+        let completed =
+            unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, i32::from(wait)) };
+        if completed == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(transferred as usize)
+        }
+    }
+
+    fn stop_reason(deadline: Option<Instant>, cancelled: Option<&AtomicBool>) -> Option<io::Error> {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Some(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "control write was cancelled",
+            ));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Some(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "control write timed out",
+            ));
+        }
+        None
+    }
+
+    fn duration_millis(duration: Duration) -> u32 {
+        duration_millis_ceil(duration).clamp(1, u32::MAX as u128) as u32
     }
 }
 
@@ -511,7 +829,10 @@ mod imp {
                 }
                 // SAFETY: we own `handle` and transfer ownership to the File.
                 let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
-                return Ok(CtlStream::Windows(file));
+                return Ok(CtlStream::Windows(WindowsStream {
+                    file,
+                    overlapped: false,
+                }));
             }
             Err(io::Error::other("accept retries exhausted"))
         }
@@ -538,10 +859,23 @@ mod imp {
     /// would otherwise make `client::discover` hang scanning stale entries.
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
         use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
+
         let mut last = None;
         for _ in 0..super::CONNECT_RETRIES {
-            match OpenOptions::new().read(true).write(true).open(endpoint) {
-                Ok(f) => return Ok(CtlStream::Windows(f)),
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .open(endpoint)
+            {
+                Ok(file) => {
+                    return Ok(CtlStream::Windows(WindowsStream {
+                        file,
+                        overlapped: true,
+                    }));
+                }
                 // A missing pipe = a dead server: no point retrying. (A pipe
                 // that exists but is momentarily busy reports ERROR_PIPE_BUSY,
                 // not NotFound, and is still retried below.)
@@ -562,6 +896,26 @@ pub use imp::{CtlListener, connect};
 mod tests {
     use super::*;
     use std::io::BufRead as _;
+
+    #[test]
+    fn millisecond_deadlines_round_up_only_sub_millisecond_remainders() {
+        assert_eq!(duration_millis_ceil(Duration::ZERO), 0);
+        assert_eq!(duration_millis_ceil(Duration::from_nanos(1)), 1);
+        assert_eq!(duration_millis_ceil(Duration::from_millis(1)), 1);
+        assert_eq!(duration_millis_ceil(Duration::from_micros(1_001)), 2);
+        assert_eq!(duration_millis_ceil(Duration::from_millis(1_500)), 1_500);
+    }
+
+    fn test_endpoint(tag: &str) -> String {
+        let pid = std::process::id();
+        #[cfg(unix)]
+        return std::env::temp_dir()
+            .join(format!("kettle-ctl-{tag}-{pid}.sock"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        return format!(r"\\.\pipe\kettle-ctl-{tag}-{pid}");
+    }
 
     /// Loopback: bind a listener, connect a client, round-trip a line both
     /// ways. Runs on all three CI OSes (the Windows leg exercises the named
@@ -705,5 +1059,51 @@ mod tests {
         reader.read_line(&mut resp).expect("client read");
         assert_eq!(resp.trim_end(), "resp:req-1", "got: {resp:?}");
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn blocked_write_observes_deadline_and_cancellation() {
+        fn stalled_connection(tag: &str) -> (CtlStream, std::thread::JoinHandle<()>) {
+            let endpoint = test_endpoint(tag);
+            let listener = CtlListener::bind(&endpoint).expect("bind");
+            let server = std::thread::spawn(move || {
+                let _conn = listener.accept().expect("accept");
+                std::thread::sleep(Duration::from_millis(500));
+            });
+            (connect(&endpoint).expect("connect"), server)
+        }
+
+        // Larger than both the Windows PIPE_BUF and ordinary Unix socket send
+        // buffers, ensuring the peer's refusal to read creates backpressure.
+        let payload = vec![b'x'; 8 * 1024 * 1024];
+        let (mut timed, timed_server) = stalled_connection("write-timeout");
+        let started = Instant::now();
+        let error = timed
+            .write_all_until(&payload, Instant::now() + Duration::from_millis(30), None)
+            .expect_err("blocked write must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(timed);
+        timed_server.join().expect("server thread");
+
+        let (mut cancellable, cancel_server) = stalled_connection("write-cancel");
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let setter = cancelled.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            setter.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let error = cancellable
+            .write_all_until(
+                &payload,
+                Instant::now() + Duration::from_secs(2),
+                Some(&cancelled),
+            )
+            .expect_err("blocked write must be cancelled");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(cancellable);
+        cancel_server.join().expect("server thread");
     }
 }

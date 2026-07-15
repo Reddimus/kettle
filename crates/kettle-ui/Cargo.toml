@@ -23,6 +23,8 @@ workspace = true
 dev-record = ["kettle-core/asciicast"]
 
 [dependencies]
+accesskit = "0.24.1"
+accesskit_winit = "0.33.2"
 anyhow.workspace = true
 # Cycle 277: default-features off drops the `image_data` feature,
 # which transitively pulls `image` with default features (= every
@@ -76,6 +78,7 @@ pollster = "0.4.0"
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.149"
+unicode-width.workspace = true
 # v2.33.1 scoped RUSTSEC-2026-0192 by turning winit default features off,
 # which also (unacknowledged at the time) dropped `wayland-csd-adwaita` — so
 # GNOME/Wayland users got smithay-client-toolkit's FallbackFrame ("the

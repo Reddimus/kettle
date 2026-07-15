@@ -1107,9 +1107,10 @@ fn verify_package_manifest(root: &Path, update: &AvailableUpdate) -> Result<(), 
     for file in manifest.files {
         let path = Path::new(&file.path);
         validate_archive_path(path)?;
-        let folded = file.path.to_ascii_lowercase();
-        if folded == PACKAGE_MANIFEST_FILE.to_ascii_lowercase()
-            || declared.insert(folded, file).is_some()
+        let declared_path = file.path.clone();
+        let folded = declared_path.to_lowercase();
+        if folded == PACKAGE_MANIFEST_FILE.to_lowercase()
+            || declared.insert(folded, (declared_path, file)).is_some()
         {
             return Err(UpdateError::UnsafeArchive(
                 "package manifest contains a duplicate or self-entry".into(),
@@ -1126,15 +1127,16 @@ fn verify_package_manifest(root: &Path, update: &AvailableUpdate) -> Result<(), 
             continue;
         }
         let relative_string = relative_to_string(relative)?;
-        let expected = declared
-            .remove(&relative_string.to_ascii_lowercase())
+        let (declared_path, expected) = declared
+            .remove(&relative_string.to_lowercase())
             .ok_or_else(|| {
                 UpdateError::UnsafeArchive(format!(
                     "package contains undeclared file {relative_string}"
                 ))
             })?;
         let metadata = fs::symlink_metadata(&actual)?;
-        if !metadata.file_type().is_file()
+        if declared_path != relative_string
+            || !metadata.file_type().is_file()
             || metadata.len() != expected.size
             || sha256_file(&actual)? != expected.sha256
             || package_mode(&metadata) != expected.mode
@@ -2734,6 +2736,7 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux"))]
     fn write_test_package_manifest(root: &Path, version: &str) {
+        let _ = fs::remove_file(root.join(PACKAGE_MANIFEST_FILE));
         let files = collect_files(root)
             .unwrap()
             .into_iter()
@@ -2774,6 +2777,14 @@ mod tests {
         fs::write(root.path().join("undeclared"), b"extra").unwrap();
         assert!(verify_package_manifest(root.path(), &fake_update()).is_err());
         fs::remove_file(root.path().join("undeclared")).unwrap();
+
+        let manifest_path = root.path().join(PACKAGE_MANIFEST_FILE);
+        let mut manifest: PackageManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.files[0].path.make_ascii_uppercase();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(verify_package_manifest(root.path(), &fake_update()).is_err());
+        write_test_package_manifest(root.path(), "99.0.0");
 
         fs::write(root.path().join("kettle.exe"), b"mutated").unwrap();
         assert!(verify_package_manifest(root.path(), &fake_update()).is_err());

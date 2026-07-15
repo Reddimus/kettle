@@ -2,7 +2,9 @@
 //! (xterm-compatible, honoring application-cursor-key and mouse modes).
 
 use kettle_core::TermMode;
+use winit::event::{ElementState, KeyEvent};
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 /// Which mouse-tracking mode the application has requested.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -368,6 +370,429 @@ pub fn encode(
     None
 }
 
+/// Encode a complete winit key event, including Kitty keyboard protocol modes.
+///
+/// The terminal engine owns negotiation and exposes the active progressive-
+/// enhancement flags through [`TermMode`]. With no negotiated flags this is a
+/// strict compatibility wrapper around Kettle's legacy xterm encoder. Once an
+/// application opts into Kitty keyboard reporting, press/repeat/release events
+/// are encoded according to the negotiated flags instead of being guessed from
+/// modifiers alone.
+pub fn encode_key_event(event: &KeyEvent, mods: ModifiersState, mode: TermMode) -> Option<Vec<u8>> {
+    let kitty = mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL);
+    if !kitty {
+        if event.state == ElementState::Released {
+            return None;
+        }
+        return encode_app_keypad(&event.logical_key, event.location, mods, mode)
+            .or_else(|| encode(&event.logical_key, event.text.as_deref(), mods, mode));
+    }
+
+    let event = KittyKeyEvent::from(event);
+    encode_kitty_key_event(&event, mods, mode)
+}
+
+/// Whether this event is represented by Kitty CSI-u rather than Kettle's
+/// legacy xterm encoder. Pure enhancement flags and legacy-compatible keys can
+/// keep downstream compatibility behavior such as Backspace/Delete remaps.
+pub fn uses_kitty_sequence(event: &KeyEvent, mods: ModifiersState, mode: TermMode) -> bool {
+    kitty_event_uses_sequence(&KittyKeyEvent::from(event), mods, mode)
+}
+
+fn kitty_event_uses_sequence(event: &KittyKeyEvent, mods: ModifiersState, mode: TermMode) -> bool {
+    if !mode.intersects(
+        TermMode::DISAMBIGUATE_ESC_CODES
+            | TermMode::REPORT_EVENT_TYPES
+            | TermMode::REPORT_ALL_KEYS_AS_ESC,
+    ) {
+        return false;
+    }
+
+    should_build_kitty_sequence(event, mods, mode)
+}
+
+fn encode_kitty_key_event(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    mode: TermMode,
+) -> Option<Vec<u8>> {
+    if !kitty_event_uses_sequence(event, mods, mode) {
+        if event.state == ElementState::Released {
+            return None;
+        }
+        return encode_app_keypad(&event.logical_key, event.location, mods, mode)
+            .or_else(|| encode(&event.logical_key, event.text.as_deref(), mods, mode));
+    }
+
+    if event.state == ElementState::Released {
+        if !mode.contains(TermMode::REPORT_EVENT_TYPES) {
+            return None;
+        }
+        if !mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+            && matches!(
+                event.logical_key,
+                Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+            )
+        {
+            return None;
+        }
+    }
+
+    build_kitty_sequence(event, mods, mode)
+}
+
+struct KittyKeyEvent {
+    logical_key: Key,
+    key_without_modifiers: Key,
+    text: Option<String>,
+    text_with_all_modifiers: String,
+    location: KeyLocation,
+    state: ElementState,
+    repeat: bool,
+}
+
+impl From<&KeyEvent> for KittyKeyEvent {
+    fn from(event: &KeyEvent) -> Self {
+        Self {
+            logical_key: event.logical_key.clone(),
+            key_without_modifiers: event.key_without_modifiers(),
+            text: event.text.as_deref().map(str::to_owned),
+            text_with_all_modifiers: event
+                .text_with_all_modifiers()
+                .unwrap_or_default()
+                .to_owned(),
+            location: event.location,
+            state: event.state,
+            repeat: event.repeat,
+        }
+    }
+}
+
+fn should_build_kitty_sequence(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    mode: TermMode,
+) -> bool {
+    if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) || event.state == ElementState::Released {
+        return true;
+    }
+
+    let disambiguate = mode.contains(TermMode::DISAMBIGUATE_ESC_CODES)
+        && (event.logical_key == Key::Named(NamedKey::Escape)
+            || event.location == KeyLocation::Numpad
+            || (!mods.is_empty()
+                && (mods != ModifiersState::SHIFT
+                    || matches!(
+                        event.logical_key,
+                        Key::Named(NamedKey::Tab | NamedKey::Enter | NamedKey::Backspace)
+                    ))));
+
+    if disambiguate {
+        return true;
+    }
+
+    match event.logical_key {
+        Key::Named(named) => named.to_text().is_none(),
+        _ => event.text_with_all_modifiers.is_empty(),
+    }
+}
+
+fn build_kitty_sequence(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    mode: TermMode,
+) -> Option<Vec<u8>> {
+    let encode_all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    let event_type = mode.contains(TermMode::REPORT_EVENT_TYPES)
+        && (event.repeat || event.state == ElementState::Released);
+    let associated_text = mode
+        .contains(TermMode::REPORT_ASSOCIATED_TEXT)
+        .then_some(event.text_with_all_modifiers.as_str())
+        .filter(|text| {
+            event.state != ElementState::Released && !text.is_empty() && !is_control_character(text)
+        });
+
+    let mut modifier_bits = kitty_modifier_bits(mods);
+    let (base, terminator) = kitty_numpad_base(event)
+        .or_else(|| kitty_extended_named_base(event))
+        .or_else(|| {
+            kitty_functional_base(event, modifier_bits, event_type, associated_text.is_some())
+        })
+        .or_else(|| {
+            kitty_control_or_modifier_base(event, encode_all, &mut modifier_bits)
+                .map(|base| (base, 'u'))
+        })
+        .or_else(|| {
+            kitty_textual_base(event, mods, mode, associated_text).map(|base| (base, 'u'))
+        })?;
+
+    let mut payload = format!("\x1b[{base}");
+    if event_type || modifier_bits != 0 || associated_text.is_some() {
+        payload.push(';');
+        payload.push_str(&(modifier_bits + 1).to_string());
+    }
+    if event_type {
+        payload.push(':');
+        payload.push(match event.state {
+            _ if event.repeat => '2',
+            ElementState::Pressed => '1',
+            ElementState::Released => '3',
+        });
+    }
+    if let Some(text) = associated_text {
+        payload.push(';');
+        let mut codepoints = text.chars().map(u32::from);
+        payload.push_str(&codepoints.next()?.to_string());
+        for codepoint in codepoints {
+            payload.push(':');
+            payload.push_str(&codepoint.to_string());
+        }
+    }
+    payload.push(terminator);
+    Some(payload.into_bytes())
+}
+
+fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
+    u8::from(mods.shift_key())
+        | (u8::from(mods.alt_key()) << 1)
+        | (u8::from(mods.control_key()) << 2)
+        | (u8::from(mods.super_key()) << 3)
+}
+
+fn kitty_numpad_base(event: &KittyKeyEvent) -> Option<(String, char)> {
+    if event.location != KeyLocation::Numpad {
+        return None;
+    }
+    let code = match event.logical_key.as_ref() {
+        Key::Character("0") => 57399,
+        Key::Character("1") => 57400,
+        Key::Character("2") => 57401,
+        Key::Character("3") => 57402,
+        Key::Character("4") => 57403,
+        Key::Character("5") => 57404,
+        Key::Character("6") => 57405,
+        Key::Character("7") => 57406,
+        Key::Character("8") => 57407,
+        Key::Character("9") => 57408,
+        Key::Character(".") => 57409,
+        Key::Character("/") => 57410,
+        Key::Character("*") => 57411,
+        Key::Character("-") => 57412,
+        Key::Character("+") => 57413,
+        Key::Character("=") => 57415,
+        Key::Named(NamedKey::Enter) => 57414,
+        Key::Named(NamedKey::ArrowLeft) => 57417,
+        Key::Named(NamedKey::ArrowRight) => 57418,
+        Key::Named(NamedKey::ArrowUp) => 57419,
+        Key::Named(NamedKey::ArrowDown) => 57420,
+        Key::Named(NamedKey::PageUp) => 57421,
+        Key::Named(NamedKey::PageDown) => 57422,
+        Key::Named(NamedKey::Home) => 57423,
+        Key::Named(NamedKey::End) => 57424,
+        Key::Named(NamedKey::Insert) => 57425,
+        Key::Named(NamedKey::Delete) => 57426,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+fn kitty_extended_named_base(event: &KittyKeyEvent) -> Option<(String, char)> {
+    let named = match event.logical_key {
+        Key::Named(named) => named,
+        _ => return None,
+    };
+    let code = match named {
+        NamedKey::F13 => 57376,
+        NamedKey::F14 => 57377,
+        NamedKey::F15 => 57378,
+        NamedKey::F16 => 57379,
+        NamedKey::F17 => 57380,
+        NamedKey::F18 => 57381,
+        NamedKey::F19 => 57382,
+        NamedKey::F20 => 57383,
+        NamedKey::F21 => 57384,
+        NamedKey::F22 => 57385,
+        NamedKey::F23 => 57386,
+        NamedKey::F24 => 57387,
+        NamedKey::F25 => 57388,
+        NamedKey::F26 => 57389,
+        NamedKey::F27 => 57390,
+        NamedKey::F28 => 57391,
+        NamedKey::F29 => 57392,
+        NamedKey::F30 => 57393,
+        NamedKey::F31 => 57394,
+        NamedKey::F32 => 57395,
+        NamedKey::F33 => 57396,
+        NamedKey::F34 => 57397,
+        NamedKey::F35 => 57398,
+        NamedKey::ScrollLock => 57359,
+        NamedKey::PrintScreen => 57361,
+        NamedKey::Pause => 57362,
+        NamedKey::ContextMenu => 57363,
+        NamedKey::MediaPlay => 57428,
+        NamedKey::MediaPause => 57429,
+        NamedKey::MediaPlayPause => 57430,
+        NamedKey::MediaStop => 57432,
+        NamedKey::MediaFastForward => 57433,
+        NamedKey::MediaRewind => 57434,
+        NamedKey::MediaTrackNext => 57435,
+        NamedKey::MediaTrackPrevious => 57436,
+        NamedKey::MediaRecord => 57437,
+        NamedKey::AudioVolumeDown => 57438,
+        NamedKey::AudioVolumeUp => 57439,
+        NamedKey::AudioVolumeMute => 57440,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+fn kitty_functional_base(
+    event: &KittyKeyEvent,
+    modifier_bits: u8,
+    event_type: bool,
+    associated_text: bool,
+) -> Option<(String, char)> {
+    let named = match event.logical_key {
+        Key::Named(named) => named,
+        _ => return None,
+    };
+    let one = if modifier_bits == 0 && !event_type && !associated_text {
+        ""
+    } else {
+        "1"
+    };
+    let (base, terminator) = match named {
+        NamedKey::PageUp => ("5", '~'),
+        NamedKey::PageDown => ("6", '~'),
+        NamedKey::Insert => ("2", '~'),
+        NamedKey::Delete => ("3", '~'),
+        NamedKey::Home => (one, 'H'),
+        NamedKey::End => (one, 'F'),
+        NamedKey::ArrowLeft => (one, 'D'),
+        NamedKey::ArrowRight => (one, 'C'),
+        NamedKey::ArrowUp => (one, 'A'),
+        NamedKey::ArrowDown => (one, 'B'),
+        NamedKey::F1 => (one, 'P'),
+        NamedKey::F2 => (one, 'Q'),
+        // Kitty reserves CSI 13~ for F3 while legacy xterm uses CSI R.
+        NamedKey::F3 => ("13", '~'),
+        NamedKey::F4 => (one, 'S'),
+        NamedKey::F5 => ("15", '~'),
+        NamedKey::F6 => ("17", '~'),
+        NamedKey::F7 => ("18", '~'),
+        NamedKey::F8 => ("19", '~'),
+        NamedKey::F9 => ("20", '~'),
+        NamedKey::F10 => ("21", '~'),
+        NamedKey::F11 => ("23", '~'),
+        NamedKey::F12 => ("24", '~'),
+        _ => return None,
+    };
+    Some((base.to_string(), terminator))
+}
+
+fn kitty_control_or_modifier_base(
+    event: &KittyKeyEvent,
+    encode_all: bool,
+    modifier_bits: &mut u8,
+) -> Option<String> {
+    let named = match event.logical_key {
+        Key::Named(named) => named,
+        _ => return None,
+    };
+    let control = match named {
+        NamedKey::Tab => "9",
+        NamedKey::Enter => "13",
+        NamedKey::Escape => "27",
+        NamedKey::Space => "32",
+        NamedKey::Backspace => "127",
+        _ => "",
+    };
+    if !encode_all && control.is_empty() {
+        return None;
+    }
+
+    let base = match (named, event.location) {
+        (NamedKey::Shift, KeyLocation::Left) => "57441",
+        (NamedKey::Control, KeyLocation::Left) => "57442",
+        (NamedKey::Alt, KeyLocation::Left) => "57443",
+        (NamedKey::Super, KeyLocation::Left) => "57444",
+        (NamedKey::Hyper, KeyLocation::Left) => "57445",
+        (NamedKey::Meta, KeyLocation::Left) => "57446",
+        (NamedKey::Shift, _) => "57447",
+        (NamedKey::Control, _) => "57448",
+        (NamedKey::Alt, _) => "57449",
+        (NamedKey::Super, _) => "57450",
+        (NamedKey::Hyper, _) => "57451",
+        (NamedKey::Meta, _) => "57452",
+        (NamedKey::CapsLock, _) => "57358",
+        (NamedKey::NumLock, _) => "57360",
+        _ => control,
+    };
+
+    let pressed = event.state == ElementState::Pressed;
+    let bit = match named {
+        NamedKey::Shift => Some(0),
+        NamedKey::Alt => Some(1),
+        NamedKey::Control => Some(2),
+        NamedKey::Super => Some(3),
+        _ => None,
+    };
+    if let Some(bit) = bit {
+        if pressed {
+            *modifier_bits |= 1 << bit;
+        } else {
+            *modifier_bits &= !(1 << bit);
+        }
+    }
+
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+fn kitty_textual_base(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    mode: TermMode,
+    associated_text: Option<&str>,
+) -> Option<String> {
+    let character = match event.logical_key.as_ref() {
+        Key::Character(character) => character,
+        _ => return None,
+    };
+    if character.chars().count() == 1 {
+        let shifted = character.chars().next()?;
+        let mut unshifted = if mods.shift_key() {
+            shifted.to_lowercase().next().unwrap_or(shifted)
+        } else {
+            shifted
+        };
+        if mods.shift_key()
+            && unshifted == shifted
+            && let Key::Character(without_modifiers) = event.key_without_modifiers.as_ref()
+        {
+            unshifted = without_modifiers.chars().next().unwrap_or(unshifted);
+        }
+        let primary = u32::from(unshifted);
+        let alternate = u32::from(shifted);
+        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS) && primary != alternate {
+            Some(format!("{primary}:{alternate}"))
+        } else {
+            Some(primary.to_string())
+        }
+    } else if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) && associated_text.is_some() {
+        Some("0".to_string())
+    } else {
+        None
+    }
+}
+
+fn is_control_character(text: &str) -> bool {
+    let Some(codepoint) = text.chars().next() else {
+        return false;
+    };
+    text.chars().count() == 1
+        && (codepoint <= '\u{1f}' || ('\u{7f}'..='\u{9f}').contains(&codepoint))
+}
+
 /// Build the bytes for a clipboard paste.
 ///
 /// In **bracketed-paste** mode the receiving application (vim, IPython, node,
@@ -423,6 +848,261 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn protocol_event(
+        logical_key: Key,
+        key_without_modifiers: Key,
+        text: Option<&str>,
+        text_with_all_modifiers: &str,
+        location: KeyLocation,
+        state: ElementState,
+        repeat: bool,
+    ) -> KittyKeyEvent {
+        KittyKeyEvent {
+            logical_key,
+            key_without_modifiers,
+            text: text.map(str::to_owned),
+            text_with_all_modifiers: text_with_all_modifiers.to_owned(),
+            location,
+            state,
+            repeat,
+        }
+    }
+
+    fn character_event(
+        logical: &str,
+        unmodified: &str,
+        text: &str,
+        state: ElementState,
+        repeat: bool,
+    ) -> KittyKeyEvent {
+        protocol_event(
+            Key::Character(logical.into()),
+            Key::Character(unmodified.into()),
+            Some(text),
+            text,
+            KeyLocation::Standard,
+            state,
+            repeat,
+        )
+    }
+
+    #[test]
+    fn kitty_disambiguates_control_and_escape_without_changing_plain_text() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let plain = character_event("a", "a", "a", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(&plain, ModifiersState::empty(), mode),
+            Some(b"a".to_vec())
+        );
+
+        let control = protocol_event(
+            Key::Character("a".into()),
+            Key::Character("a".into()),
+            Some("a"),
+            "\u{1}",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(&control, ModifiersState::CONTROL, mode),
+            Some(b"\x1b[97;5u".to_vec())
+        );
+
+        let escape = protocol_event(
+            Key::Named(NamedKey::Escape),
+            Key::Named(NamedKey::Escape),
+            None,
+            "\u{1b}",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(&escape, ModifiersState::empty(), mode),
+            Some(b"\x1b[27u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_reports_repeat_release_and_modifier_sides() {
+        let events = TermMode::REPORT_EVENT_TYPES;
+        let repeat = character_event("a", "a", "a", ElementState::Pressed, true);
+        assert_eq!(
+            encode_kitty_key_event(&repeat, ModifiersState::empty(), events),
+            Some(b"a".to_vec()),
+            "text repeats stay text until report-all is requested"
+        );
+        let all_events = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES;
+        assert_eq!(
+            encode_kitty_key_event(&repeat, ModifiersState::empty(), all_events),
+            Some(b"\x1b[97;1:2u".to_vec())
+        );
+        let release = character_event("a", "a", "", ElementState::Released, false);
+        assert_eq!(
+            encode_kitty_key_event(&release, ModifiersState::empty(), events),
+            Some(b"\x1b[97;1:3u".to_vec())
+        );
+
+        let enter_release = protocol_event(
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Enter),
+            None,
+            "",
+            KeyLocation::Standard,
+            ElementState::Released,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(&enter_release, ModifiersState::empty(), events),
+            None,
+            "legacy Enter has no unambiguous release representation"
+        );
+
+        let left_shift_press = protocol_event(
+            Key::Named(NamedKey::Shift),
+            Key::Named(NamedKey::Shift),
+            None,
+            "",
+            KeyLocation::Left,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(&left_shift_press, ModifiersState::SHIFT, all_events),
+            Some(b"\x1b[57441;2u".to_vec())
+        );
+        let left_shift_release = KittyKeyEvent {
+            state: ElementState::Released,
+            ..left_shift_press
+        };
+        assert_eq!(
+            encode_kitty_key_event(&left_shift_release, ModifiersState::empty(), all_events),
+            Some(b"\x1b[57441;1:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_reports_alternate_keypad_function_and_associated_text_codes() {
+        let alternate = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS;
+        let shifted = character_event("A", "a", "A", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(&shifted, ModifiersState::SHIFT, alternate),
+            Some(b"\x1b[97:65;2u".to_vec())
+        );
+
+        let caps_like = character_event("A", "a", "A", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(&caps_like, ModifiersState::empty(), alternate),
+            Some(b"\x1b[65u".to_vec()),
+            "an uppercase logical key without Shift must not be lowercased"
+        );
+
+        let numpad = protocol_event(
+            Key::Character("1".into()),
+            Key::Character("1".into()),
+            Some("1"),
+            "1",
+            KeyLocation::Numpad,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(
+                &numpad,
+                ModifiersState::empty(),
+                TermMode::REPORT_ALL_KEYS_AS_ESC
+            ),
+            Some(b"\x1b[57400u".to_vec())
+        );
+
+        let f3 = protocol_event(
+            Key::Named(NamedKey::F3),
+            Key::Named(NamedKey::F3),
+            None,
+            "",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(
+                &f3,
+                ModifiersState::empty(),
+                TermMode::DISAMBIGUATE_ESC_CODES
+            ),
+            Some(b"\x1b[13~".to_vec())
+        );
+
+        let associated = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ASSOCIATED_TEXT;
+        let accented = character_event("é", "é", "é", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(&accented, ModifiersState::empty(), associated),
+            Some(b"\x1b[233;1;233u".to_vec())
+        );
+        let grapheme = character_event("👩‍💻", "👩‍💻", "👩‍💻", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(&grapheme, ModifiersState::empty(), associated),
+            Some(b"\x1b[0;1;128105:8205:128187u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_pure_enhancement_flags_do_not_change_legacy_encoding() {
+        let f3 = protocol_event(
+            Key::Named(NamedKey::F3),
+            Key::Named(NamedKey::F3),
+            None,
+            "",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(
+                &f3,
+                ModifiersState::empty(),
+                TermMode::REPORT_ALTERNATE_KEYS | TermMode::REPORT_ASSOCIATED_TEXT
+            ),
+            Some(b"\x1bOR".to_vec())
+        );
+
+        let plain = character_event("a", "a", "a", ElementState::Pressed, false);
+        assert_eq!(
+            encode_kitty_key_event(
+                &plain,
+                ModifiersState::empty(),
+                TermMode::REPORT_ASSOCIATED_TEXT
+            ),
+            Some(b"a".to_vec())
+        );
+
+        let backspace = protocol_event(
+            Key::Named(NamedKey::Backspace),
+            Key::Named(NamedKey::Backspace),
+            Some("\u{8}"),
+            "\u{8}",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert!(!kitty_event_uses_sequence(
+            &backspace,
+            ModifiersState::empty(),
+            TermMode::REPORT_EVENT_TYPES
+        ));
+        assert!(kitty_event_uses_sequence(
+            &backspace,
+            ModifiersState::CONTROL,
+            TermMode::DISAMBIGUATE_ESC_CODES
+        ));
+        assert!(kitty_event_uses_sequence(
+            &backspace,
+            ModifiersState::empty(),
+            TermMode::REPORT_ALL_KEYS_AS_ESC
+        ));
+    }
 
     #[test]
     fn paste_normalizes_and_brackets() {

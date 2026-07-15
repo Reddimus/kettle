@@ -153,6 +153,9 @@ jobs:
       - name: Signed update manifest generator
         if: runner.os == 'Linux'
         run: python3 scripts/test-update-manifest.py
+      - name: Inner package manifest generator and verifier
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-package-manifest.py
       - name: Rustdoc (Linux, warnings denied)
         # Cycle 219: rustdoc has its own warning class (broken
         # intra-doc-links, missing docs on public items, malformed

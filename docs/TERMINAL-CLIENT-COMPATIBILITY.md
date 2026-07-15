@@ -33,20 +33,50 @@ caret that interactive clients can leave visible while another window is active.
 
 ## Keyboard encoding
 
-Kettle currently emits its legacy/xterm-compatible key encodings, including
-application cursor/keypad modes and the existing modifier forms. It does not
-emit kitty CSI-u keyboard events. Although the underlying terminal engine can
-parse kitty keyboard mode requests, Kettle deliberately leaves that mode
-disabled so Neovim and other clients do not negotiate CSI-u and then receive
-legacy bytes. A future CSI-u encoder must land before that capability can be
-advertised; v2.35 does not claim it.
+Kettle supports the progressive [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
+end to end. It answers `CSI ? u` capability queries, applies set/push/pop mode
+requests, and emits negotiated CSI-u press, repeat, and release events. The
+encoder covers alternate key codes, associated text, left/right modifiers,
+keypad keys, F13-F35, navigation, media, and volume keys. A bounded 16-entry
+mode stack prevents a client from growing terminal state indefinitely.
+
+With no negotiated Kitty flags, Kettle retains its existing xterm-compatible
+bytes exactly, including DECCKM application cursor mode, DECKPAM application
+keypad mode, xterm modified navigation keys, and the usual control codes. This
+progressive behavior matters for shells and older TUIs: enabling support does
+not force CSI-u on applications that never request it. A key press consumed by
+Kettle UI or a Kettle keybinding also suppresses its matching physical release,
+so a Kitty-aware child never receives a release for a press it did not see.
+
+Current Neovim queries CSI-u first and falls back to xterm modifyOtherKeys only
+when the terminal does not answer. Kettle's reply lets Neovim distinguish keys
+such as `Tab`/`Ctrl+I`, `Enter`/`Ctrl+M`, Escape-related chords, and keypad keys.
+See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input).
 
 ## tmux and full-screen clients
 
 - Kettle forwards application cursor/keypad modes, focus reports, SGR mouse
-  events, bracketed paste, alternate-scroll behavior, and resize events through
-  the PTY. tmux can therefore negotiate these features normally; this does not
-  imply kitty CSI-u/extended-key support.
+  events, bracketed paste, alternate-scroll behavior, resize events, Kitty
+  keyboard negotiation, OSC 8 links, OSC 52 clipboard writes, styled
+  underlines, and synchronized updates through the PTY.
+- Keep Kettle's outer `TERM=xterm-256color`. Inside tmux, keep tmux's
+  `default-terminal` at `tmux-256color`; do not globally force either value over
+  the other. `COLORTERM=truecolor`, `TERM_PROGRAM=kettle`, and
+  `TERM_PROGRAM_VERSION` are already exported by Kettle.
+- tmux does not yet auto-detect Kettle's feature set. For tmux 3.2 or newer,
+  add this to `~/.tmux.conf`:
+
+  ```tmux
+  set -as terminal-features ',xterm-256color:RGB:clipboard:cstyle:extkeys:focus:hyperlinks:mouse:osc7:overline:strikethrough:sync:usstyle'
+  set -g extended-keys on
+  ```
+
+  `on` preserves progressive negotiation: tmux forwards extended keys to an
+  inner application when that application requests them. tmux 3.5 or newer is
+  preferred because its extended-key handling was revised to request and
+  preserve xterm mode 2. The options and feature names are defined in the
+  [tmux manual](https://man.openbsd.org/tmux#extended-keys) and
+  [tmux changelog](https://github.com/tmux/tmux/blob/master/CHANGES).
 - Hold `Shift` while using the wheel to scroll Kettle's own scrollback when a
   mouse-aware tmux/TUI pane would otherwise consume the wheel.
 - Client-owned `Ctrl+V`, `Alt+V`, and `Ctrl+Alt+V` chords remain PTY input inside
@@ -55,3 +85,8 @@ advertised; v2.35 does not claim it.
 - Kettle's Codex-specific cursor compatibility policy is limited to the known
   transient native-Windows ConPTY sequence. The global unfocused-window rule is
   client-independent and does not identify processes by name.
+
+Run `scripts/check-agent-cli-smoke.sh` from a Kettle checkout to verify the
+installed Codex CLI, Claude Code CLI, tmux, clean Neovim, and configured
+Neovim/AstroNvim against the current Kettle binary. The smoke also performs a
+real `CSI ? u` PTY round trip and validates tmux's additive feature entry.

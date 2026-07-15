@@ -3,14 +3,18 @@
 
 use std::sync::Arc;
 
+use accesskit::{
+    ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId, Role, Tree,
+    TreeId, TreeUpdate,
+};
 use anyhow::Result;
 use kettle_config::{
     Action, Bindings, Config, Key as KKey, Mods, StatusBarMode, TabBarMode, TabBarPos, Trigger,
 };
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
-    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, Overlay, PaneSnapshot, PaneView,
-    Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
+    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, ImePreedit, Overlay, PaneSnapshot,
+    PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -23,7 +27,43 @@ use winit::window::{
 use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
-use crate::window_state::WindowState;
+use crate::window_state::{WindowState, track_consumed_key_release};
+
+const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
+const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
+const ACCESSIBILITY_TEXT_ID_MASK: u64 = (1 << 63) | (1 << 62);
+const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn accessibility_pane_id(pane_id: u64) -> NodeId {
+    NodeId::from(ACCESSIBILITY_PANE_ID_MASK | pane_id)
+}
+
+fn accessibility_text_id(pane_id: u64) -> NodeId {
+    NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
+}
+
+#[derive(Clone)]
+struct AccessibilityActivation {
+    initial: TreeUpdate,
+}
+
+impl ActivationHandler for AccessibilityActivation {
+    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        Some(self.initial.clone())
+    }
+}
+
+struct AccessibilityActions;
+
+impl ActionHandler for AccessibilityActions {
+    fn do_action(&mut self, _request: ActionRequest) {}
+}
+
+struct AccessibilityDeactivation;
+
+impl DeactivationHandler for AccessibilityDeactivation {
+    fn deactivate_accessibility(&mut self) {}
+}
 
 /// Cycle 904 (audit): live state for a split-divider mouse drag — the addressed
 /// split (`path`) and its orientation. The split's rect is re-fetched from
@@ -3764,6 +3804,62 @@ impl App {
         }
     }
 
+    /// Deliver user-authored bytes with the same selection, cursor, broadcast,
+    /// read-only, and scroll behavior for keyboard and IME commit paths.
+    fn write_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.clear_selection_on_input(ws);
+        self.reset_blink_phase(ws);
+        self.hide_mouse_cursor(ws);
+        ws.last_typed = Some(std::time::Instant::now());
+        if ws.mux.is_broadcast_on() {
+            ws.mux.broadcast_write(bytes);
+            if self.cfg.scroll_on_keystroke {
+                ws.mux.broadcast_scroll_to_bottom();
+            }
+        } else if let Some(pane) = ws.mux.focused()
+            && pane.feed_input(bytes)
+            && self.cfg.scroll_on_keystroke
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            term.scroll_display(Scroll::Bottom);
+        }
+    }
+
+    fn commit_ime_text(&mut self, ws: &mut WindowState, text: &str, event_loop: &ActiveEventLoop) {
+        if text.is_empty() {
+            return;
+        }
+        let key = Key::Character(text.into());
+        if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
+            return;
+        }
+        if ws.palette_input.is_some() {
+            self.palette_key(ws, &key, Some(text), event_loop);
+        } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
+            self.settings_text_key(ws, &key, Some(text));
+        } else if ws.settings_nav.is_some() {
+            return;
+        } else if ws.layout_picker_input.is_some() {
+            self.layout_picker_key(ws, &key, Some(text));
+        } else if ws.ssh_input.is_some() {
+            self.ssh_key(ws, &key, Some(text));
+        } else if ws.confirm_dialog.is_some() {
+            return;
+        } else if let Some(state) = ws.editing_title.as_mut() {
+            state.input.extend(text.chars().filter(|c| !c.is_control()));
+        } else if ws.mux.search.open {
+            self.search_key(ws, &key, Some(text));
+        } else {
+            self.write_terminal_input(ws, text.as_bytes());
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     fn tab_bar_h(&self, ws: &WindowState) -> f32 {
         let show = match self.cfg.tab_bar {
             // Title-edit needs a real chrome strip so the input never covers
@@ -5517,6 +5613,93 @@ impl App {
         }
     }
 
+    /// Visible terminal cursor cell for IME composition/candidate placement.
+    fn terminal_cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
+        let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id))?;
+        let term = pane.term.term.lock().ok()?;
+        let point = term.renderable_content().cursor.point;
+        Some((point.line.0.max(0) as usize, point.column.0))
+    }
+
+    fn update_ime_cursor_area(&self, ws: &WindowState) {
+        let Some(window) = &ws.window else {
+            return;
+        };
+        let (cw, ch) = ws
+            .renderer
+            .as_ref()
+            .map(|renderer| (renderer.cell_w, renderer.cell_h))
+            .unwrap_or((8.0, 16.0));
+        let preedit = ws
+            .ime_preedit
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .unwrap_or_default();
+        let input = ws
+            .palette_input
+            .as_ref()
+            .map(|(query, _)| (4, query.as_str()))
+            .or_else(|| {
+                ws.layout_picker_input
+                    .as_ref()
+                    .map(|(query, _)| (12, query.as_str()))
+            })
+            .or_else(|| ws.ssh_input.as_deref().map(|query| (8, query)))
+            .or_else(|| {
+                ws.mux
+                    .search
+                    .open
+                    .then_some((10, ws.mux.search.query.as_str()))
+            });
+        let (x, y) = if let Some((prefix_cols, input)) = input {
+            use unicode_width::UnicodeWidthStr as _;
+
+            let size = window.inner_size();
+            let cols = prefix_cols + input.width() + preedit.width();
+            (
+                (cols as f32 * cw).min(size.width.saturating_sub(1) as f32),
+                (size.height as f32 - ch - 5.0).max(0.0),
+            )
+        } else if let Some(edit) = &ws.editing_title {
+            use unicode_width::UnicodeWidthStr as _;
+
+            let rect = self.title_edit_rect(ws);
+            let label_cols = match edit.scope {
+                TitleEditScope::Window => 20,
+                TitleEditScope::Tab => 17,
+                TitleEditScope::Pane => 18,
+                TitleEditScope::Group => 19,
+            };
+            (
+                rect.0 + (label_cols + edit.input.width() + preedit.width()) as f32 * cw,
+                rect.1 + ((rect.3 - ch) * 0.5).max(0.0),
+            )
+        } else if ws.settings_text_edit.is_some() {
+            let size = window.inner_size();
+            (size.width as f32 * 0.5, size.height as f32 * 0.5)
+        } else {
+            let Some((row, col)) = self.terminal_cursor_cell(ws) else {
+                return;
+            };
+            let Some((rx, ry, _rw, _rh)) = self.focused_rect(ws, self.area(ws)) else {
+                return;
+            };
+            let titlebar =
+                self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
+            (
+                rx + self.cfg.padding_x + col as f32 * cw,
+                ry + self.cfg.padding_y + titlebar + row as f32 * ch,
+            )
+        };
+        let size = window.inner_size();
+        let x = x.clamp(0.0, size.width.saturating_sub(1) as f32);
+        let y = y.clamp(0.0, size.height.saturating_sub(1) as f32);
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y)),
+            winit::dpi::PhysicalSize::new(f64::from(cw.max(1.0)), f64::from(ch.max(1.0))),
+        );
+    }
+
     /// `(row, col)` of the mouse within the focused pane, if any.
     ///
     /// Clamped to the focused pane's live grid: a click in the right/bottom
@@ -5666,6 +5849,15 @@ impl App {
     }
 
     fn overlay(&self, ws: &WindowState) -> Overlay {
+        let preedit = ws
+            .ime_preedit
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .filter(|text| !text.is_empty());
+        let with_preedit = |input: &str| match preedit {
+            Some(preedit) => format!("{input}{preedit}"),
+            None => input.to_string(),
+        };
         let hover = self.cursor_cell(ws);
         let links = ws
             .links
@@ -5689,7 +5881,7 @@ impl App {
                         self.cfg.ssh_hosts.iter().map(|(n, _)| n.as_str()).collect();
                     format!("hosts: {}", names.join(", "))
                 };
-                (Some(q.clone()), hint)
+                (Some(with_preedit(q)), hint)
             }
             None => (None, String::new()),
         };
@@ -5719,7 +5911,7 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("  ·  ")
                 };
-                (Some(q.clone()), hint)
+                (Some(with_preedit(q)), hint)
             }
             None => (None, String::new()),
         };
@@ -5756,7 +5948,7 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("  ·  ")
                 };
-                (Some(q.clone()), hint)
+                (Some(with_preedit(q)), hint)
             }
             None => (None, String::new()),
         };
@@ -5773,6 +5965,24 @@ impl App {
                 .collect(),
             None => Vec::new(),
         };
+        let terminal_surface = ws.context_menu.is_none()
+            && ws.vi_mode.is_none()
+            && ws.hint_state.is_none()
+            && ws.palette_input.is_none()
+            && ws.settings_nav.is_none()
+            && ws.layout_picker_input.is_none()
+            && ws.ssh_input.is_none()
+            && ws.confirm_dialog.is_none()
+            && ws.editing_title.is_none()
+            && !ws.mux.search.open;
+        let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
+            let (row, col) = self.terminal_cursor_cell(ws)?;
+            Some(ImePreedit {
+                text: text.to_string(),
+                row,
+                col,
+            })
+        });
 
         let window_focused = ws.window_focused;
         // v2.26.0: brighten the focused pane's scrollbar while the pointer is on
@@ -5840,7 +6050,7 @@ impl App {
                 };
                 kettle_render::TitleEditOverlay {
                     label: label.to_string(),
-                    input: s.input.clone(),
+                    input: with_preedit(&s.input),
                     rect: self.title_edit_rect(ws),
                 }
             });
@@ -5894,6 +6104,7 @@ impl App {
                 layout_picker_hint,
                 edit_title,
                 hint_labels,
+                ime_preedit,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -5926,7 +6137,7 @@ impl App {
             .collect();
         let confirm_dialog = confirm_dialog_early;
         Overlay {
-            search_query: Some(s.query.clone()),
+            search_query: Some(with_preedit(&s.query)),
             search_count: s.matches.len(),
             search_index: s.index,
             highlights,
@@ -5939,6 +6150,7 @@ impl App {
             layout_picker_hint,
             edit_title,
             hint_labels,
+            ime_preedit,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -6001,6 +6213,25 @@ impl App {
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
         self.maybe_sync_native_theme(ws);
+        let accessibility_key = self.accessibility_key(ws);
+        let accessibility_due = ws
+            .accessibility_updated_at
+            .is_none_or(|updated| updated.elapsed() >= ACCESSIBILITY_UPDATE_INTERVAL);
+        if ws.accessibility_key != Some(accessibility_key)
+            && accessibility_due
+            && let Some(mut adapter) = ws.accessibility.take()
+        {
+            let mut published = false;
+            adapter.update_if_active(|| {
+                published = true;
+                self.accessibility_tree(ws)
+            });
+            ws.accessibility = Some(adapter);
+            if published {
+                ws.accessibility_key = Some(accessibility_key);
+                ws.accessibility_updated_at = Some(std::time::Instant::now());
+            }
+        }
         // v2.31.0: if the GPU device was lost (a driver TDR/reset) or hit an
         // uncaptured error (VRAM exhaustion under memory pressure), rendering
         // against the dead device cannot succeed. The new wgpu error handlers
@@ -6052,6 +6283,9 @@ impl App {
         self.poll_theme_schedule(ws);
         self.poll_focus_event(ws);
         self.poll_title_event(ws);
+        if ws.ime_preedit.is_some() {
+            self.update_ime_cursor_area(ws);
+        }
         // Cycle 745: reflect the focused pane's OSC 9;4 progress onto the OS
         // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
         self.poll_taskbar_progress(ws);
@@ -7118,7 +7352,11 @@ impl App {
                     // editable buffer + a caret instead of the stored value.
                     let editing = ws.settings_text_edit.as_ref().filter(|e| e.key == f.key);
                     let value = if let Some(e) = editing {
-                        format!("{}\u{258f}", settings_edit_display(&e.buf))
+                        let mut input = settings_edit_display(&e.buf);
+                        if let Some((preedit, _)) = &ws.ime_preedit {
+                            input.push_str(preedit);
+                        }
+                        format!("{input}\u{258f}")
                     } else if i == fld && nav.capturing {
                         // Cycle 766: capture prompt on the focused keybind row.
                         "‹press a chord — Esc to cancel›".to_string()
@@ -13975,9 +14213,141 @@ impl App {
         attrs.with_visible(false)
     }
 
+    fn initial_accessibility_tree() -> TreeUpdate {
+        let mut root = Node::new(Role::Window);
+        root.set_label("Kettle terminal");
+        let mut tree = Tree::new(ACCESSIBILITY_ROOT_ID);
+        tree.toolkit_name = Some("Kettle".to_string());
+        tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        TreeUpdate {
+            nodes: vec![(ACCESSIBILITY_ROOT_ID, root)],
+            tree: Some(tree),
+            tree_id: TreeId::ROOT,
+            focus: ACCESSIBILITY_ROOT_ID,
+        }
+    }
+
+    fn new_accessibility_adapter(
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+    ) -> accesskit_winit::Adapter {
+        accesskit_winit::Adapter::with_direct_handlers(
+            event_loop,
+            window,
+            AccessibilityActivation {
+                initial: Self::initial_accessibility_tree(),
+            },
+            AccessibilityActions,
+            AccessibilityDeactivation,
+        )
+    }
+
+    fn accessibility_tree(&self, ws: &WindowState) -> TreeUpdate {
+        let area = self.area(ws);
+        let layout = ws.mux.layout(ws.mux.active, area);
+        let focused = ws.mux.active_focus();
+        let mut children = Vec::with_capacity(layout.len());
+        let mut nodes = Vec::with_capacity(layout.len() * 2 + 1);
+        for (pane_id, (x, y, width, height)) in layout {
+            let Some(pane) = ws.mux.panes.get(&pane_id) else {
+                continue;
+            };
+            let node_id = accessibility_pane_id(pane_id);
+            let text_id = accessibility_text_id(pane_id);
+            children.push(node_id);
+            let mut node = Node::new(Role::Terminal);
+            let label = if pane.title.trim().is_empty() {
+                format!("Terminal pane {pane_id}")
+            } else {
+                pane.title.clone()
+            };
+            node.set_label(label);
+            node.set_children([text_id]);
+            let text = pane
+                .term
+                .screen_text(0)
+                .map(|screen| screen.text.trim_end().to_string())
+                .unwrap_or_default();
+            let mut text_node = Node::new(Role::TextRun);
+            text_node.set_character_lengths(
+                text.chars()
+                    .map(|character| character.len_utf8() as u8)
+                    .collect::<Vec<_>>(),
+            );
+            text_node.set_value(text);
+            text_node.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            ));
+            nodes.push((text_id, text_node));
+            if pane.read_only {
+                node.set_read_only();
+            }
+            node.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            ));
+            nodes.push((node_id, node));
+        }
+        let mut root = Node::new(Role::Window);
+        root.set_label("Kettle terminal");
+        root.set_children(children);
+        if let Some(window) = &ws.window {
+            let size = window.inner_size();
+            root.set_bounds(accesskit::Rect::new(
+                0.0,
+                0.0,
+                f64::from(size.width),
+                f64::from(size.height),
+            ));
+        }
+        nodes.push((ACCESSIBILITY_ROOT_ID, root));
+        let focus = focused
+            .map(accessibility_pane_id)
+            .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+            .unwrap_or(ACCESSIBILITY_ROOT_ID);
+        TreeUpdate {
+            nodes,
+            tree: None,
+            tree_id: TreeId::ROOT,
+            focus,
+        }
+    }
+
+    fn accessibility_key(&self, ws: &WindowState) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ws.mux.active_focus().hash(&mut hasher);
+        if let Some(window) = &ws.window {
+            let size = window.inner_size();
+            size.width.hash(&mut hasher);
+            size.height.hash(&mut hasher);
+        }
+        let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
+        layout.sort_by_key(|(pane_id, _)| *pane_id);
+        for (pane_id, rect) in layout {
+            pane_id.hash(&mut hasher);
+            for component in [rect.0, rect.1, rect.2, rect.3] {
+                component.to_bits().hash(&mut hasher);
+            }
+            if let Some(pane) = ws.mux.panes.get(&pane_id) {
+                pane.title.hash(&mut hasher);
+                pane.read_only.hash(&mut hasher);
+                pane.term.output_generation().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// C4: post-creation window setup shared by both window-creation paths.
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn apply_post_create(&self, window: &Window) {
+        window.set_ime_allowed(true);
         // Cycle 694 (Terminator parity, terminatorlib/config.py:81
         // `sticky`): show window on every workspace. macOS exposes
         // this as a Window-level method via `WindowExtMacOS`, so
@@ -14063,6 +14433,7 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        let accessibility = Self::new_accessibility_adapter(event_loop, &window);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Synchronous renderer init against the shared device — no block_on,
@@ -14094,6 +14465,7 @@ impl App {
         let mut ws = WindowState::new(seq, false, mux);
         ws.window_shown = !should_reveal_after_renderer_init(state);
         ws.renderer = Some(renderer);
+        ws.accessibility = Some(accessibility);
         ws.window = Some(window);
         if should_reveal_after_renderer_init(state)
             && let Some(w) = &ws.window
@@ -14893,6 +15265,7 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        let accessibility = Self::new_accessibility_adapter(event_loop, &window);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Cycle 812 (audit #10): guard the synchronous GPU init against a hung
@@ -14951,6 +15324,7 @@ impl App {
         // C4: cache the shared GPU context for open_window (windows 2..N).
         self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
+        ws.accessibility = Some(accessibility);
         ws.window = Some(window);
         if let Some(theme) = ws.window.as_ref().and_then(|w| w.theme()) {
             self.apply_initial_os_theme_preference(theme);
@@ -15387,6 +15761,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         event: WindowEvent,
     ) {
+        if let (Some(adapter), Some(window)) = (&mut ws.accessibility, &ws.window) {
+            adapter.process_event(window, &event);
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // Cycle 875/908: fan out in-flight shared PTY output, then flush
@@ -16543,6 +16920,12 @@ impl App {
                 // button down. Disarm them on focus loss, committing any pending
                 // copy-on-select first (mirrors the left-button-up path).
                 if !f {
+                    // The compositor may deliver held-key releases to the
+                    // newly focused window. Drop UI suppression state here so
+                    // a later unrelated release cannot be mistaken for the
+                    // missing half of an old shortcut.
+                    ws.suppressed_key_releases.clear();
+                    ws.ime_preedit = None;
                     if ws.selecting && self.cfg.copy_on_select {
                         self.copy_selection(ws);
                     }
@@ -16622,8 +17005,67 @@ impl App {
                     w.request_redraw();
                 }
             }
+            WindowEvent::Ime(ime) => {
+                match ime {
+                    winit::event::Ime::Enabled => {
+                        if let Some(window) = &ws.window {
+                            window.set_ime_allowed(true);
+                        }
+                        self.update_ime_cursor_area(ws);
+                    }
+                    winit::event::Ime::Preedit(text, selection) => {
+                        ws.ime_preedit = (!text.is_empty()).then_some((text, selection));
+                        self.update_ime_cursor_area(ws);
+                    }
+                    winit::event::Ime::Commit(text) => {
+                        ws.ime_preedit = None;
+                        self.commit_ime_text(ws, &text, event_loop);
+                    }
+                    winit::event::Ime::Disabled => {
+                        ws.ime_preedit = None;
+                    }
+                }
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
+                let ui_owns_key = !matches!(ws.detach_drag, crate::detach::DragState::Idle)
+                    || ws.context_menu.is_some()
+                    || ws.vi_mode.is_some()
+                    || ws.hint_state.is_some()
+                    || ws.palette_input.is_some()
+                    || ws.settings_nav.is_some()
+                    || ws.layout_picker_input.is_some()
+                    || ws.ssh_input.is_some()
+                    || ws.confirm_dialog.is_some()
+                    || ws.editing_title.is_some()
+                    || ws.mux.search.open
+                    || ws.ime_preedit.is_some();
+                if track_consumed_key_release(
+                    &mut ws.suppressed_key_releases,
+                    event.physical_key,
+                    event.state,
+                    ui_owns_key,
+                ) {
+                    return;
+                }
+                if event.state == ElementState::Released {
+                    let mode = ws
+                        .mux
+                        .focused()
+                        .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
+                        .unwrap_or(kettle_core::TermMode::empty());
+                    if let Some(bytes) = input::encode_key_event(&event, ws.mods, mode) {
+                        if ws.mux.is_broadcast_on() {
+                            ws.mux.broadcast_write(&bytes);
+                        } else if let Some(p) = ws.mux.focused() {
+                            p.feed_input(&bytes);
+                        }
+                    }
+                    return;
+                }
+                if ws.ime_preedit.is_some() {
                     return;
                 }
                 // v2.19.0 (tear-off UX): typing in the torn window right
@@ -16873,6 +17315,12 @@ impl App {
                     Some(&event.physical_key),
                     ws.mods,
                 ) {
+                    track_consumed_key_release(
+                        &mut ws.suppressed_key_releases,
+                        event.physical_key,
+                        event.state,
+                        true,
+                    );
                     self.handle_action(ws, act, event_loop);
                     return;
                 }
@@ -16887,9 +17335,7 @@ impl App {
                 // app set it. Tried before the normal encoder, which is
                 // location-agnostic. `event.location` distinguishes the numpad
                 // from the main keyboard row.
-                let encoded =
-                    input::encode_app_keypad(&event.logical_key, event.location, ws.mods, mode)
-                        .or_else(|| input::encode(&event.logical_key, text, ws.mods, mode));
+                let encoded = input::encode_key_event(&event, ws.mods, mode);
                 if let Some(mut bytes) = encoded {
                     // Cycle 352 (Terminator parity, terminatorlib/config.py:107-108
                     // `backspace_binding` + `delete_binding`): remap the
@@ -16897,64 +17343,10 @@ impl App {
                     // binding. Same as VTE's per-profile override.
                     // v2.20.0: shared with `send_keys` (review fix) so the
                     // agent plane honors the same remap as GUI keystrokes.
-                    bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, ws.mods, bytes);
-                    // Any keystroke that produces PTY bytes also dismisses
-                    // an active selection — alacritty/iTerm2/WezTerm all do
-                    // this so typing after a select doesn't leave a stale
-                    // highlight behind.
-                    self.clear_selection_on_input(ws);
-                    // Cycle 141: typing should land the cursor visible
-                    // immediately. Without this, a fast typist hitting
-                    // a key right as `blink_on` was false saw a brief
-                    // flash of no-cursor before the next half-period.
-                    // Alacritty / kitty / iTerm2 / WezTerm all reset
-                    // the blink phase on every keystroke. Same shape
-                    // as cycles 134-140 (Reset, focus changes, modal
-                    // close, mouse focus); typing is the last
-                    // user-driven path that still needed it.
-                    self.reset_blink_phase(ws);
-                    // PERF (key-repeat stutter fix): mark the keystroke so
-                    // its PTY echo paints immediately (see the Wakeup arm).
-                    ws.last_typed = Some(std::time::Instant::now());
-                    if ws.mux.is_broadcast_on() {
-                        ws.mux.broadcast_write(&bytes);
-                        // `scroll-on-keystroke` (Ghostty / Alacritty
-                        // default) snaps the viewport back to the
-                        // bottom on every keystroke. With broadcast
-                        // *off* (the next branch), only the focused
-                        // pane gets typed into and only it snaps —
-                        // self-consistent. With broadcast *on*, the
-                        // bytes go to every pane in the active tab;
-                        // the pre-cycle-173 code only wrote the bytes
-                        // and skipped the snap, so a user with
-                        // broadcast on AND any pane scrolled back saw
-                        // a confusing mismatch: typing reached the
-                        // remote shells but the local view stayed
-                        // pinned to history. Snap every pane in the
-                        // broadcast set, matching the non-broadcast
-                        // path's behavior so the config flag is
-                        // honored consistently regardless of mode.
-                        if self.cfg.scroll_on_keystroke {
-                            ws.mux.broadcast_scroll_to_bottom();
-                        }
-                    } else if let Some(p) = ws.mux.focused() {
-                        // Cycle 941: a read-only pane (Terminator parity)
-                        // drops the keystroke — and skips the scroll snap,
-                        // since nothing was typed.
-                        if p.feed_input(&bytes) {
-                            // Yank back to the bottom *if* the user wants it
-                            // (Ghostty/Alacritty default `scroll-on-keystroke`).
-                            // Disabling lets you pin the viewport while typing —
-                            // useful for ed-style line editors and code reading
-                            // sessions where you're typing search terms while
-                            // the screen stays put.
-                            if self.cfg.scroll_on_keystroke
-                                && let Ok(mut t) = p.term.term.lock()
-                            {
-                                t.scroll_display(Scroll::Bottom);
-                            }
-                        }
+                    if !input::uses_kitty_sequence(&event, ws.mods, mode) {
+                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, ws.mods, bytes);
                     }
+                    self.write_terminal_input(ws, &bytes);
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(ws),
@@ -17268,6 +17660,33 @@ mod tests {
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn accessibility_initial_tree_is_complete_and_pane_ids_are_stable() {
+        let update = App::initial_accessibility_tree();
+        assert_eq!(update.focus, super::ACCESSIBILITY_ROOT_ID);
+        assert_eq!(update.nodes.len(), 1);
+        let (root_id, root) = &update.nodes[0];
+        assert_eq!(*root_id, super::ACCESSIBILITY_ROOT_ID);
+        assert_eq!(root.role(), accesskit::Role::Window);
+        assert_eq!(root.label(), Some("Kettle terminal"));
+
+        let tree = update.tree.expect("initial update must establish a tree");
+        assert_eq!(tree.root, super::ACCESSIBILITY_ROOT_ID);
+        assert_eq!(tree.toolkit_name.as_deref(), Some("Kettle"));
+        assert_eq!(
+            tree.toolkit_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        let first = super::accessibility_pane_id(1);
+        let text = super::accessibility_text_id(1);
+        assert_ne!(first, super::ACCESSIBILITY_ROOT_ID);
+        assert_eq!(first, super::accessibility_pane_id(1));
+        assert_ne!(first, super::accessibility_pane_id(2));
+        assert_ne!(first, text);
+        assert_eq!(text, super::accessibility_text_id(1));
+    }
 
     #[test]
     fn inline_placement_classes_are_interleaved_before_frame_budget() {

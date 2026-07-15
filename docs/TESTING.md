@@ -294,10 +294,13 @@ These need a real display and are run by hand (or on real hardware):
   flows launched from inside a WSL pane.
 - **Agent gauntlet** (run on **Windows + WSL**; see [AGENT.md](AGENT.md)):
   - **Local agent/TUI CLIs**: `scripts/check-agent-cli-smoke.sh` launches any
-    installed Codex CLI, Claude Code CLI, and Neovim/AstroNvim through
+    installed Codex CLI, Claude Code CLI, tmux, and Neovim/AstroNvim through
     `kettle exec --strip-ansi` and verifies they print/paint and exit cleanly.
     Before those optional probes, it always verifies Kettle's own PTY env,
-    `kettle exec --json` output events, and `kettle mcp --self-test`. Missing
+    a real Kitty keyboard capability-query round trip, `kettle exec --json`
+    output events, and `kettle mcp --self-test`. The tmux probe verifies
+    `tmux-256color`, progressive extended keys, and Kettle's additive terminal
+    feature declaration. Missing
     optional tools are reported as skips, so this is a real-machine smoke rather
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
