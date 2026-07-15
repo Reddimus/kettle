@@ -425,8 +425,13 @@ jobs:
           openssl pkeyutl -verify -rawin -pubin -inkey update-public.pem \
             -in "$payload" -sigfile "$signature"
           rm -f update-public.pem
-          sha256sum dist/kettle-update-manifest.json > dist/kettle-update-manifest.json.sha256
-          sha256sum dist/kettle-update-manifest.json.sig > dist/kettle-update-manifest.json.sig.sha256
+          (
+            cd dist
+            sha256sum kettle-update-manifest.json > kettle-update-manifest.json.sha256
+            sha256sum kettle-update-manifest.json.sig > kettle-update-manifest.json.sig.sha256
+            sha256sum -c kettle-update-manifest.json.sha256
+            sha256sum -c kettle-update-manifest.json.sig.sha256
+          )
 
       - name: Render package-manager metadata from verified archives
         shell: bash
