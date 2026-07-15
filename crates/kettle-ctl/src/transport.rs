@@ -1063,20 +1063,49 @@ mod tests {
 
     #[test]
     fn blocked_write_observes_deadline_and_cancellation() {
-        fn stalled_connection(tag: &str) -> (CtlStream, std::thread::JoinHandle<()>) {
+        fn stalled_connection(
+            tag: &str,
+        ) -> (
+            CtlStream,
+            std::sync::mpsc::Sender<()>,
+            std::thread::JoinHandle<()>,
+        ) {
             let endpoint = test_endpoint(tag);
             let listener = CtlListener::bind(&endpoint).expect("bind");
+            let (release, released) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
                 let _conn = listener.accept().expect("accept");
-                std::thread::sleep(Duration::from_millis(500));
+                released.recv().expect("release stalled peer");
             });
-            (connect(&endpoint).expect("connect"), server)
+            let stream = connect(&endpoint).expect("connect");
+
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd as _;
+
+                let CtlStream::Unix(socket) = &stream;
+                let bytes: libc::c_int = 4 * 1024;
+                // SAFETY: the socket owns this valid fd and `bytes` is a
+                // correctly sized, readable SO_SNDBUF value.
+                let result = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        std::ptr::addr_of!(bytes).cast(),
+                        std::mem::size_of_val(&bytes) as libc::socklen_t,
+                    )
+                };
+                assert_eq!(result, 0, "shrink test socket send buffer");
+            }
+
+            (stream, release, server)
         }
 
         // Larger than both the Windows PIPE_BUF and ordinary Unix socket send
         // buffers, ensuring the peer's refusal to read creates backpressure.
         let payload = vec![b'x'; 8 * 1024 * 1024];
-        let (mut timed, timed_server) = stalled_connection("write-timeout");
+        let (mut timed, release_timed, timed_server) = stalled_connection("write-timeout");
         let started = Instant::now();
         let error = timed
             .write_all_until(&payload, Instant::now() + Duration::from_millis(30), None)
@@ -1084,12 +1113,13 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(timed);
+        release_timed.send(()).expect("release timed peer");
         timed_server.join().expect("server thread");
 
-        let (mut cancellable, cancel_server) = stalled_connection("write-cancel");
+        let (mut cancellable, release_cancel, cancel_server) = stalled_connection("write-cancel");
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let setter = cancelled.clone();
-        std::thread::spawn(move || {
+        let canceller = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
             setter.store(true, Ordering::Release);
         });
@@ -1103,7 +1133,9 @@ mod tests {
             .expect_err("blocked write must be cancelled");
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(started.elapsed() < Duration::from_secs(1));
+        canceller.join().expect("canceller thread");
         drop(cancellable);
+        release_cancel.send(()).expect("release cancelled peer");
         cancel_server.join().expect("server thread");
     }
 }
