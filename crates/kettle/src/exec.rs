@@ -325,6 +325,7 @@ fn run_exec_with_cancellation(
             return EXIT_INTERNAL;
         }
     };
+    let process_tree = ExecProcessTree::attach(&term);
 
     // Optional stdin → PTY pump (only for pipe/file/socket stdin).
     // The pump holds a cloneable `PtyWriter`, so the (non-`Sync`) `Terminal`
@@ -410,7 +411,7 @@ fn run_exec_with_cancellation(
         // as timeout: kill the PTY child, drain its last repaint, and finish the
         // recorder before releasing the worker slot.
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) && child_gone_at.is_none() {
-            terminate_process_tree(&term);
+            process_tree.terminate(&term);
             // Reap the killed child where the PTY backend exposes its status;
             // this prevents a cancelled long-running MCP tool from leaving a
             // zombie behind while still bounding cancellation latency.
@@ -432,7 +433,7 @@ fn run_exec_with_cancellation(
             && started.elapsed() >= limit
             && child_gone_at.is_none()
         {
-            terminate_process_tree(&term);
+            process_tree.terminate(&term);
             std::thread::sleep(SETTLE);
             while let Ok(bytes) = orx.try_recv() {
                 record_chunk(&mut recorder, &bytes);
@@ -455,65 +456,173 @@ fn run_exec_with_cancellation(
 /// tree before killing it so descendants cannot race by forking while it is
 /// being enumerated. Other Unix targets still kill the PTY process group, and
 /// every platform finishes with the portable-pty child handle.
-fn terminate_process_tree(term: &Terminal) {
-    let Some(root) = term.child_pid() else {
-        term.kill();
-        return;
-    };
+struct ExecProcessTree {
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut frozen = std::collections::HashSet::new();
-        // SAFETY: root is the positive PID returned by portable-pty.
-        unsafe {
-            libc::kill(root as libc::pid_t, libc::SIGSTOP);
+impl ExecProcessTree {
+    fn attach(_term: &Terminal) -> Self {
+        #[cfg(windows)]
+        let job = _term
+            .child_pid()
+            .and_then(|pid| match WindowsJob::attach(pid) {
+                Ok(job) => Some(job),
+                Err(error) => {
+                    log::warn!("kettle exec could not attach child {pid} to a Job Object: {error}");
+                    None
+                }
+            });
+        Self {
+            #[cfg(windows)]
+            job,
         }
-        frozen.insert(root);
-        // A small fixed-point loop bounds work under a hostile fork load while
-        // freezing every process as soon as it becomes visible.
-        for _ in 0..8 {
-            let mut discovered = linux_descendants(root, 4096);
-            discovered.push(root);
-            let before = frozen.len();
-            for pid in discovered {
-                if frozen.insert(pid) {
-                    // SAFETY: kill is called with a positive PID obtained from
-                    // procfs. Failure (already exited or permission denied) is
-                    // harmless and the portable child kill remains below.
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGSTOP);
+    }
+
+    fn terminate(&self, term: &Terminal) {
+        let Some(root) = term.child_pid() else {
+            term.kill();
+            return;
+        };
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut frozen = std::collections::HashSet::new();
+            // SAFETY: root is the positive PID returned by portable-pty.
+            unsafe {
+                libc::kill(root as libc::pid_t, libc::SIGSTOP);
+            }
+            frozen.insert(root);
+            // A small fixed-point loop bounds work under a hostile fork load while
+            // freezing every process as soon as it becomes visible.
+            for _ in 0..8 {
+                let mut discovered = linux_descendants(root, 4096);
+                discovered.push(root);
+                let before = frozen.len();
+                for pid in discovered {
+                    if frozen.insert(pid) {
+                        // SAFETY: kill is called with a positive PID obtained from
+                        // procfs. Failure (already exited or permission denied) is
+                        // harmless and the portable child kill remains below.
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGSTOP);
+                        }
                     }
                 }
+                if frozen.len() == before {
+                    break;
+                }
             }
-            if frozen.len() == before {
-                break;
+            for pid in frozen.iter().copied().filter(|pid| *pid != root) {
+                // SAFETY: as above; SIGKILL cannot invoke user handlers.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
             }
         }
-        for pid in frozen.iter().copied().filter(|pid| *pid != root) {
-            // SAFETY: as above; SIGKILL cannot invoke user handlers.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // portable-pty makes the child the leader of its terminal process
+            // group on Unix. A negative pid addresses that entire group.
+            if let Ok(group) = libc::pid_t::try_from(root) {
+                // SAFETY: group is a positive child PID; negating it selects only
+                // that child's process group.
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
             }
         }
+
+        #[cfg(windows)]
+        if let Some(job) = &self.job
+            && let Err(error) = job.terminate()
+        {
+            log::warn!("kettle exec could not terminate its Windows Job Object: {error}");
+        }
+
+        #[cfg(not(unix))]
+        let _ = root;
+
+        term.kill();
+    }
+}
+
+#[cfg(windows)]
+struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn attach(pid: u32) -> std::io::Result<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        // SAFETY: null attributes/name request a private unnamed job handle.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` has the exact structure and size required for the
+        // selected information class, and `job` remains valid for the call.
+        if unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        } == 0
+        {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(job) };
+            return Err(error);
+        }
+        // PROCESS_SET_QUOTA and PROCESS_TERMINATE are the documented rights
+        // required by AssignProcessToJobObject.
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(job) };
+            return Err(error);
+        }
+        let assigned = unsafe { AssignProcessToJobObject(job, process) };
+        unsafe { CloseHandle(process) };
+        if assigned == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(job) };
+            return Err(error);
+        }
+        Ok(Self(job))
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        // portable-pty makes the child the leader of its terminal process
-        // group on Unix. A negative pid addresses that entire group.
-        if let Ok(group) = libc::pid_t::try_from(root) {
-            // SAFETY: group is a positive child PID; negating it selects only
-            // that child's process group.
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
-            }
+    fn terminate(&self) -> std::io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: self owns a valid job handle until Drop. Termination reaches
+        // every process assigned directly or inherited through the job.
+        if unsafe { TerminateJobObject(self.0, EXIT_CANCELLED as u32) } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
         }
     }
+}
 
-    #[cfg(not(unix))]
-    let _ = root;
-
-    term.kill();
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        // SAFETY: WindowsJob exclusively owns this handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1015,6 +1124,58 @@ mod tests {
             !process_path.exists(),
             "detached descendant {pid} survived timeout"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timeout_terminates_a_windows_descendant_job() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("descendant.pid");
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\u{27}', "''");
+        let script = format!(
+            "$child = Start-Process -FilePath ping.exe -ArgumentList @('-n','30','127.0.0.1') -PassThru; \
+             [IO.File]::WriteAllText('{escaped_pid_file}', [string]$child.Id); \
+             Wait-Process -Id $child.Id"
+        );
+        let opts = ExecOpts {
+            argv: vec![
+                "powershell.exe".into(),
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_secs(2)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("PowerShell must record its descendant pid before timeout")
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: OpenProcess receives a recorded positive pid and only the
+        // synchronization right. The returned handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if process.is_null() {
+            return; // The process object was already fully reaped.
+        }
+        let exited = unsafe { WaitForSingleObject(process, 1000) } == WAIT_OBJECT_0;
+        unsafe { CloseHandle(process) };
+        assert!(exited, "Windows descendant {pid} survived Job termination");
     }
 
     #[test]

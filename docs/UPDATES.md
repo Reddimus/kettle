@@ -98,13 +98,18 @@ Windows device names, and declared/actual size mismatches are rejected. Updates
 acquire an install-prefix lock and atomically replace each destination on its own
 filesystem.
 
-When an archive contains `kettle-package-manifest.json`, Kettle additionally
-binds its product/version/target and every extracted regular file to an exact
-relative path, size, SHA-256, and Unix mode where applicable before staging is
-accepted.
-The v2.35 verifier is backward-compatible with earlier release archives that do
-not yet contain this inner package manifest; the signed feed's archive size and
-SHA-256 remain mandatory in either case.
+Linux and Windows update archives from v2.36 onward contain
+`kettle-package-manifest.json`. Kettle binds its product/version/target and
+every extracted regular file to an exact relative path, size, SHA-256, and Unix
+mode where applicable before staging is accepted. Release CI generates this
+inner manifest before packaging, then extracts the final downloaded artifact
+and verifies it again with `scripts/package-manifest.py` before signing or
+publication. The macOS `.app` is not installed by Kettle's self-updater and does
+not use this inner manifest.
+
+The verifier remains backward-compatible with release archives before v2.36
+that do not contain this inner package manifest; the signed feed's archive size
+and SHA-256 remain mandatory in either case.
 
 The schema-2 transaction journal records a transaction id, target version,
 durable phase (`prepared`, `applying`, `rolling_back`, or `committed`), and each

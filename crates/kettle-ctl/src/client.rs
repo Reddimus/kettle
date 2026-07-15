@@ -6,7 +6,7 @@
 //! `kettle ctl` and the `kettle mcp` bridge.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -231,9 +231,11 @@ impl Client {
                 "request line exceeds {MAX_LINE_BYTES} bytes"
             )));
         }
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+        let mut frame = line.into_bytes();
+        frame.push(b'\n');
+        self.writer
+            .write_all_until(&frame, deadline, cancelled)
+            .map_err(map_write_error)?;
         loop {
             let Some(line) = self.read_capped_line(Some(deadline), cancelled)? else {
                 return Err(CtlError::Io(std::io::Error::new(
@@ -421,6 +423,14 @@ fn call_timeout(method: &str, params: &Value) -> Duration {
     }
 }
 
+fn map_write_error(error: std::io::Error) -> CtlError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut => CtlError::TimedOut,
+        std::io::ErrorKind::Interrupted => CtlError::Cancelled,
+        _ => CtlError::Io(error),
+    }
+}
+
 fn parse_server_frame(line: &str) -> Result<ServerFrame, CtlError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|error| CtlError::Protocol(format!("malformed server frame: {error}")))?;
@@ -478,6 +488,7 @@ mod tests {
     use crate::protocol::Event;
     use crate::transport::CtlListener;
     use serde_json::json;
+    use std::io::Write as _;
 
     fn test_listener(tag: &str) -> (CtlListener, String) {
         static NEXT_ENDPOINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -781,5 +792,27 @@ mod tests {
             Err(CtlError::TimedOut)
         ));
         assert_eq!(client.next_id, 1);
+    }
+
+    #[test]
+    fn write_deadline_errors_keep_their_public_semantics() {
+        assert!(matches!(
+            map_write_error(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "deadline"
+            )),
+            CtlError::TimedOut
+        ));
+        assert!(matches!(
+            map_write_error(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled"
+            )),
+            CtlError::Cancelled
+        ));
+        assert!(matches!(
+            map_write_error(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "peer")),
+            CtlError::Io(error) if error.kind() == std::io::ErrorKind::BrokenPipe
+        ));
     }
 }

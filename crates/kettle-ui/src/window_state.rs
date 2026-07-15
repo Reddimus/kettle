@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use winit::dpi::PhysicalPosition;
-use winit::keyboard::ModifiersState;
+use winit::event::ElementState;
+use winit::keyboard::{ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Window};
 
 use kettle_render::Renderer;
@@ -25,6 +26,27 @@ use crate::app::{
     TitleEditState, ViState,
 };
 use crate::mux::Mux;
+
+/// Track key presses consumed by Kettle UI and swallow only their matching
+/// release. Kitty's event-type reporting makes releases observable by the
+/// child process, so letting a UI-owned press disappear while its release leaks
+/// would leave applications with an impossible input sequence.
+pub(crate) fn track_consumed_key_release(
+    suppressed: &mut std::collections::HashSet<PhysicalKey>,
+    physical_key: PhysicalKey,
+    state: ElementState,
+    press_consumed: bool,
+) -> bool {
+    match state {
+        ElementState::Pressed => {
+            if press_consumed {
+                suppressed.insert(physical_key);
+            }
+            false
+        }
+        ElementState::Released => suppressed.remove(&physical_key),
+    }
+}
 
 /// Multi-window cycle (Peacock): the accent this window resolved + claimed.
 pub(crate) struct WindowAccent {
@@ -50,6 +72,14 @@ pub(crate) struct WindowState {
     /// surface must go before the `Arc<Window>` it borrows from.
     pub(crate) renderer: Option<Renderer>,
     pub(crate) window: Option<Arc<Window>>,
+    /// Native accessibility bridge. Constructed while the window is still
+    /// hidden, before its first `set_visible(true)`.
+    pub(crate) accessibility: Option<accesskit_winit::Adapter>,
+    /// Accessibility updates are content-keyed and rate-limited so an active
+    /// AT-SPI/UIA client cannot turn terminal repaint throughput into unbounded
+    /// native accessibility traffic on the UI thread.
+    pub(crate) accessibility_key: Option<u64>,
+    pub(crate) accessibility_updated_at: Option<std::time::Instant>,
     /// Cycle 745: OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
@@ -63,6 +93,13 @@ pub(crate) struct WindowState {
     /// moving its panes between Muxes — the PTYs never notice.
     pub(crate) mux: Mux,
     pub(crate) mods: ModifiersState,
+    /// Physical keys whose press was consumed by Kettle UI/keybindings. Their
+    /// matching release must not leak to a Kitty-protocol client after the UI
+    /// state that consumed the press has already closed.
+    pub(crate) suppressed_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
+    /// Active input-method composition and its byte-indexed selection range.
+    /// Committed text is written to the PTY and this preedit is cleared.
+    pub(crate) ime_preedit: Option<(String, Option<(usize, usize)>)>,
     pub(crate) fullscreen: bool,
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) selecting: bool,
@@ -269,10 +306,15 @@ impl WindowState {
             seq,
             renderer: None,
             window: None,
+            accessibility: None,
+            accessibility_key: None,
+            accessibility_updated_at: None,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
             mux,
             mods: ModifiersState::empty(),
+            suppressed_key_releases: std::collections::HashSet::new(),
+            ime_preedit: None,
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
@@ -330,5 +372,63 @@ impl WindowState {
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn consumed_press_swallows_exactly_its_matching_release() {
+        let mut suppressed = std::collections::HashSet::new();
+        let consumed = PhysicalKey::Code(KeyCode::KeyK);
+        let unrelated = PhysicalKey::Code(KeyCode::KeyJ);
+
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            consumed,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(suppressed.contains(&consumed));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            unrelated,
+            ElementState::Released,
+            false
+        ));
+        assert!(track_consumed_key_release(
+            &mut suppressed,
+            consumed,
+            ElementState::Released,
+            false
+        ));
+        assert!(!suppressed.contains(&consumed));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            consumed,
+            ElementState::Released,
+            false
+        ));
+    }
+
+    #[test]
+    fn unconsumed_press_does_not_suppress_release() {
+        let mut suppressed = std::collections::HashSet::new();
+        let key = PhysicalKey::Code(KeyCode::KeyA);
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            key,
+            ElementState::Pressed,
+            false
+        ));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            key,
+            ElementState::Released,
+            false
+        ));
     }
 }

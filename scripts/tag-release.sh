@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Create and push a signed release tag only from synchronized protected main.
+# The tagger email and signing public key must belong to the GitHub account;
+# `git verify-tag` proves the local signature, while release CI additionally
+# requires GitHub's API to mark that signature verified.
 
 set -euo pipefail
 

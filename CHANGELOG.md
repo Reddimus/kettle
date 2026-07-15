@@ -6,6 +6,65 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.0] — 2026-07-14
+
+  ### Added
+  - **Progressive Kitty keyboard input is implemented end to end.** Kettle now
+    answers capability queries and emits the negotiated CSI-u press, repeat,
+    and release forms for text, navigation, keypad, function, modifier, media,
+    and volume keys. Alternate key codes and associated text are supported,
+    while applications that do not negotiate the protocol retain the existing
+    xterm-compatible input path. Keyboard flags and the bounded mode stack are
+    independent across primary and alternate screens.
+  - **Native input methods and accessibility bridges cover the terminal UI.**
+    IME composition is positioned and rendered at the focused terminal cursor,
+    committed text follows the same read-only, broadcast, selection, blink, and
+    scroll rules as keyboard input, and text-entry overlays accept IME commits.
+    AccessKit exposes the application and live pane tree, pane titles, visible
+    terminal text, focus, read-only state, and geometry through each platform's
+    native accessibility API. Semantic-change detection and a 10 Hz publication
+    ceiling keep high-output TUIs from overwhelming the UI thread when a native
+    accessibility client is active.
+  - **Release packages carry a second, content-level integrity manifest.**
+    Linux and Windows archives bind their exact product, version, target, file
+    set, sizes, SHA-256 hashes, and Unix modes where applicable. Release CI
+    verifies the generated manifest before compression and again after
+    extracting the final archive.
+
+  ### Fixed
+  - **Control requests cannot hang indefinitely while writing to a stalled
+    local peer.** Unix uses nonblocking sends with deadline-aware polling;
+    Windows uses operation-specific overlapped I/O, cancellation, and mandatory
+    kernel completion draining. Timeouts and MCP cancellation retain their
+    public error semantics.
+  - **Headless Windows command cancellation reaches descendant processes.**
+    `kettle exec` assigns its ConPTY child to a private Job Object configured to
+    terminate the tree on cancellation, timeout, or handle closure, with the
+    portable PTY kill retained as a fallback.
+  - **Consumed UI shortcuts no longer leak unmatched Kitty key releases.**
+    Physical presses owned by Kettle overlays or keybindings suppress only
+    their corresponding release and are cleared safely on focus loss.
+  - **Bottom input bars remain one line at narrow widths.** Search, command and
+    layout palettes, SSH/title prompts, confirmations, and update notices are
+    width-fitted with Unicode-aware truncation instead of wrapping into clipped
+    rows.
+  - **Kitty mode-stack overflow no longer corrupts terminal title state.** A
+    narrowly vendored `alacritty_terminal` patch evicts the oldest keyboard
+    mode, tracks direct flag changes, and preserves screen-local query state;
+    public parser regressions cover the patched behavior until upstream ships
+    an equivalent release.
+
+  ### Changed
+  - **Agent/TUI compatibility checks now exercise the real local toolchain.**
+    The smoke validates Kettle's PTY environment and Kitty query round trip,
+    Codex CLI, Claude Code CLI, clean and configured Neovim/AstroNvim, and tmux
+    with additive terminal features and progressive extended keys. Terminal
+    compatibility documentation now records the supported tmux configuration
+    and protocol behavior.
+  - **Release commits are signed.** The release helper now requires `git
+    commit -S`, matching the already signed release-tag path and GitHub's
+    verified-signature publication gate.
+
 ## [2.35.0] — 2026-07-14
 
   ### Fixed

@@ -1350,21 +1350,11 @@ impl Terminal {
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
             scrolling_history: history_limit,
-            // Cycle 798 (audit A2, critical): do NOT advertise the kitty
-            // keyboard protocol. With this `true`, alacritty_terminal replies
-            // to the `CSI ? u` progressive-enhancement query and honors
-            // `CSI > flags u` (setting DISAMBIGUATE_ESC_CODES / REPORT_*
-            // TermMode bits) — i.e. it tells programs "I encode keys in the
-            // kitty CSI-u format." But kettle's key encoder
-            // (`kettle-ui/src/input.rs::encode`) ONLY implements the legacy
-            // xterm encoding and never emits CSI-u. So an app that enabled the
-            // protocol (e.g. Neovim's kitty keyboard mode) would push its flags,
-            // think kettle speaks CSI-u, and then mis-read the legacy bytes it
-            // actually receives — broken/ambiguous key input. Until a real
-            // CSI-u encoder lands, the robust answer is to not advertise it:
-            // programs fall back to the legacy encoding `encode()` implements
-            // and tests, which is correct and unambiguous for the common keys.
-            kitty_keyboard: false,
+            // Kettle's winit input path implements Kitty's negotiated CSI-u
+            // protocol (including repeat/release, keypad identities, alternate
+            // keys, and associated text), so the engine may answer `CSI ? u`
+            // and honor the per-screen keyboard-mode stack.
+            kitty_keyboard: true,
             default_cursor_style,
             ..TermConfig::default()
         };
@@ -3130,6 +3120,25 @@ mod conformance {
         (t, p)
     }
 
+    fn kitty_keyboard_harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor, Rx) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let proxy = EventProxy::new(tx, waker);
+        let config = TermConfig {
+            kitty_keyboard: true,
+            ..TermConfig::default()
+        };
+        let term = Term::new(
+            config,
+            &TermSize {
+                columns: cols,
+                screen_lines: rows,
+            },
+            proxy,
+        );
+        (term, Processor::new(), rx)
+    }
+
     /// Concatenate everything the terminal wrote back to the PTY.
     fn drain_pty(rx: &Rx) -> String {
         let mut out = String::new();
@@ -3176,6 +3185,69 @@ mod conformance {
         // CUP: ESC[3;2H then write — 1-based row/col.
         feed(&mut t, &mut p, b"\x1b[3;2HX");
         assert_eq!(row_text(&t, 2), " X");
+    }
+
+    #[test]
+    fn kitty_keyboard_stack_caps_and_evicts_its_oldest_mode() {
+        let (mut term, mut processor, rx) = kitty_keyboard_harness(20, 5);
+
+        // The engine's maximum keyboard stack depth is 16. A seventeenth push
+        // used to remove index zero from the unrelated title stack, panicking
+        // when no title had ever been saved. Distinct modes also let us prove
+        // that the oldest keyboard entry, not the newest, was evicted.
+        for flags in 0..=16 {
+            feed(
+                &mut term,
+                &mut processor,
+                format!("\x1b[>{flags}u").as_bytes(),
+            );
+        }
+        feed(&mut term, &mut processor, b"\x1b[<15u\x1b[?u");
+
+        assert_eq!(drain_pty(&rx), "\x1b[?1u");
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        assert!(!term.mode().contains(TermMode::REPORT_EVENT_TYPES));
+    }
+
+    #[test]
+    fn kitty_keyboard_negotiation_applies_flags_and_is_screen_local() {
+        let (mut term, mut processor, rx) = kitty_keyboard_harness(20, 5);
+
+        // Query starts at zero. Replace with disambiguation, union event types,
+        // then remove disambiguation using the protocol's 1/2/3 apply modes.
+        feed(
+            &mut term,
+            &mut processor,
+            b"\x1b[?u\x1b[=1;1u\x1b[=2;2u\x1b[=1;3u\x1b[?u",
+        );
+        assert_eq!(drain_pty(&rx), "\x1b[?0u\x1b[?2u");
+        assert!(!term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        assert!(term.mode().contains(TermMode::REPORT_EVENT_TYPES));
+
+        // Push flag 4, then mutate the active stack entry with union mode.
+        // Queries must report the resulting flag set rather than stale stack
+        // state.
+        feed(&mut term, &mut processor, b"\x1b[>4u\x1b[=1;2u\x1b[?u");
+        assert_eq!(drain_pty(&rx), "\x1b[?5u");
+
+        // Main and alternate screens have independent keyboard modes and
+        // stacks. Main retains flags 1|4 while alternate starts empty,
+        // receives flag 8, and is discarded when DECRST 1049 returns to main.
+        feed(
+            &mut term,
+            &mut processor,
+            b"\x1b[?1049h\x1b[?u\x1b[>8u\x1b[?u\x1b[?1049l\x1b[?u",
+        );
+        assert_eq!(drain_pty(&rx), "\x1b[?0u\x1b[?8u\x1b[?5u");
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        assert!(term.mode().contains(TermMode::REPORT_ALTERNATE_KEYS));
+        assert!(!term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC));
+
+        // Popping the final entry resets all flags, as required by the
+        // protocol, even if a direct mode was active before the first push.
+        feed(&mut term, &mut processor, b"\x1b[<u\x1b[?u");
+        assert_eq!(drain_pty(&rx), "\x1b[?0u");
+        assert!(!term.mode().intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
     }
 
     /// Cycle 909 (R1): a selection made while scrolled back must read the

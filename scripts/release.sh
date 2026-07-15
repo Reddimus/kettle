@@ -16,7 +16,7 @@
 #   2. Asserts CHANGELOG.md has the target [VERSION] section.
 #   3. Bumps Cargo.toml's workspace `version`.
 #   4. Builds once to refresh Cargo.lock.
-#   5. Commits the bump + lock + already-committed CHANGELOG section.
+#   5. Signs and commits the bump + lock + already-committed CHANGELOG section.
 #   6. Leaves the release commit on the current branch for a pull request.
 #
 # `main` is intentionally never pushed or tagged by this script. Merge the
@@ -30,8 +30,10 @@
 #   3. Push the branch and merge its pull request after CI.
 #   4. On synchronized main: scripts/tag-release.sh 1.7.4
 #
-# `tag-release.sh` requires the configured GPG or SSH signing identity so
-# GitHub can verify the resulting annotated tag:
+# Release commits and `tag-release.sh` require a configured GPG or SSH signing
+# identity. The commit/tag email and public signing key must both be associated
+# with the GitHub account that publishes the release, or GitHub reports an
+# otherwise valid local signature as unverified:
 #
 #   git config gpg.format ssh
 #   git config user.signingkey ~/.ssh/id_ed25519.pub
@@ -308,7 +310,7 @@ for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
     fi
 done
 git add "${ADD_FILES[@]}"
-git commit -m "release: v${VERSION}
+git commit -S -m "release: v${VERSION}
 
 See CHANGELOG.md [${VERSION}]."
 MUTATIONS_STARTED=0
