@@ -433,8 +433,8 @@ mod windows_io {
     use super::*;
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND,
+        ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -467,7 +467,7 @@ mod windows_io {
             return Ok(0);
         }
         let len = buf.len().min(u32::MAX as usize) as u32;
-        run(file, None, None, |handle, overlapped| {
+        let result = run(file, None, None, |handle, overlapped| {
             // SAFETY: buffer and OVERLAPPED remain alive until `run` observes
             // completion, including after cancellation.
             unsafe {
@@ -479,7 +479,23 @@ mod windows_io {
                     overlapped,
                 )
             }
-        })
+        });
+        match result {
+            // Named pipes report an orderly peer close as a Win32 error. At
+            // the Read boundary this is EOF, matching synchronous File reads
+            // and the cross-platform `Read::read` contract.
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_BROKEN_PIPE as i32
+                            || code == ERROR_PIPE_NOT_CONNECTED as i32
+                ) =>
+            {
+                Ok(0)
+            }
+            result => result,
+        }
     }
 
     pub(super) fn write(
