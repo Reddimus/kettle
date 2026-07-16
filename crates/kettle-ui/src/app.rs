@@ -3646,7 +3646,7 @@ impl App {
             let pane = ws.mux.focused()?;
             (pane.term.child_pid()?, pane.term.current_dir())
         };
-        self.remote_scanner.refresh();
+        self.remote_scanner.refresh_roots(&[pid]);
         let mut shell = self.remote_scanner.foreground_shell(pid)?;
         // Cycle 917 (#2): assert the interactive-shell contract at the boundary.
         // The detector already rejects one-shot helpers, but re-checking here
@@ -6477,25 +6477,6 @@ impl App {
         }
         // Reflect the active pane (incl. after tab/focus switches).
         self.sync_window_title(ws);
-        // Advance the cursor blink phase (configurable half-period). Skip
-        // the increment when the active pane has DEC mode 12 cleared so the
-        // cursor sits solid — without this, vim-style "solid block while
-        // editing" requests are ignored even though the engine honored them.
-        let pane_blink_redraw = ws
-            .mux
-            .active_focus()
-            .and_then(|id| ws.mux.panes.get(&id))
-            .map(|p| p.term.cursor_blinking())
-            .unwrap_or(true);
-        if self.cfg.cursor_blink
-            && pane_blink_redraw
-            && ws.window_focused
-            && ws.last_blink.elapsed()
-                >= std::time::Duration::from_millis(self.cfg.cursor_blink_interval)
-        {
-            ws.blink_on = !ws.blink_on;
-            ws.last_blink = std::time::Instant::now();
-        }
         // Cycle 908: capture a just-exited pane's final output before reap drops
         // its sidechannel — otherwise the shell's last line is lost from the trace.
         #[cfg(feature = "dev-record")]
@@ -10273,9 +10254,13 @@ impl App {
         }
         self.last_remote_poll = Some(now);
         let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
+        let roots: Vec<u32> = pane_ids
+            .iter()
+            .filter_map(|id| ws.mux.panes.get(id)?.term.child_pid())
+            .collect();
         // Cycle 851: refresh the OS process snapshot + parent→children index
         // ONCE per tick, then query every pane against the shared index.
-        self.remote_scanner.refresh();
+        self.remote_scanner.refresh_roots(&roots);
         for id in pane_ids {
             let Some(pane) = ws.mux.panes.get(&id) else {
                 continue;
@@ -13903,6 +13888,26 @@ fn throttle_elapsed(
     last.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
+fn cursor_blink_active(configured: bool, pane_requests_blink: bool, window_focused: bool) -> bool {
+    configured && pane_requests_blink && window_focused
+}
+
+fn next_cursor_blink_phase(
+    active: bool,
+    elapsed: std::time::Duration,
+    interval: std::time::Duration,
+    current: bool,
+) -> Option<bool> {
+    (active && elapsed >= interval).then_some(!current)
+}
+
+fn normalized_ime_preedit(
+    text: String,
+    selection: Option<(usize, usize)>,
+) -> Option<(String, Option<(usize, usize)>)> {
+    (!text.is_empty()).then_some((text, selection))
+}
+
 /// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
 /// until `timeout` elapses. Returns `true` if the timeout was reached without
 /// `done` ever being observed set — i.e. the caller should treat the init as
@@ -17257,26 +17262,32 @@ impl App {
                 }
             }
             WindowEvent::Ime(ime) => {
-                match ime {
+                let redraw = match ime {
                     winit::event::Ime::Enabled => {
                         if let Some(window) = &ws.window {
                             window.set_ime_allowed(true);
                         }
                         self.update_ime_cursor_area(ws);
+                        false
                     }
                     winit::event::Ime::Preedit(text, selection) => {
-                        ws.ime_preedit = (!text.is_empty()).then_some((text, selection));
+                        let next = normalized_ime_preedit(text, selection);
+                        if ws.ime_preedit == next {
+                            return;
+                        }
+                        ws.ime_preedit = next;
                         self.update_ime_cursor_area(ws);
+                        true
                     }
                     winit::event::Ime::Commit(text) => {
+                        let redraw = ws.ime_preedit.is_some() || !text.is_empty();
                         ws.ime_preedit = None;
                         self.commit_ime_text(ws, &text, event_loop);
+                        redraw
                     }
-                    winit::event::Ime::Disabled => {
-                        ws.ime_preedit = None;
-                    }
-                }
-                if let Some(window) = &ws.window {
+                    winit::event::Ime::Disabled => ws.ime_preedit.take().is_some(),
+                };
+                if redraw && let Some(window) = &ws.window {
                     window.request_redraw();
                 }
             }
@@ -17692,10 +17703,27 @@ impl App {
                 w.request_redraw();
             }
         }
-        let blink_active = self.cfg.cursor_blink && ws.window_focused;
+        let pane_blink = ws
+            .mux
+            .active_focus()
+            .and_then(|id| ws.mux.panes.get(&id))
+            .map(|pane| pane.term.cursor_blinking())
+            .unwrap_or(true);
+        let blink_active =
+            cursor_blink_active(self.cfg.cursor_blink, pane_blink, ws.window_focused);
         let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
         let blink_elapsed = now.saturating_duration_since(ws.last_blink);
-        let blink_due = blink_active && blink_elapsed >= blink_interval;
+        let next_blink =
+            next_cursor_blink_phase(blink_active, blink_elapsed, blink_interval, ws.blink_on);
+        let blink_due = next_blink.is_some();
+        if let Some(next_blink) = next_blink {
+            // Advance at the TIMER edge, before request_redraw(). Wayland may
+            // defer RedrawRequested until a compositor frame callback; leaving
+            // the old timestamp in place during that gap repeatedly enqueues
+            // the same blink and drains the queue at full frame rate.
+            ws.blink_on = next_blink;
+            ws.last_blink = now;
+        }
         let term_anim = ws
             .mux
             .panes
@@ -18205,6 +18233,51 @@ mod tests {
             origin + interval,
             interval
         ));
+    }
+
+    #[test]
+    fn cursor_blink_wakes_only_when_config_pane_and_focus_allow_it() {
+        for configured in [false, true] {
+            for pane_requests_blink in [false, true] {
+                for focused in [false, true] {
+                    assert_eq!(
+                        super::cursor_blink_active(configured, pane_requests_blink, focused),
+                        configured && pane_requests_blink && focused
+                    );
+                }
+            }
+        }
+        let interval = std::time::Duration::from_millis(530);
+        assert_eq!(
+            super::next_cursor_blink_phase(
+                true,
+                interval - std::time::Duration::from_millis(1),
+                interval,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            super::next_cursor_blink_phase(true, interval, interval, true),
+            Some(false)
+        );
+        assert_eq!(
+            super::next_cursor_blink_phase(true, interval, interval, false),
+            Some(true)
+        );
+        assert_eq!(
+            super::next_cursor_blink_phase(false, interval * 10, interval, true),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_ime_preedit_normalizes_to_stable_absence() {
+        assert_eq!(super::normalized_ime_preedit(String::new(), None), None);
+        assert_eq!(
+            super::normalized_ime_preedit("compose".into(), Some((1, 4))),
+            Some(("compose".into(), Some((1, 4))))
+        );
     }
 
     #[test]
@@ -20034,8 +20107,18 @@ mod tests {
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         let body = &rest[..end];
         assert!(
-            body.contains("let blink_due = blink_active && blink_elapsed >= blink_interval"),
+            body.contains("next_cursor_blink_phase(")
+                && body.contains("let blink_due = next_blink.is_some()"),
             "about_to_wait must request a blink redraw only when the half-period elapsed"
+        );
+        let blink = body
+            .find("let next_blink =")
+            .expect("blink phase scheduling must exist");
+        let blink_body = &body[blink..];
+        assert!(
+            blink_body.find("ws.last_blink = now") < blink_body.find("w.request_redraw()"),
+            "advance the blink deadline before requesting a compositor frame so repeated \
+             about_to_wait callbacks cannot enqueue the same blink"
         );
         assert!(
             body.contains("blink_interval.saturating_sub(blink_elapsed)")

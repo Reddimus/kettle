@@ -400,7 +400,11 @@ text, so its bitmap is already resident).
   above), input encoding, search/SSH overlays, session save/restore,
   cursor-blink and visual-bell timers (scheduled via
   `ControlFlow::WaitUntil` only while something animates, so an idle
-  terminal does no work).
+  terminal does no work). Blink phase advances at the timer edge before the
+  redraw request, so a delayed Wayland frame callback cannot enqueue the same
+  phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
+  do not reposition IME or request another frame unless visible preedit state
+  actually changed.
 - **One reader thread per pane** — blocking `read()` on the PTY master →
   `Extractor::feed` → image/side-channel chunks recorded, text chunks driven
   into the `alacritty_terminal::Term` (behind a `Mutex` shared with the
@@ -507,8 +511,12 @@ runtime toggles).
 The most recent additions:
 
 - **kettle-remote crate** (SSH / Docker / Podman / kubectl / lxc
-  detection via sysinfo process-tree walk) — drives per-pane title
-  prefixes and the right-click "Clone session" entry.
+  detection) — drives per-pane title prefixes and the right-click "Clone
+  session" entry. Windows and macOS retain the cross-platform `sysinfo`
+  snapshot. Linux's app-loop scanner starts from the known PTY child PIDs and
+  follows only bounded `/proc/<pid>/task/<pid>/children` trees, reading at most
+  1 MiB per proc file and 4096 nodes per refresh; the public full-snapshot API
+  remains available for one-shot callers.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).

@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **Focused Wayland windows with developer recording enabled now return to
+    idle instead of redrawing at compositor rate.** Repeated empty IME preedit
+    notifications are state-deduplicated, cursor-blink deadlines advance before
+    a redraw is queued, and Linux remote-session detection walks only Kettle's
+    bounded pane-descendant `/proc` trees instead of refreshing every process
+    and thread on each eligible frame.
+
 ## [2.36.3] — 2026-07-16
 
   ### Fixed
