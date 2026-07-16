@@ -494,9 +494,10 @@ Separate workflows:
   repeats with prefix/record paths containing every Desktop Entry quoting edge
   (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
   checks. The original normal binary is restored for a simulated stable
-  release-tarball install. When the matching release tag exists, the script
-  also runs `install-online.sh` and verifies SHA-256 and prefix-local uninstall
-  behavior.
+  release-tarball install. When the matching release tag and platform asset are
+  both published, the script also runs `install-online.sh` and verifies SHA-256
+  and prefix-local uninstall behavior. A tag whose asset still returns 404 is
+  treated as an in-progress release; other asset-probe failures remain fatal.
 - `scripts/check-windows-installer.ps1` — runs on Windows CI after the release
   binary is built, installs to a throwaway custom prefix, verifies the portable
   install payload, then uninstalls through the saved helper without repeating

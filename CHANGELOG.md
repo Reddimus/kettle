@@ -13,6 +13,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     a redraw is queued, and Linux remote-session detection walks only Kettle's
     bounded pane-descendant `/proc` trees instead of refreshing every process
     and thread on each eligible frame.
+  - **Linux installer CI no longer deadlocks during the tag-to-assets release
+    window.** The published-release smoke waits for the platform asset as well
+    as its signed tag, while retaining fatal handling for non-404 probe errors.
 
 ## [2.36.3] — 2026-07-16
 
