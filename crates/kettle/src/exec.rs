@@ -1154,7 +1154,11 @@ mod tests {
             cols: 80,
             rows: 24,
             cwd: None,
-            timeout: Some(Duration::from_secs(2)),
+            // Hosted Windows runners can spend several seconds cold-starting
+            // Windows PowerShell after a large workspace build. The fixture
+            // must reach WriteAllText before Kettle fires the timeout or the
+            // test never observes the descendant it is meant to validate.
+            timeout: Some(Duration::from_secs(10)),
             mode: OutputMode::Raw,
             record: None,
             forward_stdin: false,
