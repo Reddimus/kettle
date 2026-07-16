@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.3] — 2026-07-16
+
   ### Fixed
   - **Tearing a tab into a second window no longer disconnects Kettle on
     Wayland.** Linux file notifications report config reads as access events;
