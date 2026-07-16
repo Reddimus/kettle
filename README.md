@@ -249,9 +249,12 @@ kettle --screenshot OUT.png # render a representative frame offscreen and exit (
 ```
 
 Fatal GPU errors are recovered in process without restarting panes. Fault-only
-JSONL diagnostics are retained under the per-user cache
-(`%LOCALAPPDATA%\kettle\diagnostics\` on Windows); they contain adapter and
-recovery metadata, never terminal contents.
+GPU JSONL records and event-loop stall/exit JSON records are retained under the
+per-user cache (`%LOCALAPPDATA%\kettle\diagnostics\` on Windows,
+`$XDG_CACHE_HOME/kettle/diagnostics/` on Unix). They contain bounded adapter,
+backend, phase, timing, and window-count metadata—never terminal contents,
+commands, environment values, or user paths. `RUST_LOG` controls both `log` and
+`tracing` events, including winit/Wayland protocol failures.
 
 ## Default keybindings (Terminator-compatible)
 

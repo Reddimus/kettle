@@ -43,9 +43,9 @@ Three cross-cutting changes:
      render pass each screenshot).
    - Or hook into the existing `render_frame` path with an optional
      readback flag that fires once per screenshot trigger (lower
-     overhead, but requires a new state machine: queue screenshot
-     request → next render takes the slow path → after present,
-     copy texture to staging buffer → map-async → PNG write).
+     overhead, but requires a state machine: queue screenshot request →
+     next render copies the surface in its normal submission → a bounded
+     worker waits, maps, and writes the PNG).
    - Decision: the second approach. One frame's worth of latency is
      fine for a user-triggered screenshot. The hot path stays unchanged.
 
@@ -62,9 +62,10 @@ Three cross-cutting changes:
      they see on-screen; sub-pixel border slop is fine.
 
 3. **Toast / notification path**. We already have notify-rust + the
-   cycle-612 desktop notification surface. After PNG write succeeds,
-   fire a notification with body "Saved to <path>" so the user knows
-   where it landed.
+   cycle-612 desktop notification surface. The interactive action reports
+   that the capture was queued and its destination; control-plane callers get
+   the worker's exact completion result. A second in-flight request is rejected
+   explicitly instead of replacing the first.
 
 ## Architecture
 
@@ -73,10 +74,11 @@ Three cross-cutting changes:
 │ kettle_ui::app::App (Action::TakeScreenshot dispatch)                │
 │                                                                      │
 │  on action:                                                          │
-│    self.pending_screenshot = Some(ScreenshotRequest {                │
-│        path: session_screenshot_path(unix_secs, pid, cache),         │
+│    renderer.set_pending_screenshot(ScreenshotRequest {               │
+│        out_path: session_screenshot_path(unix_secs, pid, cache),     │
 │        crop: self.mux.focused_pane_rect(),                           │
-│    });                                                               │
+│        completion: optional control-plane sender,                    │
+│    })?;  // BUSY if one is pending or in flight                      │
 │    self.window.request_redraw();  ← forces next paint                │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
@@ -84,25 +86,24 @@ Three cross-cutting changes:
 ┌──────────────────────────────────────────────────────────────────────┐
 │ kettle_render::Renderer::render_frame (extended)                     │
 │                                                                      │
-│  if let Some(req) = take_pending_screenshot():                       │
-│    render to intermediate texture (instead of swapchain only)        │
-│    issue copy_texture_to_buffer(crop_rect)                           │
-│    after queue.submit:                                               │
-│      staging_buf.map_async(MapMode::Read, cb)                        │
-│      when cb fires (next frame typically):                           │
-│        encode PNG from mapped bytes                                  │
-│        write to req.path                                             │
-│        send Toast(req.path) event back to App                        │
+│  if let Some(req) = pending_screenshot.take():                       │
+│    copy the acquired surface into a capped staging buffer            │
+│    queue.submit(draw + copy)                                         │
+│    hand {device, submission, staging, req} to one lazy worker        │
+│    call Window::pre_present_notify, then present                      │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ App handles ToastEvent → fire_notify("Screenshot saved", req.path)   │
+│ Screenshot worker (never the winit event-loop thread)                │
+│  finite GPU wait → map → validate rows → BGRA/RGBA → crop → PNG      │
+│  log result + answer optional control-plane completion sender         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-`Renderer::take_pending_screenshot()` is a tiny getter; the queue lives
-in a `Mutex<Option<ScreenshotRequest>>` on the renderer.
+The queue is a single `Option<ScreenshotRequest>` owned on the event-loop
+thread. The worker uses a capacity-one synchronous channel and atomic busy
+latch. Readback is capped at 256 MiB and the GPU wait at five seconds.
 
 The PNG encoder is the same crate used by the existing `capture_png`
 function (cycle X) — `image` is already a transitive dep via
@@ -154,17 +155,15 @@ $ xdg-open ~/.cache/kettle/shots/kettle-*.png
 
 ## Risks + mitigations
 
-- **Risk:** wgpu readback can be slow on integrated GPUs (~10 ms).
-  **Mitigation:** screenshot is user-triggered, not on the hot path.
-  One frame of latency is acceptable.
-- **Risk:** PNG encode blocks the render thread.
-  **Mitigation:** spawn a tokio task / std::thread to do the encode
-  + write off the render thread. The mapped buffer is owned by the
-  task; renderer unblocks immediately.
-- **Risk:** mapped-buffer leak if the user closes kettle mid-encode.
-  **Mitigation:** put the task in a JoinSet tracked by the renderer;
-  on shutdown, abort the joinset (the kernel reaps the leaked staging
-  buffer when the wgpu device drops).
+- **Risk:** wgpu readback can be slow or a driver can stop completing work.
+  **Mitigation:** one bounded worker owns a finite five-second wait; the winit
+  event loop submits and presents without waiting.
+- **Risk:** repeated capture requests grow staging memory or overwrite a
+  completion channel. **Mitigation:** exactly one request may be pending or in
+  flight; later callers receive a busy result.
+- **Risk:** mapped-buffer cleanup when the user closes kettle mid-encode.
+  **Mitigation:** the worker owns the job and staging buffer to completion; a
+  process exit lets wgpu/the OS release them, with no detached borrowed state.
 - **Risk:** image crate version skew with the headless `capture_png`
   path. **Mitigation:** share the encoder helper between the two
   paths — single image-crate import location.

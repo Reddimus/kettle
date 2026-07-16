@@ -120,7 +120,10 @@ discipline here.
   asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
   pixels appear in the menu area — catches the v1.3.0/v1.3.1
   blank-menu render-pass-order regression class that bare logic
-  tests can't see.
+  tests can't see. Live-screenshot unit coverage verifies whole-frame
+  preservation, exact row/column cropping, out-of-surface rejection, and
+  truncated-source rejection; the native live smoke exercises the asynchronous
+  readback path.
 
 - **kettle-ui** (270+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
@@ -144,6 +147,9 @@ discipline here.
   symlink refusal, permission tightening, and corruption/oversize backup
   contracts; xterm modifier encoding + paste payload bracketing +
   injection-guard.
+  Runtime-diagnostic tests verify control-character stripping, message bounds,
+  private Unix directory/file modes, and ten-record rotation without needing a
+  live event loop.
 
 - **Multi-window (v2.18.0, cross-crate)**: the tab tear-off drag is a
   pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no

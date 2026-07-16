@@ -37,7 +37,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 # emitted by `kettle --print-completions <shell>`. clap_complete
 # tracks clap itself so the MSRV constraints are aligned.
 clap_complete = "4.6"
-env_logger.workspace = true
 kettle-config.workspace = true
 # Cycle 922 (agent-first A1): `kettle exec` drives a real PTY headlessly
 # (no GPU/window) via kettle-core directly — construct `Terminal`, stream the
@@ -53,6 +52,7 @@ kettle-ctl.workspace = true
 kettle-render.workspace = true
 kettle-update.workspace = true
 kettle-ui.workspace = true
+tracing-subscriber.workspace = true
 log.workspace = true
 notify-rust.workspace = true
 serde.workspace = true

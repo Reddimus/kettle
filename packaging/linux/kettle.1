@@ -700,12 +700,13 @@ is given.
 .TP
 .B RUST_LOG
 Standard
-.B env_logger
+.B tracing-subscriber EnvFilter
 filter (e.g.
 .IR info ", " debug ", " "kettle=trace" ).
 Default
 .I warn
-surfaces session-restore failures + GPU init errors on stderr.
+surfaces session-restore failures, GPU init errors, and winit/Wayland protocol
+failures on stderr.
 .TP
 .B XDG_CONFIG_HOME
 Linux/Unix config root (default
