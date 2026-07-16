@@ -6,10 +6,10 @@ artifacts.
 
 ## Current baseline
 
-- Latest release: `v2.36.1`
-- Current workspace version: `2.36.1`
-- Release records inspected: 133 Git tags and 133 changelog headings, from
-  `v0.1.0` through `v2.36.1`
+- Latest release: `v2.36.2`
+- Current workspace version: `2.36.2`
+- Release records inspected: 134 Git tags and 134 changelog headings, from
+  `v0.1.0` through `v2.36.2`
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
@@ -31,7 +31,7 @@ artifacts.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.36.1` (2026-06-19 to 2026-07-15): cwd-aware titles and
+- `v2.29.0` to `v2.36.2` (2026-06-19 to 2026-07-16): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
   keyboard text selection, package-template lockstep, bounded/private recording
   retention, graphics-resource accounting, hardened control/MCP and durable
