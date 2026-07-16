@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.1] — 2026-07-15
+
+  ### Fixed
+  - **Opening Kettle a second time no longer creates an unnecessary second GUI
+    process.** An argument-free desktop or Super-key launch now asks the
+    existing primary process to create a fresh OS window through private,
+    same-user, size- and deadline-bounded local IPC. The secondary exits only
+    after the winit thread confirms that the renderer, shell, and window are
+    live; incompatible, busy, malformed, or failed handoffs open a separate
+    process so a launcher click is never lost. Explicit CLI launches remain
+    isolated, and `--new-process` forces isolation for a default launch.
+  - **Wayland frame presentation follows winit's required lifecycle.** Every
+    submitted surface frame now calls the pre-present notification immediately
+    before presentation, avoiding compositor timing/protocol failures during
+    multi-window activity. Live screenshots no longer wait indefinitely for
+    GPU readback on the UI thread: a single bounded worker performs a finite
+    wait, mapping, crop, and PNG write without stalling terminal input or
+    compositor dispatch.
+  - **Wayland disconnects and event-loop stalls retain actionable diagnostics.**
+    Kettle bridges winit/tracing events into its configured log filter and
+    writes privacy-safe, bounded runtime phase incidents plus exit context to a
+    private rotating state directory. Diagnostics exclude terminal contents,
+    command lines, environment values, and working paths.
+
+  ### Changed
+  - **Developer recording remains policy-consistent across launcher
+    activation.** The handshake compares a bounded destination fingerprint and
+    raw-input policy without transmitting the recording path. Compatible
+    windows share the live recorder and emit a `kettle:activation_window`
+    marker; a recorder mismatch or stopped recorder falls back to an isolated
+    process instead of silently changing capture or redaction behavior.
+
 ## [2.36.0] — 2026-07-14
 
   ### Added
