@@ -167,7 +167,10 @@ discipline here.
   legacy single-window files; and the **exit-allowlist drift guard**
   (`event_loop_exit_sites_are_allowlisted`, kettle-ui) pins the only
   code paths allowed to terminate the process, now that closing one
-  window must leave the others running.
+  window must leave the others running. Bare-launch activation tests cover
+  private lock/socket permissions, first-process election, matching handoff,
+  incompatible recorder identity, bounded request validation, UI rejection
+  fallback, and the `--new-process`/explicit-argument bypass contract.
 
 - **kettle** (binary, 50+ tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105

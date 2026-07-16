@@ -144,7 +144,9 @@ Since v2.18.0 kettle has the cross-window coordinator too: every window
 lives in one process, owned by `App`'s `windows: BTreeMap<u64, WindowState>`
 map (`crates/kettle-ui/src/window_state.rs`) — the in-process equivalent of
 Terminator's Borg singleton. (cycle-302 file IPC still bridges *separate*
-kettle processes.)
+kettle processes.) Bare GUI launches now elect a per-user primary over private
+local IPC and ask it to open a new in-process window; explicit launches remain
+separate, with `--new-process` as the default-launch escape hatch.
 
 ### `terminatorlib/window.py` — top-level GTK Window
 

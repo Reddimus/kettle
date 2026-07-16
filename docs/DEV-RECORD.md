@@ -77,6 +77,14 @@ local development marker so it cannot replace a feature build with a public
 binary and silently disable recording. Re-run `just install-local-dev-record`
 from the checkout to update the installed development build.
 
+Bare Super-key/desktop launches join the existing primary Kettle process and
+open another window in its shared recording. The activation handshake compares
+a bounded fingerprint of the file/directory target plus the raw-input policy;
+it never transmits the recording path. A mismatch opens a separate process
+instead of silently recording to the wrong destination or changing redaction.
+Use `kettle --new-process` when an intentionally isolated default session is
+needed.
+
 > **Shared recorder.** The trace writer now lives in `kettle-core` behind the
 > `asciicast` feature, so it backs two front-ends: the GUI's `--record` (full
 > trace — output, input tokens, and `m` markers) and the new headless

@@ -298,6 +298,13 @@ struct Cli {
     #[arg(long = "working-directory", short = 'd', value_name = "DIR")]
     working_directory: Option<std::path::PathBuf>,
 
+    /// Start a separate Kettle process even when a primary bare-launch process
+    /// is available. Any launch with explicit arguments already starts
+    /// separately; this flag is the explicit escape hatch for an otherwise
+    /// default launch.
+    #[arg(long)]
+    new_process: bool,
+
     /// Launch into a named layout (Terminator parity). Saves +
     /// restores from `<config-dir>/layouts/<NAME>.json` so a user
     /// can maintain distinct workspaces ("dev", "ops", "docs")
@@ -645,6 +652,12 @@ fn init_logging() {
         .init();
 }
 
+fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
+    let mut args = args.into_iter();
+    let _program = args.next();
+    args.next().is_none()
+}
+
 /// Cycle 741: compute where a crash report is written, in addition to
 /// stderr. Pure + env-injected so it is unit-testable, mirroring
 /// `home_dir_fallback` in kettle-core. Uses the platform STATE dir (crash
@@ -713,6 +726,44 @@ fn resolve_record_target(
     } else {
         nonempty_env(directory_env).map(RecordingTarget::Directory)
     }
+}
+
+#[cfg(feature = "dev-record")]
+fn recording_activation_key(target: &kettle_core::record::RecordingTarget) -> String {
+    use kettle_core::record::RecordingTarget;
+
+    let (kind, path) = match target {
+        RecordingTarget::File(path) => ("file", path),
+        RecordingTarget::Directory(path) => ("dir", path),
+    };
+    let absolute = if path.is_absolute() {
+        path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.clone())
+    };
+    format!("{kind}:{:016x}", stable_path_hash(&absolute))
+}
+
+#[cfg(feature = "dev-record")]
+fn stable_path_hash(path: &std::path::Path) -> u64 {
+    #[cfg(unix)]
+    let bytes: Vec<u8> = {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(windows)]
+    let bytes: Vec<u8> = {
+        use std::os::windows::ffi::OsStrExt as _;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
+    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 /// Cycle 741: install a `panic = "abort"`-safe panic hook as the very first
@@ -937,6 +988,7 @@ fn main() -> anyhow::Result<()> {
     // the user has bumped logging (`RUST_LOG=info kettle …`); on the
     // default filter it stays out of the way.
     log::info!("kettle {KETTLE_VERSION} starting");
+    let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let cli = Cli::parse();
 
     // Cycle 922 (agent-first): subcommands are self-contained non-GUI entry
@@ -1640,7 +1692,52 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("-e/--exec: program name is empty");
     }
+    #[cfg(feature = "dev-record")]
+    let record = resolve_record_target(
+        cli.record,
+        cli.record_dir,
+        std::env::var_os("KETTLE_RECORD"),
+        std::env::var_os("KETTLE_RECORD_DIR"),
+    );
+    #[cfg(feature = "dev-record")]
+    let record_raw_input = cli.record_raw_input
+        || std::env::var("KETTLE_RECORD_RAW_INPUT")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+    let activation_identity = kettle_ctl::activation::LaunchIdentity {
+        #[cfg(feature = "dev-record")]
+        recording_key: record.as_ref().map(recording_activation_key),
+        #[cfg(not(feature = "dev-record"))]
+        recording_key: None,
+        #[cfg(feature = "dev-record")]
+        record_raw_input: record.is_some() && record_raw_input,
+        #[cfg(not(feature = "dev-record"))]
+        record_raw_input: false,
+    };
+    let activation = if bare_gui_launch && !cli.new_process {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string));
+        let request = kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity);
+        match kettle_ctl::activation::activate_or_elect(request) {
+            Ok(kettle_ctl::activation::ActivationOutcome::Activated) => return Ok(()),
+            Ok(kettle_ctl::activation::ActivationOutcome::Primary(primary)) => Some(primary),
+            Ok(kettle_ctl::activation::ActivationOutcome::Standalone) => None,
+            Err(error) => {
+                log::warn!("bare-launch activation unavailable: {error}; opening separately");
+                None
+            }
+        }
+    } else {
+        None
+    };
     kettle_ui::run_with(kettle_ui::Options {
+        activation,
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         // Dropdown-parity cycle: the About panel shows exactly what
         // `--version` prints (crate version + git hash).
@@ -1663,26 +1760,13 @@ fn main() -> anyhow::Result<()> {
         tab_handoff: cli.tab_handoff,
         tab_handoff_fd: cli.tab_handoff_fd,
         #[cfg(feature = "dev-record")]
-        record: resolve_record_target(
-            cli.record,
-            cli.record_dir,
-            std::env::var_os("KETTLE_RECORD"),
-            std::env::var_os("KETTLE_RECORD_DIR"),
-        ),
+        record,
         // Cycle 916 (file-by-file audit): bool-PARSE the env var — `is_some()`
         // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
         // enabling raw keystroke (password) capture into the trace. Only an
         // explicit truthy value enables it. (dev-record feature only.)
         #[cfg(feature = "dev-record")]
-        record_raw_input: cli.record_raw_input
-            || std::env::var("KETTLE_RECORD_RAW_INPUT")
-                .map(|v| {
-                    matches!(
-                        v.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                })
-                .unwrap_or(false),
+        record_raw_input,
     })
 }
 
@@ -1883,9 +1967,29 @@ mod window_state_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod activation_cli_tests {
+    use super::{Cli, is_bare_gui_argv};
+    use clap::Parser as _;
+
+    #[test]
+    fn only_an_argument_free_launch_is_bare() {
+        assert!(is_bare_gui_argv(["kettle"]));
+        assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
+        assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
+        assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    #[test]
+    fn new_process_escape_hatch_parses() {
+        let cli = Cli::try_parse_from(["kettle", "--new-process"]).unwrap();
+        assert!(cli.new_process);
+    }
+}
+
 #[cfg(all(test, feature = "dev-record"))]
 mod record_target_tests {
-    use super::{Cli, resolve_record_target};
+    use super::{Cli, recording_activation_key, resolve_record_target};
     use clap::Parser;
     use kettle_core::record::RecordingTarget;
     use std::path::PathBuf;
@@ -1954,6 +2058,20 @@ mod record_target_tests {
         let cli = Cli::try_parse_from(["kettle", "--record-dir", "missing traces"]).unwrap();
         assert_eq!(cli.record, None);
         assert_eq!(cli.record_dir, Some(PathBuf::from("missing traces")));
+    }
+
+    #[test]
+    fn activation_key_is_stable_bounded_and_target_sensitive() {
+        let file = recording_activation_key(&RecordingTarget::File(PathBuf::from("trace.cast")));
+        let same = recording_activation_key(&RecordingTarget::File(PathBuf::from("trace.cast")));
+        let directory =
+            recording_activation_key(&RecordingTarget::Directory(PathBuf::from("trace.cast")));
+        let other = recording_activation_key(&RecordingTarget::File(PathBuf::from("other.cast")));
+        assert_eq!(file, same);
+        assert!(file.starts_with("file:"));
+        assert!(file.len() <= 32);
+        assert_ne!(file, directory);
+        assert_ne!(file, other);
     }
 }
 

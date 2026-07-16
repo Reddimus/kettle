@@ -105,6 +105,18 @@ winit window, its renderer, its `Mux` tab/split tree, input + overlay
 state) lives in `WindowState`, while `App` keeps the process globals
 (config, event-loop proxy, ctl server, Lua VM).
 
+A no-argument GUI launch first uses the private activation endpoint under the
+per-user runtime/state directory. One advisory lock elects a primary; the
+endpoint accepts only a versioned `open_window` request capped at 8 KiB and
+verifies same-user peers. A capacity-32 handoff reaches the winit thread, and
+the secondary exits only after that thread confirms OS-window creation. A busy,
+incompatible, timed-out, or failed request falls back to a separate process so
+a launcher click is never discarded. Any explicit argument bypasses activation;
+`--new-process` provides a discoverable isolation escape hatch for an otherwise
+default launch. Dev-record builds also compare a bounded path fingerprint and
+raw-input policy before joining, preventing recording-policy drift without
+putting a user path on the wire.
+
 - **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
   remove the addressed window from the map, run the inner handlers with
   disjoint `&mut App` + `&mut WindowState` borrows, then reinsert it.

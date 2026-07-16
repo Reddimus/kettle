@@ -292,6 +292,9 @@ fn ctl_page_values(
 pub enum UserEvent {
     Wakeup,
     ReloadConfig,
+    /// A compatible bare Kettle launch asked this primary process to open a
+    /// fresh OS window. The bounded inbox carries the request and completion.
+    Activation,
     /// Cycle 302 remote control: the remote-command file changed and
     /// the watcher needs the main thread to read + process new lines.
     /// One event per change (notify coalesces consecutive writes), so
@@ -1631,6 +1634,14 @@ fn effective_record_status(
     recorder.or(start_failed.then_some(crate::dev_record::RecordStatus::IoError))
 }
 
+#[cfg(feature = "dev-record")]
+fn activation_recording_available(
+    required: bool,
+    status: Option<crate::dev_record::RecordStatus>,
+) -> bool {
+    !required || status == Some(crate::dev_record::RecordStatus::Recording)
+}
+
 fn window_title_with_home(
     template: &str,
     pane_title: &str,
@@ -2897,6 +2908,10 @@ pub struct App {
     #[cfg(feature = "dev-record")]
     recording_error_reported: bool,
     proxy: EventLoopProxy<UserEvent>,
+    /// Private, bounded bare-launch activation inbox. The IPC thread waits for
+    /// this event-loop thread to confirm window creation before telling the
+    /// secondary launcher it may exit.
+    activation: Option<crate::activation_server::ActivationInbox>,
     /// Privacy-safe event-loop phase tracker. A separate watchdog records a
     /// bounded incident when a callback stops making progress; it never
     /// captures terminal contents, command lines, or paths.
@@ -3095,14 +3110,61 @@ impl App {
         self.windows.insert(seq, ws);
     }
 
+    fn drain_activation_requests(&mut self, event_loop: &ActiveEventLoop) {
+        // Keep requests queued while window 1 is still creating the shared GPU
+        // context. `resumed` calls this again immediately after initialization.
+        if self.gpu.is_none() {
+            return;
+        }
+        let pending = self
+            .activation
+            .as_ref()
+            .map(crate::activation_server::ActivationInbox::drain)
+            .unwrap_or_default();
+        for request in pending {
+            #[cfg(feature = "dev-record")]
+            if !activation_recording_available(
+                request.request.requires_recording(),
+                self.recording_status(),
+            ) {
+                log::warn!(
+                    "bare-launch activation rejected because the requested dev recorder is not active"
+                );
+                let _ = request.completion.send(false);
+                continue;
+            }
+            let cwd = request.request.cwd().map(str::to_string);
+            let opened = self
+                .open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
+                .is_ok();
+            if opened {
+                log::info!("bare-launch activation opened a new window");
+                #[cfg(feature = "dev-record")]
+                if let Some(recorder) = self.recorder.as_mut() {
+                    recorder.record_marker("kettle:activation_window");
+                }
+            }
+            let _ = request.completion.send(opened);
+        }
+    }
+
     pub fn run() -> Result<()> {
         Self::run_with(crate::Options::default())
     }
 
-    pub fn run_with(startup: crate::Options) -> Result<()> {
+    pub fn run_with(mut startup: crate::Options) -> Result<()> {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
+        let activation = startup.activation.take().and_then(|primary| {
+            match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
+                Ok(inbox) => Some(inbox),
+                Err(error) => {
+                    log::warn!("bare-launch activation server unavailable: {error}");
+                    None
+                }
+            }
+        });
 
         // Watch the chosen config file's directory for live reload.
         // Cycle 151: filter notify events by path so we only reload
@@ -3370,6 +3432,7 @@ impl App {
             #[cfg(feature = "dev-record")]
             recording_error_reported: false,
             proxy,
+            activation,
             runtime_tracker,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Cycle 928 (agent-first A2): server is started later in `resumed`
@@ -13803,6 +13866,7 @@ impl ApplicationHandler<UserEvent> for App {
         };
         self.resumed_inner(&mut ws, event_loop);
         self.finish_window_dispatch(event_loop, seq, ws);
+        self.drain_activation_requests(event_loop);
         runtime_tracker.set_window_count(self.windows.len());
     }
 
@@ -13810,6 +13874,7 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
+            UserEvent::Activation => self.drain_activation_requests(el),
             // C4: PTY wakeups carry no pane id and config reloads re-style
             // everything — fan these out to every window. The Wakeup arm
             // gates per window on the panes' output generations, so only
@@ -15717,6 +15782,9 @@ impl App {
 
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
+            // Consumed by the outer window-less dispatch before a WindowState
+            // is checked out.
+            UserEvent::Activation => {}
             UserEvent::Wakeup => {
                 // C4: wakeups fan out to every window; skip windows whose
                 // panes produced no output since their last paint (plain
@@ -20621,7 +20689,7 @@ mod tests {
     fn recording_window_title_suffix_is_ascii_safe() {
         use super::{
             RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX, RECORDING_TITLE_SUFFIX,
-            effective_record_status, recording_window_title,
+            activation_recording_available, effective_record_status, recording_window_title,
         };
         use crate::dev_record::RecordStatus;
 
@@ -20634,6 +20702,19 @@ mod tests {
             effective_record_status(Some(RecordStatus::LimitReached), true),
             Some(RecordStatus::LimitReached)
         );
+        assert!(activation_recording_available(false, None));
+        assert!(activation_recording_available(
+            true,
+            Some(RecordStatus::Recording)
+        ));
+        assert!(!activation_recording_available(
+            true,
+            Some(RecordStatus::LimitReached)
+        ));
+        assert!(!activation_recording_available(
+            true,
+            Some(RecordStatus::IoError)
+        ));
         assert_eq!(recording_window_title("kettle".to_string(), None), "kettle");
         assert_eq!(
             recording_window_title("kettle".to_string(), Some(RecordStatus::Recording)),
