@@ -630,6 +630,21 @@ fn reset_sigpipe() {
 #[cfg(not(unix))]
 fn reset_sigpipe() {}
 
+/// Install one subscriber for both `log` and `tracing` events. Winit reports a
+/// Wayland dispatch failure through `tracing`, so a log-only initializer loses
+/// the protocol error and leaves callers with only `Exit Failure: 1`.
+fn init_logging() {
+    use std::io::IsTerminal as _;
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
 /// Cycle 741: compute where a crash report is written, in addition to
 /// stderr. Pure + env-injected so it is unit-testable, mirroring
 /// `home_dir_fallback` in kettle-core. Uses the platform STATE dir (crash
@@ -872,14 +887,14 @@ fn main() -> anyhow::Result<()> {
     // Cycle 868: under the GUI subsystem (see the crate-root attribute), a
     // terminal launch must attach the parent console so CLI subcommands print;
     // an Explorer/Start-menu launch has no parent console and stays windowed
-    // (no console at all). MUST run before any stdout/stderr use (env_logger /
+    // (no console at all). MUST run before any stdout/stderr use (logging /
     // println!) so the std handles are wired first.
     attach_parent_console_if_needed();
     // Cycle 741: capture panics (message + backtrace) to stderr AND a crash
     // log under the state dir — early so even an early panic lands.
     install_panic_hook();
     reset_sigpipe();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    init_logging();
     if kettle_update::is_pending_update_helper_invocation() {
         std::process::exit(match kettle_update::run_pending_update_helper() {
             Ok(()) => 0,

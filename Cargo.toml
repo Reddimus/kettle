@@ -84,7 +84,7 @@ kettle-ui = { path = "crates/kettle-ui", version = "2.36.0" }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
-env_logger = "0.11"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 regex = "1"

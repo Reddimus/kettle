@@ -319,7 +319,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `custom_commands.py` | Custom menu items | A | cycle-611 `menu-item = LABEL = CMD` config + cycle-375 Lua `kettle.add_menu_item` |
 | ~~`remote.py`~~ | SSH/Docker/Podman session detection | A | cycles 629 (design) + 639 + 643-646 + 655-658 — 7/7 sub-cycles complete. `kettle-remote` crate with sysinfo-backed BFS process-tree walk, SSH + Container detectors (22 argv shapes covered), `Terminal::child_pid()`, App's 5 Hz poll loop, pane-title flip on detect change, right-click "Reconnect" menu entry. Deployed at cycle-657. | cycle-658 |
 | `logger.py` | Log terminal output to file | A | cycle-621 `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
-| ~~`terminalshot.py`~~ | Screenshot focused terminal | A | cycles 640 + 650 + 654 + 688 + 689 — 7/7 sub-cycles complete + deployed. `Action::TakeScreenshot` (4 aliases) → `session_screenshot_path(secs, pid, cache)` → cycle-654 `ScreenshotRequest { out_path, crop }` queued on `Renderer::pending_screenshot` → cycle-688 `capture_live_surface` does the wgpu `copy_texture_to_buffer` + `map_async` + BGRA→RGBA + PNG encode → cycle-689 focused-pane crop + toast notification. End-to-end on the deployed binary: press the chord → focused pane's PNG appears at `<cache>/kettle/shots/kettle-<secs>-<pid>.png` + desktop notification fires. Whole-window screenshots still available via the headless `--screenshot=PATH` CLI. | cycle-689 |
+| ~~`terminalshot.py`~~ | Screenshot focused terminal | A | `Action::TakeScreenshot` queues one bounded `ScreenshotRequest { out_path, crop }`. The frame copy is encoded in the normal render submission; a single lazy worker performs the finite GPU wait, mapping, BGRA→RGBA conversion, crop, PNG encode, and write so the winit/Wayland event loop never blocks on readback. A concurrent request receives an explicit busy error. The focused-pane PNG appears at `<cache>/kettle/shots/kettle-<secs>-<pid>.png`; whole-window screenshots remain available through `--screenshot=PATH`. | cycle-689 + v2.36.1 hardening |
 | `dir_open.py` | Open cwd in file manager | A | cycle-607 `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | cycle-606 `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |
@@ -487,8 +487,9 @@ do not re-litigate without explicit user request.
   GUI. N/A; kettle has no preferences GUI.
 
 - **`debugserver.py`** (DEBUG TCP server). Internal maintainer tooling.
-  kettle's tracing surface is `RUST_LOG=trace kettle` per env_logger
-  convention.
+  kettle's tracing surface is `RUST_LOG=trace kettle`; one
+  `tracing-subscriber` filter receives both `log` and `tracing` events, including
+  winit backend errors.
 
 - **`testplugin.py`** development-only example. N/A.
 

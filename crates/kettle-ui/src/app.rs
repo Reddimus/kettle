@@ -2897,6 +2897,10 @@ pub struct App {
     #[cfg(feature = "dev-record")]
     recording_error_reported: bool,
     proxy: EventLoopProxy<UserEvent>,
+    /// Privacy-safe event-loop phase tracker. A separate watchdog records a
+    /// bounded incident when a callback stops making progress; it never
+    /// captures terminal contents, command lines, or paths.
+    runtime_tracker: crate::runtime_diagnostics::RuntimeTracker,
     /// v2.20.0 P4 (perf): wakeup-dedup latch shared by every pane's `Waker`.
     /// Under output flood the PTY readers fire once per 64KiB read — dozens
     /// of queued `UserEvent::Wakeup`s per paint window, each one fanning out
@@ -3217,6 +3221,10 @@ impl App {
             .version
             .clone()
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let runtime_tracker = crate::runtime_diagnostics::RuntimeTracker::start(
+            cache_dir_from_env(|key| std::env::var(key).ok()),
+            startup_version.clone(),
+        );
         // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
         // was set, init a LuaEngine + run the script once. Failures
         // log::warn but don't block the launch (same shape as the
@@ -3362,6 +3370,7 @@ impl App {
             #[cfg(feature = "dev-record")]
             recording_error_reported: false,
             proxy,
+            runtime_tracker,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Cycle 928 (agent-first A2): server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
@@ -3401,8 +3410,14 @@ impl App {
             version_line: startup_version,
             torn_drag: None,
         };
-        event_loop.run_app(&mut app)?;
-        Ok(())
+        app.runtime_tracker.set_window_count(app.windows.len());
+        let result = event_loop.run_app(&mut app);
+        app.runtime_tracker.set_phase("exiting");
+        if let Err(error) = &result {
+            app.runtime_tracker.record_exit(&error.to_string());
+        }
+        app.runtime_tracker.stop();
+        result.map_err(Into::into)
     }
 
     /// Drain commands a Lua callback (event hook or menu-item)
@@ -6441,6 +6456,7 @@ impl App {
         let active = ws.mux.active;
         let layout = ws.mux.layout(active, area);
         let focus = ws.mux.active_focus();
+        let window = ws.window.clone();
 
         let Some(renderer) = ws.renderer.as_mut() else {
             return;
@@ -6539,9 +6555,18 @@ impl App {
             .collect();
         // Cycle 296: status bar built BEFORE the &mut renderer borrow
         // (the helper reads `ws.mux` immutably). Cheap when off.
-        if let Err(e) =
-            renderer.render_frame_with_status(&panes, &tabbar, &self.cfg, &overlay, &status)
-        {
+        if let Err(e) = renderer.render_frame_with_status_and_pre_present(
+            &panes,
+            &tabbar,
+            &self.cfg,
+            &overlay,
+            &status,
+            || {
+                if let Some(window) = &window {
+                    window.pre_present_notify();
+                }
+            },
+        ) {
             log::warn!("render error: {e}");
         }
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
@@ -9235,22 +9260,22 @@ impl App {
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    log::info!("take_screenshot: queued → {}", path.display());
                     let path_str = path.display().to_string();
-                    renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
+                    let request = kettle_render::ScreenshotRequest {
                         out_path: path,
                         crop,
                         completion: None,
-                    });
-                    // Cycle 689 (sub-cycle 5): toast notification.
-                    // Optimistic — we fire BEFORE the GPU readback
-                    // completes (which happens on the next frame).
-                    // If the capture fails the notification is a
-                    // mild lie, but capture failures are rare
-                    // (would require GPU/disk I/O error) and the
-                    // log::warn from capture_live_surface surfaces
-                    // them in --debug runs.
-                    fire_notify("kettle: screenshot queued", &path_str);
+                    };
+                    if renderer.set_pending_screenshot(request).is_ok() {
+                        log::info!("take_screenshot: queued -> {path_str}");
+                        fire_notify("kettle: screenshot queued", &path_str);
+                    } else {
+                        log::warn!("take_screenshot: another capture is in progress");
+                        fire_notify(
+                            "kettle: screenshot busy",
+                            "Wait for the current capture to finish, then try again.",
+                        );
+                    }
                 }
             }
             Action::ReloadConfig => self.reload_config(ws),
@@ -11575,11 +11600,19 @@ impl App {
             ));
             return;
         };
-        renderer.set_pending_screenshot(kettle_render::ScreenshotRequest {
+        let screenshot = kettle_render::ScreenshotRequest {
             out_path: path.clone(),
             crop,
             completion: Some(done_tx),
-        });
+        };
+        if renderer.set_pending_screenshot(screenshot).is_err() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BUSY,
+                "another screenshot capture is already in progress",
+            ));
+            return;
+        }
         if target_seq == ws.seq {
             if let Some(w) = &ws.window {
                 w.request_redraw();
@@ -13762,15 +13795,20 @@ impl ApplicationHandler<UserEvent> for App {
     // mid-handler drops the entry, which is fine: kettle aborts on panic,
     // nothing observes the missing window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let runtime_tracker = self.runtime_tracker.clone();
+        let _phase = runtime_tracker.enter("resumed");
         let seq = self.focused_seq;
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
         };
         self.resumed_inner(&mut ws, event_loop);
         self.finish_window_dispatch(event_loop, seq, ws);
+        runtime_tracker.set_window_count(self.windows.len());
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+        let runtime_tracker = self.runtime_tracker.clone();
+        let _phase = runtime_tracker.enter("user_event");
         match ev {
             // C4: PTY wakeups carry no pane id and config reloads re-style
             // everything — fan these out to every window. The Wakeup arm
@@ -13807,9 +13845,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.finish_window_dispatch(el, seq, ws);
             }
         }
+        runtime_tracker.set_window_count(self.windows.len());
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let phase_name = if matches!(&event, WindowEvent::RedrawRequested) {
+            "redraw"
+        } else {
+            "window_event"
+        };
+        let runtime_tracker = self.runtime_tracker.clone();
+        let _phase = runtime_tracker.enter(phase_name);
         // An unknown WindowId (a late event for an already-closed window)
         // is dropped rather than misrouted to the focused window.
         let Some(seq) = self.seq_of_window(id) else {
@@ -13825,9 +13871,12 @@ impl ApplicationHandler<UserEvent> for App {
         // highlight leaves a theme row OR the menu closes without committing.
         self.sync_theme_preview(&mut ws);
         self.finish_window_dispatch(event_loop, seq, ws);
+        runtime_tracker.set_window_count(self.windows.len());
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let runtime_tracker = self.runtime_tracker.clone();
+        let _phase = runtime_tracker.enter("about_to_wait");
         // v2.19.0 (tear-off UX): failsafe — torn-drag tracking that lost its
         // drop signal (an X11 release the WM swallowed, then no further
         // input) is abandoned after 120s of silence. The window is long
@@ -13869,6 +13918,7 @@ impl ApplicationHandler<UserEvent> for App {
             )),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
+        runtime_tracker.set_window_count(self.windows.len());
     }
     // C1-DISPATCH-END
 }
@@ -15302,13 +15352,17 @@ impl App {
                     }
                 });
         }
-        let init_result = pollster::block_on(Renderer::new(
-            window.clone(),
-            size.width.max(1),
-            size.height.max(1),
-            scale,
-            &self.cfg,
-        ));
+        let init_result = {
+            let runtime_tracker = self.runtime_tracker.clone();
+            let _phase = runtime_tracker.enter("gpu_init");
+            pollster::block_on(Renderer::new(
+                window.clone(),
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &self.cfg,
+            ))
+        };
         // Disarm the watchdog the moment init returns, on BOTH the success and
         // the quick-failure path, so a clean renderer-init error below never
         // gets a spurious "timed out" report behind it.

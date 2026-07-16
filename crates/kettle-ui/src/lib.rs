@@ -33,6 +33,7 @@ mod gpu_diagnostics;
 mod input;
 mod lua;
 mod mux;
+mod runtime_diagnostics;
 mod session;
 mod settings;
 // Cycle 794: in-app "newer release available" checker (notify-only). Kept a

@@ -1037,6 +1037,11 @@ pub struct Renderer {
     /// `set_pending_screenshot()` after computing the path via
     /// the cycle-650 `session_screenshot_path` helper.
     pub pending_screenshot: Option<ScreenshotRequest>,
+    /// Lazy, single-consumer readback worker. Live surface capture must never
+    /// block the winit event-loop thread: Wayland can disconnect clients that
+    /// stop dispatching while output globals are changing. The worker owns the
+    /// finite GPU wait, mapping, PNG encoding, and file write.
+    screenshot_worker: Option<ScreenshotWorker>,
 }
 
 /// Cycle 654: a queued screenshot request. Sub-cycle 4 of
@@ -1054,6 +1059,255 @@ pub struct ScreenshotRequest {
     /// screenshot` / MCP). The UI action leaves this `None` and keeps its
     /// optimistic notification behavior.
     pub completion: Option<std::sync::mpsc::Sender<Result<std::path::PathBuf, String>>>,
+}
+
+const MAX_LIVE_SCREENSHOT_BYTES: u64 = 256 * 1024 * 1024;
+const LIVE_SCREENSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct PreparedScreenshot {
+    staging: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    unpadded_bytes_per_row: u32,
+    padded_bytes_per_row: u32,
+    format: wgpu::TextureFormat,
+    request: ScreenshotRequest,
+}
+
+struct ScreenshotJob {
+    device: wgpu::Device,
+    submission: wgpu::SubmissionIndex,
+    prepared: PreparedScreenshot,
+}
+
+struct ScreenshotWorker {
+    sender: std::sync::mpsc::SyncSender<ScreenshotJob>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ScreenshotWorker {
+    fn start() -> std::io::Result<Self> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<ScreenshotJob>(1);
+        let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_busy = busy.clone();
+        std::thread::Builder::new()
+            .name("kettle-screenshot".to_string())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let completion = job.prepared.request.completion.clone();
+                    let result = finish_live_screenshot(job);
+                    if let Some(tx) = completion {
+                        let _ = tx.send(result.clone());
+                    }
+                    match result {
+                        Ok(path) => log::info!("screenshot saved: {}", path.display()),
+                        Err(error) => log::warn!("take_screenshot capture failed: {error}"),
+                    }
+                    worker_busy.store(false, std::sync::atomic::Ordering::Release);
+                }
+            })
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("could not create screenshot worker: {error}"),
+                )
+            })?;
+        Ok(Self { sender, busy })
+    }
+
+    fn is_busy(&self) -> bool {
+        self.busy.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn try_submit(&self, job: ScreenshotJob) -> Result<(), ScreenshotSubmitError> {
+        if self
+            .busy
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Err(ScreenshotSubmitError::Busy(Box::new(job)));
+        }
+        match self.sender.try_send(job) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(job)) => {
+                self.busy.store(false, std::sync::atomic::Ordering::Release);
+                Err(ScreenshotSubmitError::Busy(Box::new(job)))
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(job)) => {
+                self.busy.store(false, std::sync::atomic::Ordering::Release);
+                Err(ScreenshotSubmitError::Disconnected(Box::new(job)))
+            }
+        }
+    }
+}
+
+enum ScreenshotSubmitError {
+    Busy(Box<ScreenshotJob>),
+    Disconnected(Box<ScreenshotJob>),
+}
+
+fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, String> {
+    let ScreenshotJob {
+        device,
+        submission,
+        prepared,
+    } = job;
+    let buffer_slice = prepared.staging.slice(..);
+    let (map_tx, map_rx) = std::sync::mpsc::sync_channel(1);
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = map_tx.send(result.map_err(|error| format!("{error:?}")));
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(LIVE_SCREENSHOT_TIMEOUT),
+        })
+        .map_err(|error| format!("screenshot GPU wait failed: {error:?}"))?;
+    map_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .map_err(|_| "screenshot map callback timed out".to_string())?
+        .map_err(|error| format!("screenshot map failed: {error}"))?;
+
+    let mapped = buffer_slice
+        .get_mapped_range()
+        .map_err(|error| format!("screenshot mapped range failed: {error:?}"))?;
+    let pixel_bytes = u64::from(prepared.width)
+        .checked_mul(u64::from(prepared.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "screenshot pixel size overflow".to_string())?;
+    let capacity = usize::try_from(pixel_bytes)
+        .map_err(|_| "screenshot pixel buffer does not fit this platform".to_string())?;
+    let bgra = matches!(
+        prepared.format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    let mut rgba = Vec::with_capacity(capacity);
+    for row in 0..prepared.height {
+        let start = usize::try_from(u64::from(row) * u64::from(prepared.padded_bytes_per_row))
+            .map_err(|_| "screenshot row offset overflow".to_string())?;
+        let end = start
+            .checked_add(prepared.unpadded_bytes_per_row as usize)
+            .ok_or_else(|| "screenshot row end overflow".to_string())?;
+        let row_pixels = mapped
+            .get(start..end)
+            .ok_or_else(|| "screenshot mapped buffer is shorter than expected".to_string())?;
+        if bgra {
+            for chunk in row_pixels.chunks_exact(4) {
+                rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+            }
+        } else {
+            rgba.extend_from_slice(row_pixels);
+        }
+    }
+    drop(mapped);
+    prepared.staging.unmap();
+
+    let (out_w, out_h, out_pixels) =
+        crop_screenshot(prepared.width, prepared.height, rgba, prepared.request.crop)?;
+    use image::{ImageBuffer, Rgba};
+    let image: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
+        .ok_or_else(|| "screenshot image buffer shape is invalid".to_string())?;
+    image
+        .save(&prepared.request.out_path)
+        .map_err(|error| format!("PNG save failed: {error}"))?;
+    Ok(prepared.request.out_path)
+}
+
+fn crop_screenshot(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    crop: Option<(f32, f32, f32, f32)>,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let Some((cx, cy, cw, ch)) = crop else {
+        return Ok((width, height, rgba));
+    };
+    let cx = cx.max(0.0) as u32;
+    let cy = cy.max(0.0) as u32;
+    let x_end = cx.saturating_add(cw.max(1.0) as u32).min(width);
+    let y_end = cy.saturating_add(ch.max(1.0) as u32).min(height);
+    let cropped_w = x_end.saturating_sub(cx);
+    let cropped_h = y_end.saturating_sub(cy);
+    if cropped_w == 0 || cropped_h == 0 {
+        return Err("screenshot crop is outside the surface".to_string());
+    }
+    let capacity = u64::from(cropped_w)
+        .checked_mul(u64::from(cropped_h))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| "screenshot crop size overflow".to_string())?;
+    let source_stride = usize::try_from(u64::from(width) * 4)
+        .map_err(|_| "screenshot source stride overflow".to_string())?;
+    let col_start = usize::try_from(u64::from(cx) * 4)
+        .map_err(|_| "screenshot crop column overflow".to_string())?;
+    let col_end = usize::try_from(u64::from(x_end) * 4)
+        .map_err(|_| "screenshot crop column overflow".to_string())?;
+    let mut cropped = Vec::with_capacity(capacity);
+    for y in cy..y_end {
+        let row_start = usize::try_from(u64::from(y) * source_stride as u64)
+            .map_err(|_| "screenshot crop row overflow".to_string())?;
+        let row_end = row_start
+            .checked_add(source_stride)
+            .ok_or_else(|| "screenshot source row overflow".to_string())?;
+        let row = rgba
+            .get(row_start..row_end)
+            .ok_or_else(|| "screenshot source buffer is shorter than expected".to_string())?;
+        cropped.extend_from_slice(
+            row.get(col_start..col_end)
+                .ok_or_else(|| "screenshot crop columns are outside the source".to_string())?,
+        );
+    }
+    Ok((cropped_w, cropped_h, cropped))
+}
+
+#[cfg(test)]
+mod live_screenshot_tests {
+    use super::crop_screenshot;
+
+    fn pixels(width: u32, height: u32) -> Vec<u8> {
+        (0..width * height)
+            .flat_map(|pixel| [pixel as u8, 0, 0, 255])
+            .collect()
+    }
+
+    #[test]
+    fn no_crop_preserves_surface_pixels() {
+        let input = pixels(2, 2);
+        let (width, height, output) = crop_screenshot(2, 2, input.clone(), None).unwrap();
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn crop_extracts_requested_rows_and_columns() {
+        let (width, height, output) =
+            crop_screenshot(3, 2, pixels(3, 2), Some((1.0, 0.0, 2.0, 2.0))).unwrap();
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(
+            output
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [1, 2, 4, 5]
+        );
+    }
+
+    #[test]
+    fn crop_rejects_rectangles_outside_the_surface() {
+        let error = crop_screenshot(2, 2, pixels(2, 2), Some((5.0, 5.0, 1.0, 1.0))).unwrap_err();
+        assert_eq!(error, "screenshot crop is outside the surface");
+    }
+
+    #[test]
+    fn crop_rejects_short_source_buffers() {
+        let error = crop_screenshot(2, 2, vec![0; 4], Some((0.0, 0.0, 2.0, 2.0))).unwrap_err();
+        assert_eq!(error, "screenshot source buffer is shorter than expected");
+    }
 }
 
 impl Renderer {
@@ -1387,6 +1641,7 @@ impl Renderer {
             scale,
             accent_override: None,
             pending_screenshot: None,
+            screenshot_worker: None,
         })
     }
 
@@ -1521,18 +1776,27 @@ impl Renderer {
         self.grid_glyphs_dirty = true;
     }
 
-    /// Cycle 654 (sub-cycle 3 of terminalshot design): queue a
-    /// screenshot request to be honored on the next `render_frame`.
-    /// Replaces any pending request — only the latest one wins on
-    /// rapid-fire triggers. The renderer consumes + clears this slot
-    /// during the next paint.
-    pub fn set_pending_screenshot(&mut self, req: ScreenshotRequest) {
+    /// Queue a screenshot request for the next frame. At most one capture may
+    /// be pending or in flight; callers receive the original request back when
+    /// the bounded worker is busy so they can report an explicit error.
+    pub fn set_pending_screenshot(
+        &mut self,
+        req: ScreenshotRequest,
+    ) -> Result<(), ScreenshotRequest> {
+        if self.pending_screenshot.is_some()
+            || self
+                .screenshot_worker
+                .as_ref()
+                .is_some_and(ScreenshotWorker::is_busy)
+        {
+            return Err(req);
+        }
         self.pending_screenshot = Some(req);
+        Ok(())
     }
 
-    /// Cycle 654: peek + clear. Sub-cycle 4 will call this from
-    /// inside `render_frame` after the wgpu surface is presented +
-    /// the copy_texture_to_buffer is issued.
+    /// Peek and clear a queued request. Primarily retained for focused tests
+    /// and callers that need to cancel before the next frame is encoded.
     pub fn take_pending_screenshot(&mut self) -> Option<ScreenshotRequest> {
         self.pending_screenshot.take()
     }
@@ -1694,6 +1958,25 @@ impl Renderer {
         overlay: &Overlay,
         status: &StatusBar,
     ) -> Result<()> {
+        self.render_frame_with_status_and_pre_present(panes, tabbar, cfg, overlay, status, || {})
+    }
+
+    /// Live-window renderer variant. `pre_present` is invoked after drawing
+    /// and queue submission, immediately before the surface is presented. The
+    /// winit caller uses this seam for `Window::pre_present_notify`; offscreen
+    /// callers keep using the no-op wrappers above.
+    pub fn render_frame_with_status_and_pre_present<F>(
+        &mut self,
+        panes: &[PaneView<'_>],
+        tabbar: &TabBar,
+        cfg: &Config,
+        overlay: &Overlay,
+        status: &StatusBar,
+        pre_present: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(),
+    {
         let theme = &cfg.theme;
         // OSC 11 (set default background) override from the focused pane.
         // The engine stores it in `Colors[257]`; the renderer needs it for
@@ -4059,40 +4342,36 @@ impl Renderer {
                     .render(&self.atlas, &self.viewport, &mut pass)?;
             }
         }
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
-        // if a screenshot request is queued (cycle-654), copy the
-        // surface texture to a staging buffer BEFORE present (after
-        // present the texture isn't readable). The PNG encode + write
-        // happens off-thread; this path is best-effort: errors log
-        // but don't fail the frame.
-        let screenshot_req = self.pending_screenshot.take();
-        if let Some(req) = &screenshot_req {
-            // The live-surface readback needs the surface to have been
-            // configured with COPY_SRC. On adapters that don't advertise it
-            // (e.g. the RDP Microsoft Remote Display adapter — see the surface
-            // config above) `self.config.usage` won't contain COPY_SRC, so
-            // skip the copy and degrade gracefully instead of hitting a
-            // validation error. Offscreen `--screenshot` is unaffected (it
-            // builds its own COPY_SRC texture).
-            let result = if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
-                self.capture_live_surface(&frame, req)
-                    .map(|_| req.out_path.clone())
-                    .map_err(|e| e.to_string())
+        // Encode a pending surface readback into this frame's submission. The
+        // finite GPU wait, mapping, conversion, PNG encode, and write happen on
+        // the lazy worker after submit, never on winit's event-loop thread.
+        let prepared_screenshot = self.pending_screenshot.take().map(|request| {
+            if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.prepare_live_screenshot(&frame, request, &mut encoder)
             } else {
-                Err(
+                Err((
+                    request,
                     "live-surface screenshot unavailable: surface lacks COPY_SRC \
-                     (e.g. RDP remote display) — use offscreen `--screenshot` instead"
+                     (for example an RDP remote display); use offscreen --screenshot"
                         .to_string(),
-                )
-            };
-            if let Some(tx) = &req.completion {
-                let _ = tx.send(result.clone());
+                ))
             }
-            if let Err(e) = result {
-                log::warn!("take_screenshot capture failed: {e}");
+        });
+        let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        if let Some(prepared) = prepared_screenshot {
+            match prepared {
+                Ok(prepared) => {
+                    let job = ScreenshotJob {
+                        device: self.gpu.device.clone(),
+                        submission,
+                        prepared,
+                    };
+                    self.submit_screenshot_job(job);
+                }
+                Err((request, error)) => Self::complete_screenshot_error(request, error),
             }
         }
+        pre_present();
         self.gpu.queue.present(frame);
         if reconfigure_after_present {
             self.surface.configure(&self.gpu.device, &self.config);
@@ -4107,45 +4386,55 @@ impl Renderer {
         Ok(())
     }
 
-    /// Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
-    /// copy the current swap-chain texture to a staging buffer,
-    /// then map + encode PNG + write to `req.out_path`. Synchronous
-    /// (device.poll(Wait)) to keep the implementation simple; a
-    /// future polish can move the encode off-thread.
-    fn capture_live_surface(
+    fn prepare_live_screenshot(
         &self,
         frame: &wgpu::SurfaceTexture,
-        req: &ScreenshotRequest,
-    ) -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let tex = &frame.texture;
-        let size = tex.size();
+        request: ScreenshotRequest,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<PreparedScreenshot, (ScreenshotRequest, String)> {
+        let texture = &frame.texture;
+        let size = texture.size();
         let width = size.width;
         let height = size.height;
-        // wgpu requires 256-byte alignment on bytes_per_row.
-        let bytes_per_pixel = 4u32; // BGRA8 / RGBA8 — both 4 bpp.
-        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let unpadded_bytes_per_row = width
+            .checked_mul(4)
+            .ok_or_else(|| (request.clone(), "screenshot row size overflow".to_string()))?;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * height) as u64;
-
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .checked_add(align - 1)
+            .map(|bytes| bytes / align * align)
+            .ok_or_else(|| {
+                (
+                    request.clone(),
+                    "screenshot aligned row size overflow".to_string(),
+                )
+            })?;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| {
+                (
+                    request.clone(),
+                    "screenshot readback size overflow".to_string(),
+                )
+            })?;
+        if buffer_size > MAX_LIVE_SCREENSHOT_BYTES {
+            return Err((
+                request,
+                format!(
+                    "screenshot readback requires {buffer_size} bytes; limit is \
+                     {MAX_LIVE_SCREENSHOT_BYTES} bytes"
+                ),
+            ));
+        }
         let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-screenshot-readback"),
             size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("kettle-screenshot-copy"),
-            });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: tex,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -4164,83 +4453,63 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        Ok(PreparedScreenshot {
+            staging,
+            width,
+            height,
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+            format: texture.format(),
+            request,
+        })
+    }
 
-        let buffer_slice = staging.slice(..);
-        let done = Arc::new(AtomicBool::new(false));
-        let done_set = done.clone();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            if let Err(e) = result {
-                log::warn!("screenshot map_async failed: {e:?}");
-            }
-            done_set.store(true, Ordering::SeqCst);
-        });
-        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        if !done.load(Ordering::SeqCst) {
-            return Err(anyhow!("screenshot readback timed out"));
+    fn complete_screenshot_error(request: ScreenshotRequest, error: String) {
+        if let Some(tx) = request.completion {
+            let _ = tx.send(Err(error.clone()));
         }
-        let mapped = buffer_slice
-            .get_mapped_range()
-            .map_err(|e| anyhow!("screenshot mapped range failed: {e:?}"))?;
+        log::warn!("take_screenshot capture failed: {error}");
+    }
 
-        // Compact rows (strip wgpu's 256-byte row padding) +
-        // convert BGRA → RGBA if needed. Surface format is
-        // typically Bgra8UnormSrgb on most desktop adapters;
-        // PNG expects RGBA.
-        let surface_format = tex.format();
-        let bgra = matches!(
-            surface_format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        );
-        let mut rgba: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
-        for row in 0..height {
-            let start = (row * padded_bytes_per_row) as usize;
-            let row_pixels = &mapped[start..start + unpadded_bytes_per_row as usize];
-            if bgra {
-                for chunk in row_pixels.chunks_exact(4) {
-                    rgba.push(chunk[2]);
-                    rgba.push(chunk[1]);
-                    rgba.push(chunk[0]);
-                    rgba.push(chunk[3]);
+    fn submit_screenshot_job(&mut self, mut job: ScreenshotJob) {
+        for attempt in 0..2 {
+            if self.screenshot_worker.is_none() {
+                match ScreenshotWorker::start() {
+                    Ok(worker) => self.screenshot_worker = Some(worker),
+                    Err(error) => {
+                        Self::complete_screenshot_error(
+                            job.prepared.request,
+                            format!("screenshot worker unavailable: {error}"),
+                        );
+                        return;
+                    }
                 }
-            } else {
-                rgba.extend_from_slice(row_pixels);
+            }
+            let Some(worker) = self.screenshot_worker.as_ref() else {
+                unreachable!("screenshot worker was initialized above");
+            };
+            match worker.try_submit(job) {
+                Ok(()) => return,
+                Err(ScreenshotSubmitError::Busy(returned)) => {
+                    Self::complete_screenshot_error(
+                        returned.prepared.request,
+                        "another live screenshot is already in progress".to_string(),
+                    );
+                    return;
+                }
+                Err(ScreenshotSubmitError::Disconnected(returned)) => {
+                    self.screenshot_worker = None;
+                    job = *returned;
+                    if attempt == 1 {
+                        Self::complete_screenshot_error(
+                            job.prepared.request,
+                            "screenshot worker disconnected".to_string(),
+                        );
+                        return;
+                    }
+                }
             }
         }
-        drop(mapped);
-        staging.unmap();
-
-        // Apply optional crop.
-        let (out_w, out_h, out_pixels) = if let Some((cx, cy, cw, ch)) = req.crop {
-            let cx = cx.max(0.0) as u32;
-            let cy = cy.max(0.0) as u32;
-            let cw = cw.max(1.0) as u32;
-            let ch = ch.max(1.0) as u32;
-            let x_end = (cx + cw).min(width);
-            let y_end = (cy + ch).min(height);
-            let cropped_w = x_end.saturating_sub(cx);
-            let cropped_h = y_end.saturating_sub(cy);
-            let mut cropped: Vec<u8> = Vec::with_capacity((cropped_w * cropped_h * 4) as usize);
-            for y in cy..y_end {
-                let row_start = (y * width * 4) as usize;
-                let row_pixels = &rgba[row_start..row_start + (width * 4) as usize];
-                let col_start = (cx * 4) as usize;
-                let col_end = (x_end * 4) as usize;
-                cropped.extend_from_slice(&row_pixels[col_start..col_end]);
-            }
-            (cropped_w, cropped_h, cropped)
-        } else {
-            (width, height, rgba)
-        };
-
-        // PNG encode + write.
-        use image::{ImageBuffer, Rgba};
-        let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
-            .ok_or_else(|| anyhow!("screenshot ImageBuffer::from_raw failed"))?;
-        img.save(&req.out_path)
-            .map_err(|e| anyhow!("PNG save failed: {e}"))?;
-        log::info!("screenshot saved: {}", req.out_path.display());
-        Ok(())
     }
 
     /// Build one pane's text buffer + background/cursor/selection/search quads.

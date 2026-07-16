@@ -134,6 +134,22 @@ state) lives in `WindowState`, while `App` keeps the process globals
   the surface is reconfigured for the next acquisition. `Occluded` and
   `Timeout` skip only that frame, while sustained fatal outcomes enter the
   shared recovery path.
+- **Presentation and readback respect the window-system boundary** — every live
+  frame calls winit's `pre_present_notify` after queue submission and
+  immediately before `present`, which is required for correct compositor frame
+  tracking. A live screenshot copies the surface in that same submission, then
+  hands the staging buffer to one bounded worker for a finite GPU wait, mapping,
+  conversion, crop, and PNG write. The event-loop thread never waits for a GPU
+  readback, and a second capture receives an explicit busy result.
+- **Runtime diagnostics are phase-only** — a watchdog observes fixed event-loop
+  phase names (`resumed`, `gpu_init`, `window_event`, `redraw`, `user_event`,
+  `about_to_wait`) and writes one private, rotated record after a bounded stall.
+  An event-loop backend error writes the same record shape on exit. Records
+  include only version, pid, display backend, phase, elapsed time, window count,
+  and a sanitized bounded error; terminal bytes, commands, environment values,
+  and paths never cross this boundary. The logging subscriber bridges both
+  `log` and `tracing`, preserving winit's Wayland protocol error in stderr and
+  the journal.
 - **PTY wakeups fan out** to all windows, gated per window by a per-pane
   output-generation counter — plain output emits no `TermEvent`, so the
   counter is the only reliable "this pane has new bytes" signal.
