@@ -173,7 +173,10 @@ putting a user path on the wire.
   cross-process dedupe goes through a presence registry in kettle-ctl
   (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
   window under `<runtime base>/kettle/instances`, a sibling of the ctl
-  discovery dir; RAII guard, dead-pid pruning, best-effort).
+  discovery dir; RAII guard, dead-pid pruning, best-effort). The directory and
+  leaves are current-user private on Unix; reads are no-follow and capped at
+  4 KiB, and version, filename identity, PID, and `#rrggbb` fields are validated
+  before a claim participates in color selection.
   `accent-color = theme|off|none` opts out; a hex value pins one color.
 
 ## Per-pane data flow
