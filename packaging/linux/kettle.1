@@ -72,6 +72,11 @@ does not exist (catches typos at launch time, not at the first
 .B cd
 inside the running shell).
 .TP
+.B \-\-new\-process
+Force an isolated Kettle process for a default launch. With no arguments, a
+launcher click normally asks the primary Kettle process to open another OS
+window; every launch carrying other arguments is already isolated.
+.TP
 .BI \-\-config \ FILE
 Load configuration from
 .I FILE

@@ -11,6 +11,7 @@
 //! (docs/MUX-SERVER-DESIGN.md): the daemon can re-host the same server side and
 //! no client changes.
 
+pub mod activation;
 pub mod client;
 pub mod discovery;
 // Multi-window cycle: cross-process window-presence registry (Peacock accent

@@ -253,7 +253,10 @@ Future → Done since the v1.0 cut of this matrix"):
 - **In-process multi-window** — one kettle process hosts N OS
   windows; `new_window` (`Ctrl+Shift+I`) no longer spawns a second
   process. The GPU device/queue is shared across windows; the
-  process exits when the last window closes.
+  process exits when the last window closes. Bare desktop/Super-key launches
+  activate that primary and open another in-process window after a confirmed
+  bounded local-IPC handoff; explicit CLI launches stay isolated, and
+  `--new-process` forces isolation for an otherwise default launch.
 - **Live tab tear-off** (Windows Terminal parity) — drag a tab
   outside the window and release: the tab moves *live* into a new
   window at the drop point — PTYs, scrollback and running programs

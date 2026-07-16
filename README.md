@@ -52,7 +52,10 @@ and **WezTerm** into one tool.
   focused-pane accent so you always know broadcast is on) — with
   Terminator's default keybindings.
 - **Multi-window with Chromium-grade tab tear-off** — one process hosts
-  any number of OS windows (`Ctrl+Shift+I`). **Drag a tab past the tab
+  any number of OS windows (`Ctrl+Shift+I`). A bare launcher click joins the
+  primary process and opens another window; `kettle --new-process` is the
+  explicit isolation escape hatch, while every launch with other arguments is
+  already separate. **Drag a tab past the tab
   bar and it tears off instantly into a live window that rides the
   pointer** in the OS's native move loop — Snap Layouts and FancyZones
   work mid-drag, and PTYs, scrollback and running programs move
@@ -245,6 +248,7 @@ kettle --config FILE        # use a specific config file (live-reloaded; error i
 kettle -d /path/to/dir      # open the first tab in this directory
 kettle -e htop              # run a command instead of the shell
 kettle -e ssh -t host       # (-e consumes the rest of the args)
+kettle --new-process        # force an isolated process for a default launch
 kettle --screenshot OUT.png # render a representative frame offscreen and exit (no window)
 ```
 

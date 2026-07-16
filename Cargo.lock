@@ -1935,7 +1935,9 @@ dependencies = [
 name = "kettle-ctl"
 version = "2.36.0"
 dependencies = [
+ "kettle-state",
  "libc",
+ "log",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",

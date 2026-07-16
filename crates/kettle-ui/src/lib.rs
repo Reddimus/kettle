@@ -20,6 +20,7 @@
 //! hints (Ctrl+Shift+H). Modal state is coordinated through
 //! `close_all_modals()` / `any_modal_open()` so they don't stack.
 
+mod activation_server;
 mod app;
 // C1 (multi-window foundation): per-window state container. `App` keeps only
 // process-global state; everything tied to one OS window lives here.
@@ -64,6 +65,9 @@ pub use lua::{LuaCommand, LuaEngine, LuaEvent};
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
 pub struct Options {
+    /// One-shot primary-election handle for bare-launch activation. The Kettle
+    /// binary supplies this only when no earlier process accepted the launch.
+    pub activation: Option<kettle_ctl::activation::PrimaryHandle>,
     /// Run this argv in the first tab instead of the shell (`kettle -e …`).
     pub command: Option<Vec<String>>,
     /// Dropdown-parity cycle: the bin crate's full version string (crate
