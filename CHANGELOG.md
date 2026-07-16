@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.2] — 2026-07-16
+
+  ### Fixed
+  - **Window presence records are now private, bounded, and strictly
+    validated.** Kettle writes each local discovery record through an atomic
+    owner-only `0600` replacement inside an owner-only `0700` directory,
+    instead of allowing the process umask to leave metadata group-readable.
+    Readers cap entries at 4 KiB; require the supported schema, PID/filename
+    agreement, and exact RGB syntax; and reject links, reparse points,
+    non-regular files, foreign ownership, or permissive modes before pruning
+    invalid state. These checks keep multi-window discovery fail-closed at its
+    local trust boundary without changing normal launcher behavior.
+
 ## [2.36.1] — 2026-07-15
 
   ### Fixed
