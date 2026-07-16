@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **Tearing a tab into a second window no longer disconnects Kettle on
+    Wayland.** Linux file notifications report config reads as access events;
+    treating those opens as edits caused live reload to reread the config, and
+    the old per-window fan-out doubled that feedback after a tear-off created a
+    second window. Kettle now accepts only real file changes, coalesces watcher
+    bursts with a bounded non-blocking latch, loads process-wide config once,
+    and applies it to every window while preserving session-local font zoom.
+
 ## [2.36.2] — 2026-07-16
 
   ### Fixed

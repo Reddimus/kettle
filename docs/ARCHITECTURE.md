@@ -165,6 +165,18 @@ putting a user path on the wire.
 - **PTY wakeups fan out** to all windows, gated per window by a per-pane
   output-generation counter — plain output emits no `TermEvent`, so the
   counter is the only reliable "this pane has new bytes" signal.
+- **Filesystem notifications are hints, not commands** — the config and legacy
+  remote-command watchers observe a containing directory so atomic replacement
+  remains portable, then require the exact target path and a create, modify, or
+  remove event. Non-mutating access events are rejected: on Linux, reading a
+  watched file can itself emit `Access(Open)`, so treating access as a change
+  creates a reload feedback loop. Each watcher also has a one-in-flight atomic
+  latch. Config changes settle for 75 ms through winit's `WaitUntil` control
+  flow, with no event-thread sleep, then load and compile process-wide state
+  once before applying renderer changes to every window. The latch re-arms
+  immediately before the read so a racing genuine edit is not lost. Remote
+  commands re-arm immediately before their bounded file drain; accumulated
+  lines make notification coalescing lossless.
 - **Pane ids are process-global** (the `NEXT_PANE_ID` atomic), so the
   agent control plane and the session file address panes unambiguously
   across windows.
