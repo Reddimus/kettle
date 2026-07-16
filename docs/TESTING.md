@@ -173,6 +173,13 @@ discipline here.
   private lock/socket permissions, first-process election, matching handoff,
   incompatible recorder identity, bounded request validation, UI rejection
   fallback, and the `--new-process`/explicit-argument bypass contract.
+  Live-reload regressions additionally pin the filesystem event-kind matrix:
+  opens, reads, closes, unrelated paths, and backend-specific `Other` events do
+  not reload; create/modify/remove and imprecise `Any` changes to the exact file
+  do. Concurrent notifications prove the one-in-flight latch, failed sends
+  prove re-arming, and process-level source guards require one config load
+  followed by application to every mapped window while preserving per-window
+  runtime zoom on a no-op reload.
 
 - **kettle** (binary, 50+ tests): clap argv parsing for the cycle-30
   `-e` + `-d` + `--config` combination; the cycle-105

@@ -1946,6 +1946,53 @@ fn compile_triggers(
     out
 }
 
+const CONFIG_RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(75);
+
+/// Filesystem watchers observe the containing directory so atomic replacement
+/// works across platforms. Only content/name changes to the exact file are
+/// actionable: accepting `Access(Open)` creates a read -> reload -> read
+/// feedback loop on Linux inotify.
+fn watcher_event_matches(event: &notify::Event, watched: &std::path::Path) -> bool {
+    use notify::EventKind;
+
+    event.paths.iter().any(|path| path == watched)
+        && matches!(
+            event.kind,
+            EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        )
+}
+
+/// Queue at most one event until the main thread re-arms the latch. Re-open it
+/// when the event loop has already closed so a failed send cannot strand the
+/// watcher in a permanently pending state.
+fn queue_watcher_event(
+    pending: &std::sync::atomic::AtomicBool,
+    send: impl FnOnce() -> bool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    if pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    if send() {
+        true
+    } else {
+        pending.store(false, Ordering::Release);
+        false
+    }
+}
+
+fn reloaded_font_size(configured_changed: bool, configured: f32, runtime: Option<f32>) -> f32 {
+    if configured_changed {
+        configured
+    } else {
+        runtime.unwrap_or(configured)
+    }
+}
+
 /// Cycle 290: scan `text` for any compiled trigger match, returning the
 /// first action that fires. Pure helper used by `App::run_triggers` and
 /// the drift guard. Returns `None` when no trigger fires so the caller
@@ -2924,6 +2971,14 @@ pub struct App {
     /// re-opens the latch BEFORE reading generations, so output that lands
     /// after the clear enqueues a fresh event (no lost wakeups).
     wake_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Exactly one config watcher notification may be queued or debouncing.
+    /// The main thread clears this immediately before it rereads the file.
+    config_reload_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Short, non-blocking settle window for atomic-save event bursts.
+    config_reload_deadline: Option<std::time::Instant>,
+    /// Remote-file counterpart to `config_reload_pending`. Commands accumulate
+    /// in the bounded file, so one drain notification is sufficient.
+    remote_command_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cycle 928 (agent-first A2): the in-process control server, present when
     /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
     /// zero-cost default path. Started in `resumed`, dropped on exit (which
@@ -3177,18 +3232,22 @@ impl App {
         // all pointlessly reloaded the config. Match on `paths`
         // containing the watched config file exactly.
         let mut watcher = None;
+        let config_reload_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(path) = startup.config.clone().or_else(Config::default_path)
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
             let watched = path.clone();
+            let pending = config_reload_pending.clone();
             use notify::Watcher;
             if let Ok(mut w) =
                 notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     if let Ok(ev) = res
-                        && ev.paths.iter().any(|p| p == &watched)
+                        && watcher_event_matches(&ev, &watched)
                     {
-                        let _ = p.send_event(UserEvent::ReloadConfig);
+                        queue_watcher_event(&pending, || {
+                            p.send_event(UserEvent::ReloadConfig).is_ok()
+                        });
                     }
                 })
             {
@@ -3204,18 +3263,22 @@ impl App {
         // itself, send UserEvent::RemoteCommand so the main thread
         // reads + dispatches lines.
         let mut remote_watcher = None;
+        let remote_command_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(path) = startup.remote_file.clone()
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
             let watched = path.clone();
+            let pending = remote_command_pending.clone();
             use notify::Watcher;
             if let Ok(mut w) =
                 notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     if let Ok(ev) = res
-                        && ev.paths.iter().any(|p| p == &watched)
+                        && watcher_event_matches(&ev, &watched)
                     {
-                        let _ = p.send_event(UserEvent::RemoteCommand);
+                        queue_watcher_event(&pending, || {
+                            p.send_event(UserEvent::RemoteCommand).is_ok()
+                        });
                     }
                 })
             {
@@ -3435,6 +3498,9 @@ impl App {
             activation,
             runtime_tracker,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            config_reload_pending,
+            config_reload_deadline: None,
+            remote_command_pending,
             // Cycle 928 (agent-first A2): server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
             ctl: None,
@@ -10243,38 +10309,16 @@ impl App {
         }
     }
 
-    fn reload_config(&mut self, ws: &mut WindowState) {
+    /// Read and install the process-wide portion of a live configuration once.
+    /// Returns whether the configured font size changed, which controls whether
+    /// each window keeps its session-local zoom.
+    fn load_reloaded_config(&mut self) -> bool {
         let previous_config_font_size = self.cfg.font_size;
-        let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         let mut new = self
             .config_path
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
-        if let Some(r) = ws.renderer.as_mut() {
-            // Order matters slightly: family first so the cell measurer
-            // sees the new family when size changes (the size setter
-            // re-measures internally; a stale family would yield wrong
-            // cell dims for one frame). Both are no-ops when unchanged,
-            // so steady-state reloads (same family / same size) are free.
-            r.set_font_family(new.font_family.clone());
-            // Runtime zoom is intentionally session-local: Increase/Decrease
-            // do not write the config, while ResetFontSize still uses the
-            // configured default. A no-op reload must therefore keep the live
-            // renderer zoom; only an actual config font-size change should
-            // replace it.
-            let font_size_changed =
-                (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
-            let effective_font_size = if font_size_changed {
-                new.font_size
-            } else {
-                runtime_font_size.unwrap_or(new.font_size)
-            };
-            r.set_font_size(effective_font_size);
-            // Cycle 636: pick up cell-width/cell-height changes too.
-            // Setter is a no-op when unchanged.
-            r.set_cell_scale(new.cell_width, new.cell_height);
-        }
         // Cycle 290: re-compile triggers from the freshly-loaded config
         // BEFORE assigning, while `new` is still owned. Recompile
         // catches added/removed/changed patterns. Clearing the throttle stamp
@@ -10303,15 +10347,64 @@ impl App {
         if let Some(title) = self.startup.title_override.clone() {
             new.window_title_format = title;
         }
+        let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
-        // Cycle 936: a config reload may have changed the font size, so the
-        // saved pre-scaled-zoom size is stale — drop it (see the font-size
-        // action arm) so a later zoom-out doesn't revert to the old size.
-        ws.scaled_zoom_prev_font_size = None;
+        font_size_changed
+    }
+
+    fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {
+        let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
+        if let Some(r) = ws.renderer.as_mut() {
+            // Family first: the font-size setter re-measures cells and must see
+            // the new family. All setters are no-ops when unchanged.
+            r.set_font_family(self.cfg.font_family.clone());
+            r.set_font_size(reloaded_font_size(
+                font_size_changed,
+                self.cfg.font_size,
+                runtime_font_size,
+            ));
+            r.set_cell_scale(self.cfg.cell_width, self.cfg.cell_height);
+        }
+        // A configured size change invalidates the pre-scaled-zoom baseline;
+        // a no-op reload must preserve both it and the live runtime zoom.
+        if font_size_changed {
+            ws.scaled_zoom_prev_font_size = None;
+        }
         self.resize_all(ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
+    }
+
+    /// Immediate manual reload. The addressed window is checked out of the
+    /// map by the dispatch wrapper, so update it plus every mapped sibling.
+    fn reload_config(&mut self, ws: &mut WindowState) {
+        let font_size_changed = self.load_reloaded_config();
+        self.apply_reloaded_config(ws, font_size_changed);
+        let seqs: Vec<u64> = self.windows.keys().copied().collect();
+        for seq in seqs {
+            if let Some(mut sibling) = self.windows.remove(&seq) {
+                self.apply_reloaded_config(&mut sibling, font_size_changed);
+                self.windows.insert(seq, sibling);
+            }
+        }
+        log::debug!(
+            "config reload applied once across {} windows",
+            self.windows.len() + 1
+        );
+    }
+
+    /// Debounced watcher reload when every window is still in the map.
+    fn reload_config_windows(&mut self) {
+        let font_size_changed = self.load_reloaded_config();
+        let seqs: Vec<u64> = self.windows.keys().copied().collect();
+        for seq in &seqs {
+            if let Some(mut ws) = self.windows.remove(seq) {
+                self.apply_reloaded_config(&mut ws, font_size_changed);
+                self.windows.insert(*seq, ws);
+            }
+        }
+        log::debug!("config reload applied once across {} windows", seqs.len());
     }
 
     /// Cycle 290: scan every pane's recent output for configured
@@ -13875,17 +13968,21 @@ impl ApplicationHandler<UserEvent> for App {
         let _phase = runtime_tracker.enter("user_event");
         match ev {
             UserEvent::Activation => self.drain_activation_requests(el),
-            // C4: PTY wakeups carry no pane id and config reloads re-style
-            // everything — fan these out to every window. The Wakeup arm
-            // gates per window on the panes' output generations, so only
-            // windows with fresh output repaint.
-            UserEvent::Wakeup | UserEvent::ReloadConfig => {
+            // A watcher event starts a short non-blocking settle window. The
+            // pending latch stays closed until about_to_wait clears it just
+            // before the single process-level read.
+            UserEvent::ReloadConfig => {
+                self.config_reload_deadline
+                    .get_or_insert_with(|| std::time::Instant::now() + CONFIG_RELOAD_DEBOUNCE);
+            }
+            // PTY wakeups carry no pane id. Fan out, with each window gated on
+            // its panes' output generations.
+            UserEvent::Wakeup => {
                 // v2.20.0 P4: reopen the wakeup latch BEFORE any generation
                 // reads below — a reader that bumps its generation after this
                 // store enqueues a fresh Wakeup, so the new output is painted
                 // either by this pass (we see the bump) or by the next event
-                // (we already woke for it). Clearing on ReloadConfig too is
-                // harmless: the worst case is one extra queued event.
+                // (we already woke for it).
                 // (swap with AcqRel rather than a plain Release store: the
                 // acquire edge pairs with the reader's swap — the textbook
                 // consumer side of a wake flag.)
@@ -13899,6 +13996,18 @@ impl ApplicationHandler<UserEvent> for App {
                     self.user_event_inner(&mut ws, el, ev.clone());
                     self.finish_window_dispatch(el, seq, ws);
                 }
+            }
+            UserEvent::RemoteCommand => {
+                // Re-arm before reading: a writer racing the drain can queue a
+                // new notification, while commands already present are batched.
+                self.remote_command_pending
+                    .swap(false, std::sync::atomic::Ordering::AcqRel);
+                let seq = self.focused_seq;
+                let Some(mut ws) = self.windows.remove(&seq) else {
+                    return;
+                };
+                self.user_event_inner(&mut ws, el, UserEvent::RemoteCommand);
+                self.finish_window_dispatch(el, seq, ws);
             }
             // Ctl / remote / update-banner events act on the focused window.
             _ => {
@@ -13959,6 +14068,18 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.abandon_torn_drag(None);
         }
+        let now = std::time::Instant::now();
+        if self
+            .config_reload_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.config_reload_deadline = None;
+            // Clear before the read so a genuine edit racing the reload queues
+            // a follow-up; Access(Open) itself is filtered by event kind.
+            self.config_reload_pending
+                .swap(false, std::sync::atomic::Ordering::AcqRel);
+            self.reload_config_windows();
+        }
         // C4: every window ticks (reap, blink, coalesced-paint deadlines);
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
@@ -13973,6 +14094,13 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(ms) = wait {
                 min_wait = Some(min_wait.map_or(ms, |w: u64| w.min(ms)));
             }
+        }
+        if let Some(deadline) = self.config_reload_deadline {
+            let ms = (deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis() as u64)
+                .max(1);
+            min_wait = Some(min_wait.map_or(ms, |wait| wait.min(ms)));
         }
         if self.windows.is_empty() {
             return;
@@ -15829,7 +15957,8 @@ impl App {
                     w.request_redraw();
                 }
             }
-            UserEvent::ReloadConfig => self.reload_config(ws),
+            // Consumed by the outer process-level debounce dispatch.
+            UserEvent::ReloadConfig => {}
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
             UserEvent::UpdateAvailable { tag, url } => {
@@ -17782,6 +17911,111 @@ mod tests {
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+
+    #[test]
+    fn watcher_accepts_changes_to_exact_path_only() {
+        use notify::EventKind;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind,
+        };
+
+        let watched = std::path::Path::new("/tmp/kettle-config.toml");
+        let event = |kind| notify::Event::new(kind).add_path(watched.to_path_buf());
+        for kind in [
+            EventKind::Any,
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert!(super::watcher_event_matches(&event(kind), watched));
+        }
+        for kind in [
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Other,
+        ] {
+            assert!(!super::watcher_event_matches(&event(kind), watched));
+        }
+        let unrelated = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(std::path::PathBuf::from("/tmp/session.json"));
+        assert!(!super::watcher_event_matches(&unrelated, watched));
+    }
+
+    #[test]
+    fn watcher_gate_coalesces_rearms_and_recovers_from_send_failure() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let pending = AtomicBool::new(false);
+        let sends = AtomicUsize::new(0);
+        assert!(super::queue_watcher_event(&pending, || {
+            sends.fetch_add(1, Ordering::Relaxed);
+            true
+        }));
+        assert!(!super::queue_watcher_event(&pending, || {
+            sends.fetch_add(1, Ordering::Relaxed);
+            true
+        }));
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+
+        pending.store(false, Ordering::Release);
+        assert!(!super::queue_watcher_event(&pending, || false));
+        assert!(!pending.load(Ordering::Acquire));
+        assert!(super::queue_watcher_event(&pending, || true));
+    }
+
+    #[test]
+    fn watcher_gate_allows_only_one_racing_sender() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let pending = Arc::new(AtomicBool::new(false));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let pending = pending.clone();
+                let sends = sends.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::queue_watcher_event(&pending, || {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                        true
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn config_reload_font_policy_preserves_runtime_zoom() {
+        assert_eq!(super::reloaded_font_size(false, 13.0, Some(19.0)), 19.0);
+        assert_eq!(super::reloaded_font_size(false, 13.0, None), 13.0);
+        assert_eq!(super::reloaded_font_size(true, 15.0, Some(19.0)), 15.0);
+        assert_eq!(
+            super::CONFIG_RELOAD_DEBOUNCE,
+            std::time::Duration::from_millis(75)
+        );
+    }
+
+    #[test]
+    fn watched_reload_loads_once_then_applies_every_window() {
+        let src = include_str!("app.rs");
+        let body = src
+            .split("fn reload_config_windows(&mut self)")
+            .nth(1)
+            .and_then(|body| body.split("/// Cycle 290: scan").next())
+            .expect("reload_config_windows body");
+        assert_eq!(body.matches("self.load_reloaded_config()").count(), 1);
+        assert!(body.contains("self.windows.keys().copied().collect()"));
+        assert!(body.contains("self.apply_reloaded_config(&mut ws"));
+    }
 
     #[test]
     fn accessibility_initial_tree_is_complete_and_pane_ids_are_stable() {
