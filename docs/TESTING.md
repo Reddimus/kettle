@@ -157,8 +157,10 @@ discipline here.
   returning the dragged tab, cursor leave/re-enter, plus an
   end-to-end drag walkthrough; the per-window accent **presence
   registry** (`kettle-ctl/src/presence.rs`) pins claim/release
-  round-trips, dead-PID pruning, and in-place hue updates against a
-  temp dir; **shell detection** (`detect_shells_windows`/`_unix`,
+  round-trips, private directory/file modes, dead-PID pruning, bounded and
+  no-follow reads, filename/payload validation, rejected hue updates, and
+  in-place valid hue updates against a temp dir; **shell detection**
+  (`detect_shells_windows`/`_unix`,
   kettle-core) is pure over injected closures (PATH lookup, WSL
   enumeration, vswhere, Git Bash probe), so the Windows-Terminal
   ordering / skip-when-absent / never-empty cases run on every OS;
