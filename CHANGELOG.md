@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.4] — 2026-07-16
+
   ### Fixed
   - **Focused Wayland windows with developer recording enabled now return to
     idle instead of redrawing at compositor rate.** Repeated empty IME preedit
