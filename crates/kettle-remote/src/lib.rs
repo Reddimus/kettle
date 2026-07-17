@@ -213,6 +213,10 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
 /// existing tests.
 pub struct RemoteScanner {
     sys: sysinfo::System,
+    #[cfg(target_os = "linux")]
+    procfs: LinuxProcessTree,
+    #[cfg(target_os = "linux")]
+    use_procfs: bool,
     index: std::collections::HashMap<u32, Vec<u32>>,
 }
 
@@ -226,22 +230,51 @@ impl RemoteScanner {
     pub fn new() -> Self {
         Self {
             sys: sysinfo::System::new(),
+            #[cfg(target_os = "linux")]
+            procfs: LinuxProcessTree::default(),
+            #[cfg(target_os = "linux")]
+            use_procfs: false,
             index: std::collections::HashMap::new(),
         }
     }
 
-    /// Refresh the process snapshot and rebuild the parent→children index.
-    /// Call once per poll tick, before querying panes.
+    /// Refresh the cross-platform full process snapshot and rebuild the
+    /// parent→children index. Preserved for one-shot callers that do not know
+    /// their roots; Kettle's app loop uses [`Self::refresh_roots`] instead.
     pub fn refresh(&mut self) {
         self.sys.refresh();
         self.index = build_children_index(&self.sys);
+        #[cfg(target_os = "linux")]
+        {
+            self.use_procfs = false;
+        }
+    }
+
+    /// Refresh the process snapshot for the pane roots that will be queried.
+    ///
+    /// Linux walks only those roots' `/proc/<pid>/task/<pid>/children` trees.
+    /// That keeps a focused cursor blink from synchronously rereading every
+    /// process and thread on the machine. Platforms without that rooted procfs
+    /// interface retain the cross-platform sysinfo snapshot.
+    pub fn refresh_roots(&mut self, roots: &[u32]) {
+        #[cfg(target_os = "linux")]
+        {
+            self.procfs.refresh_roots(roots);
+            self.index = build_children_index(&self.procfs);
+            self.use_procfs = true;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = roots;
+            self.refresh();
+        }
     }
 
     /// Resolve the remote context for the pane rooted at `child_pid`, using the
     /// index built by the last [`refresh`](Self::refresh). No OS walk, no map
     /// rebuild — safe to call once per pane.
     pub fn detect_root(&self, child_pid: u32) -> Option<RemoteContext> {
-        detect_root_in_index(child_pid, &self.sys, &self.index)
+        detect_root_in_index(child_pid, self.tree(), &self.index)
     }
 
     /// Cycle 888: the deepest known-shell descendant of the pane rooted at
@@ -250,7 +283,7 @@ impl RemoteScanner {
     /// user actually entered (e.g. `wsl` typed inside pwsh) instead of the
     /// pane's original launch command. `None` for a plain pane.
     pub fn foreground_shell(&self, child_pid: u32) -> Option<ShellLaunch> {
-        find_foreground_shell_in_index(child_pid, &self.sys, &self.index)
+        find_foreground_shell_in_index(child_pid, self.tree(), &self.index)
     }
 
     /// v2.29.0: the cwd of the pane's foreground process — the DEEPEST live
@@ -264,7 +297,135 @@ impl RemoteScanner {
     /// (elevated / cross-arch / WSL-relay target — sysinfo returns None).
     pub fn foreground_cwd(&self, child_pid: u32) -> Option<String> {
         let pid = deepest_descendant_in_index(child_pid, &self.index).unwrap_or(child_pid);
-        self.sys.cwd_of(pid)
+        self.tree().cwd_of(pid)
+    }
+
+    fn tree(&self) -> &dyn ProcessTree {
+        #[cfg(target_os = "linux")]
+        {
+            if self.use_procfs {
+                &self.procfs
+            } else {
+                &self.sys
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            &self.sys
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+const MAX_PROC_FILE_BYTES: u64 = 1 << 20;
+#[cfg(target_os = "linux")]
+const MAX_PROC_TREE_NODES: usize = 4096;
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    bytes
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|pid| !pid.is_empty())
+        .filter_map(|pid| std::str::from_utf8(pid).ok()?.parse().ok())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_argv(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct LinuxProcessTree {
+    entries: std::collections::HashMap<u32, LinuxProcessEntry>,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxProcessEntry {
+    parent: Option<u32>,
+    argv: Option<Vec<String>>,
+    cwd: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcessTree {
+    fn refresh_roots(&mut self, roots: &[u32]) {
+        self.refresh_from(std::path::Path::new("/proc"), roots);
+    }
+
+    fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) {
+        use std::collections::{HashSet, VecDeque};
+
+        self.entries.clear();
+        let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
+        let mut visited = HashSet::with_capacity(roots.len());
+        while let Some((pid, parent)) = queue.pop_front() {
+            if self.entries.len() >= MAX_PROC_TREE_NODES || !visited.insert(pid) {
+                continue;
+            }
+            let process_dir = proc_root.join(pid.to_string());
+            let argv =
+                read_proc_file_bounded(&process_dir.join("cmdline")).map(|b| parse_proc_argv(&b));
+            let cwd = std::fs::read_link(process_dir.join("cwd"))
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned());
+            let children = read_proc_file_bounded(
+                &process_dir
+                    .join("task")
+                    .join(pid.to_string())
+                    .join("children"),
+            );
+            if argv.is_none() && cwd.is_none() && children.is_none() {
+                continue;
+            }
+            if let Some(children) = &children {
+                for child in parse_proc_children(children) {
+                    if queue.len() + self.entries.len() >= MAX_PROC_TREE_NODES {
+                        break;
+                    }
+                    queue.push_back((child, Some(pid)));
+                }
+            }
+            self.entries
+                .insert(pid, LinuxProcessEntry { parent, argv, cwd });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_file_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PROC_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_PROC_FILE_BYTES).then_some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+impl ProcessTree for LinuxProcessTree {
+    fn refresh(&mut self) {}
+
+    fn parent_of(&self, pid: u32) -> Option<u32> {
+        self.entries.get(&pid)?.parent
+    }
+
+    fn argv_of(&self, pid: u32) -> Option<Vec<String>> {
+        self.entries.get(&pid)?.argv.clone()
+    }
+
+    fn cwd_of(&self, pid: u32) -> Option<String> {
+        self.entries.get(&pid)?.cwd.clone()
+    }
+
+    fn all_pids(&self) -> Vec<u32> {
+        self.entries.keys().copied().collect()
     }
 }
 
@@ -1059,6 +1220,64 @@ pub fn format_remote_title(ctx: &RemoteContext) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn proc_parsers_are_bounded_to_valid_pids_and_preserve_lossy_argv() {
+        assert_eq!(
+            parse_proc_children(b"12 34\ninvalid 4294967296 56").collect::<Vec<_>>(),
+            [12, 34, 56]
+        );
+        assert_eq!(
+            parse_proc_argv(b"ssh\0alice@host\0bad-\xff\0\0"),
+            ["ssh", "alice@host", "bad-\u{fffd}"]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_walks_only_requested_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make_process = |pid: u32, argv: &[u8], children: &[u8]| {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(dir.join("task").join(pid.to_string())).unwrap();
+            std::fs::write(dir.join("cmdline"), argv).unwrap();
+            std::fs::write(
+                dir.join("task").join(pid.to_string()).join("children"),
+                children,
+            )
+            .unwrap();
+            symlink("/tmp", dir.join("cwd")).unwrap();
+        };
+        make_process(10, b"bash\0", b"20\n");
+        make_process(20, b"ssh\0alice@box.example\0", b"");
+        make_process(99, b"docker\0exec\0unrelated\0sh\0", b"");
+
+        let mut tree = LinuxProcessTree::default();
+        tree.refresh_from(&root, &[10]);
+        let index = build_children_index(&tree);
+        assert_eq!(tree.all_pids().len(), 2);
+        assert!(!tree.all_pids().contains(&99));
+        assert_eq!(tree.parent_of(20), Some(10));
+        assert_eq!(tree.cwd_of(20).as_deref(), Some("/tmp"));
+        assert_eq!(
+            detect_root_in_index(10, &tree, &index),
+            Some(RemoteContext::Ssh {
+                host: "box.example".into(),
+                user: Some("alice".into()),
+            })
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Cycle 643 drift guard. `format_remote_title` is the pure
     /// formatter behind the per-pane title update path.
     #[test]
@@ -1824,7 +2043,7 @@ mod tests {
         // Give pwsh a moment to start + run Set-Location before reading its cwd.
         std::thread::sleep(std::time::Duration::from_millis(1200));
         let mut sc = RemoteScanner::new();
-        sc.refresh();
+        sc.refresh_roots(&[pid]);
         let cwd = sc.foreground_cwd(pid);
         let _ = child.kill();
         let _ = child.wait();

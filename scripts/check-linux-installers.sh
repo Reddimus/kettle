@@ -207,6 +207,25 @@ if ! git ls-remote --exit-code --tags "$remote" "refs/tags/${tag}" >/dev/null 2>
   exit 0
 fi
 
+# A signed tag can become visible before the release finalizer publishes its
+# assets. Treat that normal publication window like an unpublished tag rather
+# than deadlocking every PR on a guaranteed 404. Other HTTP failures remain
+# errors so genuine GitHub/network outages do not silently reduce coverage.
+case "$(uname -m)" in
+  x86_64 | amd64) online_asset="kettle-linux-x86_64.tar.gz" ;;
+  aarch64 | arm64) online_asset="kettle-linux-aarch64.tar.gz" ;;
+  *) fail "online installer smoke has no release asset for $(uname -m)" ;;
+esac
+asset_url="https://github.com/${repo}/releases/download/${tag}/${online_asset}"
+asset_status=$(curl -sSLI -o /dev/null -w '%{http_code}' "$asset_url") \
+  || fail "could not check published asset ${asset_url}"
+if [ "$asset_status" = "404" ]; then
+  echo "linux-installer check: ${tag} asset is not published yet; skipping online installer smoke"
+  exit 0
+fi
+[ "$asset_status" = "200" ] \
+  || fail "published asset probe returned HTTP ${asset_status} for ${asset_url}"
+
 online_prefix="${tmp_root}/online"
 KETTLE_VERSION="$tag" KETTLE_PREFIX="$online_prefix" sh scripts/install-online.sh \
   > "${tmp_root}/online-install.out"

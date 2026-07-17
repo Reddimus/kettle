@@ -125,7 +125,7 @@ discipline here.
   truncated-source rejection; the native live smoke exercises the asynchronous
   readback path.
 
-- **kettle-ui** (270+ tests): split-tree layout tiles with no
+- **kettle-ui** (290+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
   splits keep every leaf; `Node::leaf_ids` DFS-order +
   `nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
@@ -149,7 +149,17 @@ discipline here.
   injection-guard.
   Runtime-diagnostic tests verify control-character stripping, message bounds,
   private Unix directory/file modes, and ten-record rotation without needing a
-  live event loop.
+  live event loop. Idle-loop regressions pin the cursor-blink truth table,
+  require the phase timestamp to advance before a redraw request, and normalize
+  repeated empty IME preedit notifications to the same absent state.
+
+- **kettle-remote** (30+ tests): injected process-tree fixtures cover SSH and
+  container detection, deterministic breadth-first selection, cwd/shell clone
+  behavior, cycles, missing roots, and injection-safe reconnect commands. The
+  portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
+  Linux CI additionally builds a synthetic proc tree and proves the rooted
+  scanner finds the requested SSH descendant and cwd without reading an
+  unrelated process.
 
 - **Multi-window (v2.18.0, cross-crate)**: the tab tear-off drag is a
   pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
@@ -484,9 +494,10 @@ Separate workflows:
   repeats with prefix/record paths containing every Desktop Entry quoting edge
   (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
   checks. The original normal binary is restored for a simulated stable
-  release-tarball install. When the matching release tag exists, the script
-  also runs `install-online.sh` and verifies SHA-256 and prefix-local uninstall
-  behavior.
+  release-tarball install. When the matching release tag and platform asset are
+  both published, the script also runs `install-online.sh` and verifies SHA-256
+  and prefix-local uninstall behavior. A tag whose asset still returns 404 is
+  treated as an in-progress release; other asset-probe failures remain fatal.
 - `scripts/check-windows-installer.ps1` — runs on Windows CI after the release
   binary is built, installs to a throwaway custom prefix, verifies the portable
   install payload, then uninstalls through the saved helper without repeating
