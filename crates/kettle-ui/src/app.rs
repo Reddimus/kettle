@@ -1692,33 +1692,6 @@ fn window_title_with_home(
     )
 }
 
-/// Shell-quote a dropped file path so the user can press Enter without
-/// having to escape spaces / special chars by hand. POSIX-style single
-/// quoting: wrap in `'…'`, replace internal `'` with `'\''` (close the
-/// quote, escape the literal apostrophe, reopen). This is the most
-/// portable form — bash / zsh / fish accept it identically, and so does
-/// PowerShell 7+ (which kettle users on Windows typically run; the
-/// single-quote-string syntax there matches POSIX for non-apostrophe
-/// content). cmd.exe is the outlier, but it's a rare top-level shell on
-/// modern Windows + the user can always re-edit before Enter. Always
-/// quotes — even for plain paths — to keep the output predictable and
-/// avoid a regex matching exercise on what's "special" across shells.
-/// Pure so the quoting rule is unit-tested.
-fn shell_quote_path(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy();
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Vi-mode (Alacritty parity). Carries the vi cursor's
 /// position + the visual-selection anchor when vi-mode is active.
 #[derive(Debug, Clone, Copy)]
@@ -4820,12 +4793,41 @@ impl App {
     }
 
     fn paste_clipboard(&mut self, ws: &mut WindowState) {
+        // File paste: when the OS clipboard holds a file list (an
+        // Explorer/Finder "Copy" on a file — e.g. a video — populates CF_HDROP /
+        // `text/uri-list`, not text) paste the file path(s) as shell-quoted
+        // text. That is the channel CLI agents like Claude Code / Codex accept
+        // for any file type (they `Read` the path, or drive `ffmpeg` for a
+        // video). WSL panes get the path translated to `/mnt/…`. Gated by
+        // `paste-files` (on by default); a plain-text clipboard falls through to
+        // the normal text paste below.
+        if self.cfg.paste_files.enabled()
+            && let Some(text) = self.clipboard_file_paste_text(ws)
+        {
+            self.paste_text(ws, text);
+            return;
+        }
         let text = self
             .clipboard
             .as_mut()
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
         self.paste_text(ws, text);
+    }
+
+    /// Read a file list from the clipboard (CF_HDROP on Windows, `text/uri-list`
+    /// elsewhere) and format it for the focused pane, or `None` if the clipboard
+    /// holds no files. See [`crate::mux::format_paths_for_paste`].
+    fn clipboard_file_paste_text(&mut self, ws: &WindowState) -> Option<String> {
+        let paths = self
+            .clipboard
+            .as_mut()?
+            .get()
+            .file_list()
+            .ok()
+            .filter(|v| !v.is_empty())?;
+        let argv = ws.mux.focused_argv();
+        Some(crate::mux::format_paths_for_paste(&argv, &paths))
     }
 
     /// Paste the **X11 PRIMARY selection** (middle-click). On X11 the
@@ -17154,7 +17156,11 @@ impl App {
                 // pane* BRACKETED_PASTE wrap (applied individually per pane),
                 // so a broadcast set containing one shell + one vim
                 // doesn't break either of them.
-                let text = format!("{} ", shell_quote_path(&path));
+                let argv = ws.mux.focused_argv();
+                let text = format!(
+                    "{} ",
+                    crate::mux::format_paths_for_paste(&argv, std::slice::from_ref(&path))
+                );
                 if ws.mux.is_broadcast_on() {
                     ws.mux.broadcast_paste(&text);
                 } else {
@@ -19797,41 +19803,6 @@ mod tests {
             parts.path.as_deref(),
             Some("~/Repos/SPI-1/flight-event-line-server-go")
         );
-    }
-
-    #[test]
-    fn shell_quote_path_handles_spaces_quotes_and_multibyte() {
-        use super::shell_quote_path;
-        use std::path::Path;
-        // Plain path — still wrapped (always-quote keeps the rule simple
-        // and the output predictable across every special-char list).
-        assert_eq!(
-            shell_quote_path(Path::new("/foo/bar.txt")),
-            "'/foo/bar.txt'",
-        );
-        // Spaces in a path — quoting is the *whole point*; cat 'a b.txt'
-        // works, cat a b.txt would be two arguments.
-        assert_eq!(
-            shell_quote_path(Path::new("/foo bar/baz qux.txt")),
-            "'/foo bar/baz qux.txt'",
-        );
-        // Embedded apostrophe — POSIX form is close-quote, escape, reopen.
-        // `/foo'bar` becomes `'/foo'\''bar'`. bash/zsh/fish all accept this
-        // identically.
-        assert_eq!(
-            shell_quote_path(Path::new("/foo'bar.txt")),
-            r"'/foo'\''bar.txt'",
-        );
-        // Multiple apostrophes — each gets the same treatment.
-        assert_eq!(shell_quote_path(Path::new("'a'b'")), r"''\''a'\''b'\'''",);
-        // Multibyte (Japanese path component) — passes through verbatim
-        // inside the quotes; no special handling needed since UTF-8 is
-        // shell-safe.
-        let p = Path::new("/路径/file.txt");
-        assert_eq!(shell_quote_path(p), "'/路径/file.txt'");
-        // Empty path — empty quotes (harmless on shell, the user will
-        // see '' and notice).
-        assert_eq!(shell_quote_path(Path::new("")), "''");
     }
 
     #[test]

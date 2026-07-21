@@ -262,6 +262,26 @@ impl Osc52 {
     }
 }
 
+/// Policy for pasting OS file references — a file copied in the file manager
+/// (`CF_HDROP` on Windows, `text/uri-list` elsewhere) — into the focused pane
+/// as a shell-quoted path. `On` (default) pastes the path(s); `Off` disables
+/// the clipboard file-paste branch so a copied file behaves as before. Explicit
+/// drag-and-drop still pastes a path regardless of this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteFiles {
+    /// Ignore a clipboard file list (only text is pasted).
+    Off,
+    /// Paste clipboard file path(s) as shell-quoted text (default).
+    On,
+}
+
+impl PasteFiles {
+    /// Should a clipboard file list be pasted as path text?
+    pub fn enabled(self) -> bool {
+        matches!(self, PasteFiles::On)
+    }
+}
+
 /// When the tab bar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarMode {
@@ -1010,6 +1030,9 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
+    /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
+    /// shell-quoted path (default: on). See [`PasteFiles`].
+    pub paste_files: PasteFiles,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
     /// Status-bar mode. See [`StatusBarMode`].
@@ -2211,6 +2234,7 @@ impl Default for Config {
             cursor_blink: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
+            paste_files: PasteFiles::On,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             status_bar: StatusBarMode::Off,
@@ -3184,6 +3208,10 @@ impl Config {
                         | "true"
                         | "copy"
                 ),
+                "paste-files" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
+                ),
                 // Boolean keys: accept the same alias set `parse_bool`
                 // recognizes. Previously, any non-"false"
                 // string silently meant "true", so typos like
@@ -3672,6 +3700,12 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "paste-files" => {
+                    cfg.paste_files = match e.value.to_ascii_lowercase().as_str() {
+                        "off" | "none" | "disabled" | "false" | "0" => PasteFiles::Off,
+                        _ => PasteFiles::On,
                     }
                 }
                 "tab-bar" => {
@@ -6130,6 +6164,33 @@ cell-height = 1.2\n";
         assert_eq!(Config::parse_text("osc52 = bogus").osc52, Osc52::Copy);
         assert!(!Osc52::Off.can_copy() && !Osc52::Off.can_paste());
         assert!(Osc52::Both.can_copy() && Osc52::Both.can_paste());
+    }
+
+    #[test]
+    fn paste_files_policy_parsing_and_default() {
+        // On by default: copying a file in Explorer pastes its path.
+        let d = Config::default().paste_files;
+        assert_eq!(d, PasteFiles::On);
+        assert!(d.enabled());
+
+        assert_eq!(
+            Config::parse_text("paste-files = off").paste_files,
+            PasteFiles::Off
+        );
+        assert!(
+            !Config::parse_text("paste-files = false")
+                .paste_files
+                .enabled()
+        );
+        assert_eq!(
+            Config::parse_text("paste-files = on").paste_files,
+            PasteFiles::On
+        );
+        // Unknown value falls back to the (on) default.
+        assert_eq!(
+            Config::parse_text("paste-files = bogus").paste_files,
+            PasteFiles::On
+        );
     }
 
     #[test]

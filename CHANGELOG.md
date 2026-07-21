@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Added
+  - **Copying a file in the OS file manager and pasting it into a pane now
+    inserts the file's path**, so a video, PDF, or any non-image file can be
+    handed to a CLI agent (Claude Code, Codex) — which reads the path, or drives
+    `ffmpeg`/`ffprobe` for a video — instead of the paste doing nothing. When the
+    clipboard holds a file list (`CF_HDROP` / `text/uri-list`) rather than text,
+    Kettle pastes the path(s), shell-quoted for the focused pane (POSIX,
+    PowerShell, or `cmd`) and translated to `/mnt/…` (or an in-distro `/home/…`
+    for a `\\wsl.localhost\…` share) when the pane runs WSL. Multiple selected
+    files paste as space-separated quoted paths. Drag-and-drop now shares the
+    same shell-aware quoting and WSL translation. Controlled by the new
+    `paste-files` key (on by default; `paste-files = off` restores the previous
+    behavior). Explicit drag-and-drop always pastes a path regardless.
+
   ### Fixed
   - **A typo saved into a live-reloaded config no longer reverts silently.**
     `--check-config` already flagged malformed values (e.g. `cursor-style =
