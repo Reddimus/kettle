@@ -39,9 +39,9 @@ tracked here so they are not lost.
 
 ## UX / feedback
 
-- **Surface malformed-config diagnostics in the GUI.** `detect_malformed_values`
-  is wired only into the CLI; a typo saved to the live-reloaded config silently
-  reverts. Fire a notification / dismissible banner on reload.
+- ~~**Surface malformed-config diagnostics in the GUI.**~~ Done in v2.36.5:
+  live reload now fires an edge-triggered desktop notification listing the
+  ignored malformed lines (`should_notify_malformed` + `load_reloaded_config`).
 - Keybind-capture should warn when reassigning an in-use chord; Settings
   GPU/padding writes should surface a persist failure; overlay text inputs need
   caret movement / Home/End / paste.
