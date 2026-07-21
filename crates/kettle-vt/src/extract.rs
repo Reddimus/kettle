@@ -124,6 +124,13 @@ pub struct Extractor {
     seq_reservation: Option<GraphicsReservation>,
     discarding_seq: bool,
     discard_remaining: usize,
+    /// Rolling tail (≤3 bytes) of the active control string's payload, kept
+    /// even while discarding, so a raw `0x9c` can be classified as either a
+    /// standalone C1 ST or a UTF-8 continuation byte of an in-progress
+    /// multi-byte character (`E2 9C xx` covers the whole U+2700 block —
+    /// ✢ ✳ ✶ ✻ ✽ — which Claude Code puts in OSC 0 titles).
+    seq_tail: [u8; 3],
+    seq_tail_len: u8,
 }
 
 impl Default for Extractor {
@@ -150,6 +157,8 @@ impl Extractor {
             seq_reservation: None,
             discarding_seq: false,
             discard_remaining: 0,
+            seq_tail: [0; 3],
+            seq_tail_len: 0,
         }
     }
 
@@ -224,12 +233,14 @@ impl Extractor {
                             // Account for the ESC consumed on the preceding
                             // iteration first. If it is the final quarantined
                             // byte, leave `b` untouched for Pass mode.
-                            debug_assert_eq!(self.consume_discard_bytes(1), 1);
+                            let consumed = self.consume_discard_bytes(1);
+                            debug_assert_eq!(consumed, 1);
                             if self.mode == Mode::Pass {
                                 continue;
                             }
                             i += 1;
-                            debug_assert_eq!(self.consume_discard_bytes(1), 1);
+                            let consumed = self.consume_discard_bytes(1);
+                            debug_assert_eq!(consumed, 1);
                             continue;
                         }
                         i += 1;
@@ -269,6 +280,20 @@ impl Extractor {
                                     continue;
                                 }
                                 let b = hay[off];
+                                if b == 0x9c && self.seq_expects_utf8_continuation() {
+                                    // A raw 0x9c that continues an in-progress
+                                    // UTF-8 character is payload, not an 8-bit
+                                    // ST — matching the downstream VT engine,
+                                    // xterm, and Windows Terminal. Cutting here
+                                    // leaked the rest of the string to the grid
+                                    // as text (stray "C" / stale-row bugs).
+                                    let consumed = self.consume_seq_bytes(&hay[off..off + 1]);
+                                    i += consumed;
+                                    // If the discard-recovery boundary landed on
+                                    // this byte the mode is already Pass; either
+                                    // way the outer loop re-dispatches correctly.
+                                    continue;
+                                }
                                 i += 1;
                                 if b == 0x1b {
                                     self.st_pending = true;
@@ -301,6 +326,7 @@ impl Extractor {
         self.seq_reservation = None;
         self.discarding_seq = false;
         self.discard_remaining = 0;
+        self.seq_tail_len = 0;
     }
 
     fn append_seq(&mut self, bytes: &[u8]) -> bool {
@@ -343,23 +369,76 @@ impl Extractor {
         if bytes.is_empty() {
             return 0;
         }
-        if !self.discarding_seq {
-            let room = self
-                .budget
-                .limits()
-                .sequence_bytes
-                .saturating_sub(self.seq.len());
-            if bytes.len() > room {
-                // `append_seq` is intentionally all-or-nothing. Account for
-                // the prefix that still fit so recovery starts at the actual
-                // configured limit, not at the start of this bulk slice.
-                self.bail(room);
-            } else if self.append_seq(bytes) {
-                return bytes.len();
+        let consumed = 'consumed: {
+            if !self.discarding_seq {
+                let room = self
+                    .budget
+                    .limits()
+                    .sequence_bytes
+                    .saturating_sub(self.seq.len());
+                if bytes.len() > room {
+                    // `append_seq` is intentionally all-or-nothing. Account for
+                    // the prefix that still fit so recovery starts at the actual
+                    // configured limit, not at the start of this bulk slice.
+                    self.bail(room);
+                } else if self.append_seq(bytes) {
+                    break 'consumed bytes.len();
+                }
+            }
+            self.consume_discard_bytes(bytes.len())
+        };
+        self.note_seq_tail(&bytes[..consumed]);
+        consumed
+    }
+
+    /// Remember the last ≤3 payload bytes actually consumed (stored or
+    /// discarded) so `seq_expects_utf8_continuation` can classify a raw
+    /// `0x9c` stop byte without re-walking the accumulator.
+    fn note_seq_tail(&mut self, consumed: &[u8]) {
+        if consumed.is_empty() {
+            return;
+        }
+        if consumed.len() >= 3 {
+            self.seq_tail
+                .copy_from_slice(&consumed[consumed.len() - 3..]);
+            self.seq_tail_len = 3;
+        } else {
+            let keep = (3 - consumed.len()).min(self.seq_tail_len as usize);
+            let start = self.seq_tail_len as usize - keep;
+            self.seq_tail
+                .copy_within(start..self.seq_tail_len as usize, 0);
+            self.seq_tail[keep..keep + consumed.len()].copy_from_slice(consumed);
+            self.seq_tail_len = (keep + consumed.len()) as u8;
+        }
+    }
+
+    /// True when the payload consumed so far ends with an incomplete UTF-8
+    /// scalar, i.e. the next byte is expected to be a continuation byte. A
+    /// raw `0x9c` in that position is character data (✳ = `E2 9C B3`,
+    /// 💜 = `F0 9F 92 9C`, 末 = `E6 9C AB`, …), not a C1 ST.
+    fn seq_expects_utf8_continuation(&self) -> bool {
+        let tail = &self.seq_tail[..self.seq_tail_len as usize];
+        let mut cont = 0usize;
+        for &b in tail.iter().rev() {
+            if (0x80..=0xBF).contains(&b) {
+                cont += 1;
+            } else {
+                break;
             }
         }
-
-        self.consume_discard_bytes(bytes.len())
+        if cont >= tail.len() {
+            // Every known byte is a continuation: any lead byte is outside
+            // the 3-byte window, so the character is already complete (or
+            // the payload is malformed) — treat the 0x9c as a real ST.
+            return false;
+        }
+        let needed = match tail[tail.len() - 1 - cont] {
+            0xC2..=0xDF => 1,
+            0xE0..=0xEF => 2,
+            0xF0..=0xF4 => 3,
+            _ => return false,
+        };
+        cont < needed
     }
 
     fn consume_discard_bytes(&mut self, available: usize) -> usize {
@@ -1142,6 +1221,55 @@ mod tests {
         let mut ex = Extractor::new();
         let out = ex.feed(b"\x1b]2;title\x9cafter");
         assert_eq!(passed(&out), b"\x1b]2;title\x1b\\after");
+    }
+
+    #[test]
+    fn utf8_continuation_0x9c_inside_osc_is_payload_not_st() {
+        // ✳ (U+2733) = E2 9C B3 — every U+2700-block glyph Claude Code puts
+        // in its OSC 0 title carries 0x9C as a continuation byte. The scan
+        // must not cut the title there: the OSC forwards verbatim and no
+        // residue leaks to the grid (the stray-"C" / stale-row bug).
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07after");
+        assert_eq!(passed(&out), b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07after");
+    }
+
+    #[test]
+    fn utf8_continuation_0x9c_split_across_feeds_is_payload() {
+        // The lead byte arrives in one PTY read, the 0x9C continuation in
+        // the next: the rolling tail must survive the chunk boundary.
+        let mut ex = Extractor::new();
+        let mut out = ex.feed(b"\x1b]0;\xe2");
+        out.extend(ex.feed(b"\x9c\xb3 t\x07"));
+        assert_eq!(passed(&out), b"\x1b]0;\xe2\x9c\xb3 t\x07");
+    }
+
+    #[test]
+    fn utf8_continuation_0x9c_inside_dcs_is_payload() {
+        // The memchr2 (DCS/APC) arm has the same defect: 末 (U+672B) =
+        // E6 9C AB. The non-sixel DCS forwards verbatim, uncut.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1bPnot-sixel \xe6\x9c\xab\x1b\\after");
+        assert_eq!(passed(&out), b"\x1bPnot-sixel \xe6\x9c\xab\x1b\\after");
+    }
+
+    #[test]
+    fn utf8_final_byte_0x9c_of_4byte_char_is_payload() {
+        // 💜 (U+1F49C) = F0 9F 92 9C — the 0x9C is the FINAL continuation
+        // byte, classified via the full 3-byte look-back window.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]0;\xf0\x9f\x92\x9c\x07x");
+        assert_eq!(passed(&out), b"\x1b]0;\xf0\x9f\x92\x9c\x07x");
+    }
+
+    #[test]
+    fn standalone_raw_st_still_terminates_after_complete_multibyte_char() {
+        // A COMPLETE UTF-8 char followed by a raw 0x9C: the first 0x9C (in
+        // ✳) is payload, the second is a standalone C1 ST and still
+        // terminates — legacy 8-bit-ST emitters keep working.
+        let mut ex = Extractor::new();
+        let out = ex.feed(b"\x1b]2;\xe2\x9c\xb3\x9cafter");
+        assert_eq!(passed(&out), b"\x1b]2;\xe2\x9c\xb3\x1b\\after");
     }
 
     #[test]

@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **The stray `C` and the intermittently solid autofill text that appeared
+    only in Kettle while running Claude Code are fixed at the parser.** The VT
+    pre-parser treated a raw `0x9c` byte inside an OSC/DCS/APC control string as
+    an 8-bit ST terminator with no UTF-8 awareness, so a window title carrying a
+    U+2700-block glyph (Claude Code's spinner, e.g. `✳` = `E2 9C B3`) was cut at
+    the continuation byte and its tail leaked to the grid as text — printing a
+    stray `C` and, when it wrapped at the last cell, scrolling the grid one row
+    out of step with ConPTY so later partial repaints left stale solid text
+    where dim ghost input belonged. The stop-byte scan is now UTF-8-aware (a
+    `0x9c` that completes a multi-byte scalar is payload; a standalone `0x9c`
+    still terminates), matching vte/xterm/Windows Terminal, for both the OSC and
+    the DCS/APC arms. Separately, the bounded-discard recovery counter's
+    side-effecting calls were moved out of `debug_assert_eq!` so release builds
+    keep the same resynchronization behavior as debug builds.
+
   ### Changed
   - **Internal cycle-numbered dev-log references removed from all living
     sources.** Roughly 3,500 numbered audit-cycle bookkeeping references in
