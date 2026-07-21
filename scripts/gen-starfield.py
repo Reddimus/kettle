@@ -4,7 +4,7 @@
 Stars emerge near the center and drift outward to the edges as the camera moves
 forward — the classic "warp at low speed" look — kept slow, sparse, and dark so
 terminal text stays readable. Modeled in SCREEN SPACE (each star has an angle +
-a radial progress p that cycles 0->1 over the loop), so on-screen density and
+a radial progress p that loops 0->1), so on-screen density and
 brightness are directly controlled and the field looks right at any aspect ratio.
 
 Seamless loop: a star's brightness fades to 0 at both ends of p (center and

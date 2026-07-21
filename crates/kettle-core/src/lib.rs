@@ -38,8 +38,8 @@ pub mod scrollbar;
 pub mod search;
 // Agent-first asciicast session recorder. Behind the
 // `asciicast` feature in normal builds; always available under `cfg(test)` so
-// the in-crate tests + the `writes_a_replayable_asciicast_file` test exercise it without the
-// feature flag.
+// the in-crate tests + the `replays_asciicast_v2_output_into_grid` replay
+// test exercise it without the feature flag.
 #[cfg(any(feature = "asciicast", test))]
 pub mod record;
 pub mod term;

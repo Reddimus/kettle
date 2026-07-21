@@ -98,8 +98,8 @@ fn bounded_push(pending: &Mutex<Vec<LuaCommand>>, cmd: LuaCommand) -> mlua::Resu
 /// can't directly mutate App state (lifetime + threading), so
 /// side-effect APIs (send_text, set_tab_title, notify, ...) push
 /// onto this queue and the App drains it after the script
-/// returns. Same shape as the kettle-ctl newline-delimited JSON
-/// protocol's line buffer, just in-process.
+/// returns. Same shape as the `--remote-send` / `--remote-file`
+/// remote-command file's line buffer, just in-process.
 #[derive(Debug, Clone)]
 pub enum LuaCommand {
     /// `kettle.send_text(s)` → write s to the focused pane's PTY.

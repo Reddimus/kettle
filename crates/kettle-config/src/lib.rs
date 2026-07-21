@@ -5097,7 +5097,13 @@ cell-height = 1.2\n";
                 if w != word {
                     continue;
                 }
-                let after = &lower[i + word.len()..];
+                // The plural form ("<word>s 331-410") is banned the
+                // same as the singular, so skip an optional `s`
+                // before looking at the separator.
+                let mut after = &lower[i + word.len()..];
+                if after.first() == Some(&b's') {
+                    after = &after[1..];
+                }
                 let numbered_or_placeholder = match (after.first(), after.get(1)) {
                     (Some(&s), Some(&c)) if s == b' ' || s == b'-' => {
                         c.is_ascii_digit()

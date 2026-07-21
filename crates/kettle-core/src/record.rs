@@ -37,7 +37,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// its 8KiB buffer fills, so a flood can't grow the loss window); a hard
 /// crash loses at most this much trailing trace. `finish` / `Drop` still
 /// flush, so every clean close path produces a complete, replayable file —
-/// verified by the `writes_a_replayable_asciicast_file` test.
+/// the close-path completeness guard
+/// (`recorder_output_flushed_before_reap_and_on_close` in kettle-ui) is
+/// unaffected.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A single trace stops at an event boundary before growing past 512 MiB.

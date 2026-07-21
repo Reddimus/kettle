@@ -1,4 +1,4 @@
-//! (agent-first A1): `kettle exec` — run a command under a real
+//! `kettle exec` (agent-first A1) — run a command under a real
 //! PTY with full VT emulation, headlessly (no GPU, no window, no winit), and
 //! stream its output to this process's real stdout.
 //!

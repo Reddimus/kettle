@@ -8,7 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
   ### Changed
   - **Internal cycle-numbered dev-log references removed from all living
-    sources.** Roughly 2,600 numbered audit-cycle bookkeeping references in
+    sources.** Roughly 3,500 numbered audit-cycle bookkeeping references in
     code comments, docs, scripts, and build files were reworded into timeless
     prose that preserves each rationale. Historical changelog entries and git
     subjects are unchanged and remain the provenance record. A new repo-wide

@@ -122,8 +122,8 @@ jobs:
     # without giving a hang the full 6-hour default. NOTE: unlike
     # ci.yml, release.yml is NOT covered by cancel-in-
     # progress concurrency — a release must always complete, never
-    # be canceled mid-upload (a lesson from the GitHub Actions
-    # budget-exhaustion incident).
+    # be canceled mid-upload (a lesson from the v1.43.0 partial
+    # release, which shipped macOS/Windows assets but no Linux one).
     timeout-minutes: 75
     strategy:
       fail-fast: false

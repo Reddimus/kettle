@@ -597,7 +597,7 @@ v1.31.0). Cumulative deliverables:
 
   Workspace tests             286 → 308 (+22 drift guards)
   Tagged releases             v1.8.0 → v1.31.0 (24 releases)
-  Bucket-D features           46/46 effectively shipped
+  Bucket-D increments         46/46 effectively shipped
   Plugin Bucket-D             COMPLETE (all 6 Terminator plugins ported;
                               the last gap closed via
                               Action::OpenLayoutPicker)

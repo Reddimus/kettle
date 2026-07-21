@@ -201,9 +201,10 @@ pub enum Action {
     /// Terminator parity (`key_help`).
     /// Terminator's F1 opens its HTML manual via `open_url`
     /// (xdg-open). kettle opens its README at the canonical
-    /// GitHub URL via the `open` crate — the same dispatch path
-    /// `Action::OpenUrl` clicks already use, so it works on
-    /// Linux/macOS/Windows without spawning a per-platform helper.
+    /// GitHub URL via the `open` crate — the same
+    /// `open::that_detached` dispatch path URL clicks already use,
+    /// so it works on Linux/macOS/Windows without spawning a
+    /// per-platform helper.
     ShowHelp,
     /// Terminator parity
     /// (`terminatorlib/layoutlauncher.py`). Open the runtime

@@ -2198,7 +2198,7 @@ mod tests {
             attr_present,
             "the GUI-subsystem crate attribute was removed; without it Windows \
              re-allocates a phantom console on every Start-menu / Explorer \
-             launch (the flash this cycle eliminated). Restore the crate-root \
+             launch (the flash this fix eliminated). Restore the crate-root \
              `#![cfg_attr(all(windows, not(test)), windows_subsystem = ...)]`."
         );
         // The conditional parent-console attach is present.
@@ -2439,7 +2439,7 @@ mod tests {
             assert!(
                 embedded.contains(key),
                 "embedded example config missing Terminator-parity key {key:?}; \
-                 cycles 290/309/331-410 documented it"
+                 the Terminator-parity passes documented it"
             );
         }
     }
